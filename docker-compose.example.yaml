@@ -1,0 +1,84 @@
+# Shakedown — example deployment for QNAP / any Docker host.
+#
+# Paste this into Container Station → Applications → Create. Edit volumes to
+# match your share layout. ALL paths under /share/data must live on the same
+# physical volume so hardlinks work (PRD §4).
+#
+# Setup:
+#   1. File Station: create /share/data/{archive,library,music,shakedown-config}
+#   2. File Station: upload an initial shakedown.yaml to /share/data/shakedown-config/
+#   3. Container Station → Applications → Create: paste this YAML and your env vars
+#
+# Schedules live as ofelia labels below — not in shakedown.yaml. Edit the
+# schedule by editing this compose file in Container Station.
+
+services:
+  shakedown:
+    image: shakedown:latest
+    container_name: shakedown
+    volumes:
+      - /share/data/archive:/data/archive
+      - /share/data/library:/data/library
+      - /share/data/shakedown-config:/config:ro
+    environment:
+      - IA_EMAIL=${IA_EMAIL:-}
+      - IA_PASSWORD=${IA_PASSWORD:-}
+    # No restart policy: container exits when sync completes.
+
+  ofelia:
+    image: mcuadros/ofelia:latest
+    container_name: shakedown-ofelia
+    depends_on:
+      - shakedown
+    command: daemon --docker
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      ofelia.job-exec.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
+      ofelia.job-exec.dead-sync.container: "shakedown"
+      ofelia.job-exec.dead-sync.command: "shakedown sync --collection grateful-dead"
+
+      ofelia.job-exec.phish-sync.schedule: "0 0 4 * * 0"  # Sunday 04:00
+      ofelia.job-exec.phish-sync.container: "shakedown"
+      ofelia.job-exec.phish-sync.command: "shakedown sync --collection phish"
+
+  # Optional: HTTP control plane for ad-hoc triggers + Prometheus metrics.
+  # Uncomment and set SHAKEDOWN_API_TOKEN if you want it.
+  #
+  # shakedown-serve:
+  #   image: shakedown:latest
+  #   container_name: shakedown-serve
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /share/data/archive:/data/archive
+  #     - /share/data/library:/data/library
+  #     - /share/data/shakedown-config:/config:ro
+  #   environment:
+  #     - SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN}
+  #   ports:
+  #     - "8080:8080"
+  #   command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
+
+  # Optional: library tool. Beets reads /data/library, manages /data/music.
+  #
+  # beets:
+  #   image: lscr.io/linuxserver/beets:latest
+  #   container_name: beets
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /share/data/library:/data/library:ro
+  #     - /share/data/music:/music
+  #     - /share/data/beets-config:/config
+
+  # Optional: streaming server. Reads /data/music read-only.
+  #
+  # navidrome:
+  #   image: deluan/navidrome:latest
+  #   container_name: navidrome
+  #   restart: unless-stopped
+  #   ports:
+  #     - "4533:4533"
+  #   volumes:
+  #     - /share/data/music:/music:ro
+  #     - /share/data/navidrome:/data

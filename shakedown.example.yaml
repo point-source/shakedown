@@ -1,0 +1,37 @@
+# Shakedown — example configuration. See prd.md §11.
+# Place this at /share/data/shakedown-config/shakedown.yaml on a QNAP setup.
+
+archive_root: /data/archive
+library_root: /data/library
+state_db: /data/archive/.shakedown/state.db
+
+# Global concurrency cap on parallel downloads within a sync.
+max_concurrent_downloads: 4
+
+sources:
+  - name: internetarchive
+    type: ia
+    auth:
+      # Only needed for download-restricted items. Leave unset to skip auth.
+      email_env: IA_EMAIL
+      password_env: IA_PASSWORD
+    collections:
+      - name: grateful-dead
+        query: 'collection:GratefulDead'
+        format_filters: [flac, shn]
+        exclude_filters: ['*_64kb.mp3', '*_vbr.mp3']
+        # Template renders the staging *directory*; original filenames are appended
+        # automatically (PRD §8). Available IA fields: identifier, title, creator,
+        # date, year, venue, coverage. Filters: sanitize, short, lower, upper.
+        library_layout: '{year}/{date} - {venue|sanitize}'
+        on_complete:
+          webhook: http://beets:8337/import?path={staging_path}
+
+      - name: phish
+        query: 'collection:Phish'
+        format_filters: [flac]
+        # Default library_layout is `passthrough`: mirrors the archive layout 1:1.
+
+notifications:
+  on_failure:
+    webhook: http://ntfy:80/shakedown
