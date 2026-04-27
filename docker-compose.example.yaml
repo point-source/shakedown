@@ -14,7 +14,7 @@
 
 services:
   shakedown:
-    image: shakedown:latest
+    image: ghcr.io/OWNER/shakedown:latest   # replace OWNER with your fork's GitHub user/org
     container_name: shakedown
     volumes:
       - /share/data/archive:/data/archive
@@ -47,7 +47,7 @@ services:
   # Uncomment and set SHAKEDOWN_API_TOKEN if you want it.
   #
   # shakedown-serve:
-  #   image: shakedown:latest
+  #   image: ghcr.io/OWNER/shakedown:latest
   #   container_name: shakedown-serve
   #   restart: unless-stopped
   #   volumes:

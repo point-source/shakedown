@@ -18,10 +18,11 @@ Three layers, two on-disk trees, one process. The **archive layer** at `/data/ar
 
 ## Quick start (Docker)
 
+Replace `OWNER` below with the GitHub user/org that hosts your fork.
+
 ```bash
-git clone https://github.com/yourorg/shakedown
-cd shakedown
-docker build -t shakedown:latest .
+docker pull ghcr.io/OWNER/shakedown:latest
+
 cp shakedown.example.yaml ./shakedown.yaml      # edit to taste
 mkdir -p ./data/{archive,library}
 
@@ -29,8 +30,39 @@ docker run --rm \
   -v $PWD/shakedown.yaml:/config/shakedown.yaml:ro \
   -v $PWD/data/archive:/data/archive \
   -v $PWD/data/library:/data/library \
-  shakedown:latest sync --collection grateful-dead
+  ghcr.io/OWNER/shakedown:latest sync --collection grateful-dead
 ```
+
+To build from source instead:
+
+```bash
+git clone https://github.com/OWNER/shakedown
+cd shakedown
+docker build -t shakedown:local .
+```
+
+## Container images & releases
+
+Images are published to **`ghcr.io/<owner>/shakedown`** by `.github/workflows/ci.yml` on every push to `main`. Each push produces three tags:
+
+| Tag | Meaning |
+|---|---|
+| `latest` | Most recent build of the default branch. Auto-updates. |
+| `main` | Same as `latest` today; pin here if you ever add release branches. |
+| `sha-<short>` | Immutable per-commit tag. Pin to this for reproducible deployments. |
+
+Builds are multi-arch (`linux/amd64` + `linux/arm64`), so the same tag works on Intel QNAPs (TS-x73/x83), Atom/Celeron NUCs, and ARM QNAPs (TS-x33/x53D).
+
+PRs build the image as a smoke test but do **not** push.
+
+### One-time setup for a fresh fork
+
+The workflow runs on `GITHUB_TOKEN` and needs no extra secrets, but two manual steps are required after the first successful push:
+
+1. **Make the package public.** GHCR images default to private. Go to your repo → *Packages* → `shakedown` → *Package settings* → *Change visibility* → *Public*. Without this, `docker pull` requires login.
+2. **Confirm Actions has write access.** Same package settings page → *Manage Actions access* → ensure your repo is listed with the *Write* role. The workflow needs this to keep updating the package after the initial publish.
+
+Tag-driven releases (e.g. `git tag v0.2.0 && git push --tags` → `ghcr.io/.../shakedown:0.2.0`) are not enabled by default. To opt in later, add `tags: ['v*']` to the workflow's `on.push` trigger and add `type=semver,pattern={{version}}` to the `metadata-action` config.
 
 ## QNAP / Container Station setup (no SSH required)
 
