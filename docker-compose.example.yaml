@@ -2,7 +2,7 @@
 #
 # Paste this into Container Station → Applications → Create. Edit volumes to
 # match your share layout. ALL paths under /share/data must live on the same
-# physical volume so hardlinks work (PRD §4).
+# physical volume so hardlinks work (SPEC.md §spec:system-shape).
 #
 # Setup:
 #   1. File Station: create /share/data/{archive,library,music,shakedown-config}

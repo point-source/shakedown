@@ -5,7 +5,8 @@
 > library/streaming software the user points at it. This document
 > captures the problem space in the user's language. Solution design
 > (architecture, data model, plugin interface) lives in SPEC.md; work
-> breakdown lives in ROADMAP.md. Source PRD: `prd.md`.
+> breakdown lives in ROADMAP.md. Together, this document and SPEC.md
+> supersede the original PRD (retired; see git history for `prd.md`).
 
 ## Problem statement §req:problem-statement
 

@@ -4,7 +4,7 @@
 
 Self-hosted tool for durably mirroring music collections from open archives — Internet Archive's GratefulDead/etree collections, Phish.in, and similar — onto a local NAS, while keeping the on-disk archive decoupled from whatever library/streaming software you point at it.
 
-See [`prd.md`](prd.md) for the full design rationale.
+See [`REQUIREMENTS.md`](REQUIREMENTS.md) for the problem space and [`SPEC.md`](SPEC.md) for the full design rationale.
 
 ## What it does
 
@@ -46,7 +46,7 @@ docker build -t shakedown:local .
 Images are published to **`ghcr.io/<owner>/shakedown`** by `.github/workflows/ci.yml` on every push to `main`. Each push produces three tags:
 
 | Tag | Meaning |
-|---|---|
+| --- | --- |
 | `latest` | Most recent build of the default branch. Auto-updates. |
 | `main` | Same as `latest` today; pin here if you ever add release branches. |
 | `sha-<short>` | Immutable per-commit tag. Pin to this for reproducible deployments. |
@@ -66,7 +66,7 @@ Tag-driven releases (e.g. `git tag v0.2.0 && git push --tags` → `ghcr.io/.../s
 
 ## QNAP / Container Station setup (no SSH required)
 
-1. **File Station:** create `/share/data/{archive,library,music,shakedown-config}` — all under one share so they share a filesystem (hardlinks require this; PRD §4).
+1. **File Station:** create `/share/data/{archive,library,music,shakedown-config}` — all under one share so they share a filesystem (hardlinks require this; SPEC.md §spec:system-shape).
 2. **File Station:** upload an initial `shakedown.yaml` (start from [`shakedown.example.yaml`](shakedown.example.yaml)) to `/share/data/shakedown-config/`.
 3. **Container Station → Applications → Create:** paste [`docker-compose.example.yaml`](docker-compose.example.yaml). Set `IA_EMAIL` / `IA_PASSWORD` env vars if you have a download-restricted collection. Click Create.
 4. **Day-to-day operation:** edit `shakedown.yaml` via File Station for source/collection changes; edit the compose YAML in Container Station for schedule changes; check Container Station for logs.
