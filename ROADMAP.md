@@ -6,29 +6,6 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Item lifecycle and status conformance
-
-### §road:prune-retains-record
-
-Change `prune_disappeared` to delete an item's archive files and staging
-links while retaining its database record marked pruned
-(`src/shakedown/sync.py`, `src/shakedown/models.py`,
-`src/shakedown/state.py`). §spec:item-lifecycle
-
-### §road:stale-collection-status
-
-Report a collection as stale in `shakedown status` when its source
-enumeration fails (`src/shakedown/sync.py`, `src/shakedown/status.py`).
-§spec:failure-behavior. Depends on §road:prune-retains-record (shared
-`status` reporting surface).
-
-**Verify:** With `prune_disappeared: true` on a collection, remove an
-already-mirrored item from the source's enumeration and run
-`shakedown sync`. Confirm the item's files are gone from both trees but
-`shakedown status` still reports the takedown as pruned. Then point a
-collection at an unreachable source, sync, and confirm `status` marks
-the collection stale while its existing items remain.
-
 ## Library staging robustness
 
 ### §road:template-unknown-fallback

@@ -99,7 +99,7 @@ criterion 5).
 
 ## Item lifecycle §spec:item-lifecycle
 
-*Status: in progress — pruning retains no record; see §road:prune-retains-record*
+*Status: implemented*
 
 Every discovered item carries a persistent status:
 
@@ -111,6 +111,7 @@ Every discovered item carries a persistent status:
 | `failed` | Fetch attempted and failed; retried on the next run |
 | `unavailable` | Source explicitly disallows download (e.g. stream-only); a human-readable `restriction_reason` is recorded and shown in `status` |
 | `disappeared` | Previously `complete`, no longer in the source's enumeration; local files retained |
+| `pruned` | Vanished from a `prune_disappeared`-opted collection: archive files and staging links removed, DB record retained so `status` still reports the takedown |
 
 Behavior the user can observe:
 
@@ -514,7 +515,7 @@ Container Station (compose edit), logs via Container Station.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: in progress — stale collections are not yet reported; see §road:stale-collection-status*
+*Status: implemented*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
