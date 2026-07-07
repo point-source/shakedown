@@ -138,19 +138,35 @@ def test_disappeared_items_retained_by_default(tmp_roots: tuple[Path, Path]) -> 
 
 
 def test_disappeared_pruned_when_opted_in(tmp_roots: tuple[Path, Path]) -> None:
+    """§spec:item-lifecycle: prune_disappeared removes files + staging links but
+    retains the DB record marked `pruned` so `status` can still report the takedown."""
     archive, library = tmp_roots
     config = make_config(archive, library, prune_disappeared=True)
     _seed_item("gd-show-2")
 
     assert run_sync(config) == 0
+    archived = archive / "fake-src" / "coll1" / "gd-show-2"
+    staged = library / "fake-src" / "coll1" / "gd-show-2"
+    assert archived.is_dir() and staged.is_dir()
+
     FakePlugin.items.clear()
     assert run_sync(config) == 0
 
-    archived = archive / "fake-src" / "coll1" / "gd-show-2"
+    # Files gone from both trees...
     assert not archived.exists(), "prune_disappeared=true must remove archive directory"
+    assert not staged.exists(), "prune_disappeared=true must remove staging links"
+
+    # ...but the record is retained, marked pruned, so the takedown stays reportable.
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
-    assert items.get("fake-src", "coll1", "gd-show-2") is None
+    row = items.get("fake-src", "coll1", "gd-show-2")
+    assert row is not None and row.status == ItemStatus.PRUNED
+    assert row.archive_path is None
+
+    # A subsequent sync leaves the pruned record untouched (not re-disappeared).
+    assert run_sync(config) == 0
+    row = items.get("fake-src", "coll1", "gd-show-2")
+    assert row is not None and row.status == ItemStatus.PRUNED
 
 
 def test_sync_never_hashes_disk_bytes(tmp_roots: tuple[Path, Path], monkeypatch) -> None:

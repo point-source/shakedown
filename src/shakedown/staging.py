@@ -115,3 +115,38 @@ def stage_item(
         except FilesystemError as e:
             result.collisions.append(f"{dst}: {e}")
     return result
+
+
+def unstage_item(
+    config: Config,
+    collection: CollectionConfig,
+    source_name: str,
+    item: Item,
+) -> None:
+    """Remove an item's staging hardlinks and any directories left empty.
+
+    Used when pruning a disappeared item (§spec:item-lifecycle): the archive
+    files and their library links are removed while the DB record is retained.
+    Only the item's own manifest links are unlinked; shared parent directories
+    are removed solely when they become empty, so a sibling item's staging tree
+    is never touched. Missing links are ignored — unstaging is idempotent.
+    """
+    if item.archive_path is None or item.recorded_manifest is None:
+        return
+
+    staging_dir = staging_dir_for(
+        config, collection, source_name, item.source_metadata, item.archive_path
+    )
+    for mf in item.recorded_manifest.files:
+        (staging_dir / mf.name).unlink(missing_ok=True)
+
+    # Prune now-empty directories from the item's staging dir up to the library
+    # root; rmdir removes a directory only when empty, so siblings are safe.
+    library_root = config.library_root
+    current = staging_dir
+    while current != library_root and current.is_relative_to(library_root):
+        try:
+            current.rmdir()
+        except OSError:
+            break  # not empty (or gone) — stop climbing
+        current = current.parent

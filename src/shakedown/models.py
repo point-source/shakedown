@@ -15,6 +15,7 @@ class ItemStatus(StrEnum):
     FAILED = "failed"
     UNAVAILABLE = "unavailable"
     DISAPPEARED = "disappeared"
+    PRUNED = "pruned"
 
 
 @dataclass(frozen=True)

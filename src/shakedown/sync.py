@@ -24,7 +24,7 @@ from shakedown.notify import HandoffPayload
 from shakedown.notify import fire as fire_handoff
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
-from shakedown.staging import stage_item, staging_dir_for
+from shakedown.staging import stage_item, staging_dir_for, unstage_item
 from shakedown.state import ItemRepo, RunRepo
 
 log = logging.getLogger(__name__)
@@ -179,7 +179,7 @@ def _sync_collection(
             if p.action == PlanAction.UNAVAILABLE and p.descriptor is not None:
                 _record_unavailable(items, source.name, collection.name, p.descriptor)
             elif p.action == PlanAction.DISAPPEARED and p.existing is not None:
-                _record_disappeared(items, collection, p.existing)
+                _record_disappeared(items, config, source.name, collection, p.existing)
 
     # Phase 6: record run
     if run is not None:
@@ -247,6 +247,7 @@ def _build_plan(
         if identifier not in seen_identifiers and existing.status not in (
             ItemStatus.DISAPPEARED,
             ItemStatus.UNAVAILABLE,
+            ItemStatus.PRUNED,
         ):
             plan.append(PlannedItem(None, existing, PlanAction.DISAPPEARED))
     return plan
@@ -577,14 +578,26 @@ def _record_failed(
 
 def _record_disappeared(
     items: ItemRepo,
+    config: Config,
+    source_name: str,
     collection: CollectionConfig,
     existing: Item,
 ) -> None:
-    """PRD §9: disappeared items are NOT deleted unless prune_disappeared: true."""
+    """Handle an item that vanished from the source's enumeration (§spec:item-lifecycle).
+
+    Default: retain the local files and flag the item `disappeared` — an upstream
+    takedown never deletes the user's copy. With `prune_disappeared: true`: delete
+    the archive files and staging links but *retain the DB record* marked `pruned`,
+    so `shakedown status` can still report the takedown.
+    """
     if collection.prune_disappeared:
         if existing.archive_path and existing.archive_path.exists():
             shutil.rmtree(existing.archive_path)
-        items.delete(existing.source_name, existing.collection_name, existing.identifier)
+        unstage_item(config, collection, source_name, existing)
+        existing.status = ItemStatus.PRUNED
+        existing.archive_path = None
+        existing.last_verified_at = datetime.now()
+        items.upsert(existing)
         return
     existing.status = ItemStatus.DISAPPEARED
     existing.last_verified_at = datetime.now()
