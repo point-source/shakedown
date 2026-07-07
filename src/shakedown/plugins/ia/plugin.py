@@ -176,7 +176,6 @@ class IAPlugin(SourcePlugin):
                 shutil.move(str(child), str(dest_dir / child.name))
             ia_subdir.rmdir()
 
-        files_written: list[Path] = []
         bytes_downloaded = 0
         missing: list[str] = []
         for mf in item.manifest.files:
@@ -184,7 +183,6 @@ class IAPlugin(SourcePlugin):
             if not written.is_file():
                 missing.append(mf.name)
                 continue
-            files_written.append(written)
             bytes_downloaded += written.stat().st_size
 
         if missing:
@@ -196,9 +194,7 @@ class IAPlugin(SourcePlugin):
                 retriable=True,
             )
 
-        return FetchResult(
-            success=True, bytes_downloaded=bytes_downloaded, files_written=files_written
-        )
+        return FetchResult(success=True, bytes_downloaded=bytes_downloaded)
 
     def verify(self, item: ItemDescriptor, archive_path: Path) -> VerifyResult:
         """Cheap existence-only verify. Hashing belongs in `verify --deep`."""

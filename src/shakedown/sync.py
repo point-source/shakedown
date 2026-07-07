@@ -380,7 +380,6 @@ def _fetch_with_retries(
     in place of exponential backoff. The temp dir is wiped before each attempt so
     a partial write from the previous try never contaminates the next.
     """
-    result = FetchResult(success=False, bytes_downloaded=0, error="no fetch attempted")
     for attempt in range(1, max_attempts + 1):
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
@@ -398,7 +397,7 @@ def _fetch_with_retries(
             attempt, max_attempts, desc.identifier, result.error, delay,
         )
         time.sleep(delay)
-    return result
+    raise AssertionError("unreachable: max_attempts must be >= 1")
 
 
 def _fetch_one(
@@ -437,15 +436,17 @@ def _fetch_one(
             error=fetch_result.error,
         )
 
-    # Core-owned completeness guard: every manifest file must be present in tmp
-    # before we promote it. This is existence-only — no byte hashing (SPEC §spec:sync-identity).
-    missing = [mf.name for mf in desc.manifest.files if not (tmp_dir / mf.name).is_file()]
-    if missing:
+    # Core-owned completeness guard before promotion: route the existence-only
+    # check through the plugin's own verify() contract (no byte hashing —
+    # SPEC §spec:sync-identity) so a plugin can't commit partial state even if it
+    # over-reports success.
+    verified = plugin.verify(desc, tmp_dir)
+    if not verified.ok:
         return _FetchOutcome(
             success=False,
             archive_path=dest,
             bytes_downloaded=fetch_result.bytes_downloaded,
-            error=f"missing after fetch: {missing[:5]}",
+            error=f"missing after fetch: {verified.missing_files[:5]}",
         )
 
     _promote_atomically(tmp_dir, dest, stale_dir)

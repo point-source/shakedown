@@ -42,7 +42,6 @@ class FetchResult:
     """
     success: bool
     bytes_downloaded: int
-    files_written: list[Path] = field(default_factory=list)
     error: str | None = None
     retriable: bool = False
     retry_after: float | None = None
