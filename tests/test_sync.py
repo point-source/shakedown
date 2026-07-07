@@ -540,3 +540,31 @@ def test_collection_cap_of_one_serializes(tmp_roots: tuple[Path, Path], monkeypa
     monkeypatch.setattr(FakePlugin, "discover", gated_discover)
 
     assert run_sync(config) == 1, "serial execution can't satisfy a 2-party barrier"
+
+
+def test_traversal_identifier_is_rejected(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
+    """A remote source must not escape the archive tree via a `..`/absolute identifier.
+    The core rejects it before any download, rename, or rmtree runs."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["../../evil"] = FakeItem(
+        identifier="../../evil",
+        files=[FakeFile(name="evil.flac", content=b"pwned")],
+        metadata={},
+    )
+
+    fetched: list[str] = []
+    real_fetch = FakePlugin.fetch
+
+    def tracking_fetch(self, item, dest_dir, format_filters, exclude_filters):
+        fetched.append(item.identifier)
+        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+
+    monkeypatch.setattr(FakePlugin, "fetch", tracking_fetch)
+
+    assert run_sync(config) == 1, "unsafe item is a failed fetch"
+    assert "../../evil" not in fetched, "unsafe identifier must never reach fetch"
+    # Nothing was written anywhere outside the collection's archive subtree.
+    assert not (archive / "evil").exists()
+    assert not (archive / "evil.flac").exists()
+    assert not (archive.parent / "evil").exists()

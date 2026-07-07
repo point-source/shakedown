@@ -364,6 +364,18 @@ def _backoff_seconds(attempt: int) -> float:
     return min(_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS)
 
 
+def _within_archive(archive_root: Path, candidate: Path) -> bool:
+    """True iff `candidate` stays inside `archive_root` (no traversal/absolute escape).
+
+    Uses lexical normalization (not `resolve()`) so a symlink already inside the
+    archive tree isn't rejected; the check exists to stop a remote identifier from
+    escaping the tree, not to police the operator's own layout.
+    """
+    root = os.path.normpath(archive_root)
+    cand = os.path.normpath(candidate)
+    return cand == root or cand.startswith(root + os.sep)
+
+
 def _fetch_with_retries(
     plugin: SourcePlugin,
     desc: ItemDescriptor,
@@ -418,6 +430,19 @@ def _fetch_one(
     assert target.descriptor is not None
     desc = target.descriptor
     dest = archive_root / desc.identifier
+
+    # Trust boundary: the identifier comes from a remote source and drives
+    # os.rename / shutil.rmtree / plugin downloads below. Reject anything that
+    # would escape the archive tree (traversal via `..`, an absolute path, or a
+    # separator) before it touches the filesystem.
+    if not _within_archive(archive_root, dest):
+        log.warning("[%s] rejecting unsafe identifier: %r", desc.identifier, desc.identifier)
+        return _FetchOutcome(
+            success=False,
+            archive_path=dest,
+            error=f"unsafe identifier escapes archive tree: {desc.identifier!r}",
+        )
+
     tmp_dir = archive_root / f".tmp-{desc.identifier}"
     stale_dir = archive_root / f".stale-{desc.identifier}"
 
