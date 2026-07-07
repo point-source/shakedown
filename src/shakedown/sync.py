@@ -53,6 +53,7 @@ class CollectionSyncStats:
     failed: int = 0
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
+    stale: bool = False  # source enumeration failed; existing items left untouched
 
 
 def run_sync(
@@ -104,13 +105,16 @@ def run_sync(
                 log.exception("sync failed for %s/%s", source.name, collection.name)
                 overall_failed += 1
                 continue
-            log.info(
-                "%s/%s: discovered=%d new=%d updated=%d failed=%d bytes=%d",
-                source.name, collection.name,
-                stats.discovered, stats.new, stats.updated, stats.failed,
-                stats.bytes_downloaded,
-            )
-            if stats.failed > 0:
+            if stats.stale:
+                log.warning("%s/%s: STALE (source enumeration failed)", source.name, collection.name)
+            else:
+                log.info(
+                    "%s/%s: discovered=%d new=%d updated=%d failed=%d bytes=%d",
+                    source.name, collection.name,
+                    stats.discovered, stats.new, stats.updated, stats.failed,
+                    stats.bytes_downloaded,
+                )
+            if stats.failed > 0 or stats.stale:
                 overall_failed += 1
     return 0 if overall_failed == 0 else 1
 
@@ -138,9 +142,24 @@ def _sync_collection(
     descriptors: list[ItemDescriptor] = []
     seen_identifiers: set[str] = set()
     log.info("[%s/%s] discovering...", source.name, collection.name)
-    for desc in plugin.discover(collection):
-        descriptors.append(desc)
-        seen_identifiers.add(desc.identifier)
+    try:
+        for desc in plugin.discover(collection):
+            descriptors.append(desc)
+            seen_identifiers.add(desc.identifier)
+    except Exception as e:
+        # Source enumeration failed (unreachable or permanently-gone source). Flag
+        # the collection stale so `status` reports it, and leave every existing item
+        # untouched — a failed enumeration is not evidence any item disappeared
+        # (§spec:failure-behavior). We do not run plan/fetch/stage this run.
+        log.warning("[%s/%s] source enumeration failed: %s", source.name, collection.name, e)
+        stats.stale = True
+        stats.errors.append(f"source enumeration failed: {e}")
+        if run is not None:
+            run.stale = True
+            run.errors = stats.errors
+            run.finished_at = datetime.now()
+            runs.finish(run)
+        return stats
     stats.discovered = len(descriptors)
 
     # Phase 2: plan

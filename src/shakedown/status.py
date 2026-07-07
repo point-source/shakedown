@@ -42,6 +42,9 @@ def _collection_summary(
         "drift_files": drift.count(source_name, collection_name),
         "last_run": _summarize_run(last) if last else None,
         "restricted": restricted,
+        # Stale = the most recent run failed to enumerate the source; existing
+        # items are retained (§spec:failure-behavior).
+        "stale": bool(last.stale) if last else False,
     }
 
 
@@ -77,6 +80,8 @@ def print_status(config: Config, *, as_json: bool) -> None:
 
     for s in summaries:
         click.echo(f"=== {s['source']}/{s['collection']} ===")
+        if s["stale"]:
+            click.echo("  STALE: source enumeration failed last run; existing items retained")
         last = s["last_run"]
         if last:
             click.echo(

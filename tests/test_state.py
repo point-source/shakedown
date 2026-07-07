@@ -75,6 +75,59 @@ def test_run_lifecycle(tmp_path: Path) -> None:
     assert latest.finished_at == datetime(2026, 4, 26, 12, 30)
 
 
+def test_run_stale_round_trips(tmp_path: Path) -> None:
+    """A run flagged stale (source enumeration failed) survives a save/load cycle."""
+    conn = connect(tmp_path / "s.db")
+    runs = RunRepo(conn)
+    run = runs.start("s", "c", datetime(2026, 4, 26, 12, 0))
+    run.stale = True
+    run.errors = ["source enumeration failed: unreachable"]
+    run.finished_at = datetime(2026, 4, 26, 12, 1)
+    runs.finish(run)
+    latest = runs.latest("s", "c")
+    assert latest is not None
+    assert latest.stale is True
+    assert latest.errors == ["source enumeration failed: unreachable"]
+
+
+def test_v1_db_migrates_to_current_schema(tmp_path: Path) -> None:
+    """An existing v1 database (no runs.stale column) upgrades in place; the added
+    column defaults to non-stale so historical runs read back cleanly."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version (version) VALUES (1);
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_name TEXT NOT NULL,
+            collection_name TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            items_discovered INTEGER NOT NULL DEFAULT 0,
+            items_new INTEGER NOT NULL DEFAULT 0,
+            items_updated INTEGER NOT NULL DEFAULT 0,
+            items_failed INTEGER NOT NULL DEFAULT 0,
+            bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+            errors TEXT NOT NULL DEFAULT '[]'
+        );
+        INSERT INTO runs (source_name, collection_name, started_at)
+            VALUES ('s', 'c', '2026-01-01T00:00:00');
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = connect(db_path)  # triggers migration
+    version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
+    assert version == 2
+    latest = RunRepo(conn).latest("s", "c")
+    assert latest is not None and latest.stale is False
+
+
 def test_drift_repo(tmp_path: Path) -> None:
     conn = connect(tmp_path / "s.db")
     drift = DriftRepo(conn)

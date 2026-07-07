@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = [
     """
@@ -46,7 +46,8 @@ _SCHEMA = [
         items_updated      INTEGER NOT NULL DEFAULT 0,
         items_failed       INTEGER NOT NULL DEFAULT 0,
         bytes_downloaded   INTEGER NOT NULL DEFAULT 0,
-        errors             TEXT NOT NULL DEFAULT '[]'
+        errors             TEXT NOT NULL DEFAULT '[]',
+        stale              INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -86,17 +87,36 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    # CREATE TABLE IF NOT EXISTS brings a fresh DB fully up to date; for an
+    # existing DB it is a no-op and the version-gated steps below apply the delta.
     for stmt in _SCHEMA:
         conn.execute(stmt)
     cur = conn.execute("SELECT version FROM schema_version")
     row = cur.fetchone()
     if row is None:
         conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-    elif row["version"] != SCHEMA_VERSION:
-        # Forward-compatible migrations land here as version-gated branches.
+        return
+
+    current = row["version"]
+    if current > SCHEMA_VERSION:
         raise RuntimeError(
-            f"unsupported schema version: db={row['version']} expected={SCHEMA_VERSION}"
+            f"unsupported schema version: db={current} expected={SCHEMA_VERSION}"
         )
+    while current < SCHEMA_VERSION:
+        current += 1
+        _MIGRATIONS[current](conn)
+        conn.execute("UPDATE schema_version SET version=?", (current,))
+
+
+def _migrate_to_2(conn: sqlite3.Connection) -> None:
+    """v1 → v2: add runs.stale so `status` can report enumeration-failure staleness."""
+    conn.execute("ALTER TABLE runs ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
+
+
+# Version-gated, forward-only upgrade steps keyed by the version they produce.
+_MIGRATIONS = {
+    2: _migrate_to_2,
+}
 
 
 @contextmanager

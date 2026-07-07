@@ -9,7 +9,7 @@ from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect
 from shakedown.models import ItemStatus
 from shakedown.plugins.base import FetchResult
-from shakedown.state import ItemRepo
+from shakedown.state import ItemRepo, RunRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -167,6 +167,41 @@ def test_disappeared_pruned_when_opted_in(tmp_roots: tuple[Path, Path]) -> None:
     assert run_sync(config) == 0
     row = items.get("fake-src", "coll1", "gd-show-2")
     assert row is not None and row.status == ItemStatus.PRUNED
+
+
+def test_stale_source_retains_items_and_flags_run(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """§spec:failure-behavior: when source enumeration fails, the run is flagged
+    stale and the collection's existing items are retained untouched."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show")
+
+    # First sync mirrors the item normally.
+    assert run_sync(config) == 0
+    archived = archive / "fake-src" / "coll1" / "gd-show" / "gd-show.flac"
+    assert archived.is_file()
+
+    # Source goes unreachable: discover raises instead of enumerating.
+    def unreachable_discover(self, collection):
+        raise ConnectionError("source unreachable")
+        yield  # pragma: no cover  (keep it a generator, like the real discover)
+
+    monkeypatch.setattr(FakePlugin, "discover", unreachable_discover)
+
+    # The sync surfaces failure, but the existing item and its files remain.
+    assert run_sync(config) == 1
+    assert archived.is_file(), "a stale source must not delete existing items"
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-show")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+
+    # The latest run is flagged stale — the signal `status` reports.
+    latest = RunRepo(conn).latest("fake-src", "coll1")
+    assert latest is not None and latest.stale is True
+    assert any("enumeration failed" in e for e in latest.errors)
 
 
 def test_sync_never_hashes_disk_bytes(tmp_roots: tuple[Path, Path], monkeypatch) -> None:

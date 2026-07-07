@@ -88,6 +88,34 @@ def test_item_show_unknown_identifier(tmp_path: Path, tmp_roots) -> None:
     assert "not found" in result.output
 
 
+def test_status_reports_stale_collection(tmp_path: Path, tmp_roots, monkeypatch) -> None:
+    """§spec:failure-behavior surface: after a source-enumeration failure, the
+    `shakedown status` CLI marks the collection stale while its items remain."""
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"a")]
+    )
+    from shakedown.config import load
+    config = load(cfg)
+    assert run_sync(config) == 0
+
+    def unreachable_discover(self, collection):
+        raise ConnectionError("source unreachable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(FakePlugin, "discover", unreachable_discover)
+    assert run_sync(config) == 1
+
+    result = CliRunner().invoke(main, ["--config", str(cfg), "status"])
+    assert result.exit_code == 0
+    assert "STALE" in result.output
+    assert "complete=1" in result.output, "existing items remain reported"
+
+    json_result = CliRunner().invoke(main, ["--config", str(cfg), "status", "--json"])
+    assert '"stale": true' in json_result.output
+
+
 def test_item_forget_removes_row(tmp_path: Path, tmp_roots) -> None:
     archive, library = tmp_roots
     cfg = _write_config(tmp_path, archive, library)

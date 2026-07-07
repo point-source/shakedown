@@ -88,3 +88,4 @@ class Run:
     items_failed: int = 0
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
+    stale: bool = False  # source enumeration failed; existing items retained
