@@ -88,6 +88,37 @@ def test_item_show_unknown_identifier(tmp_path: Path, tmp_roots) -> None:
     assert "not found" in result.output
 
 
+def test_status_reports_pruned_takedown(tmp_path: Path, tmp_roots) -> None:
+    """§spec:item-lifecycle surface: after a pruned takedown, `shakedown status`
+    still reports the item — its record is retained even though the files are gone."""
+    archive, library = tmp_roots
+    cfg = tmp_path / "shakedown.yaml"
+    cfg.write_text(f"""
+archive_root: {archive}
+library_root: {library}
+sources:
+  - name: fake-src
+    type: fake
+    collections:
+      - name: coll1
+        query: '*'
+        prune_disappeared: true
+""")
+    from shakedown.config import load
+    config = load(cfg)
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"a")]
+    )
+    assert run_sync(config) == 0
+
+    FakePlugin.items.clear()  # source takes the item down
+    assert run_sync(config) == 0
+
+    result = CliRunner().invoke(main, ["--config", str(cfg), "status"])
+    assert result.exit_code == 0
+    assert "pruned=1" in result.output, "status must still report the pruned takedown"
+
+
 def test_status_reports_stale_collection(tmp_path: Path, tmp_roots, monkeypatch) -> None:
     """§spec:failure-behavior surface: after a source-enumeration failure, the
     `shakedown status` CLI marks the collection stale while its items remain."""
