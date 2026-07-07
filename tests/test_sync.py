@@ -303,3 +303,52 @@ def test_changed_upstream_preserves_old_bytes_on_fetch_failure(
     # Crucially: old archive bytes survive untouched.
     assert archived.is_file()
     assert archived.read_bytes() == b"original bytes from v1 fetch"
+
+
+def test_sync_sweeps_stale_temp_dir_before_fetch(tmp_roots: tuple[Path, Path]) -> None:
+    """SPEC §spec:sync-workflow: a temp dir left by a prior crashed run is swept on
+    the next run and never leaks into the archive tree."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show", content=b"real bytes")
+
+    # Simulate a prior crashed fetch: a leftover core-owned temp dir with junk.
+    coll_root = archive / "fake-src" / "coll1"
+    coll_root.mkdir(parents=True)
+    stale_tmp = coll_root / ".tmp-gd-show"
+    stale_tmp.mkdir()
+    (stale_tmp / "junk-from-last-time.flac").write_bytes(b"garbage")
+
+    assert run_sync(config) == 0
+
+    archived = coll_root / "gd-show" / "gd-show.flac"
+    assert archived.read_bytes() == b"real bytes"
+    # The stale temp dir and its junk are gone; nothing leaked into the archive.
+    assert not stale_tmp.exists()
+    assert not (coll_root / "gd-show" / "junk-from-last-time.flac").exists()
+
+
+def test_partial_fetch_is_not_promoted(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
+    """SPEC §spec:sync-workflow: the core promotes only a complete temp dir. A plugin
+    that reports success but fails to write every manifest file must not commit
+    partial state to the archive."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show", content=b"bytes")
+
+    from shakedown.plugins.base import FetchResult
+
+    def partial_fetch(self, item, dest_dir, format_filters, exclude_filters):
+        # Claim success but never write the manifest file into the temp dir.
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        return FetchResult(success=True, bytes_downloaded=0)
+
+    monkeypatch.setattr(FakePlugin, "fetch", partial_fetch)
+
+    assert run_sync(config) == 1  # completeness guard fails the item
+    # No partial archive directory was committed.
+    assert not (archive / "fake-src" / "coll1" / "gd-show").exists()
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    items = ItemRepo(conn)
+    row = items.get("fake-src", "coll1", "gd-show")
+    assert row is None or row.status == ItemStatus.FAILED

@@ -90,10 +90,13 @@ def test_discover_skips_items_whose_metadata_fetch_raises() -> None:
     assert {d.identifier for d in descriptors} == {"good-1", "good-2"}
 
 
-def test_fetch_atomic_rename_moves_files_into_place(tmp_path: Path) -> None:
-    """ia.download writes to <tmp>/<id>/<file>; plugin must promote to <dest>/<file>."""
+def test_fetch_flattens_ia_subdir_into_dest(tmp_path: Path) -> None:
+    """ia.download writes to <dest>/<id>/<file>; the plugin flattens to <dest>/<file>.
+
+    The plugin writes into the core-owned temp dir it is handed; the core owns the
+    atomic promotion into the archive (see test_sync.py)."""
     plugin = _make_plugin()
-    dest = tmp_path / "dead" / "gd1977-05-08"
+    dest = tmp_path / ".tmp-gd1977-05-08"
 
     from shakedown.models import Manifest, ManifestFile
     from shakedown.plugins.base import ItemDescriptor
@@ -118,15 +121,13 @@ def test_fetch_atomic_rename_moves_files_into_place(tmp_path: Path) -> None:
     final = dest / "d1t01.flac"
     assert final.is_file()
     assert final.read_bytes() == b"audio"
-    # The temp directory must not be left behind on success.
-    assert not (dest.parent / f".tmp-{dest.name}").exists()
-    # And no stale <dest>/<identifier>/ subdir from the IA layout.
+    # No stale <dest>/<identifier>/ subdir from the IA layout should remain.
     assert not (dest / desc.identifier).exists()
 
 
 def test_fetch_with_missing_files_after_download_returns_failure(tmp_path: Path) -> None:
     plugin = _make_plugin()
-    dest = tmp_path / "dead" / "gd-x"
+    dest = tmp_path / ".tmp-gd-x"
 
     from shakedown.models import Manifest, ManifestFile
     from shakedown.plugins.base import ItemDescriptor
@@ -147,7 +148,6 @@ def test_fetch_with_missing_files_after_download_returns_failure(tmp_path: Path)
 
     assert result.success is False
     assert "missing after fetch" in (result.error or "")
-    assert not dest.exists(), "failed fetch must not promote temp dir to dest"
 
 
 def test_fetch_refuses_restricted_items_without_calling_download(tmp_path: Path) -> None:
@@ -171,44 +171,11 @@ def test_fetch_refuses_restricted_items_without_calling_download(tmp_path: Path)
     mock_download.assert_not_called()
 
 
-def test_fetch_cleans_stale_temp_dir_from_prior_failure(tmp_path: Path) -> None:
-    """A prior partial fetch leaves a .tmp-<id> dir; the next fetch must clear it."""
+def test_fetch_returns_failure_when_download_raises(tmp_path: Path) -> None:
+    """When ia.download raises, the plugin reports failure and leaves promotion to
+    the core (which keeps prior archive bytes intact — see test_sync.py)."""
     plugin = _make_plugin()
-    dest = tmp_path / "dead" / "gd-x"
-    dest.parent.mkdir(parents=True)
-
-    stale = dest.parent / f".tmp-{dest.name}"
-    stale.mkdir()
-    (stale / "junk-from-last-time.flac").write_bytes(b"garbage")
-
-    from shakedown.models import Manifest, ManifestFile
-    from shakedown.plugins.base import ItemDescriptor
-    desc = ItemDescriptor(
-        identifier="gd-x",
-        manifest=Manifest(files=(ManifestFile("real.flac", 4, "abc"),)),
-        metadata={},
-    )
-
-    def fake_download(identifier, files, destdir, **kwargs):
-        target = Path(destdir) / identifier
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "real.flac").write_bytes(b"good")
-
-    with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=fake_download):
-        result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
-
-    assert result.success
-    assert (dest / "real.flac").read_bytes() == b"good"
-    # The junk file must not have leaked through.
-    assert not (dest / "junk-from-last-time.flac").exists()
-
-
-def test_fetch_failure_preserves_existing_dest(tmp_path: Path) -> None:
-    """PRD §5: archive durability. If a re-fetch fails after the prior dest existed,
-    the prior bytes must remain at dest_dir. The atomic side-temp swap covers this:
-    the staged-aside copy is renamed back into place."""
-    plugin = _make_plugin()
-    dest = tmp_path / "dead" / "gd-x"
+    dest = tmp_path / ".tmp-gd-x"
 
     from shakedown.models import Manifest, ManifestFile
     from shakedown.plugins.base import ItemDescriptor
@@ -218,30 +185,14 @@ def test_fetch_failure_preserves_existing_dest(tmp_path: Path) -> None:
         metadata={},
     )
 
-    # Seed an existing archive copy at dest (pretend a prior successful fetch).
-    dest.mkdir(parents=True)
-    (dest / "real.flac").write_bytes(b"original")
-
-    # Now simulate a fetch where ia.download itself raises mid-download.
     def fake_download_raises(identifier, files, destdir, **kwargs):
-        # Touch the temp dir to mimic a partial write before the crash.
-        target = Path(destdir) / identifier
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "real.flac").write_bytes(b"partial-overwrite")
         raise RuntimeError("simulated network drop")
 
     with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=fake_download_raises):
         result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
 
     assert result.success is False
-    # Prior bytes must survive untouched.
-    assert dest.is_dir()
-    assert (dest / "real.flac").read_bytes() == b"original"
-    # No leftover .tmp- or .stale- siblings on success path; .tmp- may persist on
-    # failure for next-run cleanup, which the next call to fetch() will sweep.
-    # The .stale- variant must NOT be present (the old dest was never moved aside,
-    # since the rename only happens after a successful download).
-    assert not (dest.parent / f".stale-{dest.name}").exists()
+    assert "simulated network drop" in (result.error or "")
 
 
 def test_verify_existence_only_does_not_hash(tmp_path: Path) -> None:

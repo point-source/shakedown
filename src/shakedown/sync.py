@@ -8,6 +8,7 @@ under --deep.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -330,25 +331,79 @@ def _fetch_one(
     archive_root: Path,
     collection: CollectionConfig,
 ) -> _FetchOutcome:
-    """Plugin-mediated fetch into <archive_root>/<identifier>/. Atomic per PRD §9 step 3.
+    """Core-owned atomic fetch into <archive_root>/<identifier>/ (SPEC §spec:sync-workflow).
 
-    The plugin owns the swap-in of new bytes onto an existing dest. On failure, the
-    plugin must leave the prior archive directory intact (PRD §5: archive layer is
-    durable; only an explicit user wipe should remove archive bytes).
+    The plugin downloads into a fresh, core-owned temp dir and never touches the
+    final archive location. The core verifies the manifest files landed, then
+    atomically renames the temp dir into place — so no plugin can commit partial
+    state to the archive. A failure leaves only the temp dir (swept on the next
+    run) and the prior archive bytes untouched (SPEC §spec:failure-behavior:
+    archive durability across fetch failures).
     """
     assert target.descriptor is not None
     desc = target.descriptor
     dest = archive_root / desc.identifier
+    tmp_dir = archive_root / f".tmp-{desc.identifier}"
+    stale_dir = archive_root / f".stale-{desc.identifier}"
+
+    # Sweep leftovers from any prior crashed run before we begin.
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    if stale_dir.exists():
+        shutil.rmtree(stale_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     fetch_result = plugin.fetch(
-        desc, dest, collection.format_filters, collection.exclude_filters
+        desc, tmp_dir, collection.format_filters, collection.exclude_filters
     )
+    if not fetch_result.success:
+        # Leave tmp_dir for next-run cleanup; the archive copy (if any) is untouched.
+        return _FetchOutcome(
+            success=False,
+            archive_path=dest,
+            bytes_downloaded=fetch_result.bytes_downloaded,
+            error=fetch_result.error,
+        )
+
+    # Core-owned completeness guard: every manifest file must be present in tmp
+    # before we promote it. This is existence-only — no byte hashing (SPEC §spec:sync-identity).
+    missing = [mf.name for mf in desc.manifest.files if not (tmp_dir / mf.name).is_file()]
+    if missing:
+        return _FetchOutcome(
+            success=False,
+            archive_path=dest,
+            bytes_downloaded=fetch_result.bytes_downloaded,
+            error=f"missing after fetch: {missing[:5]}",
+        )
+
+    _promote_atomically(tmp_dir, dest, stale_dir)
     return _FetchOutcome(
-        success=fetch_result.success,
+        success=True,
         archive_path=dest,
         bytes_downloaded=fetch_result.bytes_downloaded,
-        error=fetch_result.error,
     )
+
+
+def _promote_atomically(tmp_dir: Path, dest: Path, stale_dir: Path) -> None:
+    """Atomically swap a fully-fetched temp dir into the archive location.
+
+    Rename any prior dest aside, install the new dest, then discard the
+    staged-aside copy. If the install rename fails, restore the prior bytes.
+    Renames within one filesystem are atomic, so dest is either the old tree or
+    the new one, never a partial mix (SPEC §spec:sync-workflow).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    had_prior = dest.exists()
+    if had_prior:
+        os.rename(dest, stale_dir)
+    try:
+        os.rename(tmp_dir, dest)
+    except Exception:
+        if had_prior and stale_dir.exists() and not dest.exists():
+            os.rename(stale_dir, dest)
+        raise
+    if stale_dir.exists():
+        shutil.rmtree(stale_dir)
 
 
 def _record_complete(

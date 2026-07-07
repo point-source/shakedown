@@ -69,7 +69,13 @@ class SourcePlugin(ABC):
         format_filters: list[str],
         exclude_filters: list[str],
     ) -> FetchResult:
-        """Download files matching filters into dest_dir.
+        """Download files matching filters into dest_dir, verifying source checksums.
+
+        `dest_dir` is a fresh, core-owned temporary directory. The plugin only
+        writes the item's files there and reports the outcome; it MUST NOT touch
+        the final archive location. The core performs the atomic rename of
+        `dest_dir` into the archive on success and sweeps it on failure, so no
+        plugin can commit partial state to the archive (SPEC.md §spec:sync-workflow).
 
         Implementations must be idempotent: re-running on a populated dest_dir
         should verify and skip matching files (the IA library does this natively).

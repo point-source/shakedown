@@ -125,11 +125,11 @@ class IAPlugin(SourcePlugin):
         format_filters: list[str],
         exclude_filters: list[str],
     ) -> FetchResult:
-        """Download manifest files into dest_dir.
+        """Download manifest files into dest_dir (a core-owned temp directory).
 
-        Strategy: download into a sibling .tmp-<identifier> directory, then atomically
-        rename to dest_dir on full success. Partial failures leave the temp dir for
-        next-run cleanup.
+        The plugin only writes bytes and verifies IA's per-file checksums; the
+        core owns the temp-dir lifecycle and the atomic rename into the archive
+        (SPEC.md §spec:sync-workflow).
         """
         if item.is_restricted:
             return FetchResult(
@@ -142,20 +142,13 @@ class IAPlugin(SourcePlugin):
         if not target_files:
             return FetchResult(success=True, bytes_downloaded=0)
 
-        tmp_dir = dest_dir.parent / f".tmp-{dest_dir.name}"
-        stale_dir = dest_dir.parent / f".stale-{dest_dir.name}"
-        # Sweep leftovers from any prior crashed run.
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
-        if stale_dir.exists():
-            shutil.rmtree(stale_dir)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             ia.download(
                 item.identifier,
                 files=target_files,  # type: ignore[arg-type]  # IA accepts filenames at runtime
-                destdir=str(tmp_dir),
+                destdir=str(dest_dir),
                 # IA places files under <destdir>/<identifier>/...; strip that prefix below.
                 no_directory=False,
                 ignore_existing=False,
@@ -167,23 +160,23 @@ class IAPlugin(SourcePlugin):
             log.exception("IA download failed for %s", item.identifier)
             return FetchResult(success=False, bytes_downloaded=0, error=str(e))
 
-        # IA's download writes to <tmp_dir>/<identifier>/<filename>. Move that subtree
-        # into <tmp_dir> root, then atomically rename tmp_dir → dest_dir.
-        ia_subdir = tmp_dir / item.identifier
+        # IA's download writes to <dest_dir>/<identifier>/<filename>. Flatten that
+        # subtree into dest_dir; the core promotes dest_dir into the archive.
+        ia_subdir = dest_dir / item.identifier
         if ia_subdir.is_dir():
             for child in ia_subdir.iterdir():
-                shutil.move(str(child), str(tmp_dir / child.name))
+                shutil.move(str(child), str(dest_dir / child.name))
             ia_subdir.rmdir()
 
         files_written: list[Path] = []
         bytes_downloaded = 0
         missing: list[str] = []
         for mf in item.manifest.files:
-            written = tmp_dir / mf.name
+            written = dest_dir / mf.name
             if not written.is_file():
                 missing.append(mf.name)
                 continue
-            files_written.append(dest_dir / mf.name)
+            files_written.append(written)
             bytes_downloaded += written.stat().st_size
 
         if missing:
@@ -192,22 +185,6 @@ class IAPlugin(SourcePlugin):
                 bytes_downloaded=bytes_downloaded,
                 error=f"missing after fetch: {missing[:5]}",
             )
-
-        # Atomic side-temp swap: rename old dest aside, install new dest, then
-        # discard the staged-aside copy. If the second rename fails, restore the
-        # prior bytes. This guarantees archive durability across fetch failures (PRD §5).
-        dest_dir.parent.mkdir(parents=True, exist_ok=True)
-        had_prior = dest_dir.exists()
-        if had_prior:
-            os.rename(dest_dir, stale_dir)
-        try:
-            os.rename(tmp_dir, dest_dir)
-        except Exception:
-            if had_prior and stale_dir.exists() and not dest_dir.exists():
-                os.rename(stale_dir, dest_dir)
-            raise
-        if stale_dir.exists():
-            shutil.rmtree(stale_dir)
 
         return FetchResult(
             success=True, bytes_downloaded=bytes_downloaded, files_written=files_written
