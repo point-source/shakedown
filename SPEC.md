@@ -134,7 +134,7 @@ collection so a config typo can't silently discard recordings.
 
 ## Sync workflow §spec:sync-workflow
 
-*Status: in progress — atomic fetch lives in the IA plugin, not the core, and collection concurrency is unbounded; see §road:core-atomic-fetch, §road:concurrent-collections*
+*Status: implemented*
 
 A sync run for a (source, collection) pair proceeds in six phases:
 
@@ -319,7 +319,7 @@ already works. Scheduling is deliberately someone else's job
 
 ## Configuration §spec:configuration
 
-*Status: in progress — `max_concurrent_collections` was removed from config and must be restored; see §road:concurrent-collections*
+*Status: implemented*
 
 All configuration lives in a single YAML file mounted at
 `/config/shakedown.yaml`, editable through File Station or any text
@@ -514,7 +514,7 @@ Container Station (compose edit), logs via Container Station.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: in progress — retry/backoff is delegated to the `internetarchive` library and stale collections are not reported; see §road:core-retry-backoff, §road:stale-collection-status*
+*Status: in progress — stale collections are not yet reported; see §road:stale-collection-status*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
@@ -527,7 +527,7 @@ degrade a single item or a single run, never the archive.
 | Cross-filesystem archive/library | Hard error at startup; refuse to run (§spec:system-shape) |
 | State DB corrupted or lost | `reconcile` rebuilds it without re-downloading (§spec:state) |
 | Disk full | Run aborts cleanly; no partial commits reach the archive |
-| Source rate-limits | Plugin honors `Retry-After`, backs off, resumes |
+| Source rate-limits | Core honors the plugin-surfaced `Retry-After`, backs off, resumes |
 | Library tool retags files in place | Invisible to sync (§spec:sync-identity); reported by `verify --deep` on request |
 | Library tool deletes staging links | Restored on next sync or `restage` |
 | User wipes library tree | Rebuilt by `restage` with zero downloads |

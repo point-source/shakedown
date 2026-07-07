@@ -6,40 +6,6 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Core fetch durability
-
-The no-partial-commit guarantee currently lives inside the IA plugin;
-the spec assigns it to the core so every plugin inherits it.
-
-### §road:core-atomic-fetch
-
-Move temp-dir download and atomic rename from the IA plugin into the
-core fetch phase (`src/shakedown/sync.py`, `src/shakedown/plugins/base.py`,
-`src/shakedown/plugins/ia/plugin.py`) so no plugin can commit partial
-state to the archive. §spec:sync-workflow
-
-### §road:core-retry-backoff
-
-Add core-owned bounded retries for checksum mismatches and
-`Retry-After`-honoring rate-limit backoff to the fetch phase
-(`src/shakedown/sync.py`), instead of delegating both to the
-`internetarchive` library. §spec:failure-behavior. Depends on
-§road:core-atomic-fetch.
-
-### §road:concurrent-collections
-
-Restore the `max_concurrent_collections` global cap so collections sync
-in bounded parallel (`src/shakedown/config.py`, `src/shakedown/sync.py`,
-`tests/test_config.py`, `shakedown.example.yaml`).
-§spec:configuration, §spec:sync-workflow
-
-**Verify:** Configure two collections and run `shakedown sync`; kill the
-process mid-download. Confirm the archive tree contains no
-partially-fetched item directories and `shakedown status` reports no
-`complete` item with missing files. Re-run `shakedown sync` and confirm
-it resumes cleanly with both collections syncing concurrently; a third
-run downloads nothing.
-
 ## Item lifecycle and status conformance
 
 ### §road:prune-retains-record
