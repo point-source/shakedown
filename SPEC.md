@@ -10,7 +10,7 @@
 
 ## System shape §spec:system-shape
 
-*Status: not started*
+*Status: implemented*
 
 The system is three logical layers, two on-disk trees, and one process:
 
@@ -57,7 +57,7 @@ same seam the *arr ecosystem uses for its download→library handoff.
 
 ## Sync identity §spec:sync-identity
 
-*Status: not started*
+*Status: implemented*
 
 This is the load-bearing design decision of the project
 (§req:priorities #1). The system's answer to "do I already have this
@@ -99,7 +99,7 @@ criterion 5).
 
 ## Item lifecycle §spec:item-lifecycle
 
-*Status: not started*
+*Status: in progress — pruning retains no record; see §road:prune-retains-record*
 
 Every discovered item carries a persistent status:
 
@@ -134,7 +134,7 @@ collection so a config typo can't silently discard recordings.
 
 ## Sync workflow §spec:sync-workflow
 
-*Status: not started*
+*Status: in progress — atomic fetch lives in the IA plugin, not the core, and collection concurrency is unbounded; see §road:core-atomic-fetch, §road:concurrent-collections*
 
 A sync run for a (source, collection) pair proceeds in six phases:
 
@@ -184,7 +184,7 @@ manifest recorded, or not there at all — the invariant that makes
 
 ## Source plugins §spec:source-plugins
 
-*Status: not started*
+*Status: in progress — interface and IA plugin done; interface doc and etree plugin missing; see §road:plugin-interface-doc, §road:etree-plugin*
 
 Sources are pluggable so that new archives can be added without core
 changes (§req:constraints). A plugin implements three operations plus
@@ -225,7 +225,7 @@ documented interface" — not "installable third-party ecosystem."
 
 ## Library staging §spec:library-staging
 
-*Status: not started*
+*Status: in progress — missing template fields raise instead of rendering `unknown`; see §road:template-unknown-fallback*
 
 Per collection, the user provides a `library_layout` template that
 renders each item's **staging directory** under the library tree, from
@@ -263,7 +263,7 @@ filenames are then hardlinked into that directory unchanged.
 
 ## Verification and drift §spec:verify-drift
 
-*Status: not started*
+*Status: implemented*
 
 `shakedown verify` is the explicit, operator-invoked integrity tool.
 It is never scheduled by default (§req:constraints).
@@ -289,7 +289,7 @@ It is never scheduled by default (§req:constraints).
 
 ## CLI surface §spec:cli
 
-*Status: not started*
+*Status: implemented*
 
 Shakedown is a one-shot CLI; every command runs to completion and
 exits (§req:constraints). The command surface:
@@ -319,7 +319,7 @@ already works. Scheduling is deliberately someone else's job
 
 ## Configuration §spec:configuration
 
-*Status: not started*
+*Status: in progress — `max_concurrent_collections` was removed from config and must be restored; see §road:concurrent-collections*
 
 All configuration lives in a single YAML file mounted at
 `/config/shakedown.yaml`, editable through File Station or any text
@@ -351,7 +351,7 @@ Structure: top-level roots (`archive_root`, `library_root`,
 
 ## State persistence and recovery §spec:state
 
-*Status: not started*
+*Status: implemented*
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -384,7 +384,7 @@ pretending otherwise would be false durability.
 
 ## Library handoff and notifications §spec:handoff
 
-*Status: not started*
+*Status: in progress — implementation fires per item with an unversioned payload and never sends failure notifications; see §road:handoff-batch-payload, §road:failure-notifications*
 
 After a sync that staged at least one item for a collection, the
 system fires that collection's `on_complete` action — this is how new
@@ -443,7 +443,7 @@ credentials.
 
 ## Serve control plane §spec:serve
 
-*Status: not started*
+*Status: in progress — auth uses a custom header instead of bearer tokens; see §road:serve-bearer-auth*
 
 An optional `shakedown serve` command exposes a small HTTP API for
 users who want ad-hoc triggers and monitoring without `docker exec`
@@ -472,7 +472,7 @@ all; it is not required for any success criterion.
 
 ## Deployment §spec:deployment
 
-*Status: not started*
+*Status: implemented*
 
 The deployment is a single Docker Compose stack, paste-able into QNAP
 Container Station, operable entirely through web UIs — no SSH at any
@@ -514,7 +514,7 @@ Container Station (compose edit), logs via Container Station.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: not started*
+*Status: in progress — retry/backoff is delegated to the `internetarchive` library and stale collections are not reported; see §road:core-retry-backoff, §road:stale-collection-status*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
