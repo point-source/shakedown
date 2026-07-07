@@ -30,11 +30,22 @@ class ItemDescriptor:
 
 @dataclass
 class FetchResult:
-    """Outcome of fetch() for a single item."""
+    """Outcome of fetch() for a single item.
+
+    On failure, plugins classify whether the fault is transient so the core can
+    apply bounded retries with backoff (SPEC.md §spec:failure-behavior):
+    - `retriable` — a checksum mismatch, truncated download, rate limit, or other
+      transient fault worth another attempt. Permanent faults (restricted item,
+      malformed metadata) leave it False so the core fails fast.
+    - `retry_after` — seconds the source asked us to wait (e.g. an HTTP
+      `Retry-After` on a 429). The core honors it in place of its own backoff.
+    """
     success: bool
     bytes_downloaded: int
     files_written: list[Path] = field(default_factory=list)
     error: str | None = None
+    retriable: bool = False
+    retry_after: float | None = None
 
 
 @dataclass

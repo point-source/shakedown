@@ -195,6 +195,45 @@ def test_fetch_returns_failure_when_download_raises(tmp_path: Path) -> None:
     assert "simulated network drop" in (result.error or "")
 
 
+class _FakeResponse:
+    def __init__(self, status_code: int, headers: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+class _HTTPError(Exception):
+    def __init__(self, message: str, response: _FakeResponse | None = None) -> None:
+        super().__init__(message)
+        self.response = response
+
+
+def test_is_retriable_classifies_transient_faults() -> None:
+    from shakedown.plugins.ia.plugin import _is_retriable
+
+    # HTTP status-based
+    assert _is_retriable(_HTTPError("boom", _FakeResponse(429))) is True
+    assert _is_retriable(_HTTPError("boom", _FakeResponse(503))) is True
+    # Message-based (no response attached)
+    assert _is_retriable(RuntimeError("checksum mismatch on d1t01.flac")) is True
+    assert _is_retriable(RuntimeError("Connection reset by peer")) is True
+    # Permanent faults fail fast
+    assert _is_retriable(_HTTPError("not found", _FakeResponse(404))) is False
+    assert _is_retriable(RuntimeError("malformed metadata")) is False
+
+
+def test_retry_after_seconds_parses_delta_header() -> None:
+    from shakedown.plugins.ia.plugin import _retry_after_seconds
+
+    assert _retry_after_seconds(_HTTPError("429", _FakeResponse(429, {"Retry-After": "12"}))) == 12.0
+    # HTTP-date form is not delta-seconds → fall back to core backoff (None).
+    assert _retry_after_seconds(
+        _HTTPError("429", _FakeResponse(429, {"Retry-After": "Wed, 21 Oct 2025 07:28:00 GMT"}))
+    ) is None
+    # No response / no header → None.
+    assert _retry_after_seconds(RuntimeError("plain error")) is None
+    assert _retry_after_seconds(_HTTPError("boom", _FakeResponse(500))) is None
+
+
 def test_verify_existence_only_does_not_hash(tmp_path: Path) -> None:
     plugin = _make_plugin()
     archive_path = tmp_path / "gd-x"

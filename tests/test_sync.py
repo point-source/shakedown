@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import shakedown.sync as sync_module
 from shakedown.db import connect
 from shakedown.models import ItemStatus
+from shakedown.plugins.base import FetchResult
 from shakedown.state import ItemRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
@@ -352,3 +354,114 @@ def test_partial_fetch_is_not_promoted(tmp_roots: tuple[Path, Path], monkeypatch
     items = ItemRepo(conn)
     row = items.get("fake-src", "coll1", "gd-show")
     assert row is None or row.status == ItemStatus.FAILED
+
+
+def test_retriable_fetch_failure_is_retried_then_succeeds(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """SPEC §spec:failure-behavior: a transient (checksum) fault is retried, bounded,
+    and the item completes once a later attempt succeeds — with backoff between tries."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show", content=b"good bytes")
+
+    delays: list[float] = []
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: delays.append(d))
+
+    attempts = {"n": 0}
+    real_fetch = FakePlugin.fetch
+
+    def flaky_fetch(self, item, dest_dir, format_filters, exclude_filters):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            return FetchResult(
+                success=False, bytes_downloaded=0,
+                error="checksum mismatch", retriable=True,
+            )
+        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+
+    monkeypatch.setattr(FakePlugin, "fetch", flaky_fetch)
+
+    assert run_sync(config) == 0
+    assert attempts["n"] == 3, "should retry until the third attempt succeeds"
+    assert delays == [1.0, 2.0], "exponential backoff between the two retries"
+    archived = archive / "fake-src" / "coll1" / "gd-show" / "gd-show.flac"
+    assert archived.read_bytes() == b"good bytes"
+
+
+def test_retriable_fetch_failure_gives_up_after_bounded_attempts(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Retries are bounded: a persistently-failing transient fault marks the item
+    failed after _MAX_FETCH_ATTEMPTS and never commits partial state."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show")
+
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    attempts = {"n": 0}
+
+    def always_fail(self, item, dest_dir, format_filters, exclude_filters):
+        attempts["n"] += 1
+        return FetchResult(
+            success=False, bytes_downloaded=0, error="checksum mismatch", retriable=True,
+        )
+
+    monkeypatch.setattr(FakePlugin, "fetch", always_fail)
+
+    assert run_sync(config) == 1
+    assert attempts["n"] == sync_module._MAX_FETCH_ATTEMPTS
+    assert not (archive / "fake-src" / "coll1" / "gd-show").exists()
+
+
+def test_non_retriable_fetch_failure_is_not_retried(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A permanent fault (retriable=False) fails fast — exactly one attempt."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show")
+
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    attempts = {"n": 0}
+
+    def hard_fail(self, item, dest_dir, format_filters, exclude_filters):
+        attempts["n"] += 1
+        return FetchResult(
+            success=False, bytes_downloaded=0, error="malformed metadata", retriable=False,
+        )
+
+    monkeypatch.setattr(FakePlugin, "fetch", hard_fail)
+
+    assert run_sync(config) == 1
+    assert attempts["n"] == 1, "non-retriable faults must not be retried"
+
+
+def test_retry_after_is_honored_over_backoff(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """SPEC §spec:failure-behavior: a source-supplied Retry-After overrides the
+    core's exponential backoff."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show", content=b"good bytes")
+
+    delays: list[float] = []
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: delays.append(d))
+
+    attempts = {"n": 0}
+    real_fetch = FakePlugin.fetch
+
+    def rate_limited(self, item, dest_dir, format_filters, exclude_filters):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return FetchResult(
+                success=False, bytes_downloaded=0,
+                error="429 too many requests", retriable=True, retry_after=7.5,
+            )
+        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+
+    monkeypatch.setattr(FakePlugin, "fetch", rate_limited)
+
+    assert run_sync(config) == 0
+    assert delays == [7.5], "the Retry-After value, not exponential backoff"

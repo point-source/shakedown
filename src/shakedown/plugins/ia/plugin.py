@@ -153,12 +153,20 @@ class IAPlugin(SourcePlugin):
                 no_directory=False,
                 ignore_existing=False,
                 checksum=True,
-                retries=3,
+                # Core owns retries/backoff (SPEC §spec:failure-behavior); don't
+                # let the IA library retry underneath us.
+                retries=0,
                 archive_session=self._session,
             )
         except Exception as e:
-            log.exception("IA download failed for %s", item.identifier)
-            return FetchResult(success=False, bytes_downloaded=0, error=str(e))
+            log.warning("IA download failed for %s: %s", item.identifier, e)
+            return FetchResult(
+                success=False,
+                bytes_downloaded=0,
+                error=str(e),
+                retriable=_is_retriable(e),
+                retry_after=_retry_after_seconds(e),
+            )
 
         # IA's download writes to <dest_dir>/<identifier>/<filename>. Flatten that
         # subtree into dest_dir; the core promotes dest_dir into the archive.
@@ -180,10 +188,12 @@ class IAPlugin(SourcePlugin):
             bytes_downloaded += written.stat().st_size
 
         if missing:
+            # A truncated/partial download is a transient fault worth another attempt.
             return FetchResult(
                 success=False,
                 bytes_downloaded=bytes_downloaded,
                 error=f"missing after fetch: {missing[:5]}",
+                retriable=True,
             )
 
         return FetchResult(
@@ -194,6 +204,63 @@ class IAPlugin(SourcePlugin):
         """Cheap existence-only verify. Hashing belongs in `verify --deep`."""
         missing = [f.name for f in item.manifest.files if not (archive_path / f.name).is_file()]
         return VerifyResult(ok=not missing, missing_files=missing)
+
+
+_RETRIABLE_MARKERS = (
+    "checksum",
+    "rate limit",
+    "too many requests",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+    "temporarily unavailable",
+    "429",
+    "502",
+    "503",
+    "504",
+)
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """Best-effort HTTP status from a requests-style exception (has .response)."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    return getattr(response, "status_code", None)
+
+
+def _is_retriable(exc: BaseException) -> bool:
+    """Classify a download failure as a transient fault worth a bounded retry.
+
+    Rate limits (429), server errors (5xx), connection resets/timeouts, and
+    checksum mismatches are transient; anything else fails fast so a permanent
+    fault isn't retried needlessly (SPEC §spec:failure-behavior).
+    """
+    status = _http_status(exc)
+    if status is not None and (status == 429 or 500 <= status < 600):
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _RETRIABLE_MARKERS)
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Extract a `Retry-After` delay (seconds) from an HTTP error response, if any.
+
+    Only the delta-seconds form is honored; the HTTP-date form falls back to the
+    core's exponential backoff.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_template_fields(identifier: str, metadata: dict[str, Any]) -> dict[str, Any]:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,7 +23,7 @@ from shakedown.models import Item, ItemStatus
 from shakedown.notify import HandoffPayload
 from shakedown.notify import fire as fire_handoff
 from shakedown.plugins import registry
-from shakedown.plugins.base import ItemDescriptor, SourcePlugin
+from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
 from shakedown.staging import stage_item, staging_dir_for
 from shakedown.state import ItemRepo, RunRepo
 
@@ -325,6 +326,55 @@ class _FetchOutcome:
     error: str | None = None
 
 
+# Bounded core-owned retries for transient fetch faults (checksum mismatch,
+# truncated download, rate limits). SPEC §spec:failure-behavior.
+_MAX_FETCH_ATTEMPTS = 3
+_BACKOFF_BASE_SECONDS = 1.0
+_MAX_BACKOFF_SECONDS = 60.0
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff for the Nth (1-based) attempt, capped."""
+    return min(_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS)
+
+
+def _fetch_with_retries(
+    plugin: SourcePlugin,
+    desc: ItemDescriptor,
+    tmp_dir: Path,
+    collection: CollectionConfig,
+    *,
+    max_attempts: int = _MAX_FETCH_ATTEMPTS,
+) -> FetchResult:
+    """Call plugin.fetch with bounded retries and backoff (SPEC §spec:failure-behavior).
+
+    Retries are core-owned, not delegated to the plugin's library: a transient
+    fault (checksum mismatch, truncated download, rate limit) is retried up to
+    `max_attempts` times. When the source supplies a `Retry-After`, we honor it
+    in place of exponential backoff. The temp dir is wiped before each attempt so
+    a partial write from the previous try never contaminates the next.
+    """
+    result = FetchResult(success=False, bytes_downloaded=0, error="no fetch attempted")
+    for attempt in range(1, max_attempts + 1):
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        result = plugin.fetch(
+            desc, tmp_dir, collection.format_filters, collection.exclude_filters
+        )
+        if result.success or not result.retriable or attempt == max_attempts:
+            return result
+
+        delay = result.retry_after if result.retry_after is not None else _backoff_seconds(attempt)
+        log.warning(
+            "fetch attempt %d/%d for %s failed (%s); retrying in %.1fs",
+            attempt, max_attempts, desc.identifier, result.error, delay,
+        )
+        time.sleep(delay)
+    return result
+
+
 def _fetch_one(
     plugin: SourcePlugin,
     target: PlannedItem,
@@ -346,16 +396,12 @@ def _fetch_one(
     tmp_dir = archive_root / f".tmp-{desc.identifier}"
     stale_dir = archive_root / f".stale-{desc.identifier}"
 
-    # Sweep leftovers from any prior crashed run before we begin.
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
+    # Sweep any stale swap-aside dir from a prior crashed promotion; the temp dir
+    # is swept per-attempt inside _fetch_with_retries.
     if stale_dir.exists():
         shutil.rmtree(stale_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    fetch_result = plugin.fetch(
-        desc, tmp_dir, collection.format_filters, collection.exclude_filters
-    )
+    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, collection)
     if not fetch_result.success:
         # Leave tmp_dir for next-run cleanup; the archive copy (if any) is untouched.
         return _FetchOutcome(
