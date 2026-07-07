@@ -5,8 +5,11 @@ archive_root: /data/archive
 library_root: /data/library
 state_db: /data/archive/.shakedown/state.db
 
-# Global concurrency cap on parallel downloads within a sync.
+# Global concurrency caps. `max_concurrent_downloads` bounds parallel file
+# downloads within one collection; `max_concurrent_collections` bounds how many
+# collections sync in parallel. Total fetch threads are the product of the two.
 max_concurrent_downloads: 4
+max_concurrent_collections: 2
 
 sources:
   - name: internetarchive

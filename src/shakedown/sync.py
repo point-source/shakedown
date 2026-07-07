@@ -62,8 +62,14 @@ def run_sync(
     collection_filter: str | None = None,
     dry_run: bool = False,
 ) -> int:
-    """Top-level sync entrypoint. Returns process exit code."""
-    overall_failed = 0
+    """Top-level sync entrypoint. Returns process exit code.
+
+    Collections sync in bounded parallel, capped by the global
+    `max_concurrent_collections` (SPEC §spec:configuration, §spec:sync-workflow).
+    Each collection opens its own DB connection and is otherwise independent, so
+    one collection's failure degrades only that collection's run.
+    """
+    work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
     for source in config.sources:
         if source_filter and source.name != source_filter:
             continue
@@ -71,20 +77,40 @@ def run_sync(
         for collection in source.collections:
             if collection_filter and collection.name != collection_filter:
                 continue
+            work.append((source, collection, plugin))
+
+    if not work:
+        return 0
+
+    # Initialize the state DB once, up front. The one-time WAL switch and schema
+    # migration need brief exclusive access; doing it here keeps concurrent
+    # collection workers from racing on it (each then opens an already-WAL,
+    # already-migrated DB). SPEC §spec:sync-workflow.
+    connect(config.state_db).close()  # type: ignore[arg-type]
+
+    overall_failed = 0
+    max_workers = min(config.max_concurrent_collections, len(work))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_sync_collection, config, source, collection, plugin, dry_run=dry_run):
+                (source, collection)
+            for source, collection, plugin in work
+        }
+        for fut in as_completed(futures):
+            source, collection = futures[fut]
             try:
-                stats = _sync_collection(
-                    config, source, collection, plugin, dry_run=dry_run
-                )
-                log.info(
-                    "%s/%s: discovered=%d new=%d updated=%d failed=%d bytes=%d",
-                    source.name, collection.name,
-                    stats.discovered, stats.new, stats.updated, stats.failed,
-                    stats.bytes_downloaded,
-                )
-                if stats.failed > 0:
-                    overall_failed += 1
+                stats = fut.result()
             except Exception:
                 log.exception("sync failed for %s/%s", source.name, collection.name)
+                overall_failed += 1
+                continue
+            log.info(
+                "%s/%s: discovered=%d new=%d updated=%d failed=%d bytes=%d",
+                source.name, collection.name,
+                stats.discovered, stats.new, stats.updated, stats.failed,
+                stats.bytes_downloaded,
+            )
+            if stats.failed > 0:
                 overall_failed += 1
     return 0 if overall_failed == 0 else 1
 

@@ -66,6 +66,7 @@ class Config(BaseModel):
     state_db: Path | None = None  # defaults to <archive_root>/.shakedown/state.db
 
     max_concurrent_downloads: int = Field(default=4, ge=1)
+    max_concurrent_collections: int = Field(default=2, ge=1)
 
     sources: list[SourceConfig]
     notifications: NotificationsConfig | None = None

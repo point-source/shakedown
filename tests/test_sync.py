@@ -1,9 +1,11 @@
 """End-to-end sync tests using FakePlugin. Maps to PRD §16 success criteria."""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import shakedown.sync as sync_module
+from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect
 from shakedown.models import ItemStatus
 from shakedown.plugins.base import FetchResult
@@ -465,3 +467,76 @@ def test_retry_after_is_honored_over_backoff(
 
     assert run_sync(config) == 0
     assert delays == [7.5], "the Retry-After value, not exponential backoff"
+
+
+def _two_collection_config(archive: Path, library: Path, *, max_collections: int = 2) -> Config:
+    return Config(
+        archive_root=archive,
+        library_root=library,
+        max_concurrent_collections=max_collections,
+        sources=[
+            SourceConfig(
+                name="fake-src",
+                type="fake",
+                collections=[
+                    CollectionConfig(name="c1", query="*"),
+                    CollectionConfig(name="c2", query="*"),
+                ],
+            )
+        ],
+    )
+
+
+def test_two_collections_both_mirror(tmp_roots: tuple[Path, Path]) -> None:
+    """SPEC §spec:sync-workflow surface: a multi-collection sync mirrors every
+    collection into its own archive + staging subtree."""
+    archive, library = tmp_roots
+    config = _two_collection_config(archive, library)
+    _seed_item("gd-show")
+
+    assert run_sync(config) == 0
+    for coll in ("c1", "c2"):
+        assert (archive / "fake-src" / coll / "gd-show" / "gd-show.flac").is_file()
+        assert (library / "fake-src" / coll / "gd-show" / "gd-show.flac").is_file()
+
+
+def test_collections_sync_concurrently(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
+    """SPEC §spec:configuration: max_concurrent_collections lets collections run in
+    parallel. A rendezvous barrier both collection threads must reach at once passes
+    only under real concurrency; a sequential run would deadlock and fail the sync."""
+    archive, library = tmp_roots
+    config = _two_collection_config(archive, library, max_collections=2)
+    _seed_item("gd-show")
+
+    barrier = threading.Barrier(2, timeout=5)
+    orig_discover = FakePlugin.discover
+
+    def gated_discover(self, collection):
+        # Block until both collection workers are in discover simultaneously.
+        barrier.wait()
+        return orig_discover(self, collection)
+
+    monkeypatch.setattr(FakePlugin, "discover", gated_discover)
+
+    assert run_sync(config) == 0, "both collections must be in flight at once"
+    for coll in ("c1", "c2"):
+        assert (archive / "fake-src" / coll / "gd-show" / "gd-show.flac").is_file()
+
+
+def test_collection_cap_of_one_serializes(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
+    """max_concurrent_collections=1 forces serial collection execution: a barrier
+    expecting two simultaneous arrivals must time out, so the run reports failure."""
+    archive, library = tmp_roots
+    config = _two_collection_config(archive, library, max_collections=1)
+    _seed_item("gd-show")
+
+    barrier = threading.Barrier(2, timeout=0.5)
+    orig_discover = FakePlugin.discover
+
+    def gated_discover(self, collection):
+        barrier.wait()  # never satisfied with only one worker at a time
+        return orig_discover(self, collection)
+
+    monkeypatch.setattr(FakePlugin, "discover", gated_discover)
+
+    assert run_sync(config) == 1, "serial execution can't satisfy a 2-party barrier"

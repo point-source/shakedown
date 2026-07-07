@@ -105,12 +105,44 @@ sources:
     assert cfg.sources[0].collections[0].library_layout == "{year}/{date} - {venue|sanitize}"
 
 
-def test_max_concurrent_collections_field_removed(tmp_path: Path) -> None:
-    """Setting the dropped knob in YAML is now a config error (extra=forbid)."""
+def test_max_concurrent_collections_defaults(tmp_path: Path) -> None:
+    """The global collection-concurrency cap is restored and defaults to bounded parallel."""
     p = _write(tmp_path, """
 archive_root: /a
 library_root: /l
-max_concurrent_collections: 4
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'q'
+""")
+    cfg = load(p)
+    assert cfg.max_concurrent_collections == 2
+
+
+def test_max_concurrent_collections_honored_from_yaml(tmp_path: Path) -> None:
+    p = _write(tmp_path, """
+archive_root: /a
+library_root: /l
+max_concurrent_collections: 5
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'q'
+""")
+    cfg = load(p)
+    assert cfg.max_concurrent_collections == 5
+
+
+def test_max_concurrent_collections_must_be_positive(tmp_path: Path) -> None:
+    """A zero/negative cap is a config error (ge=1), named at startup."""
+    p = _write(tmp_path, """
+archive_root: /a
+library_root: /l
+max_concurrent_collections: 0
 sources:
   - name: ia
     type: ia
