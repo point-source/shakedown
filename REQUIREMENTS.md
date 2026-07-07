@@ -83,6 +83,12 @@ status output).
    interface is documented well enough that a second plugin can be
    written by someone who has not touched the IA plugin — demonstrated
    by shipping an **etree** source plugin in v1 (see Priorities).
+9. **Durable against upstream takedowns.** When an item that was
+   previously mirrored disappears from the source's enumeration, its
+   local files are retained by default and it is flagged as
+   `disappeared` in `shakedown status`; a per-collection
+   `prune_disappeared: true` opt-in instead deletes the local copy for
+   users who want strict mirroring.
 
 ## User stories §req:user-stories
 
@@ -112,6 +118,12 @@ criterion and implies a testable path through the product's surface.
 - **See what I'm not getting.** As a homelab operator, I want
   `shakedown status` to list restricted, stream-only items with the
   reason, so that I understand the gaps in my mirror. *(→ criterion 7)*
+- **Keep copies the source removes.** As a homelab operator, I want
+  items that disappear from the source to stay on my disk by default —
+  flagged in `status` but never deleted — with an opt-in
+  `prune_disappeared` per collection for strict mirroring, so that an
+  upstream takedown never costs me a recording I already have.
+  *(→ criterion 9)*
 - **Switch library tools.** As a homelab operator, I want to point a
   different library tool at the staging tree without the archive layer
   changing, so that switching from Beets to Lidarr costs me nothing on
@@ -143,6 +155,11 @@ constraints that drive architecture.
   time. Running sync after a partial failure resumes correctly. Running
   sync at any cadence (including after missed scheduled runs) converges
   to the same result.
+- **Durable mirroring against upstream loss.** The mirror is durable
+  in the takedown direction: an item vanishing from the source never
+  deletes the user's local copy unless they have explicitly opted into
+  pruning. Losing content is only ever the user's choice, never an
+  upstream side effect.
 - **Storage efficiency.** Archive + library staging together cost
   effectively 1x storage. Any further duplication is a library-tool
   decision, not Shakedown's.
@@ -223,8 +240,9 @@ pulled in to prove the plugin seam.
    and single-item operations as the CLI surface.
 5. Multi-collection config via a single YAML file, secrets via env only
    (→ criterion 2).
-6. Restricted / disappeared item handling surfaced in `status`
-   (→ criterion 7).
+6. Restricted / disappeared item handling: both surfaced in `status`,
+   disappeared items retained by default with an opt-in
+   `prune_disappeared` per collection (→ criteria 7, 9).
 7. QNAP-targeted Docker Compose deployment (Shakedown + ofelia +
    library tool + streaming server), web-UI-only setup (→ criterion 6).
 8. Library handoff via webhook, with an exec fallback.
