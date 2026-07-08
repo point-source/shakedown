@@ -53,9 +53,10 @@ not scale to "add Phish next month and etree the month after."
 
 ## Success criteria §req:success-criteria
 
-Observable outcomes that define v1 as done. Each is demonstrable
-end-to-end from the product's surface (CLI, config, on-disk trees,
-status output).
+Observable outcomes that define the product as done. Each is
+demonstrable end-to-end from the product's surface (CLI, config,
+on-disk trees, status output). Criteria 1–10 defined v1 (shipped);
+criteria 11–12 define the current discovery-performance increment.
 
 1. **Unattended weekly mirror that actually fires.** A weekly sync of
    the IA Grateful Dead collection runs unattended for a month with no
@@ -105,6 +106,20 @@ status output).
     and is excluded from the default test run and CI, so day-to-day
     development stays offline and deterministic while releases can be
     gated on the real thing.
+11. **Fast recurring sync.** A weekly sync of a large collection
+    (~14k items) in which nothing has changed upstream completes in a
+    small fraction of a first full sync's time — its wall-clock is
+    bounded by enumerating the collection once, not by the item count —
+    and it never stalls for minutes on a single slow upstream response.
+    It still detects every upstream change the current
+    manifest-vs-manifest comparison detects: speed never comes at the
+    cost of a missed change.
+12. **Polite parallel first sync.** The first full sync of a large
+    collection overlaps discovery and downloading and runs multiple
+    upstream requests concurrently, yet stays within the source's
+    politeness ceiling as a single shared budget — so a large first
+    sync is faster without ever being throttled or blacklisted, and a
+    partial or failed discovery still never prunes.
 
 ## User stories §req:user-stories
 
@@ -163,6 +178,23 @@ criterion and implies a testable path through the product's surface.
   deletion — so that I catch real-API drift and integration breakage
   that offline fixtures cannot, without slowing or destabilizing the
   everyday test run. *(→ criterion 10)*
+- **Quick weekly check.** As a homelab operator, I want my weekly sync
+  to finish quickly when nothing new has been posted, so that a no-op
+  run doesn't take anywhere near as long as the first full mirror — and
+  I still trust it to have caught anything that did change.
+  *(→ criterion 11)*
+- **One slow item doesn't hang the run.** As a homelab operator, I want
+  a single slow or timing-out upstream response to not freeze my whole
+  sync for minutes, so that one bad metadata endpoint can't hold the
+  rest of the collection hostage. *(→ criterion 11)*
+- **Bearable first sync.** As a homelab operator, I want the first sync
+  of a big collection to start downloading while it's still discovering,
+  so that I'm not waiting through thousands of metadata lookups before
+  anything begins fetching. *(→ criterion 12)*
+- **Stay in the archive's good graces.** As a homelab operator, I want
+  Shakedown to stay within the source's politeness limits even when it
+  works in parallel, so that speeding up a sync never gets me
+  rate-limited or blacklisted by archive.org. *(→ criterion 12)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -188,6 +220,26 @@ constraints that drive architecture.
   decision, not Shakedown's.
 - **Restage speed.** Rebuilding the full library tree for a ~14k-item
   collection completes in under five minutes and never re-downloads.
+- **Sync speed.** A recurring sync's wall-clock scales with what
+  actually changed upstream, not with the size of the collection: a
+  no-op weekly run does not re-check every item one at a time. The
+  first full sync overlaps discovery and downloading rather than fully
+  enumerating before it fetches. No single slow upstream response
+  blocks the rest of the run. Concrete targets are a design decision
+  (SPEC), not fixed here; the requirement is the direction — fast when
+  little changed, and never stalled by one slow endpoint.
+- **Speed never costs correctness.** Any discovery fast-path must never
+  fail to detect an upstream change that the manifest-vs-manifest
+  comparison detects today. The "trust recorded state,
+  manifest-vs-manifest" identity below remains load-bearing;
+  performance work sits on top of it and must not weaken it. A partial
+  or failed discovery must still never trigger pruning.
+- **Politeness to the source (hard).** Regardless of internal
+  parallelism, Shakedown holds to the source's connection and rate
+  limits through a single shared budget spanning discovery and
+  downloads — the two must not sum past the source's ceiling. It must
+  never get the user throttled or blacklisted. This is a proactive
+  bound, beyond the reactive back-off in Resilience below.
 - **Resilience.** Network drops, malformed source metadata, checksum
   mismatches, disk-full, and source rate-limiting each fail cleanly
   (retry, back off, or mark the single item failed) without corrupting
@@ -263,8 +315,9 @@ Technical, operational, and scope bounds on the solution space.
 
 ## Priorities §req:priorities
 
-Ordered by user impact. v1 is the target; a second (etree) plugin is
-pulled in to prove the plugin seam.
+Ordered by user impact. v1 shipped; a second (etree) plugin was pulled
+in to prove the plugin seam. The current increment is discovery
+performance (items 13–15).
 
 **Must have (v1 core):**
 
@@ -297,9 +350,22 @@ pulled in to prove the plugin seam.
     sync → staging → re-sort/restage → deletion, runnable with one
     command, excluded from the default test run and CI (→ criterion 10).
 
-**Nice to have / out of scope for v1 (candidates for later):**
+**Next — discovery performance (post-v1, current increment):**
 
-12. Web UI for status and config; push notifications beyond webhooks
+13. Incremental recurring sync: a no-op weekly sync no longer scales
+    its wall-clock with the item count, and does so without weakening
+    change detection — every change caught today is still caught
+    (→ criterion 11; GH #8).
+14. Parallel, pipelined first sync under one shared politeness budget:
+    overlap discovery and download with bounded concurrency that spans
+    both, never exceeding the source's ceiling, with prune safety
+    preserved (→ criterion 12; GH #9).
+15. No head-of-line stalls: a single slow upstream metadata response
+    never freezes the whole run for minutes (→ criterion 11; GH #10).
+
+**Nice to have / out of scope (candidates for later):**
+
+16. Web UI for status and config; push notifications beyond webhooks
     (Pushover, Discord); direct library-tool integrations; multiple
     archive roots / tiered storage; BitTorrent as a source; cross-host
     sync. These are explicitly deferred.

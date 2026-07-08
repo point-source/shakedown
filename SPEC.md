@@ -75,6 +75,12 @@ item?" comes from recorded state, never from hashing bytes on disk.
 - No scheduled operation shall hash on-disk bytes. Byte hashing happens
   only in the explicit, operator-invoked `verify --deep`
   (§spec:verify-drift).
+- A collection may opt into skipping the per-item metadata fetch for
+  items a cheap source-side change signal reports unchanged
+  (§spec:incremental-discovery). That fast-path only ever *skips* work;
+  it never concludes "unchanged" where this manifest comparison would
+  find a change, so the identity guarantee here is preserved, not
+  weakened (§req:quality-attributes: speed never costs correctness).
 
 **Why not checksum the disk.** The naive design — re-verify local
 files against the source's checksums each run — breaks the moment a
@@ -187,6 +193,163 @@ atomic, so an item is either fully present in the archive with its
 manifest recorded, or not there at all — the invariant that makes
 "existence check only" sufficient during Plan.
 
+The Discover and Fetch phases may overlap and run concurrently under
+the discovery-performance increment (§spec:discovery-performance); that
+increment preserves every guarantee above — in particular, the
+prune/`disappeared` decision remains a post-enumeration barrier that
+never runs against a partial discovery.
+
+## Discovery performance §spec:discovery-performance
+
+*Status: not started*
+
+On a large collection (~14k items, e.g. IA GratefulDead), discovery is
+the wall-clock bottleneck in two regimes. A **first full sync**
+resolves one metadata round-trip per item (an identifier-only search
+followed by a per-item metadata fetch) and fully materializes the
+enumeration before any download begins, so thousands of sequential
+metadata calls precede any fetching. A **recurring no-op sync** — the
+production path, a weekly scheduled run where almost nothing has changed
+— pays that same per-item metadata cost only to conclude "nothing
+changed." And because discovery is sequential, one slow upstream
+metadata endpoint is head-of-line blocking: a single item can stall the
+whole run for minutes. (§req:success-criteria #11, #12;
+§req:quality-attributes: sync speed)
+
+This section describes the end state: three levers, under one politeness
+bound.
+
+### Shared source concurrency budget §spec:source-budget
+
+All of a source's concurrent traffic to its upstream host — per-item
+metadata calls during discovery, file downloads during fetch, and
+multiple collections syncing at once — draws from a **single shared
+concurrency budget per source**. That budget is the hard ceiling on
+simultaneous connections Shakedown opens to the host; discovery workers
+and download workers acquire from the same pool, and the ceiling can
+never be exceeded no matter how many collections run concurrently.
+
+**Why per-source, not per-collection.** Politeness is a property of the
+upstream host, not of any one collection: archive.org sees the sum of
+every connection Shakedown opens across all collections. A
+per-collection budget would let each of `max_concurrent_collections`
+collections open its own quota and sum past archive.org's tolerance,
+risking throttling or a blacklist — the exact failure
+§req:quality-attributes ("politeness to the source") forbids. A single
+per-source budget spanning discovery and fetch is the only bound that
+holds regardless of internal parallelism.
+
+**Tradeoff accepted.** Collections of the same source no longer get
+independent throughput — one collection's downloads and another's
+discovery compete for the same slots. This is correct: the protected
+resource is the upstream host's goodwill, which is genuinely shared.
+**Rejected:** two independent pools (a discovery pool plus the existing
+fetch pool) each individually polite — their *sum* is unbounded, which
+is precisely the blacklist risk.
+
+### Parallel, pipelined discovery §spec:discovery-pipeline
+
+Per-item metadata resolution runs concurrently rather than serially,
+and download begins while discovery is still in progress: as each item
+is discovered and classified `new` or `changed-upstream`, it is handed
+to the fetch stage without waiting for the rest of the enumeration.
+Discovery and download overlap, both drawing from the shared source
+budget (§spec:source-budget). Because file downloads take far longer
+than metadata calls, overlapping them hides most discovery latency
+behind download time on a first full sync.
+
+**The enumeration-completeness contract is preserved.** A per-item fetch
+decision (`new`/`changed-upstream`/`unchanged`) is a comparison of one
+item's current manifest against its recorded manifest
+(§spec:sync-identity) and needs no knowledge of the rest of the
+collection — so it is safe to act on the moment an item is discovered.
+But the prune/`disappeared` decision ("in the database but not in this
+discovery") requires the *complete* enumeration and remains a
+**post-discovery barrier**: it runs only after discovery finishes
+successfully, never against a partial set. The invariants that must
+hold:
+
+- An item may be fetched and staged before discovery completes.
+- Pruning runs only after a complete, successful enumeration.
+- A partial or failed enumeration prunes nothing and marks the
+  collection stale (§spec:failure-behavior) — a failed discovery is
+  never read as items having disappeared, unchanged from today.
+
+**Tradeoff.** Run counters now accumulate from concurrent producers
+(discovery) and consumers (fetch) rather than the current
+single-threaded completion loop, so per-run stats must remain correct
+under concurrency. The spec requires the invariant (counts are exact),
+not a mechanism; the fetch pool already establishes the pattern of
+isolating per-worker state.
+
+### Incremental discovery §spec:incremental-discovery
+
+Opt-in per collection (`incremental_discovery`, default off,
+§spec:configuration). When enabled, discovery requests a cheap per-item
+**change signal in the search response itself** — a source-provided
+token that moves whenever the item's contents change (for IA, the
+item's update timestamp together with its total size) — and persists it
+alongside the recorded manifest (§spec:state). On a later sync, an item
+whose current signal matches the stored one is classified `unchanged`
+**without** the per-item metadata round-trip — the expensive metadata
+fetch is skipped entirely. An item whose signal differs, or that has no
+stored signal, falls through to the full manifest comparison
+(§spec:sync-identity) exactly as today. This is what collapses a
+recurring no-op sync from N metadata calls to a single paginated search
+(§req:success-criteria #11): a weekly run's wall-clock scales with what
+changed, not with collection size.
+
+**Correctness bound — speed never costs a missed change**
+(§req:quality-attributes). The fast-path is a *skip*, never a
+*substitute*: it may only conclude "unchanged," and only when the
+source's own signal says the item has not changed. It must never
+conclude "unchanged" for an item the full manifest comparison would
+flag `changed-upstream`. This holds when the signal is monotone in the
+item's contents — any change that would alter the recorded manifest (a
+file added, removed, resized, or re-derived with a new checksum) also
+moves the signal. The design leans on this invariant of the source's
+update semantics; a source that cannot guarantee it is not offered
+incremental discovery.
+
+Because that invariant is a property of the upstream — not something
+Shakedown can prove per run — three guards make the opt-in safe:
+
+- It is **off by default**: the correct-by-construction full comparison
+  is what every collection gets unless an operator opts in.
+- The signal combines **both** an update timestamp **and** total size,
+  so a change moving either is caught even if the other is stale.
+- **`verify --deep`** (§spec:verify-drift) remains the periodic
+  byte-level safety net that catches anything a signal ever missed.
+
+**Rejected.** Making the cheap-signal skip the *default* (fastest, but
+silently trades the project's load-bearing correctness guarantee on an
+unprovable upstream invariant — §req:quality-attributes). **Rejected:**
+replacing the manifest comparison with the signal outright — the
+manifest stays the source of truth for "do I have it?" and for
+`changed-upstream` detection; the signal only gates whether it is worth
+a metadata fetch to find out.
+
+### Slow-metadata resilience §spec:slow-metadata
+
+A single slow or timing-out upstream metadata response never stalls the
+whole run. Structurally, parallel discovery (§spec:discovery-pipeline)
+removes head-of-line blocking — a slow item holds one budget slot while
+the others proceed. In addition, per-item metadata requests during
+discovery carry a **bounded timeout and retry envelope** matched to the
+upstream's real latency, so a slow endpoint costs a bounded wait rather
+than minutes of stacked timeout-then-retry cycles. Transient
+discovery-time upstream faults (a slow, 5xx, or 429 metadata response)
+are handled with the same back-off discipline the fetch path already
+owns (§spec:failure-behavior), rather than surfacing as an unhandled
+enumeration failure for what is merely transient slowness.
+
+**Why both parallelism and a tuned timeout** (issue-complementary).
+Parallelism removes the *blocking* — the run no longer waits on the slow
+item; the tuned timeout reduces the *wasted time per* slow item. Either
+alone leaves value on the table; together they satisfy
+§req:success-criteria #11's "never stalls for minutes on a single slow
+upstream response."
+
 ## Source plugins §spec:source-plugins
 
 *Status: complete*
@@ -207,6 +370,14 @@ post-fetch completeness guard (§spec:sync-workflow, §spec:failure-behavior).
 This keeps every plugin small and correct-by-default — the hard parts can't
 be reimplemented wrong per source. `verify` is existence-only by contract;
 byte hashing lives only in the core's `verify --deep` (§spec:verify-drift).
+
+The core — not the plugin — owns discovery concurrency and its politeness
+bound (§spec:source-budget): a plugin's `discover` remains a simple
+per-item enumeration, and the core parallelizes and pipelines it under the
+shared budget. A plugin whose source exposes a cheap per-item change signal
+may surface it on the descriptor so the core can offer incremental
+discovery for that source (§spec:incremental-discovery); a plugin that
+cannot is unaffected and simply always resolves full manifests.
 
 Plugins shipped in v1:
 
@@ -339,6 +510,13 @@ Structure: top-level roots (`archive_root`, `library_root`,
 `format_filters`, `exclude_filters`, `library_layout`,
 `prune_disappeared`, `on_complete`); and global `notifications`.
 
+The discovery-performance increment adds a per-source politeness ceiling
+(the shared concurrency budget of §spec:source-budget) and a
+per-collection `incremental_discovery` opt-in
+(§spec:incremental-discovery), both validated at load time like every
+other key (`extra="forbid"`, so an unknown or misspelled key fails the
+run rather than being ignored).
+
 - The system shall validate the full configuration at startup and
   refuse to run on errors, naming the offending key — a scheduled
   headless tool that limps along on half-parsed config fails at 3am
@@ -371,6 +549,9 @@ Sync state lives in a single-file embedded SQLite database at
   manifest** (§spec:sync-identity), lifecycle status and
   `restriction_reason` (§spec:item-lifecycle), source metadata for
   layout templates, and discovery/download/verification timestamps.
+  For collections using incremental discovery it also records the
+  item's last-seen source change signal (§spec:incremental-discovery),
+  the token a later sync matches against to skip a metadata fetch.
   Per run: counts, bytes downloaded, errors, and timing — the raw
   material for `status`.
 - `shakedown reconcile` rebuilds the database from scratch by walking
@@ -561,6 +742,8 @@ degrade a single item or a single run, never the archive.
 | State DB corrupted or lost | `reconcile` rebuilds it without re-downloading (§spec:state) |
 | Disk full | Run aborts cleanly; no partial commits reach the archive |
 | Source rate-limits | Core honors the plugin-surfaced `Retry-After`, backs off, resumes |
+| Slow/timing-out metadata during discovery | Bounded per-item timeout + back-off; other items proceed in parallel — one slow endpoint never stalls the run (§spec:slow-metadata) |
+| Discovery fails partway (pipelined) | Collection marked stale; nothing pruned — a partial enumeration is never read as items disappearing (§spec:discovery-pipeline) |
 | Library tool retags files in place | Invisible to sync (§spec:sync-identity); reported by `verify --deep` on request |
 | Library tool deletes staging links | Restored on next sync or `restage` |
 | User wipes library tree | Rebuilt by `restage` with zero downloads |
