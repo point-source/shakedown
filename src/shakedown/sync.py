@@ -22,7 +22,7 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
-from shakedown.models import Item, ItemStatus
+from shakedown.models import Item, ItemStatus, Run
 from shakedown.notify import (
     SyncCompletePayload,
     SyncFailedPayload,
@@ -73,42 +73,51 @@ def _describe_one(
         return plugin.describe_item(identifier, collection)
 
 
+def _stream_descriptors(
+    plugin: SourcePlugin,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+) -> Iterator[ItemDescriptor]:
+    """Yield item descriptors as they resolve, fanning per-item metadata resolution
+    across the shared per-source budget (SPEC §spec:discovery-pipeline).
+
+    Sources exposing `enumerate_items()` get concurrent `describe_item()` resolution
+    bounded by the source budget, yielded via `as_completed` so a consumer can act on
+    each item the moment it resolves (the overlap lever). Sources without the
+    enumerate/describe split fall back to the serial `discover()` stream. A transient
+    per-item fault yields None from `describe_item` and is dropped, exactly as the serial
+    path skipped a failed metadata fetch. Materializing the id list or a `describe_item`
+    call raising propagates to the consumer, which treats it as an enumeration failure.
+    """
+    identifiers = plugin.enumerate_items(collection)
+    if identifiers is None:
+        yield from plugin.discover(collection)
+        return
+    ids = list(identifiers)  # materialize the enumeration (may raise -> stale)
+    if not ids:
+        return
+    with ThreadPoolExecutor(max_workers=min(budget.size, len(ids))) as pool:
+        futures = [
+            pool.submit(_describe_one, plugin, identifier, collection, budget)
+            for identifier in ids
+        ]
+        for fut in as_completed(futures):
+            desc = fut.result()
+            if desc is not None:
+                yield desc
+
+
 def _discover_descriptors(
     plugin: SourcePlugin,
     collection: CollectionConfig,
     budget: SourceBudget,
 ) -> tuple[list[ItemDescriptor], set[str]]:
-    """Materialize the full enumeration, fanning per-item metadata resolution across
-    the shared per-source budget (SPEC §spec:discovery-pipeline).
-
-    Sources that expose `enumerate_items()` get concurrent `describe_item()` resolution
-    bounded by the source budget; the enumeration is fully materialized here (before
-    planning) so prune/`disappeared` semantics are unchanged. Sources without the
-    enumerate/describe split fall back to the serial `discover()` drain. A transient
-    per-item fault yields None and is dropped, exactly as the serial path skipped a
-    failed metadata fetch — so NEW/CHANGED/UNCHANGED/DISAPPEARED classification is
-    identical to the pre-change serial run.
+    """Materialize the full enumeration for the dry-run path (Discover + Plan, no fetch).
+    The real run streams the same descriptors (`_stream_descriptors`) into the fetch
+    pipeline instead of buffering them here.
     """
-    identifiers = plugin.enumerate_items(collection)
-    descriptors: list[ItemDescriptor] = []
-    if identifiers is None:
-        # Serial fallback: this source can't split enumerate/describe.
-        descriptors.extend(plugin.discover(collection))
-    else:
-        ids = list(identifiers)  # fully materialize the enumeration (may raise -> stale)
-        if ids:
-            workers = min(budget.size, len(ids))
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [
-                    pool.submit(_describe_one, plugin, identifier, collection, budget)
-                    for identifier in ids
-                ]
-                for fut in as_completed(futures):
-                    desc = fut.result()
-                    if desc is not None:
-                        descriptors.append(desc)
-    seen = {d.identifier for d in descriptors}
-    return descriptors, seen
+    descriptors = list(_stream_descriptors(plugin, collection, budget))
+    return descriptors, {d.identifier for d in descriptors}
 
 
 class PlanAction(StrEnum):
@@ -214,6 +223,19 @@ def run_sync(
     return 0 if overall_failed == 0 else 1
 
 
+def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: datetime) -> None:
+    """Persist the run record from the accumulated stats (SPEC §spec:sync-workflow, step 6)."""
+    run.items_discovered = stats.discovered
+    run.items_new = stats.new
+    run.items_updated = stats.updated
+    run.items_failed = stats.failed
+    run.bytes_downloaded = stats.bytes_downloaded
+    run.stale = stats.stale
+    run.errors = stats.errors
+    run.finished_at = finished
+    runs.finish(run)
+
+
 def _sync_collection(
     config: Config,
     source: SourceConfig,
@@ -294,15 +316,7 @@ def _sync_collection(
         finished = datetime.now()
         _fire_notifications(config, source, collection, stats, started, finished)
         if run is not None:
-            run.items_discovered = stats.discovered
-            run.items_new = stats.new
-            run.items_updated = stats.updated
-            run.items_failed = stats.failed
-            run.bytes_downloaded = stats.bytes_downloaded
-            run.stale = True
-            run.errors = stats.errors
-            run.finished_at = finished
-            runs.finish(run)
+            _finish_run(runs, run, stats, finished)
         return stats
 
     # Post-enumeration barrier: the enumeration is complete and successful, so the
@@ -343,14 +357,7 @@ def _sync_collection(
 
     # Phase 6: record run
     if run is not None:
-        run.items_discovered = stats.discovered
-        run.items_new = stats.new
-        run.items_updated = stats.updated
-        run.items_failed = stats.failed
-        run.bytes_downloaded = stats.bytes_downloaded
-        run.errors = stats.errors
-        run.finished_at = finished
-        runs.finish(run)
+        _finish_run(runs, run, stats, finished)
 
     return stats
 
@@ -408,25 +415,10 @@ def _pipelined_discover_and_fetch(
                 deferred.append(planned)
 
         try:
-            enumerated = plugin.enumerate_items(collection)
-            if enumerated is None:
-                # No cheap enumerate/describe split: stream discover() and still overlap
-                # each descriptor's fetch with generating the next.
-                for desc in plugin.discover(collection):
-                    dispatch(desc)
-            else:
-                ids = list(enumerated)  # materialize the enumeration (may raise -> stale)
-                if ids:
-                    workers = min(budget.size, len(ids))
-                    with ThreadPoolExecutor(max_workers=workers) as discover_pool:
-                        describe_futures = [
-                            discover_pool.submit(_describe_one, plugin, i, collection, budget)
-                            for i in ids
-                        ]
-                        for dfut in as_completed(describe_futures):
-                            desc = dfut.result()  # may raise -> enumeration failure
-                            if desc is not None:
-                                dispatch(desc)
+            # Descriptors stream in as each resolves; dispatch classifies and fetches
+            # each immediately, so downloads overlap the remaining enumeration.
+            for desc in _stream_descriptors(plugin, collection, budget):
+                dispatch(desc)
         except Exception as e:  # any enumeration fault marks the collection stale
             enum_error = e
 
