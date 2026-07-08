@@ -462,31 +462,82 @@ step (§req:success-criteria #6). See
 [`docker-compose.example.yaml`](docker-compose.example.yaml) for the
 canonical example.
 
-- **`shakedown`** — the one-shot CLI container; runs only while a
-  command runs; no restart policy.
-- **`ofelia`** — the scheduler; invokes `shakedown sync …` inside the
-  shakedown container on cron schedules defined as Docker labels in
-  the compose file.
+**The scheduler launches a fresh container per tick.** Because
+Shakedown is a one-shot, stateless-between-runs CLI (§req:constraints),
+no long-lived worker container exists to attach to. Each scheduled
+tick therefore *starts a new container* from the image, runs one
+`sync --collection <name>`, and exits — matching the batch design.
+When a tick fires, the sync runs; "the schedule is configured" and
+"the sync ran" are the same event (§req:success-criteria #1,
+§req:quality-attributes "scheduled runs are observable and
+self-contained").
+
+Long-running services in the stack:
+
+- **`ofelia`** — the scheduler. Runs fresh per-tick containers from
+  the Shakedown image, one job per collection, on cron schedules
+  defined as Docker labels. Each job carries the same
+  archive/library/config mounts and `IA_*` credentials as a manual
+  run, mounts config read-only, and reaps its finished container.
+- **`shakedown-serve`** *(optional)* — the only long-lived Shakedown
+  process, when present: the auth-protected control plane
+  (§spec:serve) for status/metrics and ad-hoc triggers without SSH.
 - Library tool and streaming server (Beets, Navidrome, …) join the
-  same stack, reading the library tree — they are the user's choice
-  and Shakedown places no requirements on them.
+  same stack, reading the library tree — the user's choice; Shakedown
+  places no requirements on them.
+
+There is **no idle standalone `shakedown` service**. A one-shot
+container that exits at bring-up and then sits `Exited` does no work,
+cannot be a scheduler target, and reads as the worker while doing
+nothing — so it is omitted. The Shakedown image is still present in
+the stack, referenced by ofelia's per-tick jobs and (optionally) by
+`serve`.
 
 All data paths live under a single share
 (`/share/data/{archive,library,music,shakedown-config}`) so archive
 and library share a filesystem (§spec:system-shape).
 
-**Why ofelia rather than host cron or a built-in scheduler.** Ofelia
-is itself a container, so the entire deployment — including timing —
-is one compose YAML editable in Container Station: no host cron, no
-SSH, no scheduler code in Shakedown. Schedule changes are compose-file
-label edits; "did the Sunday sync run?" is answerable from ofelia's
-container logs. Missed schedules are harmless because sync is
-idempotent at any cadence (§spec:sync-workflow). Per-collection
-schedules are additional ofelia jobs invoking
-`shakedown sync --collection <name>`. The tradeoff — schedules are
-more verbose as labels than a `schedule:` key in shakedown.yaml would
-be — is accepted for having exactly one source of timing truth
-(§spec:configuration).
+**First bring-up does no unscoped work.** A freshly deployed stack
+does not sync anything on `up`; each collection syncs on its own
+schedule. There is deliberately no implicit "sync everything at
+startup" — with many configured collections that would be surprising
+and expensive (§req:quality-attributes). A user who wants an
+immediate first run triggers one explicitly (see manual triggers).
+
+**Manual triggers (no-SSH-first, SSH supported).** To run a sync
+without waiting for the next tick:
+
+- **Primary, no SSH:** `POST /sync` on the `serve` control plane
+  (bearer-token authed, §spec:serve).
+- **Fallback:** start a one-off container from the same image with
+  `sync --collection <name>` — via Container Station's *Create
+  Container* UI (no SSH) or `docker run` over SSH. This is the manual
+  equivalent of a tick; ofelia itself has no "run now" command, so a
+  one-off is simply launching the image by hand.
+
+SSH remains fully supported and is documented as guidance, not
+designed out; the web-UI paths exist so it is never *required*
+(§req:success-criteria #6).
+
+**Why ofelia, launching fresh containers, rather than host cron, a
+built-in scheduler, or exec-into-a-running-container.** Ofelia is
+itself a container, so the entire deployment — including timing — is
+one compose YAML editable in Container Station: no host cron, no SSH,
+no scheduler code in Shakedown. Launching a fresh container per tick
+(rather than `exec`-ing into a persistent one) is what keeps Shakedown
+one-shot: there is no daemon to keep alive, and a tick can never
+silently no-op because a prior run has exited. Schedule changes are
+compose-file label edits; "did the Sunday sync run?" is answerable
+from the per-tick container logs. Missed schedules are harmless
+because sync is idempotent at any cadence (§spec:sync-workflow).
+Accepted tradeoffs: per-tick job definitions repeat the mount/env
+wiring and live on the scheduler rather than on a worker service (more
+verbose than a `schedule:` key in shakedown.yaml would be) — accepted
+for exactly one source of timing truth (§spec:configuration); and
+ofelia requires access to the host Docker socket to start containers
+(mounted read-only), whose blast radius is host-root-equivalent — an
+unavoidable property of any in-stack container scheduler, called out
+so operators place the stack accordingly.
 
 Setup flow (web-UI-only): create the share folders in File Station,
 upload an initial `shakedown.yaml`, paste the compose YAML into
