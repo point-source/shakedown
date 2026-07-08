@@ -112,30 +112,80 @@ def stage_item(
                 item.identifier, mf.name,
             )
             continue
+        _link_file(
+            src, dst, result, staged_paths,
+            collision_msg=(
+                f"{dst}: another item already staged here this run "
+                f"(template renders to the same path for multiple items)"
+            ),
+        )
 
-        already_claimed_this_run = staged_paths is not None and dst in staged_paths
-        try:
-            if dst.exists():
-                if src.stat().st_ino == dst.stat().st_ino:
-                    result.already_present += 1
-                    if staged_paths is not None:
-                        staged_paths.add(dst)
-                    continue
-                if already_claimed_this_run:
-                    result.collisions.append(
-                        f"{dst}: another item already staged here this run "
-                        f"(template renders to the same path for multiple items)"
-                    )
-                    continue
-                # Stale link from a prior run; archive inode has been replaced.
-                dst.unlink()
-            hardlink(src, dst)
-            result.linked += 1
-            if staged_paths is not None:
-                staged_paths.add(dst)
-        except FilesystemError as e:
-            result.collisions.append(f"{dst}: {e}")
+    # The metadata.json sidecar is staged as an explicit additional link, not a manifest
+    # entry (§spec:metadata-preservation). It is regenerated from the DB-recorded metadata
+    # when the archive copy is absent, so restage/reconcile stay network-free.
+    if collection.preserve_source_metadata:
+        sidecar_src = _ensure_archive_sidecar(item)
+        if sidecar_src is not None:
+            _link_file(
+                sidecar_src, staging_dir / METADATA_SIDECAR, result, staged_paths,
+                collision_msg=(
+                    f"{staging_dir / METADATA_SIDECAR}: metadata sidecar already staged "
+                    f"by another item this run"
+                ),
+            )
     return result
+
+
+def _link_file(
+    src: Path,
+    dst: Path,
+    result: StageResult,
+    staged_paths: set[Path] | None,
+    *,
+    collision_msg: str,
+) -> None:
+    """Hardlink one file into the staging tree, resolving the two "dst exists" cases.
+
+    Already-present (same inode) is a no-op; a stale link from a prior fetch (archive
+    inode replaced) is unlinked and relinked; a path already claimed by another item this
+    run is a cross-item collision reported via ``collision_msg`` (§spec:library-staging,
+    §spec:layout-collision-safety).
+    """
+    already_claimed_this_run = staged_paths is not None and dst in staged_paths
+    try:
+        if dst.exists():
+            if src.stat().st_ino == dst.stat().st_ino:
+                result.already_present += 1
+                if staged_paths is not None:
+                    staged_paths.add(dst)
+                return
+            if already_claimed_this_run:
+                result.collisions.append(collision_msg)
+                return
+            # Stale link from a prior run; archive inode has been replaced.
+            dst.unlink()
+        hardlink(src, dst)
+        result.linked += 1
+        if staged_paths is not None:
+            staged_paths.add(dst)
+    except FilesystemError as e:
+        result.collisions.append(f"{dst}: {e}")
+
+
+def _ensure_archive_sidecar(item: Item) -> Path | None:
+    """Return the item's archive-side metadata.json, regenerating it from recorded state
+    when the on-disk copy is absent (§spec:metadata-preservation).
+
+    Keeps the archive self-describing and lets restage/reconcile reproduce the sidecar
+    without the network — the metadata dict is already in the state DB. Returns None when
+    the archive directory is gone (a pruned item has nothing to link).
+    """
+    if item.archive_path is None or not item.archive_path.is_dir():
+        return None
+    src = item.archive_path / METADATA_SIDECAR
+    if not src.is_file():
+        write_sidecar(src, item.source_metadata)
+    return src
 
 
 def unstage_item(
@@ -160,6 +210,10 @@ def unstage_item(
     )
     for mf in item.recorded_manifest.files:
         (staging_dir / mf.name).unlink(missing_ok=True)
+    # Drop the metadata.json sidecar link too, so the staging dir can go empty. Done
+    # unconditionally (missing_ok) — idempotent, and it clears a stale link even if the
+    # collection later opted out of preservation (§spec:metadata-preservation).
+    (staging_dir / METADATA_SIDECAR).unlink(missing_ok=True)
 
     # Prune now-empty directories from the item's staging dir up to the library
     # root; rmdir removes a directory only when empty, so siblings are safe.
