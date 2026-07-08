@@ -54,8 +54,6 @@ def _keep(name: str, fmt: str, formats: list[str], excludes: list[str]) -> bool:
 
 def _coerce_size(raw: Any) -> int | None:
     """archive.org reports file sizes as strings; coerce to int or None."""
-    if raw is None:
-        return None
     try:
         return int(raw)
     except (TypeError, ValueError):
@@ -87,7 +85,8 @@ def _is_restricted(meta: dict[str, Any]) -> tuple[bool, str | None]:
         return True, "access-restricted-item"
     if str(_first(meta, "access-restricted")).lower() == "true":
         return True, "access-restricted"
-    if _first(meta, "curation") and "dark" in str(_first(meta, "curation")).lower():
+    curation = _first(meta, "curation")
+    if curation and "dark" in str(curation).lower():
         return True, "dark"
     return False, None
 
