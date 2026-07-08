@@ -90,6 +90,16 @@ status output).
    `disappeared` in `shakedown status`; a per-collection
    `prune_disappeared: true` opt-in instead deletes the local copy for
    users who want strict mirroring.
+10. **Provable end-to-end against the real source.** A single
+    documented, opt-in check downloads one small public Internet
+    Archive item for real and drives the typical lifecycle against it:
+    sync into the archive, hardlink staging into the library tree,
+    re-sorting the library by changing the layout template and
+    restaging, and deletion via disappeared-item handling and
+    forgetting an item. It passes on a clean machine with one command
+    and is excluded from the default test run and CI, so day-to-day
+    development stays offline and deterministic while releases can be
+    gated on the real thing.
 
 ## User stories §req:user-stories
 
@@ -141,6 +151,13 @@ criterion and implies a testable path through the product's surface.
   I want a successful sync to poke my library tool — via a webhook, or
   by executing a command like `beet import` when I prefer — so that new
   shows flow into my library without me watching. *(→ criteria 1, 2)*
+- **Prove it works for real before I ship.** As a maintainer preparing
+  a release, I want to run one opt-in check that downloads a small real
+  IA item and exercises the typical lifecycle end-to-end — sync,
+  hardlink staging, re-sorting via a layout change and restage, and
+  deletion — so that I catch real-API drift and integration breakage
+  that offline fixtures cannot, without slowing or destabilizing the
+  everyday test run. *(→ criterion 10)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -214,6 +231,11 @@ Technical, operational, and scope bounds on the solution space.
   loosely coupled) or by executing a configured command (e.g.
   `beet import`) as a built-in fallback. Deciding the webhook payload
   contract is part of the design.
+- **Network-dependent verification is opt-in and bounded.** The default
+  test run and CI are fully offline and deterministic. The real-data
+  end-to-end check is invoked explicitly by a developer, downloads a
+  single small public item (a few megabytes) to stay polite to the
+  upstream archive, and its flakiness never blocks pull requests.
 - **Not a library manager, discovery tool, transcoder, or general
   downloader.** Shakedown does not tag, rename inside the library, serve
   audio, recommend/scrobble, transcode, or wrap arbitrary downloaders.
@@ -254,10 +276,13 @@ pulled in to prove the plugin seam.
    written against it to demonstrate the seam is real (→ criterion 8).
 10. Optional `serve` control plane (health, status, metrics, auth-
     protected trigger).
+11. Opt-in real-data end-to-end check: one small public IA item through
+    sync → staging → re-sort/restage → deletion, runnable with one
+    command, excluded from the default test run and CI (→ criterion 10).
 
 **Nice to have / out of scope for v1 (candidates for later):**
 
-11. Web UI for status and config; push notifications beyond webhooks
+12. Web UI for status and config; push notifications beyond webhooks
     (Pushover, Discord); direct library-tool integrations; multiple
     archive roots / tiered storage; BitTorrent as a source; cross-host
     sync. These are explicitly deferred.

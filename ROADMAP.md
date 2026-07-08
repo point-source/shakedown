@@ -20,3 +20,21 @@ Switch mutating-endpoint authentication from the custom
 without it is rejected. Unset the token and confirm mutating endpoints
 report disabled (not open) while `GET /healthz`, `/status`, and
 `/metrics` remain reachable.
+
+## Real-source end-to-end check §road:e2e-real-source
+
+### Opt-in network test §road:e2e-real-source-test
+
+Add the opt-in `network`-marked end-to-end test driving the `ia`
+plugin against one pinned small public IA item through the full
+lifecycle, deselected by the default test run
+(`tests/test_e2e_real_source.py`, `pyproject.toml`, README run
+instructions and item-replacement procedure). §spec:e2e-real-source
+
+**Verify:** On a clean machine with network access and no IA
+credentials, run `pytest -m network`: the test downloads the pinned
+item once and passes, exercising sync → hardlink staging → no-op
+re-sync → restage after a layout change → disappeared retention →
+prune → forget. Run plain `pytest` and confirm zero network tests are
+selected and the suite passes offline; confirm `.github/workflows/ci.yml`
+is unchanged.
