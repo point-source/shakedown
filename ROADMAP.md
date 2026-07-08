@@ -6,36 +6,6 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Layout collision safety §road:layout-collision-safety
-
-Closes §spec:layout-collision-safety: a lossy `library_layout` is caught
-at config time, and any runtime drops are surfaced loudly without
-aborting the run.
-
-### Layout uniqueness declaration and config-time guard §road:layout-uniqueness-guard
-
-Add a per-item-unique-fields declaration to the plugin capability
-(`src/shakedown/plugins/base.py`, `plugins/ia/plugin.py`,
-`plugins/etree/plugin.py`) and extend `_validate_layouts` in
-`src/shakedown/config.py` to warn when a non-passthrough `library_layout`
-references no per-item-unique field and hard-error when it references no
-plugin field at all. §spec:layout-collision-safety
-
-### Consolidated collision summary in run and status §road:collision-summary
-
-Aggregate same-run staging collisions into a single per-run count and
-colliding-path summary (`src/shakedown/sync.py` collision handling and
-`CollectionSyncStats`) and surface it in `shakedown status`
-(`src/shakedown/status.py`), distinct from ordinary fetch failures and
-without aborting the run. §spec:layout-collision-safety
-
-**Verify:** Load a config whose non-passthrough layout omits any unique
-field (e.g. `{year}/{venue}`) and confirm a named startup warning; load a
-constant template and confirm a hard config error. Sync a source with two
-items that render the same path with matching filenames: confirm the run
-completes, exits non-zero, and `status` plus the run summary report N
-recordings dropped to layout collisions with the colliding paths.
-
 ## Source metadata preservation §road:metadata-preservation
 
 Closes §spec:metadata-preservation: opt-in `metadata.json` sidecars that
