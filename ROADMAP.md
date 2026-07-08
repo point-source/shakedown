@@ -6,29 +6,6 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Prune safety on per-item metadata failure §road:prune-safety
-
-Closes §spec:prune-safety: a transient `describe_item` failure must
-never prune or disappear a still-enumerated item.
-
-### Key pruning on enumeration, not description §road:prune-on-enumeration
-
-Capture the identifiers enumeration returned but whose description
-failed (out of `_stream_descriptors` / `_stream_descriptors_incremental`
-and `_pipelined_discover_and_fetch`, plus the dry-run
-`_discover_descriptors`) and amend `_disappeared_plan` / `_build_plan`
-so such items are left exactly as recorded — never `disappeared`,
-`failed`, or pruned — on both the real and dry-run paths, in
-`src/shakedown/sync.py`, with a regression test that forces a describe
-failure on a `prune_disappeared` collection. §spec:prune-safety
-
-**Verify:** With `prune_disappeared: true`, sync a fake collection so an
-item is `complete`. Re-sync with the plugin's `describe_item` forced to
-fail for that item while enumeration still lists it: confirm the item's
-archive directory is retained, `shakedown status` does not report it as
-`disappeared` or `pruned`, and a later clean re-sync resolves it
-normally.
-
 ## Layout collision safety §road:layout-collision-safety
 
 Closes §spec:layout-collision-safety: a lossy `library_layout` is caught

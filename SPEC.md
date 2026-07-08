@@ -358,7 +358,7 @@ upstream response."
 
 ## Prune safety: enumeration versus description §spec:prune-safety
 
-*Status: not started*
+*Status: complete*
 
 On a `prune_disappeared` collection, a transient failure to fetch a
 *single item's* metadata during discovery must not cost the user that
