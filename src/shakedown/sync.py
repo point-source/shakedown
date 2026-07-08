@@ -13,7 +13,7 @@ import shutil
 import threading
 import time
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,7 +22,7 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
-from shakedown.models import Item, ItemStatus
+from shakedown.models import Item, ItemStatus, Run
 from shakedown.notify import (
     SyncCompletePayload,
     SyncFailedPayload,
@@ -73,42 +73,51 @@ def _describe_one(
         return plugin.describe_item(identifier, collection)
 
 
+def _stream_descriptors(
+    plugin: SourcePlugin,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+) -> Iterator[ItemDescriptor]:
+    """Yield item descriptors as they resolve, fanning per-item metadata resolution
+    across the shared per-source budget (SPEC §spec:discovery-pipeline).
+
+    Sources exposing `enumerate_items()` get concurrent `describe_item()` resolution
+    bounded by the source budget, yielded via `as_completed` so a consumer can act on
+    each item the moment it resolves (the overlap lever). Sources without the
+    enumerate/describe split fall back to the serial `discover()` stream. A transient
+    per-item fault yields None from `describe_item` and is dropped, exactly as the serial
+    path skipped a failed metadata fetch. Materializing the id list or a `describe_item`
+    call raising propagates to the consumer, which treats it as an enumeration failure.
+    """
+    identifiers = plugin.enumerate_items(collection)
+    if identifiers is None:
+        yield from plugin.discover(collection)
+        return
+    ids = list(identifiers)  # materialize the enumeration (may raise -> stale)
+    if not ids:
+        return
+    with ThreadPoolExecutor(max_workers=min(budget.size, len(ids))) as pool:
+        futures = [
+            pool.submit(_describe_one, plugin, identifier, collection, budget)
+            for identifier in ids
+        ]
+        for fut in as_completed(futures):
+            desc = fut.result()
+            if desc is not None:
+                yield desc
+
+
 def _discover_descriptors(
     plugin: SourcePlugin,
     collection: CollectionConfig,
     budget: SourceBudget,
 ) -> tuple[list[ItemDescriptor], set[str]]:
-    """Materialize the full enumeration, fanning per-item metadata resolution across
-    the shared per-source budget (SPEC §spec:discovery-pipeline).
-
-    Sources that expose `enumerate_items()` get concurrent `describe_item()` resolution
-    bounded by the source budget; the enumeration is fully materialized here (before
-    planning) so prune/`disappeared` semantics are unchanged. Sources without the
-    enumerate/describe split fall back to the serial `discover()` drain. A transient
-    per-item fault yields None and is dropped, exactly as the serial path skipped a
-    failed metadata fetch — so NEW/CHANGED/UNCHANGED/DISAPPEARED classification is
-    identical to the pre-change serial run.
+    """Materialize the full enumeration for the dry-run path (Discover + Plan, no fetch).
+    The real run streams the same descriptors (`_stream_descriptors`) into the fetch
+    pipeline instead of buffering them here.
     """
-    identifiers = plugin.enumerate_items(collection)
-    descriptors: list[ItemDescriptor] = []
-    if identifiers is None:
-        # Serial fallback: this source can't split enumerate/describe.
-        descriptors.extend(plugin.discover(collection))
-    else:
-        ids = list(identifiers)  # fully materialize the enumeration (may raise -> stale)
-        if ids:
-            workers = min(budget.size, len(ids))
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [
-                    pool.submit(_describe_one, plugin, identifier, collection, budget)
-                    for identifier in ids
-                ]
-                for fut in as_completed(futures):
-                    desc = fut.result()
-                    if desc is not None:
-                        descriptors.append(desc)
-    seen = {d.identifier for d in descriptors}
-    return descriptors, seen
+    descriptors = list(_stream_descriptors(plugin, collection, budget))
+    return descriptors, {d.identifier for d in descriptors}
 
 
 class PlanAction(StrEnum):
@@ -214,6 +223,19 @@ def run_sync(
     return 0 if overall_failed == 0 else 1
 
 
+def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: datetime) -> None:
+    """Persist the run record from the accumulated stats (SPEC §spec:sync-workflow, step 6)."""
+    run.items_discovered = stats.discovered
+    run.items_new = stats.new
+    run.items_updated = stats.updated
+    run.items_failed = stats.failed
+    run.bytes_downloaded = stats.bytes_downloaded
+    run.stale = stats.stale
+    run.errors = stats.errors
+    run.finished_at = finished
+    runs.finish(run)
+
+
 def _sync_collection(
     config: Config,
     source: SourceConfig,
@@ -223,7 +245,15 @@ def _sync_collection(
     dry_run: bool,
     budget: SourceBudget,
 ) -> CollectionSyncStats:
-    """Sync one (source, collection) end-to-end."""
+    """Sync one (source, collection) end-to-end.
+
+    Discover, classify, and fetch overlap: each discovered item is classified as it
+    resolves and, if `new`/`changed-upstream`, handed to the fetch stage immediately —
+    so downloads begin while discovery is still enumerating (SPEC §spec:discovery-pipeline).
+    The prune/`disappeared` decision needs the *complete* enumeration, so it is held
+    back as a post-enumeration barrier that runs only after discovery finishes
+    successfully; a failed enumeration marks the collection stale and prunes nothing.
+    """
     started = datetime.now()
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
@@ -234,51 +264,69 @@ def _sync_collection(
     stats = CollectionSyncStats()
     staged_paths: set[Path] = set()
 
-    # Phase 1: discover. Fan per-item metadata resolution across the shared source
-    # budget, but fully materialize the enumeration before planning so prune/
-    # `disappeared` semantics are unchanged (SPEC §spec:discovery-pipeline).
     log.info("[%s/%s] discovering...", source.name, collection.name)
-    try:
-        descriptors, seen_identifiers = _discover_descriptors(plugin, collection, budget)
-    except Exception as e:
-        # Source enumeration failed (unreachable or permanently-gone source). Flag
-        # the collection stale so `status` reports it, and leave every existing item
-        # untouched — a failed enumeration is not evidence any item disappeared
-        # (§spec:failure-behavior). We do not run plan/fetch/stage this run.
-        log.warning("[%s/%s] source enumeration failed: %s", source.name, collection.name, e)
-        stats.stale = True
-        stats.errors.append(f"source enumeration failed: {e}")
-        finished = datetime.now()
-        if not dry_run:
-            _fire_notifications(config, source, collection, stats, started, finished)
-        if run is not None:
-            run.stale = True
-            run.errors = stats.errors
-            run.finished_at = finished
-            runs.finish(run)
-        return stats
-    stats.discovered = len(descriptors)
-
-    # Phase 2: plan
-    plan = _build_plan(
-        items, source.name, collection.name, descriptors, seen_identifiers,
-        prune_disappeared=collection.prune_disappeared,
-    )
-    _log_plan(source.name, collection.name, plan)
 
     if dry_run:
+        # Dry-run performs Discover and Plan only (SPEC §spec:sync-workflow): no fetch,
+        # no overlap to exploit, no writes. Materialize the enumeration and report the
+        # plan without touching disk or DB.
+        try:
+            descriptors, seen_identifiers = _discover_descriptors(plugin, collection, budget)
+        except Exception as e:
+            log.warning("[%s/%s] source enumeration failed: %s", source.name, collection.name, e)
+            stats.stale = True
+            stats.errors.append(f"source enumeration failed: {e}")
+            return stats
+        stats.discovered = len(descriptors)
+        plan = _build_plan(
+            items, source.name, collection.name, descriptors, seen_identifiers,
+            prune_disappeared=collection.prune_disappeared,
+        )
+        _log_plan(source.name, collection.name, plan)
         return stats
 
-    # Phase 3 + 4: fetch + stage
-    fetch_targets = [p for p in plan if p.action in (PlanAction.NEW, PlanAction.CHANGED_UPSTREAM)]
-    _execute_fetch_and_stage(
-        config, source, collection, plugin, items, fetch_targets, stats, staged_paths,
-        budget=budget,
-    )
+    # Snapshot the pre-run DB state once. It drives per-item classification (is this
+    # `new`/`changed-upstream`/`unchanged`?) and, after enumeration, the prune barrier
+    # (which recorded items were not seen this run?). A fetch upserts rows during the
+    # run, but the disappeared decision is computed against this pre-run snapshot, so a
+    # freshly fetched item is never mistaken for a vanished one.
+    by_identifier = {
+        item.identifier: item
+        for item in items.list_for_collection(source.name, collection.name)
+    }
 
-    # Phase 4b: re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
+    # Phases 1-4, pipelined: discover -> classify -> fetch + stage, overlapping downloads
+    # with the remaining enumeration (SPEC §spec:discovery-pipeline, overlap lever).
+    seen_identifiers, deferred, enum_error = _pipelined_discover_and_fetch(
+        config, source, collection, plugin, items, stats, staged_paths, budget, by_identifier,
+    )
+    stats.discovered = len(seen_identifiers)
+
+    if enum_error is not None:
+        # Enumeration failed (source unreachable or faulted partway). Flag the collection
+        # stale so `status` reports it, and DO NOT run the prune barrier — a partial or
+        # failed enumeration is never read as items having disappeared
+        # (§spec:failure-behavior, §spec:discovery-pipeline). Any items already fetched
+        # before the failure are valid and were recorded as they completed.
+        log.warning(
+            "[%s/%s] source enumeration failed: %s", source.name, collection.name, enum_error
+        )
+        stats.stale = True
+        stats.errors.append(f"source enumeration failed: {enum_error}")
+        finished = datetime.now()
+        _fire_notifications(config, source, collection, stats, started, finished)
+        if run is not None:
+            _finish_run(runs, run, stats, finished)
+        return stats
+
+    # Post-enumeration barrier: the enumeration is complete and successful, so the
+    # prune/`disappeared` set (in the DB but not seen this run) is now safe to compute.
+    disappeared = _disappeared_plan(by_identifier, seen_identifiers, collection.prune_disappeared)
+    _log_pipeline_plan(source.name, collection.name, stats, deferred, disappeared)
+
+    # Re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
     # stage_item is idempotent — already-linked files share an inode and are skipped.
-    for p in plan:
+    for p in deferred:
         if (
             p.action == PlanAction.UNCHANGED
             and p.existing is not None
@@ -293,13 +341,14 @@ def _sync_collection(
                 stats.errors.append(f"staging collision: {c}")
                 stats.failed += 1
 
-    # Persist new state for unavailable / disappeared / unchanged in one shot
+    # Persist new state for unavailable / disappeared in one shot.
     with transaction(conn):
-        for p in plan:
+        for p in deferred:
             if p.action == PlanAction.UNAVAILABLE and p.descriptor is not None:
                 _record_unavailable(items, source.name, collection.name, p.descriptor)
-            elif p.action == PlanAction.DISAPPEARED and p.existing is not None:
-                _record_disappeared(items, config, source.name, collection, p.existing)
+        for p in disappeared:
+            assert p.existing is not None
+            _record_disappeared(items, config, source.name, collection, p.existing)
 
     # Phase 5: notify. Fire before recording so any delivery failure is captured
     # in the run's errors (visible in `status`) but never aborts the sync.
@@ -308,16 +357,81 @@ def _sync_collection(
 
     # Phase 6: record run
     if run is not None:
-        run.items_discovered = stats.discovered
-        run.items_new = stats.new
-        run.items_updated = stats.updated
-        run.items_failed = stats.failed
-        run.bytes_downloaded = stats.bytes_downloaded
-        run.errors = stats.errors
-        run.finished_at = finished
-        runs.finish(run)
+        _finish_run(runs, run, stats, finished)
 
     return stats
+
+
+def _pipelined_discover_and_fetch(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    plugin: SourcePlugin,
+    items: ItemRepo,
+    stats: CollectionSyncStats,
+    staged_paths: set[Path],
+    budget: SourceBudget,
+    by_identifier: dict[str, Item],
+) -> tuple[set[str], list[PlannedItem], Exception | None]:
+    """Overlap discover → classify → fetch (SPEC §spec:discovery-pipeline, overlap lever).
+
+    Each descriptor is classified the moment it resolves; a `new`/`changed-upstream`
+    item is submitted to the fetch pool immediately, so its download begins while the
+    rest of the collection is still being enumerated — both stages drawing from the
+    shared per-source ``budget`` (SPEC §spec:source-budget). `unchanged`/`unavailable`
+    items need no fetch and are deferred to the caller's post-enumeration barrier.
+
+    Returns ``(seen, deferred, enum_error)``:
+
+    - ``seen`` — every identifier that resolved to a descriptor; the input to the
+      prune/`disappeared` barrier, which the caller runs only when ``enum_error`` is None.
+    - ``deferred`` — the UNCHANGED / UNAVAILABLE planned items.
+    - ``enum_error`` — the exception if enumeration faulted partway (the collection goes
+      stale and nothing is pruned), else None for a complete, successful enumeration.
+
+    Downloads run concurrently, but their results (DB writes, staging, stats) are
+    applied on this orchestrating thread only, so per-run counters stay exact without
+    locking (SPEC §spec:discovery-pipeline: counts exact under concurrent producers and
+    consumers).
+    """
+    archive_root = config.archive_root / source.name / collection.name
+    seen: set[str] = set()
+    deferred: list[PlannedItem] = []
+    enum_error: Exception | None = None
+
+    with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
+        fetch_futures: dict[Future[_FetchOutcome], PlannedItem] = {}
+
+        def dispatch(desc: ItemDescriptor) -> None:
+            seen.add(desc.identifier)
+            planned = _classify_one(desc, by_identifier)
+            if planned.action in (PlanAction.NEW, PlanAction.CHANGED_UPSTREAM):
+                archive_root.mkdir(parents=True, exist_ok=True)
+                fut = fetch_pool.submit(
+                    _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
+                )
+                fetch_futures[fut] = planned
+            else:
+                deferred.append(planned)
+
+        try:
+            # Descriptors stream in as each resolves; dispatch classifies and fetches
+            # each immediately, so downloads overlap the remaining enumeration.
+            for desc in _stream_descriptors(plugin, collection, budget):
+                dispatch(desc)
+        except Exception as e:  # any enumeration fault marks the collection stale
+            enum_error = e
+
+        # Drain every fetch already in flight. Those downloads are valid whether or not
+        # the enumeration completed, and recording them keeps the archive and DB
+        # consistent (SPEC §spec:discovery-pipeline: an item may be fetched and staged
+        # before discovery completes).
+        for fut in as_completed(fetch_futures):
+            _process_fetch_result(
+                fut, fetch_futures[fut], config, source, collection, items, stats, staged_paths
+            )
+
+    return seen, deferred, enum_error
 
 
 def _fire_notifications(
@@ -386,6 +500,53 @@ def _files_missing(item: Item) -> bool:
     )
 
 
+def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> PlannedItem:
+    """Classify a single descriptor by manifest-vs-manifest comparison (PRD §9 step 2).
+
+    Never hashes bytes: the comparison is between the source's *current* manifest and
+    the manifest recorded at fetch time. PRD §5 also requires the expected file paths
+    still exist on disk — manifest-equality alone isn't enough; vanished files trigger
+    a re-fetch. This decision needs only *this* item's state, so it is safe to make the
+    moment the item is discovered, before the rest of the enumeration
+    (SPEC §spec:discovery-pipeline).
+    """
+    existing = by_identifier.get(desc.identifier)
+    if desc.is_restricted:
+        return PlannedItem(desc, existing, PlanAction.UNAVAILABLE)
+    if existing is None or existing.recorded_manifest is None:
+        return PlannedItem(desc, existing, PlanAction.NEW)
+    if existing.recorded_manifest == desc.manifest:
+        if _files_missing(existing):
+            return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
+        return PlannedItem(desc, existing, PlanAction.UNCHANGED)
+    return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
+
+
+def _disappeared_plan(
+    by_identifier: dict[str, Item],
+    seen_identifiers: set[str],
+    prune_disappeared: bool,
+) -> list[PlannedItem]:
+    """Items in the DB but not in this (complete) enumeration — the prune/`disappeared`
+    barrier. Callers MUST run this only after a complete, successful enumeration; a
+    partial discovery is never read as items having disappeared
+    (SPEC §spec:discovery-pipeline, §spec:failure-behavior).
+
+    Already-terminal states are skipped so a still-absent item isn't reprocessed every
+    run — except that an item already flagged `disappeared` stays reachable for pruning
+    once a collection opts into `prune_disappeared`, so the retain→prune transition takes
+    effect on the next sync (§spec:item-lifecycle).
+    """
+    terminal = {ItemStatus.UNAVAILABLE, ItemStatus.PRUNED}
+    if not prune_disappeared:
+        terminal.add(ItemStatus.DISAPPEARED)
+    return [
+        PlannedItem(None, existing, PlanAction.DISAPPEARED)
+        for identifier, existing in by_identifier.items()
+        if identifier not in seen_identifiers and existing.status not in terminal
+    ]
+
+
 def _build_plan(
     items: ItemRepo,
     source_name: str,
@@ -395,47 +556,16 @@ def _build_plan(
     *,
     prune_disappeared: bool = False,
 ) -> list[PlannedItem]:
-    """Manifest-vs-manifest classification for every item.
-
-    PRD §9 step 2: never hash bytes. Comparison is between the source's *current*
-    manifest and the manifest we recorded at fetch time. PRD §5 also requires that
-    the expected file paths still exist on disk — manifest-equality alone isn't
-    enough; vanished files must trigger a re-fetch.
+    """Full plan (per-item classification + prune barrier) over a materialized
+    enumeration. Used by the dry-run path, which reports what would happen without
+    fetching; the real run pipelines the same classification (`_classify_one`) and
+    prune barrier (`_disappeared_plan`) with the fetch stage.
     """
-    plan: list[PlannedItem] = []
     by_identifier: dict[str, Item] = {
         item.identifier: item for item in items.list_for_collection(source_name, collection_name)
     }
-    for desc in descriptors:
-        existing = by_identifier.get(desc.identifier)
-        if desc.is_restricted:
-            plan.append(PlannedItem(desc, existing, PlanAction.UNAVAILABLE))
-            continue
-        if existing is None:
-            plan.append(PlannedItem(desc, None, PlanAction.NEW))
-            continue
-        if existing.recorded_manifest is None:
-            plan.append(PlannedItem(desc, existing, PlanAction.NEW))
-            continue
-        if existing.recorded_manifest == desc.manifest:
-            if _files_missing(existing):
-                plan.append(PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM))
-            else:
-                plan.append(PlannedItem(desc, existing, PlanAction.UNCHANGED))
-        else:
-            plan.append(PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM))
-
-    # Disappeared: in DB but not in this discover. Already-terminal states are
-    # skipped so a still-absent item isn't reprocessed every run — except that an
-    # item already flagged `disappeared` must still be reachable for pruning once a
-    # collection opts into `prune_disappeared`, so the retain→prune transition takes
-    # effect on the next sync (§spec:item-lifecycle).
-    terminal = {ItemStatus.UNAVAILABLE, ItemStatus.PRUNED}
-    if not prune_disappeared:
-        terminal.add(ItemStatus.DISAPPEARED)
-    for identifier, existing in by_identifier.items():
-        if identifier not in seen_identifiers and existing.status not in terminal:
-            plan.append(PlannedItem(None, existing, PlanAction.DISAPPEARED))
+    plan = [_classify_one(desc, by_identifier) for desc in descriptors]
+    plan.extend(_disappeared_plan(by_identifier, seen_identifiers, prune_disappeared))
     return plan
 
 
@@ -444,6 +574,28 @@ def _log_plan(source_name: str, collection_name: str, plan: list[PlannedItem]) -
     for p in plan:
         counts[p.action.value] = counts.get(p.action.value, 0) + 1
     log.info("[%s/%s] plan: %s", source_name, collection_name, counts or "(empty)")
+
+
+def _log_pipeline_plan(
+    source_name: str,
+    collection_name: str,
+    stats: CollectionSyncStats,
+    deferred: list[PlannedItem],
+    disappeared: list[PlannedItem],
+) -> None:
+    """Post-run plan summary for the pipelined path, from the accumulated stats plus the
+    deferred (unchanged/unavailable) and disappeared sets."""
+    counts = {
+        PlanAction.NEW.value: stats.new,
+        PlanAction.CHANGED_UPSTREAM.value: stats.updated,
+        PlanAction.UNCHANGED.value: sum(1 for p in deferred if p.action == PlanAction.UNCHANGED),
+        PlanAction.UNAVAILABLE.value: sum(
+            1 for p in deferred if p.action == PlanAction.UNAVAILABLE
+        ),
+        PlanAction.DISAPPEARED.value: len(disappeared),
+        "failed": stats.failed,
+    }
+    log.info("[%s/%s] plan: %s", source_name, collection_name, counts)
 
 
 def _execute_fetch_and_stage(
@@ -481,55 +633,72 @@ def _execute_fetch_and_stage(
             for target in targets
         }
         for fut in as_completed(futures):
-            target = futures[fut]
-            try:
-                outcome = fut.result()
-            except Exception as e:
-                log.exception("fetch crash for %s", target.descriptor and target.descriptor.identifier)
-                stats.failed += 1
-                stats.errors.append(f"{target.descriptor.identifier if target.descriptor else '?'}: {e}")
-                continue
-
-            assert target.descriptor is not None  # NEW/CHANGED_UPSTREAM always have a descriptor
-            desc = target.descriptor
-
-            if not outcome.success:
-                stats.failed += 1
-                stats.errors.append(f"{desc.identifier}: {outcome.error}")
-                _record_failed(items, source.name, collection, desc, outcome.error)
-                continue
-
-            stats.bytes_downloaded += outcome.bytes_downloaded
-            if target.action == PlanAction.NEW:
-                stats.new += 1
-            else:
-                stats.updated += 1
-
-            new_item = _record_complete(
-                items, source.name, collection, desc, outcome.archive_path
+            _process_fetch_result(
+                fut, futures[fut], config, source, collection, items, stats, staged_paths
             )
-            stage_result = stage_item(
-                config, collection, source.name, new_item, desc.manifest,
-                staged_paths=staged_paths,
-            )
-            if stage_result.collisions:
-                for c in stage_result.collisions:
-                    log.warning("[%s/%s] staging collision: %s", source.name, collection.name, c)
-                    stats.errors.append(f"staging collision: {c}")
-                    stats.failed += 1
 
-            # Collect for the once-per-run sync.complete batch payload; the handoff
-            # fires once after the run, not per item (SPEC §spec:handoff).
-            staging_dir = staging_dir_for(
-                config, collection, source.name, new_item.source_metadata, new_item.archive_path  # type: ignore[arg-type]
-            )
-            stats.staged.append(
-                {
-                    "identifier": desc.identifier,
-                    "archive_path": str(new_item.archive_path),
-                    "staging_path": str(staging_dir),
-                }
-            )
+
+def _process_fetch_result(
+    fut: Future[_FetchOutcome],
+    target: PlannedItem,
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    items: ItemRepo,
+    stats: CollectionSyncStats,
+    staged_paths: set[Path] | None,
+) -> None:
+    """Apply one completed fetch: record the row, stage hardlinks, accumulate stats.
+
+    Called only on the orchestrating thread (never a fetch worker), so the DB writes
+    and the per-run counters it mutates are serialized and exact even though the
+    downloads themselves ran concurrently (SPEC §spec:discovery-pipeline).
+    """
+    try:
+        outcome = fut.result()
+    except Exception as e:
+        log.exception("fetch crash for %s", target.descriptor and target.descriptor.identifier)
+        stats.failed += 1
+        stats.errors.append(f"{target.descriptor.identifier if target.descriptor else '?'}: {e}")
+        return
+
+    assert target.descriptor is not None  # NEW/CHANGED_UPSTREAM always have a descriptor
+    desc = target.descriptor
+
+    if not outcome.success:
+        stats.failed += 1
+        stats.errors.append(f"{desc.identifier}: {outcome.error}")
+        _record_failed(items, source.name, collection, desc, outcome.error)
+        return
+
+    stats.bytes_downloaded += outcome.bytes_downloaded
+    if target.action == PlanAction.NEW:
+        stats.new += 1
+    else:
+        stats.updated += 1
+
+    new_item = _record_complete(items, source.name, collection, desc, outcome.archive_path)
+    stage_result = stage_item(
+        config, collection, source.name, new_item, desc.manifest, staged_paths=staged_paths,
+    )
+    if stage_result.collisions:
+        for c in stage_result.collisions:
+            log.warning("[%s/%s] staging collision: %s", source.name, collection.name, c)
+            stats.errors.append(f"staging collision: {c}")
+            stats.failed += 1
+
+    # Collect for the once-per-run sync.complete batch payload; the handoff
+    # fires once after the run, not per item (SPEC §spec:handoff).
+    staging_dir = staging_dir_for(
+        config, collection, source.name, new_item.source_metadata, new_item.archive_path  # type: ignore[arg-type]
+    )
+    stats.staged.append(
+        {
+            "identifier": desc.identifier,
+            "archive_path": str(new_item.archive_path),
+            "staging_path": str(staging_dir),
+        }
+    )
 
 
 @dataclass

@@ -6,30 +6,6 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Pipelined discover to download §road:pipelined-sync
-
-Closes the first-full-sync overlap gap: downloads for `new`/
-`changed-upstream` items begin while discovery is still enumerating,
-under the shared budget, with pruning held back as a post-enumeration
-barrier. (§spec:discovery-performance)
-
-### Stream classification and fetch pipeline §road:stream-fetch
-
-Restructure `sync.py` so each discovered item is classified and (if
-`new`/`changed-upstream`) fetched as it arrives rather than after the
-full drain, with the prune/`disappeared` step gated on complete
-successful enumeration and per-run stats accumulated thread-safely.
-§spec:discovery-pipeline
-
-**Verify:** Run `shakedown sync --collection <c>` on a first sync of a
-multi-item collection (offline doubles). Confirm the first download
-starts before discovery has enumerated the last item (overlap observable
-in logs/timing); that a discovery failure partway through leaves the
-collection marked stale with zero items pruned; that a complete
-enumeration prunes disappeared items exactly as before; and that run
-counts (new/updated/unchanged/failed/bytes) are correct under
-concurrency.
-
 ## Incremental discovery §road:incremental-discovery
 
 Closes the recurring-no-op-sync gap: an opt-in per-collection fast-path
