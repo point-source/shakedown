@@ -55,4 +55,9 @@ reportFunctionMemberAccess = false  # click decorators add .command/.group dynam
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# Network tests are opt-in: deselected by default (and in CI), so the suite runs
+# fully offline. Reach them explicitly with `pytest -m network`.
+addopts = "-ra -m 'not network'"
+markers = [
+    "network: opt-in end-to-end test that downloads a real Internet Archive item; deselected by default, run with `pytest -m network`",
+]

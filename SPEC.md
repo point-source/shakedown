@@ -519,7 +519,8 @@ degrade a single item or a single run, never the archive.
 
 ## Real-source end-to-end check §spec:e2e-real-source
 
-*Status: not started*
+*Status: implemented — `tests/test_e2e_real_source.py` (opt-in `network`
+marker), run instructions and pinned-item replacement procedure in README.*
 
 The entire test suite runs offline against fakes and mocked HTTP.
 That leaves two failure classes invisible: archive.org's real API
@@ -530,26 +531,21 @@ pre-release gate (§req:success-criteria #10).
 
 Observable behavior:
 
-- One documented command runs the check on a clean machine; the
-  default test invocation and CI select zero network-dependent tests
-  (§req:constraints). Opting in is the only way to reach the network.
-- The check drives the `ia` plugin against exactly one pinned, small
-  (a few megabytes), public, unrestricted Internet Archive item — no
-  credentials required — through the typical lifecycle in order:
-  1. `sync` downloads the item for real, with the core verifying
-     source checksums as bytes arrive (§spec:sync-workflow).
-  2. The staged library entry shares inodes with its archive
-     counterpart (§spec:library-staging).
-  3. A second `sync` is a no-op: zero downloads, zero changes
-     (§spec:sync-identity).
-  4. Changing the collection's `library_layout` and running `restage`
-     re-sorts the library tree without network traffic.
-  5. Narrowing the collection query so the item leaves enumeration
-     flags it `disappeared` with local files retained — the retention
-     default is asserted, not assumed (§spec:item-lifecycle).
-  6. With `prune_disappeared: true`, the next `sync` removes the
-     archive files and staging links and marks the record pruned.
-  7. `item forget` drops the database record.
+- One documented command (`pytest -m network`) runs the check on a
+  clean machine; the default test invocation and CI select zero
+  network-dependent tests (§req:constraints). Opting in is the only way
+  to reach the network.
+- The check drives the `ia` plugin against exactly one pinned, small (a
+  few megabytes), public, unrestricted Internet Archive item — no
+  credentials required — through the typical lifecycle in order: real
+  `sync` (core verifying source checksums as bytes arrive,
+  §spec:sync-workflow); inode-sharing library staging
+  (§spec:library-staging); a no-op re-`sync` (§spec:sync-identity);
+  `restage` after a `library_layout` change (no network); the item
+  leaving enumeration → `disappeared` with files retained by default,
+  then pruned once `prune_disappeared` is set, so the retain→prune
+  transition is exercised, not just retain (§spec:item-lifecycle); and
+  finally `item forget` dropping the record.
 - The check runs entirely in throwaway temporary trees (archive,
   library, state DB) on one filesystem; it can never touch a real
   deployment's data.
