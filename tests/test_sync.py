@@ -7,9 +7,9 @@ from pathlib import Path
 import shakedown.sync as sync_module
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect
-from shakedown.models import ItemStatus
+from shakedown.models import ItemStatus, OperationStatus, OperationType
 from shakedown.plugins.base import FetchResult
-from shakedown.state import ItemRepo, RunRepo
+from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -105,6 +105,15 @@ def test_core_rejects_manifest_file_name_escaping_item_dir(tmp_roots: tuple[Path
     item = ItemRepo(conn).get("fake-src", "coll1", "evil")
     assert item is not None
     assert item.status == ItemStatus.FAILED
+
+    recovery = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
+    assert recovery is not None
+    assert recovery.operation == OperationType.SYNC
+    assert recovery.status == OperationStatus.COMPLETED_WITH_ITEM_ISSUES
+    assert recovery.phase == "fetch"
+    assert recovery.completed_work["items_failed"] == 1
+    assert recovery.preservation_context == "completed archive work retained"
+    assert recovery.safe_next_action == "fix failed item issues and rerun sync"
 
 
 def test_changed_upstream_triggers_refetch(tmp_roots: tuple[Path, Path]) -> None:
@@ -310,6 +319,22 @@ def test_stale_source_retains_items_and_flags_run(
     latest = RunRepo(conn).latest("fake-src", "coll1")
     assert latest is not None and latest.stale is True
     assert any("enumeration failed" in e for e in latest.errors)
+
+    recovery = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
+    assert recovery is not None
+    assert recovery.operation == OperationType.SYNC
+    assert recovery.status == OperationStatus.STALE_ENUMERATION
+    assert recovery.phase == "discover"
+    assert recovery.completed_work["items_discovered"] == 0
+    assert recovery.completed_work["items_new"] == 0
+    assert recovery.completed_work["items_updated"] == 0
+    assert recovery.preservation_context == "local recordings retained; no pruning performed"
+    assert recovery.deletion_context == "no deletion requested"
+    assert recovery.safe_next_action == "restore source access and rerun sync"
+
+    monkeypatch.undo()
+    assert run_sync(config) == 0
+    assert OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1") is None
 
 
 def test_sync_never_hashes_disk_bytes(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
