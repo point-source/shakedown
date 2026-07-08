@@ -44,6 +44,11 @@ class CollectionConfig(BaseModel):
     # the correct-by-construction full manifest comparison is what every collection gets
     # unless opted in.
     incremental_discovery: bool = False
+    # Opt-in per-collection metadata preservation (§spec:metadata-preservation): when set,
+    # the core writes the item's raw source metadata as a `metadata.json` sidecar into the
+    # archive item directory and hardlinks it into the library beside the media. Off by
+    # default — preservation is context, never coupled to media change detection.
+    preserve_source_metadata: bool = False
     on_complete: Handoff | None = None
 
 

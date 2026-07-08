@@ -33,6 +33,7 @@ def make_config(
     on_complete=None,
     prune_disappeared: bool = False,
     incremental_discovery: bool = False,
+    preserve_source_metadata: bool = False,
     format_filters=None,
 ) -> Config:
     return Config(
@@ -51,6 +52,7 @@ def make_config(
                         on_complete=on_complete,
                         prune_disappeared=prune_disappeared,
                         incremental_discovery=incremental_discovery,
+                        preserve_source_metadata=preserve_source_metadata,
                     )
                 ],
             )

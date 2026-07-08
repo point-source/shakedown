@@ -31,7 +31,13 @@ from shakedown.notify import (
 )
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
-from shakedown.staging import StageResult, stage_item, unstage_item
+from shakedown.staging import (
+    METADATA_SIDECAR,
+    StageResult,
+    stage_item,
+    unstage_item,
+    write_sidecar,
+)
 from shakedown.state import ItemRepo, RunRepo
 
 log = logging.getLogger(__name__)
@@ -1043,6 +1049,14 @@ def _fetch_one(
             bytes_downloaded=fetch_result.bytes_downloaded,
             error=f"missing after fetch: {verified.missing_files[:5]}",
         )
+
+    # Preserve the raw source metadata as a sidecar inside the temp dir *before* the
+    # atomic promotion, so it lands in the archive atomically with the media or not at
+    # all (§spec:metadata-preservation). It is written by the core, not the plugin, and
+    # is deliberately absent from the recorded manifest — change detection stays over
+    # media only (§spec:sync-identity).
+    if collection.preserve_source_metadata:
+        write_sidecar(tmp_dir / METADATA_SIDECAR, desc.metadata)
 
     _promote_atomically(tmp_dir, dest, stale_dir)
     return _FetchOutcome(

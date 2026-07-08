@@ -1,6 +1,7 @@
 """Materialize the library staging tree as hardlinks. PRD §8."""
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,23 @@ from shakedown.utils.templates import render
 log = logging.getLogger(__name__)
 
 PASSTHROUGH = "passthrough"
+
+# Name of the per-item source-metadata sidecar (§spec:metadata-preservation). Written by
+# the core into the archive item directory at fetch time and hardlinked into the library
+# staging directory beside the media. Deliberately excluded from the recorded manifest, so
+# an upstream metadata edit never flips an item to `changed-upstream` (§spec:sync-identity).
+METADATA_SIDECAR = "metadata.json"
+
+
+def write_sidecar(path: Path, metadata: dict[str, Any]) -> None:
+    """Serialize an item's raw source metadata to a `metadata.json` sidecar at `path`.
+
+    Written in place (same inode across rewrites) so a hardlinked library copy tracks the
+    archive copy without a relink. `ensure_ascii=False` preserves multilingual archival
+    metadata verbatim, matching the conservative-sanitization stance of §spec:library-staging.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False, sort_keys=True))
 
 
 @dataclass
