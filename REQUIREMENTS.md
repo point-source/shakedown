@@ -57,9 +57,14 @@ Observable outcomes that define v1 as done. Each is demonstrable
 end-to-end from the product's surface (CLI, config, on-disk trees,
 status output).
 
-1. **Unattended weekly mirror.** A weekly sync of the IA Grateful Dead
-   collection runs unattended for a month with no manual intervention
-   and no duplicate downloads.
+1. **Unattended weekly mirror that actually fires.** A weekly sync of
+   the IA Grateful Dead collection runs unattended for a month with no
+   manual intervention and no duplicate downloads. Every scheduled tick
+   actually executes its sync: the schedule does not depend on a
+   long-lived container being up, and a prior run having completed and
+   exited never causes a tick to be silently skipped. "The schedule is
+   configured" and "the sync ran on schedule" are the same thing,
+   verifiable from run logs / `status`.
 2. **New collections need no code.** Adding a second collection requires
    only YAML edits — no code changes.
 3. **Fast restage.** Wiping `/data/library/` and running
@@ -188,6 +193,14 @@ constraints that drive architecture.
   (retry, back off, or mark the single item failed) without corrupting
   the archive or aborting the whole run. No partial commits reach the
   archive tree.
+- **Scheduled runs are observable and self-contained.** Every scheduled
+  tick launches a fresh, self-contained run; it never relies on
+  attaching to a container that is already running. A tick that fails to
+  start at all — image missing, config missing, unknown collection —
+  surfaces as a visible error at the scheduler layer, never as a silent
+  no-op. A newly deployed stack does no surprising, unscoped work on
+  first bring-up: each configured collection syncs on its own schedule,
+  never as an implicit "sync everything" at startup.
 - **Operability without SSH.** All day-to-day operation and
   configuration on QNAP is achievable through Container Station and File
   Station. Failures are visible at the scheduler / container-exit layer,
@@ -216,9 +229,13 @@ Technical, operational, and scope bounds on the solution space.
 - **One-shot CLI, external scheduler.** Shakedown is a one-shot command,
   stateless between runs; scheduling is the deployment's job (ofelia in
   the compose stack), so all timing lives in one place (the compose
-  YAML) and Shakedown stays out of the scheduler business. An optional
-  `serve` command may expose a small auth-protected control plane
-  (health, status, metrics, trigger), but never schedules.
+  YAML) and Shakedown stays out of the scheduler business. Because runs
+  are one-shot and stateless, the scheduler must launch a fresh
+  container per tick rather than exec into a persistent one; the
+  deployment need not — and should not be required to — keep an idle
+  Shakedown container running between ticks. An optional `serve` command
+  may expose a small auth-protected control plane (health, status,
+  metrics, trigger), but never schedules.
 - **Deploys as one Docker Compose stack.** The whole deployment —
   including scheduling — is one compose file paste-able into Container
   Station.

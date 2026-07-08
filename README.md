@@ -68,8 +68,10 @@ Tag-driven releases (e.g. `git tag v0.2.0 && git push --tags` → `ghcr.io/.../s
 
 1. **File Station:** create `/share/data/{archive,library,music,shakedown-config}` — all under one share so they share a filesystem (hardlinks require this; SPEC.md §spec:system-shape).
 2. **File Station:** upload an initial `shakedown.yaml` (start from [`shakedown.example.yaml`](shakedown.example.yaml)) to `/share/data/shakedown-config/`.
-3. **Container Station → Applications → Create:** paste [`docker-compose.example.yaml`](docker-compose.example.yaml). Set `IA_EMAIL` / `IA_PASSWORD` env vars if you have a download-restricted collection. Click Create.
-4. **Day-to-day operation:** edit `shakedown.yaml` via File Station for source/collection changes; edit the compose YAML in Container Station for schedule changes; check Container Station for logs.
+3. **Container Station → Applications → Create:** paste [`docker-compose.example.yaml`](docker-compose.example.yaml). For a download-restricted collection, uncomment that job's `environment` label and set `IA_EMAIL` / `IA_PASSWORD`. Click Create.
+4. **How syncs run:** ofelia is the only long-running service. On each scheduled tick it launches a *fresh* shakedown container that runs one `sync` and exits — matching shakedown's one-shot design, so there is no idle service to attach to. Nothing syncs on first `up`; each collection syncs only on its own schedule.
+5. **Sync now (without waiting for a tick):** either uncomment the `shakedown-serve` control plane and `POST /sync` — `curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" "http://host:8080/sync?collection=grateful-dead"` (no SSH) — or start a one-off container from Container Station → Create with command `sync --collection <name>`. Over SSH the equivalent is `docker run --rm` with the same mounts/env; SSH stays supported, it's just never required.
+6. **Day-to-day operation:** edit `shakedown.yaml` via File Station for source/collection changes; edit the ofelia labels in the compose YAML (Container Station) for schedule changes; check Container Station for logs — each tick's container logs show that run.
 
 ## CLI
 

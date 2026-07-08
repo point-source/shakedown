@@ -9,46 +9,60 @@
 #   2. File Station: upload an initial shakedown.yaml to /share/data/shakedown-config/
 #   3. Container Station → Applications → Create: paste this YAML and your env vars
 #
-# Schedules live as ofelia labels below — not in shakedown.yaml. Edit the
-# schedule by editing this compose file in Container Station.
+# How scheduling works (SPEC.md §spec:deployment): ofelia is the only
+# long-running service. On each cron tick it launches a FRESH shakedown
+# container (ofelia job-run), which runs one `sync` and exits — matching
+# shakedown's one-shot, stateless-between-runs design. There is no idle
+# shakedown service to attach to. Change a schedule by editing the ofelia
+# labels in this file (Container Station → edit compose).
+#
+# Nothing syncs on `up`: each collection syncs only on its own schedule. To
+# sync immediately without waiting for the next tick, either (a) uncomment the
+# serve control plane below and POST /sync (no SSH), or (b) start a one-off
+# container from Container Station → Create with command
+# `sync --collection <name>` — the manual equivalent of a tick.
 
 services:
-  shakedown:
-    image: ghcr.io/OWNER/shakedown:latest   # replace OWNER with your fork's GitHub user/org
-    container_name: shakedown
-    volumes:
-      - /share/data/archive:/data/archive
-      - /share/data/library:/data/library
-      - /share/data/shakedown-config:/config:ro
-    environment:
-      - IA_EMAIL=${IA_EMAIL:-}
-      - IA_PASSWORD=${IA_PASSWORD:-}
-    # No restart policy: container exits when sync completes.
-
   ofelia:
     image: mcuadros/ofelia:latest
     container_name: shakedown-ofelia
-    depends_on:
-      - shakedown
     command: daemon --docker
     restart: unless-stopped
     volumes:
+      # Read-only docker socket: ofelia needs it to start per-tick containers.
+      # This grants host-root-equivalent access — place the stack accordingly.
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
-      ofelia.job-exec.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
-      ofelia.job-exec.dead-sync.container: "shakedown"
-      ofelia.job-exec.dead-sync.command: "shakedown sync --collection grateful-dead"
+      # One job per collection. Each tick starts a fresh shakedown container
+      # from the image, runs one sync, then is removed (job-run + delete).
+      # The mounts mirror a manual run; config is mounted read-only. The
+      # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`
+      # only carries the subcommand. Slice values (volume/environment) are
+      # JSON arrays.
+      ofelia.job-run.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
+      ofelia.job-run.dead-sync.image: "ghcr.io/OWNER/shakedown:latest"   # replace OWNER with your fork's GitHub user/org
+      ofelia.job-run.dead-sync.command: "sync --collection grateful-dead"
+      ofelia.job-run.dead-sync.volume: '["/share/data/archive:/data/archive", "/share/data/library:/data/library", "/share/data/shakedown-config:/config:ro"]'
+      ofelia.job-run.dead-sync.delete: "true"
+      # Download-restricted collections only: uncomment to pass IA credentials
+      # to this job. NOTE: values embedded here are visible via
+      # `docker inspect` on the ofelia container — omit unless the collection
+      # actually needs authentication.
+      # ofelia.job-run.dead-sync.environment: '["IA_EMAIL=${IA_EMAIL:-}", "IA_PASSWORD=${IA_PASSWORD:-}"]'
 
-      ofelia.job-exec.phish-sync.schedule: "0 0 4 * * 0"  # Sunday 04:00
-      ofelia.job-exec.phish-sync.container: "shakedown"
-      ofelia.job-exec.phish-sync.command: "shakedown sync --collection phish"
+      ofelia.job-run.phish-sync.schedule: "0 0 4 * * 0"  # Sunday 04:00
+      ofelia.job-run.phish-sync.image: "ghcr.io/OWNER/shakedown:latest"
+      ofelia.job-run.phish-sync.command: "sync --collection phish"
+      ofelia.job-run.phish-sync.volume: '["/share/data/archive:/data/archive", "/share/data/library:/data/library", "/share/data/shakedown-config:/config:ro"]'
+      ofelia.job-run.phish-sync.delete: "true"
 
   # Optional: HTTP control plane for ad-hoc triggers + Prometheus metrics.
-  # Uncomment and set SHAKEDOWN_API_TOKEN if you want it. Mutating endpoints
-  # authenticate with a standard bearer token; with no token set they are
-  # disabled (not open). Trigger a sync with:
+  # This is the recommended no-SSH way to trigger a sync on demand. Uncomment
+  # and set SHAKEDOWN_API_TOKEN if you want it. Mutating endpoints authenticate
+  # with a standard bearer token; with no token set they are disabled (not
+  # open). Trigger a sync with:
   #   curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" \
-  #     http://host:8080/sync
+  #     "http://host:8080/sync?collection=grateful-dead"
   #
   # shakedown-serve:
   #   image: ghcr.io/OWNER/shakedown:latest
