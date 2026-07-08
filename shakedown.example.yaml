@@ -28,7 +28,7 @@ sources:
         # date, year, venue, coverage. Filters: sanitize, short, lower, upper.
         library_layout: '{year}/{date} - {venue|sanitize}'
         on_complete:
-          webhook: http://beets:8337/import?path={staging_path}
+          webhook: http://beets:8337/import?path={staging_root}
 
       - name: phish
         query: 'collection:Phish'

@@ -20,8 +20,12 @@ from pathlib import Path
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
 from shakedown.models import Item, ItemStatus
-from shakedown.notify import HandoffPayload
-from shakedown.notify import fire as fire_handoff
+from shakedown.notify import (
+    SyncCompletePayload,
+    SyncFailedPayload,
+    fire_complete,
+    fire_failure,
+)
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
 from shakedown.staging import stage_item, staging_dir_for, unstage_item
@@ -54,6 +58,9 @@ class CollectionSyncStats:
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items left untouched
+    # Items fetched and staged this run, for the sync.complete batch payload
+    # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
+    staged: list[dict[str, str]] = field(default_factory=list)
 
 
 def run_sync(
@@ -154,10 +161,13 @@ def _sync_collection(
         log.warning("[%s/%s] source enumeration failed: %s", source.name, collection.name, e)
         stats.stale = True
         stats.errors.append(f"source enumeration failed: {e}")
+        finished = datetime.now()
+        if not dry_run:
+            _fire_notifications(config, source, collection, stats, started, finished)
         if run is not None:
             run.stale = True
             run.errors = stats.errors
-            run.finished_at = datetime.now()
+            run.finished_at = finished
             runs.finish(run)
         return stats
     stats.discovered = len(descriptors)
@@ -200,6 +210,11 @@ def _sync_collection(
             elif p.action == PlanAction.DISAPPEARED and p.existing is not None:
                 _record_disappeared(items, config, source.name, collection, p.existing)
 
+    # Phase 5: notify. Fire before recording so any delivery failure is captured
+    # in the run's errors (visible in `status`) but never aborts the sync.
+    finished = datetime.now()
+    _fire_notifications(config, source, collection, stats, started, finished)
+
     # Phase 6: record run
     if run is not None:
         run.items_discovered = stats.discovered
@@ -208,10 +223,66 @@ def _sync_collection(
         run.items_failed = stats.failed
         run.bytes_downloaded = stats.bytes_downloaded
         run.errors = stats.errors
-        run.finished_at = datetime.now()
+        run.finished_at = finished
         runs.finish(run)
 
     return stats
+
+
+def _fire_notifications(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    stats: CollectionSyncStats,
+    started: datetime,
+    finished: datetime,
+) -> None:
+    """Fire the once-per-(collection, run) handoff and failure notifications
+    (SPEC §spec:handoff).
+
+    ``sync.complete`` fires when the run staged at least one item; ``sync.failed``
+    fires when the run failed (source enumeration stale, or one or more items
+    failed). Both are best-effort: a delivery failure is appended to
+    ``stats.errors`` (recorded in the run, surfaced by `status`) and never raises.
+    """
+    run_errors = list(stats.errors)  # substantive errors, before any delivery attempt
+    staging_root = str(config.library_root / source.name / collection.name)
+    run_obj = {
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "items_new": stats.new,
+        "items_updated": stats.updated,
+        "items_failed": stats.failed,
+        "bytes_downloaded": stats.bytes_downloaded,
+    }
+
+    if stats.staged:
+        err = fire_complete(
+            collection,
+            SyncCompletePayload(
+                source=source.name,
+                collection=collection.name,
+                staging_root=staging_root,
+                run=run_obj,
+                staged=stats.staged,
+            ),
+        )
+        if err:
+            stats.errors.append(err)
+
+    if stats.stale or stats.failed > 0:
+        err = fire_failure(
+            config.notifications,
+            SyncFailedPayload(
+                source=source.name,
+                collection=collection.name,
+                staging_root=staging_root,
+                run=run_obj,
+                errors=run_errors,
+            ),
+        )
+        if err:
+            stats.errors.append(err)
 
 
 def _files_missing(item: Item) -> bool:
@@ -343,24 +414,17 @@ def _execute_fetch_and_stage(
                     stats.errors.append(f"staging collision: {c}")
                     stats.failed += 1
 
+            # Collect for the once-per-run sync.complete batch payload; the handoff
+            # fires once after the run, not per item (SPEC §spec:handoff).
             staging_dir = staging_dir_for(
                 config, collection, source.name, new_item.source_metadata, new_item.archive_path  # type: ignore[arg-type]
             )
-            fire_handoff(
-                collection,
-                HandoffPayload(
-                    event="item_complete",
-                    source=source.name,
-                    collection=collection.name,
-                    item_identifier=desc.identifier,
-                    archive_path=str(new_item.archive_path),
-                    staging_path=str(staging_dir),
-                    source_metadata_excerpt={
-                        k: desc.metadata.get(k)
-                        for k in ("title", "creator", "date", "year", "venue")
-                        if desc.metadata.get(k) is not None
-                    },
-                ),
+            stats.staged.append(
+                {
+                    "identifier": desc.identifier,
+                    "archive_path": str(new_item.archive_path),
+                    "staging_path": str(staging_dir),
+                }
             )
 
 
