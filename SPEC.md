@@ -516,3 +516,67 @@ degrade a single item or a single run, never the archive.
 | Source permanently gone | Existing items retained; collection reported stale in `status` |
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
 | Handoff webhook receiver down | Logged in run errors, visible in `status`; sync still succeeds (§spec:handoff) |
+
+## Real-source end-to-end check §spec:e2e-real-source
+
+*Status: not started*
+
+The entire test suite runs offline against fakes and mocked HTTP.
+That leaves two failure classes invisible: archive.org's real API
+drifting away from what the fixtures encode, and integration seams
+that only misbehave with real files on a real filesystem. The
+real-source check closes both gaps and doubles as a manual
+pre-release gate (§req:success-criteria #10).
+
+Observable behavior:
+
+- One documented command runs the check on a clean machine; the
+  default test invocation and CI select zero network-dependent tests
+  (§req:constraints). Opting in is the only way to reach the network.
+- The check drives the `ia` plugin against exactly one pinned, small
+  (a few megabytes), public, unrestricted Internet Archive item — no
+  credentials required — through the typical lifecycle in order:
+  1. `sync` downloads the item for real, with the core verifying
+     source checksums as bytes arrive (§spec:sync-workflow).
+  2. The staged library entry shares inodes with its archive
+     counterpart (§spec:library-staging).
+  3. A second `sync` is a no-op: zero downloads, zero changes
+     (§spec:sync-identity).
+  4. Changing the collection's `library_layout` and running `restage`
+     re-sorts the library tree without network traffic.
+  5. Narrowing the collection query so the item leaves enumeration
+     flags it `disappeared` with local files retained — the retention
+     default is asserted, not assumed (§spec:item-lifecycle).
+  6. With `prune_disappeared: true`, the next `sync` removes the
+     archive files and staging links and marks the record pruned.
+  7. `item forget` drops the database record.
+- The check runs entirely in throwaway temporary trees (archive,
+  library, state DB) on one filesystem; it can never touch a real
+  deployment's data.
+- A network or upstream failure fails the check loudly. It never
+  skips itself into a false pass — a release gate that silently
+  degrades is worse than none.
+
+**Why one pinned item.** The check exists to prove the pipeline, not
+to mirror content: one small item keeps runtime and bandwidth bounded
+and stays polite to archive.org (§req:constraints). The identifier is
+pinned — not queried live — so runs are comparable over time; the
+selection criteria (public domain or freely licensed, unrestricted,
+few megabytes, long-lived) and the replacement procedure when the item
+ever disappears upstream are documented alongside the check.
+
+**Why opt-in rather than scheduled CI.** Real-network tests are
+inherently flaky and consume upstream bandwidth; putting them in CI
+either blocks PRs on upstream hiccups or trains developers to ignore
+red. The check's three jobs — real-API drift detection, whole-pipeline
+integration confidence, and a pre-release gate — are all served by a
+developer running it deliberately before tagging a release
+(§req:user-stories).
+
+**Rejected alternatives.** Recorded-response replay (cassettes) was
+rejected because it re-mocks the network and cannot detect API drift —
+the primary failure class the check targets. Exercising the `etree`
+plugin as well was deferred: the IA plugin is the primary integration
+path, etree already has an offline end-to-end slice, and doubling the
+real downloads buys little; the harness does not preclude
+parameterizing over plugins later.
