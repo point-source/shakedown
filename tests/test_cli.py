@@ -131,11 +131,11 @@ def test_status_reports_stale_collection(tmp_path: Path, tmp_roots, monkeypatch)
     config = load(cfg)
     assert run_sync(config) == 0
 
-    def unreachable_discover(self, collection):
+    def unreachable_enumerate(self, collection):
         raise ConnectionError("source unreachable")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(FakePlugin, "discover", unreachable_discover)
+    monkeypatch.setattr(FakePlugin, "enumerate_items", unreachable_enumerate)
     assert run_sync(config) == 1
 
     result = CliRunner().invoke(main, ["--config", str(cfg), "status"])

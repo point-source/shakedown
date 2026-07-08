@@ -117,12 +117,16 @@ class IAPlugin(SourcePlugin):
         super().__init__(source_config)
         self._session = _get_ia_session(source_config)
 
-    def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
-        """Enumerate items matching `collection.query` against IA's advanced search."""
+    def enumerate_items(self, collection: CollectionConfig) -> Iterator[str]:
+        """Yield identifiers matching the query (the cheap half of discovery)."""
         log.info("IA discover: query=%r", collection.query)
         search = self._session.search_items(collection.query, fields=["identifier"])
         for hit in search:
-            desc = self.describe_item(hit["identifier"], collection)
+            yield hit["identifier"]
+
+    def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
+        for identifier in self.enumerate_items(collection):
+            desc = self.describe_item(identifier, collection)
             if desc is not None:
                 yield desc
 

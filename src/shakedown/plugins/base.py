@@ -71,6 +71,25 @@ class SourcePlugin(ABC):
     def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
         """Enumerate items currently matching the collection's query."""
 
+    def enumerate_items(self, collection: CollectionConfig) -> Iterator[str] | None:
+        """Cheaply list item identifiers so the core can fan `describe_item()` across
+        the shared per-source budget (SPEC §spec:discovery-pipeline). Return None
+        (the default) to signal this source has no cheap enumerate/describe split;
+        the core then drains `discover()` serially. Raising signals an enumeration
+        failure (the core marks the collection stale), exactly like `discover()`.
+        """
+        return None
+
+    def describe_item(
+        self, identifier: str, collection: CollectionConfig
+    ) -> ItemDescriptor | None:
+        """Resolve one enumerated identifier to a descriptor — the expensive per-item
+        metadata fetch. Only called when `enumerate_items()` returns an iterator.
+        Return None to skip the item (a transient fault already handled). Sources that
+        do not support the enumerate/describe split need not implement this.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def fetch(
         self,

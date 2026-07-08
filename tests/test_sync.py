@@ -242,12 +242,14 @@ def test_stale_source_retains_items_and_flags_run(
     archived = archive / "fake-src" / "coll1" / "gd-show" / "gd-show.flac"
     assert archived.is_file()
 
-    # Source goes unreachable: discover raises instead of enumerating.
-    def unreachable_discover(self, collection):
+    # Source goes unreachable: enumeration raises instead of listing identifiers.
+    # The parallel driver materializes enumerate_items() before describe/plan, so a
+    # raise here still reaches the stale handler exactly as a failed discover() did.
+    def unreachable_enumerate(self, collection):
         raise ConnectionError("source unreachable")
-        yield  # pragma: no cover  (keep it a generator, like the real discover)
+        yield  # pragma: no cover  (keep it a generator, like the real enumerate_items)
 
-    monkeypatch.setattr(FakePlugin, "discover", unreachable_discover)
+    monkeypatch.setattr(FakePlugin, "enumerate_items", unreachable_enumerate)
 
     # The sync surfaces failure, but the existing item and its files remain.
     assert run_sync(config) == 1
@@ -619,14 +621,15 @@ def test_collections_sync_concurrently(tmp_roots: tuple[Path, Path], monkeypatch
     _seed_item("gd-show")
 
     barrier = threading.Barrier(2, timeout=5)
-    orig_discover = FakePlugin.discover
+    orig_enumerate = FakePlugin.enumerate_items
 
-    def gated_discover(self, collection):
-        # Block until both collection workers are in discover simultaneously.
+    def gated_enumerate(self, collection):
+        # Block until both collection workers are at discovery start simultaneously.
+        # enumerate_items() is called once per collection at the top of discovery.
         barrier.wait()
-        return orig_discover(self, collection)
+        return orig_enumerate(self, collection)
 
-    monkeypatch.setattr(FakePlugin, "discover", gated_discover)
+    monkeypatch.setattr(FakePlugin, "enumerate_items", gated_enumerate)
 
     assert run_sync(config) == 0, "both collections must be in flight at once"
     for coll in ("c1", "c2"):
@@ -641,13 +644,13 @@ def test_collection_cap_of_one_serializes(tmp_roots: tuple[Path, Path], monkeypa
     _seed_item("gd-show")
 
     barrier = threading.Barrier(2, timeout=0.5)
-    orig_discover = FakePlugin.discover
+    orig_enumerate = FakePlugin.enumerate_items
 
-    def gated_discover(self, collection):
+    def gated_enumerate(self, collection):
         barrier.wait()  # never satisfied with only one worker at a time
-        return orig_discover(self, collection)
+        return orig_enumerate(self, collection)
 
-    monkeypatch.setattr(FakePlugin, "discover", gated_discover)
+    monkeypatch.setattr(FakePlugin, "enumerate_items", gated_enumerate)
 
     assert run_sync(config) == 1, "serial execution can't satisfy a 2-party barrier"
 
@@ -738,3 +741,187 @@ def test_traversal_identifier_is_rejected(tmp_roots: tuple[Path, Path], monkeypa
     assert not (archive / "evil").exists()
     assert not (archive / "evil.flac").exists()
     assert not (archive.parent / "evil").exists()
+
+
+# --- §road:parallel-discovery: per-item metadata resolution fanned across the budget ---
+
+def _two_collection_budget_config(
+    archive: Path, library: Path, *, max_concurrent_requests: int
+) -> Config:
+    """Two collections of one source, each with its own download pool but sharing
+    one per-source budget — the surface where concurrent describe() must stay bounded."""
+    return Config(
+        archive_root=archive,
+        library_root=library,
+        max_concurrent_downloads=4,
+        max_concurrent_collections=2,
+        sources=[
+            SourceConfig(
+                name="fake-src",
+                type="fake",
+                max_concurrent_requests=max_concurrent_requests,
+                collections=[
+                    CollectionConfig(name="c1", query="*"),
+                    CollectionConfig(name="c2", query="*"),
+                ],
+            )
+        ],
+    )
+
+
+def test_concurrent_discovery_bounded_by_source_budget(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """§spec:discovery-pipeline + §spec:source-budget: per-item describe_item() runs
+    CONCURRENTLY across the drain, but the shared per-source budget is the hard ceiling
+    on simultaneous metadata fetches — even with two collections of the source running
+    at once (max_concurrent_collections=2) and a larger download pool. With
+    max_concurrent_requests=2, the observed peak describe concurrency must never
+    exceed 2, while every item still gets resolved."""
+    import time as _time
+
+    archive, library = tmp_roots
+    config = _two_collection_budget_config(archive, library, max_concurrent_requests=2)
+    # Enough distinct items that two collections resolving concurrently would overlap
+    # well past 2 in-flight describes if the budget were not enforced.
+    for i in range(6):
+        _seed_item(f"gd-show-{i}")
+
+    lock = threading.Lock()
+    state = {"in_flight": 0, "max": 0}
+    described: set[str] = set()
+    real_describe = FakePlugin.describe_item
+
+    def instrumented_describe(self, identifier, collection):
+        with lock:
+            state["in_flight"] += 1
+            state["max"] = max(state["max"], state["in_flight"])
+            described.add(identifier)
+        try:
+            _time.sleep(0.02)  # hold the slot so overlap is real
+            return real_describe(self, identifier, collection)
+        finally:
+            with lock:
+                state["in_flight"] -= 1
+
+    monkeypatch.setattr(FakePlugin, "describe_item", instrumented_describe)
+
+    assert run_sync(config) == 0
+    # Every enumerated item's metadata was resolved (concurrency didn't drop any).
+    assert described == {f"gd-show-{i}" for i in range(6)}
+    # ...and the shared budget was never breached during discovery.
+    assert state["max"] <= 2, (
+        f"per-source budget breached during discovery: observed {state['max']} "
+        "simultaneous describes (cap 2)"
+    )
+    # Sanity: both collections mirrored every item.
+    for coll in ("c1", "c2"):
+        for i in range(6):
+            assert (archive / "fake-src" / coll / f"gd-show-{i}" / f"gd-show-{i}.flac").is_file()
+
+
+def test_slow_item_does_not_stall_others_during_discovery(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """§spec:discovery-pipeline: because describe_item() is fanned across the budget,
+    one slow item's metadata fetch must not serialize the others behind it. With a
+    budget >= 2, a deliberately slow describe overlaps the fast ones in time — proving
+    the resolution is concurrent, not a serial drain."""
+    import time as _time
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)  # single collection, default budget (4)
+    slow_id = "gd-slow"
+    _seed_item(slow_id)
+    for i in range(5):
+        _seed_item(f"gd-fast-{i}")
+
+    lock = threading.Lock()
+    intervals: dict[str, tuple[float, float]] = {}
+    real_describe = FakePlugin.describe_item
+
+    def timed_describe(self, identifier, collection):
+        start = _time.perf_counter()
+        _time.sleep(0.4 if identifier == slow_id else 0.02)
+        result = real_describe(self, identifier, collection)
+        end = _time.perf_counter()
+        with lock:
+            intervals[identifier] = (start, end)
+        return result
+
+    monkeypatch.setattr(FakePlugin, "describe_item", timed_describe)
+
+    assert run_sync(config) == 0
+    # All items resolved and mirrored.
+    assert set(intervals) == {slow_id, *(f"gd-fast-{i}" for i in range(5))}
+    for ident in intervals:
+        assert (archive / "fake-src" / "coll1" / ident / f"{ident}.flac").is_file()
+
+    # The slow item's describe overlapped at least one fast item's describe: some fast
+    # item started after the slow one began AND finished before the slow one ended.
+    slow_start, slow_end = intervals[slow_id]
+    overlapped = [
+        ident
+        for ident, (start, end) in intervals.items()
+        if ident != slow_id and start < slow_end and end > slow_start
+    ]
+    assert overlapped, (
+        "no describe overlapped the slow item — resolution was serial, not fanned"
+    )
+
+
+def test_concurrent_discovery_classifies_identically_to_serial(
+    tmp_roots: tuple[Path, Path]
+) -> None:
+    """KEY BATCH INVARIANT: NEW/CHANGED/UNCHANGED/DISAPPEARED classification under
+    concurrent per-item discovery is byte-for-byte identical to an effectively-serial
+    run (max_concurrent_requests=1). Seed the same items into two independent roots,
+    sync one concurrently and one serially, and assert identical per-item DB statuses.
+    Also proves idempotency: a second no-op sync re-fetches nothing and keeps every
+    item UNCHANGED."""
+
+    def _run_and_snapshot(
+        root: Path, *, max_concurrent_requests: int
+    ) -> tuple[dict[str, ItemStatus], Config]:
+        archive = root / "archive"
+        library = root / "library"
+        archive.mkdir(parents=True)
+        library.mkdir(parents=True)
+        config = _two_collection_budget_config(
+            archive, library, max_concurrent_requests=max_concurrent_requests
+        )
+        assert run_sync(config) == 0
+        conn = connect(config.state_db)  # type: ignore[arg-type]
+        items = ItemRepo(conn)
+        snapshot: dict[str, ItemStatus] = {}
+        for coll in ("c1", "c2"):
+            for row in items.list_for_collection("fake-src", coll):
+                snapshot[f"{coll}/{row.identifier}"] = row.status
+        return snapshot, config
+
+    archive0, _ = tmp_roots
+    base = archive0.parent
+
+    # Seed a mixed set: normal items plus one restricted (classifies UNAVAILABLE).
+    for i in range(5):
+        _seed_item(f"gd-show-{i}")
+    restricted = _seed_item("gd-stream-only")
+    restricted.is_restricted = True
+    restricted.restriction_reason = "stream-only per band request"
+
+    concurrent_snap, concurrent_cfg = _run_and_snapshot(
+        base / "concurrent", max_concurrent_requests=4
+    )
+    serial_snap, _ = _run_and_snapshot(base / "serial", max_concurrent_requests=1)
+
+    assert concurrent_snap == serial_snap, (
+        "concurrent discovery produced different classification than the serial run"
+    )
+    # Both runs classified the same set (5 complete + 1 unavailable) per collection.
+    assert len(concurrent_snap) == 12
+    assert sum(1 for s in concurrent_snap.values() if s == ItemStatus.UNAVAILABLE) == 2
+
+    # Idempotency: a second sync over the concurrent roots re-fetches nothing.
+    fetches_before = dict(FakePlugin.fetch_count)
+    assert run_sync(concurrent_cfg) == 0
+    assert FakePlugin.fetch_count == fetches_before, "no-op re-sync must not re-fetch"

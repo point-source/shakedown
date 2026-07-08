@@ -41,19 +41,30 @@ class FakePlugin(SourcePlugin):
     # Class-level state so tests can mutate the source between sync runs.
     items: ClassVar[dict[str, FakeItem]] = {}
     fetch_count: ClassVar[dict[str, int]] = {}
+    describe_count: ClassVar[dict[str, int]] = {}
+
+    def enumerate_items(self, collection: CollectionConfig) -> Iterator[str]:
+        yield from self.items
+
+    def describe_item(self, identifier: str, collection: CollectionConfig) -> ItemDescriptor | None:
+        self.describe_count[identifier] = self.describe_count.get(identifier, 0) + 1
+        it = self.items.get(identifier)
+        if it is None:
+            return None
+        files = tuple(ManifestFile(name=f.name, size=f.size, md5=f.md5) for f in it.files)
+        return ItemDescriptor(
+            identifier=it.identifier,
+            manifest=Manifest(files=files),
+            metadata={**it.metadata, "identifier": it.identifier},
+            is_restricted=it.is_restricted,
+            restriction_reason=it.restriction_reason,
+        )
 
     def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
-        for it in self.items.values():
-            files = tuple(
-                ManifestFile(name=f.name, size=f.size, md5=f.md5) for f in it.files
-            )
-            yield ItemDescriptor(
-                identifier=it.identifier,
-                manifest=Manifest(files=files),
-                metadata={**it.metadata, "identifier": it.identifier},
-                is_restricted=it.is_restricted,
-                restriction_reason=it.restriction_reason,
-            )
+        for identifier in self.enumerate_items(collection):
+            desc = self.describe_item(identifier, collection)
+            if desc is not None:
+                yield desc
 
     def fetch(
         self,
@@ -80,6 +91,7 @@ class FakePlugin(SourcePlugin):
 def reset_fake() -> None:
     FakePlugin.items.clear()
     FakePlugin.fetch_count.clear()
+    FakePlugin.describe_count.clear()
 
 
 def install_fake() -> None:

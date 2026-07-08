@@ -63,6 +63,57 @@ def _source_budget_size(config: Config, source: SourceConfig) -> int:
     return source.max_concurrent_requests or config.max_concurrent_downloads
 
 
+def _describe_one(
+    plugin: SourcePlugin,
+    identifier: str,
+    collection: CollectionConfig,
+    budget: SourceBudget | None,
+) -> ItemDescriptor | None:
+    if budget is None:
+        return plugin.describe_item(identifier, collection)
+    with budget.slot():
+        return plugin.describe_item(identifier, collection)
+
+
+def _discover_descriptors(
+    plugin: SourcePlugin,
+    collection: CollectionConfig,
+    budget: SourceBudget | None,
+) -> tuple[list[ItemDescriptor], set[str]]:
+    """Materialize the full enumeration, fanning per-item metadata resolution across
+    the shared per-source budget (SPEC §spec:discovery-pipeline).
+
+    Sources that expose `enumerate_items()` get concurrent `describe_item()` resolution
+    bounded by the source budget; the enumeration is fully materialized here (before
+    planning) so prune/`disappeared` semantics are unchanged. Sources without the
+    enumerate/describe split fall back to the serial `discover()` drain. A transient
+    per-item fault yields None and is dropped, exactly as the serial path skipped a
+    failed metadata fetch — so NEW/CHANGED/UNCHANGED/DISAPPEARED classification is
+    identical to the pre-change serial run.
+    """
+    identifiers = plugin.enumerate_items(collection)
+    descriptors: list[ItemDescriptor] = []
+    if identifiers is None:
+        # Serial fallback: this source can't split enumerate/describe.
+        descriptors.extend(plugin.discover(collection))
+    else:
+        ids = list(identifiers)  # fully materialize the enumeration (may raise -> stale)
+        if ids:
+            workers = budget.size if budget is not None else len(ids)
+            workers = max(1, min(workers, len(ids)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_describe_one, plugin, identifier, collection, budget)
+                    for identifier in ids
+                ]
+                for fut in as_completed(futures):
+                    desc = fut.result()
+                    if desc is not None:
+                        descriptors.append(desc)
+    seen = {d.identifier for d in descriptors}
+    return descriptors, seen
+
+
 class PlanAction(StrEnum):
     NEW = "new"
     UNCHANGED = "unchanged"
@@ -186,14 +237,12 @@ def _sync_collection(
     stats = CollectionSyncStats()
     staged_paths: set[Path] = set()
 
-    # Phase 1: discover
-    descriptors: list[ItemDescriptor] = []
-    seen_identifiers: set[str] = set()
+    # Phase 1: discover. Fan per-item metadata resolution across the shared source
+    # budget, but fully materialize the enumeration before planning so prune/
+    # `disappeared` semantics are unchanged (SPEC §spec:discovery-pipeline).
     log.info("[%s/%s] discovering...", source.name, collection.name)
     try:
-        for desc in plugin.discover(collection):
-            descriptors.append(desc)
-            seen_identifiers.add(desc.identifier)
+        descriptors, seen_identifiers = _discover_descriptors(plugin, collection, budget)
     except Exception as e:
         # Source enumeration failed (unreachable or permanently-gone source). Flag
         # the collection stale so `status` reports it, and leave every existing item
