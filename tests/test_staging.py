@@ -27,9 +27,22 @@ def test_template_render_substitutes_and_filters() -> None:
     assert out == "1977/1977-05-08 - Barton Hall_ Cornell"
 
 
-def test_template_render_unknown_field_raises() -> None:
+def test_template_render_missing_field_renders_unknown() -> None:
+    # A field the item's metadata lacks renders as a literal `unknown` segment
+    # rather than raising (§spec:library-staging). Collision detection catches
+    # any resulting conflicts.
+    assert render("{year}/{venue|sanitize}", {"year": "1977"}) == "1977/unknown"
+
+
+def test_template_render_null_field_renders_unknown() -> None:
+    # An explicitly-null value is treated the same as a missing field.
+    assert render("{venue}", {"venue": None}) == "unknown"
+
+
+def test_template_render_unknown_filter_raises() -> None:
+    # A bogus filter name is an author error and still raises.
     with pytest.raises(TemplateError):
-        render("{nope}", {})
+        render("{venue|bogus}", {"venue": "Barton Hall"})
 
 
 def test_custom_layout_creates_human_readable_tree(tmp_roots: tuple[Path, Path]) -> None:
@@ -51,6 +64,34 @@ def test_custom_layout_creates_human_readable_tree(tmp_roots: tuple[Path, Path])
         library / "fake-src" / "coll1" / "1977" / "1977-05-08 - Barton Hall_ Cornell" / "set1-track01.flac"
     )
     assert expected.is_file()
+
+
+def test_missing_layout_field_stages_under_unknown(tmp_roots: tuple[Path, Path]) -> None:
+    """§spec:library-staging: an item lacking a layout field stages under `unknown`."""
+    archive, library = tmp_roots
+    config = make_config(
+        archive,
+        library,
+        library_layout="{year}/{venue|sanitize}",
+    )
+    FakePlugin.items["gd1977-05-08"] = FakeItem(
+        identifier="gd1977-05-08",
+        files=[FakeFile(name="set1-track01.flac", content=b"audio")],
+        metadata={"year": "1977"},  # no venue
+    )
+
+    assert run_sync(config) == 0
+    expected = (
+        library / "fake-src" / "coll1" / "1977" / "unknown" / "set1-track01.flac"
+    )
+    assert expected.is_file()
+
+    # restage rebuilds the same tree from the archive without any fetches.
+    import shutil
+    shutil.rmtree(library / "fake-src")
+    assert run_restage(config) == 0
+    assert expected.is_file()
+    assert FakePlugin.fetch_count == {"gd1977-05-08": 1}
 
 
 def test_restage_rebuilds_after_library_wipe(tmp_roots: tuple[Path, Path]) -> None:
