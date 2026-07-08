@@ -13,7 +13,12 @@ _REGISTRY: dict[str, type[SourcePlugin]] = {}
 _builtins_loaded = False
 
 
-def register(plugin_cls: type[SourcePlugin]) -> type[SourcePlugin]:
+def register[PluginT: SourcePlugin](plugin_cls: type[PluginT]) -> type[PluginT]:
+    """Record a plugin class under its ``type_name``.
+
+    Type-preserving: the decorated class keeps its concrete type so callers
+    (and tests) can reference subclass-only attributes on instances.
+    """
     _REGISTRY[plugin_cls.type_name] = plugin_cls
     return plugin_cls
 

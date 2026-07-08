@@ -30,10 +30,7 @@ def _make_plugin(handler: Handler) -> EtreePlugin:
     )
     # `_client` is a plain instance attribute (declared on EtreePlugin, built in
     # __init__); swap it for a MockTransport-backed client so no network is used.
-    # The @register decorator types the class symbol as type[SourcePlugin], which
-    # erases the concrete EtreePlugin type at this call site, so pyright cannot see
-    # the attribute here; the assignment is correct at runtime.
-    plugin._client = httpx.Client(  # pyright: ignore[reportAttributeAccessIssue]
+    plugin._client = httpx.Client(
         base_url="https://archive.org",
         transport=httpx.MockTransport(handler),
     )
