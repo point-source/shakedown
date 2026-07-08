@@ -36,6 +36,11 @@ class CollectionConfig(BaseModel):
     exclude_filters: list[str] = Field(default_factory=list)
     library_layout: str = "passthrough"
     prune_disappeared: bool = False
+    # Opt-in per-collection fast-path (§spec:incremental-discovery); skips the per-item
+    # metadata fetch when the source's cheap change signal is unchanged. Off by default —
+    # the correct-by-construction full manifest comparison is what every collection gets
+    # unless opted in.
+    incremental_discovery: bool = False
     on_complete: Handoff | None = None
 
 
