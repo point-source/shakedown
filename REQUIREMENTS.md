@@ -57,7 +57,9 @@ Observable outcomes that define the product as done. Each is
 demonstrable end-to-end from the product's surface (CLI, config,
 on-disk trees, status output). Criteria 1–10 defined v1 (shipped);
 criteria 11–12 defined the discovery-performance increment (shipped);
-criteria 13–15 define the current mirror-integrity & metadata increment.
+criteria 13–15 defined the mirror-integrity & metadata increment
+(shipped); criteria 16–18 define the current setup, recovery, and
+validation-confidence increment.
 
 1. **Unattended weekly mirror that actually fires.** A weekly sync of
    the IA Grateful Dead collection runs unattended for a month with no
@@ -155,6 +157,36 @@ criteria 13–15 define the current mirror-integrity & metadata increment.
     syncing, and finding `metadata.json` hardlinked into the library
     beside the media, then running the explicit metadata-resync to
     update it.
+16. **A new setup proves readiness before the first real mirror.** A
+    first-time operator can validate a configured deployment and learn,
+    from the product's visible surface, whether the config, archive and
+    library paths, source access, credentials, and handoff targets are
+    usable before a large sync begins. Failures name the affected
+    collection or setting and the user action needed to continue; a
+    broken setup never looks like a clean no-op. Verifiable by checking
+    a fresh config with a missing path, bad source access, and a valid
+    minimal collection, and seeing fast, actionable pass/fail output
+    without downloading a full collection.
+17. **A broken run is recoverable without guesswork.** When a sync,
+    restage, reconcile, or validation flow fails partway through, the
+    next visible status tells the operator what completed, what did not,
+    which collection or item needs attention, and whether a retry is
+    safe. Local recordings remain intact unless the user explicitly
+    requested deletion, and a later successful retry clears the failure
+    state rather than leaving stale warnings. Verifiable by forcing a
+    network, source, storage, or config failure mid-flow, then rerunning
+    and confirming no local recording is lost and status does not report
+    success until the affected work is complete.
+18. **Release validation proves the workflows users rely on.** A
+    maintainer can run one bounded, documented validation before
+    publishing that exercises first-setup readiness, unsafe config
+    rejection, partial-failure recovery, and the ordinary sync-to-library
+    path. The check finishes quickly enough to be used before release,
+    does not require inspecting internals to understand failure, and
+    fails loudly when a user-facing workflow is broken rather than
+    passing because it skipped the risky scenario. Verifiable on a clean
+    machine by running the documented release check and seeing a clear
+    pass/fail result with any failure tied to the affected user workflow.
 
 ## User stories §req:user-stories
 
@@ -249,6 +281,25 @@ criterion and implies a testable path through the product's surface.
   way to re-pull source metadata for items I have already mirrored, so
   that I can update the preserved notes without re-downloading audio and
   without every routine run re-checking them. *(→ criterion 15)*
+- **Prove setup before the first mirror.** As a first-time operator, I
+  want to validate my config, paths, source access, credentials, and
+  handoff targets before I start a large sync, so that setup mistakes
+  fail fast with an action I can take instead of becoming a silent no-op
+  or a long run that was doomed from the start. *(→ criterion 16)*
+- **Change config without risking my archive.** As a homelab operator, I
+  want a layout, source, or collection change to be checked before it can
+  hide, skip, or delete recordings, so that experimenting with
+  configuration does not require me to inspect internals or trust raw
+  logs. *(→ criteria 16, 17)*
+- **Recover from a broken run.** As a homelab operator, I want status
+  after a failed sync or restage to tell me what is safe to retry and
+  what still needs attention, so that recovery does not involve guessing
+  whether my archive is complete. *(→ criterion 17)*
+- **Gate a release on real operator workflows.** As a maintainer, I want
+  a bounded validation run that proves setup, unsafe-config handling,
+  partial-failure recovery, and sync-to-library behavior still work, so
+  that I do not ship a release that only passed narrow unit checks.
+  *(→ criterion 18)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -319,6 +370,16 @@ constraints that drive architecture.
   no-op. A newly deployed stack does no surprising, unscoped work on
   first bring-up: each configured collection syncs on its own schedule,
   never as an implicit "sync everything" at startup.
+- **Truthful visible state.** Setup, validation, sync, restage, and
+  recovery surfaces must never report success while important work was
+  skipped, stale, incomplete, or unverified. The operator must be able to
+  tell from the visible product surface which collection or item is
+  affected and what action is available next.
+- **Fast feedback for setup and validation.** Mistakes that can be
+  detected before a large mirror begins should surface quickly and
+  locally, without waiting for a full collection walk or large download.
+  Release validation should be bounded enough to run deliberately before
+  publishing, while still proving the workflows that users rely on.
 - **Operability without SSH.** All day-to-day operation and
   configuration on QNAP is achievable through Container Station and File
   Station. Failures are visible at the scheduler / container-exit layer,
@@ -371,6 +432,11 @@ Technical, operational, and scope bounds on the solution space.
   end-to-end check is invoked explicitly by a developer, downloads a
   single small public item (a few megabytes) to stay polite to the
   upstream archive, and its flakiness never blocks pull requests.
+- **Readiness and release checks stay bounded.** Setup validation and
+  release validation may touch configured paths, credentials, source
+  availability, and handoff endpoints, but they must not turn into an
+  unbounded mirror of a large collection. They prove readiness and
+  recovery behavior before the expensive work starts.
 - **Preserved metadata is context, not media.** When a collection opts
   into preserving source metadata, the sidecar lands in the library like
   any mirrored file, but it does not participate in the media manifest
@@ -390,8 +456,9 @@ Technical, operational, and scope bounds on the solution space.
 
 Ordered by user impact. v1 shipped; a second (etree) plugin was pulled
 in to prove the plugin seam. The discovery-performance increment (items
-13–15) has shipped; the current increment is mirror integrity & metadata
-preservation (items 16–18).
+13–15) and mirror-integrity & metadata preservation increment (items
+16–18) have shipped; the current increment is setup, recovery, and
+validation confidence (items 19–21).
 
 **Must have (v1 core):**
 
@@ -424,7 +491,7 @@ preservation (items 16–18).
     sync → staging → re-sort/restage → deletion, runnable with one
     command, excluded from the default test run and CI (→ criterion 10).
 
-**Next — discovery performance (post-v1, current increment):**
+**Shipped — discovery performance (post-v1):**
 
 13. Incremental recurring sync: a no-op weekly sync no longer scales
     its wall-clock with the item count, and does so without weakening
@@ -437,8 +504,8 @@ preservation (items 16–18).
 15. No head-of-line stalls: a single slow upstream metadata response
     never freezes the whole run for minutes (→ criterion 11; GH #10).
 
-**Next — mirror integrity & metadata preservation (post-v1, current
-increment). Three independently-shippable items addressed in one pass:**
+**Shipped — mirror integrity & metadata preservation (post-v1). Three
+independently-shippable items addressed in one pass:**
 
 16. Prune-safety hardening: a per-item metadata-fetch failure never
     makes a still-enumerated item prune-eligible; pruning follows only
@@ -453,9 +520,25 @@ increment). Three independently-shippable items addressed in one pass:**
     media change-detection, with an explicit metadata-resync operation
     to refresh it (→ criterion 15; GH #15).
 
+**Next — setup, recovery, and validation confidence (post-v1, current
+increment). Three independently-shippable items addressed in one pass:**
+
+19. First-setup readiness: a user can validate paths, config, source
+    access, credentials, and handoff targets before the first large
+    mirror begins, with fast, actionable failures instead of unclear
+    exits or silent no-ops (→ criterion 16; GH #19).
+20. Recovery truthfulness: failed or interrupted sync, restage,
+    reconcile, and validation flows leave visible, retryable state and
+    never report clean success while work is incomplete or recordings
+    are at risk (→ criterion 17; GH #20).
+21. Bounded release validation: maintainers have a documented pre-release
+    check that exercises setup readiness, unsafe-config handling,
+    partial-failure recovery, and sync-to-library behavior with clear
+    pass/fail output (→ criterion 18; GH #21).
+
 **Nice to have / out of scope (candidates for later):**
 
-19. Web UI for status and config; push notifications beyond webhooks
+22. Web UI for status and config; push notifications beyond webhooks
     (Pushover, Discord); direct library-tool integrations; multiple
     archive roots / tiered storage; BitTorrent as a source; cross-host
     sync. These are explicitly deferred.
