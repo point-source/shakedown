@@ -35,6 +35,20 @@ sources:
         format_filters: [flac]
         # Default library_layout is `passthrough`: mirrors the archive layout 1:1.
 
+  # The etree Live Music Archive. A second, independently written source plugin
+  # that talks to archive.org's public HTTP/JSON API directly (httpx), rather
+  # than through the official `internetarchive` package the `ia` source uses.
+  - name: etree-lma
+    type: etree
+    collections:
+      - name: etree-lma
+        query: 'collection:etree'
+        format_filters: [flac, shn]
+        exclude_filters: ['*_64kb.mp3', '*_vbr.mp3']
+        # Available etree fields: identifier, title, creator, date, year,
+        # venue, coverage. Filters: sanitize, short, lower, upper.
+        library_layout: '{year}/{date} - {venue|sanitize}'
+
 notifications:
   on_failure:
     webhook: http://ntfy:80/shakedown

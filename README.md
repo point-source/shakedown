@@ -89,35 +89,16 @@ shakedown serve      [--host HOST] [--port PORT]    # optional HTTP control plan
 
 ## Writing a source plugin
 
-A source plugin implements `shakedown.plugins.base.SourcePlugin`:
+A source plugin teaches Shakedown how to talk to one kind of remote archive. It
+implements three methods on `shakedown.plugins.base.SourcePlugin` — `discover`,
+`fetch`, `verify` — plus a `type_name` and `template_fields` declaration, and
+registers itself. The core owns temp-dir lifecycle, atomic archive promotion,
+retries/backoff, staging, and the database, so plugins stay small.
 
-```python
-from shakedown.plugins.base import SourcePlugin, ItemDescriptor, FetchResult, VerifyResult
-from shakedown.plugins.registry import register
-
-@register
-class MyPlugin(SourcePlugin):
-    type_name = "mything"
-    template_fields = ("identifier", "date", "venue")
-
-    def discover(self, collection):
-        for thing in remote_api.list(collection.query):
-            yield ItemDescriptor(
-                identifier=thing.id,
-                manifest=Manifest(files=tuple(...)),
-                metadata={...},
-            )
-
-    def fetch(self, item, dest_dir, format_filters, exclude_filters):
-        # Download into dest_dir; return FetchResult(success=True, bytes_downloaded=N).
-        ...
-
-    def verify(self, item, archive_path):
-        # Existence-only re-check. Do NOT hash bytes here — that's `verify --deep`'s job.
-        ...
-```
-
-Reference your plugin via `type: mything` in `shakedown.yaml`. See [`src/shakedown/plugins/ia/plugin.py`](src/shakedown/plugins/ia/plugin.py) for the IA implementation.
+The full contract, the data types, the filter and failure-classification rules,
+registration, and a complete worked example live in
+[`docs/plugins.md`](docs/plugins.md) — the authoritative, self-contained guide.
+Reference your plugin from `shakedown.yaml` with `type: <your type_name>`.
 
 ## Development
 
