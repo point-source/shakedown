@@ -632,7 +632,8 @@ It is never scheduled by default (§req:constraints).
 
 ## CLI surface §spec:cli
 
-*Status: implemented*
+*Status: implemented for the shipped commands; `validate` is not started
+(§spec:setup-readiness-validation).*
 
 Shakedown is a one-shot CLI; every command runs to completion and
 exits (§req:constraints). The command surface:
@@ -644,6 +645,7 @@ exits (§req:constraints). The command surface:
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
+| `validate [--source S] [--collection C] [--live-handoff]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
 | `item show \| refetch \| forget <identifier>` | Single-item inspection and surgery. |
 | `serve [--host] [--port]` | Optional HTTP control plane (§spec:serve). |
 
@@ -900,6 +902,234 @@ upload an initial `shakedown.yaml`, paste the compose YAML into
 Container Station with credentials as environment variables. Day 2:
 collection changes via File Station (YAML edit), schedule changes via
 Container Station (compose edit), logs via Container Station.
+
+## Setup readiness validation §spec:setup-readiness-validation
+
+*Status: not started*
+
+A first-time operator can run a dedicated readiness validation before
+the first large mirror. The validation reports one pass/fail result per
+collection and names the specific setting, path, credential, source, or
+handoff target that needs action. It never downloads a full collection
+and never leaves behind archive or library items; a broken setup cannot
+look like a clean no-op. (§req:success-criteria #16,
+§req:user-stories: mirror a collection, add another collection, hand
+off automatically)
+
+Observable behavior:
+
+- `shakedown validate` checks the same startup configuration contract as
+  every command, then continues into setup-specific probes: archive,
+  library, and state paths are writable where writes are required;
+  archive and library share a filesystem; configured sources and
+  collections can be reached; required credential environment variables
+  are present and accepted by the source when credentials are needed;
+  layout templates are checked with the existing collision-risk guard;
+  and configured handoff targets are checked according to the handoff
+  validation mode below.
+- Validation output is grouped by source and collection. Each failing
+  check gives the plain-language consequence and the user action needed
+  to continue, for example "archive path is not writable; fix the volume
+  mount before syncing" or "IA credentials were rejected; update the
+  environment variables in Container Station." `--json` emits the same
+  structure for dashboards and the optional control plane.
+- A validation failure exits non-zero. A validation pass means "this
+  deployment is ready to attempt a real sync," not "the whole collection
+  has been mirrored."
+- The optional control plane exposes the same validation surface for
+  no-SSH deployments. Mutating live handoff tests remain protected by
+  the same bearer-token posture as ad-hoc sync and verify
+  (§spec:serve).
+
+**Decision and constraint.** Readiness is a dedicated validation flow,
+not an expanded `sync --dry-run` and not an always-on deep startup gate.
+The constraint is QNAP/no-SSH operability: a product director-level
+operator needs one visible "is this deployment ready?" action before a
+multi-hour mirror begins (§req:success-criteria #6, #16). `sync
+--dry-run` remains the plan preview for an already-valid deployment,
+while ordinary `status`, `restage`, and `reconcile` stay usable when an
+external source or handoff receiver is temporarily down.
+
+**Handoff validation and abuse case.** By default, handoff validation is
+non-mutating: webhook URLs are parsed and safely probed when the
+receiver supports a harmless check, configured commands are checked for
+presence and basic executability, and required environment variables are
+verified, but Shakedown does not import music, send production
+notifications, or run arbitrary configured commands as part of a normal
+readiness check. When the operator passes `--live-handoff`, Shakedown
+sends a marked validation webhook or runs the configured command with a
+marked test payload and records the result as a handoff readiness check.
+This was chosen because the director accepted the higher-confidence
+live test as an explicit action, while the default must not surprise a
+new deployment by triggering duplicate imports or arbitrary side
+effects. The blast radius is the existing handoff trust boundary: an
+operator who configures `exec` has already granted Shakedown permission
+to run that command, so validation must make the live execution visible,
+explicit, and auditable rather than implicit.
+
+**Alternatives rejected.** Expanding `sync --dry-run` was rejected
+because it mixes setup diagnosis with sync planning; a new operator
+would have to infer whether "nothing to do" means "valid and empty" or
+"the source/path/handoff could not be reached." A mandatory deep startup
+gate was rejected because it would make read-only recovery commands fail
+when an unrelated external dependency is down, directly conflicting with
+the recovery requirement (§req:success-criteria #17). Skipping handoff
+validation was rejected because a setup could pass while the promised
+library import path is broken (§req:user-stories: hand off
+automatically).
+
+**Tradeoffs.** A dedicated command adds one more surface to document,
+and live handoff validation can still cause receiver-side effects if the
+receiver ignores the marked test payload. The accepted tradeoff is that
+the potentially mutating behavior is explicit and opt-in, while the
+default readiness check remains safe to run repeatedly.
+
+**User-level test path.** On a fresh config, run validation with a
+missing archive path, a bad credential environment variable, an
+unreachable source, and a valid minimal collection. The output identifies
+each failing collection or setting and exits non-zero without
+downloading a collection. Fix the configuration and rerun until it
+passes; then run `validate --live-handoff` against a test webhook or
+test command and see the marked validation event recorded by the
+receiver.
+
+## Recoverable operation reporting §spec:recoverable-operation-reporting
+
+*Status: not started*
+
+When `sync`, `restage`, `reconcile`, or `validate` fails partway
+through, the next visible status tells the operator what completed, what
+did not, which collection or item needs attention, and whether retrying
+is safe. Local recordings remain intact unless the user explicitly
+requested deletion, and a later successful retry clears the failure
+state instead of leaving stale warnings. (§req:success-criteria #17,
+§req:user-stories: recover from a lost database, reorganize the library)
+
+Observable behavior:
+
+- Every recoverable operation records a user-facing outcome for each
+  affected source and collection: not started, in progress, completed,
+  completed with item-level issues, failed before completion, or stale
+  because source enumeration could not be trusted. The wording is
+  action-oriented: "retry is safe," "fix configuration then rerun," or
+  "deletion was requested; review before retrying."
+- `shakedown status` and `status --json` surface the latest incomplete
+  or failed operation ahead of ordinary counts, including the operation
+  type, the phase that failed, the affected collection or item when
+  known, and the next safe action. A successful later run for the same
+  collection clears the warning when it has actually completed the
+  affected work.
+- Operations that make deletion decisions preserve the existing
+  barriers: a failed or partial enumeration never prunes, and local
+  recordings are retained by default (§spec:discovery-pipeline,
+  §spec:item-lifecycle). Recovery reporting explains that preservation
+  in status so an operator does not mistake "failed run" for "lost
+  archive."
+- Interrupted runs are not reported as success merely because the
+  process exited. An unfinished operation remains visible until a retry
+  completes it or a targeted user action such as `item forget` removes
+  the affected item from Shakedown's responsibility.
+
+**Decision and constraint.** Recovery is surfaced through status as the
+operator's durable dashboard, not through transient logs alone. The
+constraint is no-SSH and post-failure operability: on QNAP, logs may be
+harder to inspect and a product director-level operator needs the next
+visible command or control-plane response to explain the state without
+knowing internal phases (§req:success-criteria #6, #17). The existing
+run records, item lifecycle, stale-collection marker, and collision
+summary are extended into a coherent recovery narrative rather than
+creating a separate recovery subsystem.
+
+**Alternatives rejected.** Relying on container logs was rejected
+because logs are ephemeral and do not answer whether a retry is safe
+after the container has exited. Treating any partial failure as a full
+rollback was rejected because successful item downloads and staging work
+are already durable and idempotent; discarding them would slow recovery
+without increasing safety. Adding a separate "repair mode" was rejected
+because the existing commands are already the recovery path: retry
+`sync`, rerun `restage`, rerun `reconcile`, or fix config and rerun
+`validate`.
+
+**Tradeoffs.** More status detail means status output must stay grouped
+and concise so ordinary healthy deployments remain easy to scan. The
+accepted tradeoff is to show the latest actionable recovery issue first
+and keep item-level detail available through JSON or targeted item
+inspection.
+
+**User-level test path.** Force a network failure during sync, a storage
+failure during restage, a bad source response during reconcile, and a
+bad path during validation. After each failure, run `shakedown status`
+and confirm it identifies the failed operation, affected collection or
+item, completed work, and safe next action. Restore the dependency and
+retry; status no longer reports success until the affected work has
+completed, and once it completes the stale warning is gone.
+
+## Release validation gate §spec:release-validation-gate
+
+*Status: not started*
+
+A maintainer can run one bounded, documented release validation before
+publishing. It exercises the user workflows most likely to regress:
+first-setup readiness, unsafe config rejection, partial-failure
+recovery, ordinary sync-to-library staging, and the existing real-source
+IA seam. The result is a clear pass/fail tied to the affected user
+workflow, not to internal fixtures. (§req:success-criteria #18,
+§req:success-criteria #10)
+
+Observable behavior:
+
+- The release check has one documented command. It is opt-in and
+  excluded from the default developer test run and routine CI unless a
+  maintainer explicitly enables it.
+- The deterministic portion runs against fake sources and throwaway
+  archive, library, config, and state paths. It proves that
+  `validate` catches missing paths, bad credentials or source access,
+  unsafe layout templates, and handoff failures; that a failed sync,
+  restage, reconcile, or validation flow leaves recordings intact; and
+  that a retry clears the visible recovery warning only after the user
+  workflow completes.
+- The real-source portion reuses the existing small, pinned IA
+  end-to-end check (§spec:e2e-real-source). It remains one small public
+  item, opt-in, and polite to the upstream source; its job is to catch
+  archive.org API drift and real filesystem integration issues the fake
+  sources cannot see.
+- A skipped risky scenario is a failure unless the maintainer
+  explicitly requested a narrower mode. The release gate never passes
+  because the network test, setup-readiness scenario, or recovery
+  scenario silently skipped itself.
+
+**Decision and constraint.** Release validation combines deterministic
+fake-source workflows with the existing one-item real IA check. The
+constraint is confidence without making every release depend on a large
+public-archive mirror: setup and recovery edge cases need deterministic
+fault injection, while source API drift needs one real upstream contact
+(§req:success-criteria #10, #18). This extends the current real-source
+check instead of replacing it.
+
+**Alternatives rejected.** Offline-only release validation was rejected
+because it cannot catch archive.org API changes, the exact gap the
+current real-source check exists to close. Broader real-source
+validation across multiple plugins was rejected for this increment
+because it is slower, more brittle, and less polite to public archives;
+the product risk called out in the requirements is confidence in the
+workflows, not mirroring many real collections before every release.
+Always-on CI execution was rejected because real-network checks are
+inherently flaky and bandwidth-consuming; a release gate should be run
+deliberately by a maintainer.
+
+**Tradeoffs.** The gate is not as fast as the default test suite and can
+still fail on an upstream outage. The accepted tradeoff is that release
+validation is explicit, bounded, and diagnostic: a maintainer sees which
+workflow broke and can distinguish a product regression from an
+upstream outage.
+
+**User-level test path.** On a clean machine, run the documented release
+validation command. Break the sample config path and see the setup
+readiness scenario fail; force a fake-source mid-run failure and see the
+recovery scenario fail until retry succeeds; disconnect network access
+and see the real-source portion fail loudly rather than skip; restore
+the environment and see one final pass/fail summary naming every
+workflow exercised.
 
 ## Failure behavior §spec:failure-behavior
 
