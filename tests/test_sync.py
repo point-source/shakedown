@@ -228,6 +228,53 @@ def test_disappeared_item_pruned_when_prune_enabled_later(tmp_roots: tuple[Path,
     assert row.archive_path is None
 
 
+def test_describe_failure_does_not_prune_still_enumerated_item(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """§spec:prune-safety: on a prune_disappeared collection, a transient describe_item
+    failure for a still-enumerated item must NOT prune or disappear it. Prune eligibility
+    keys on absence from the enumeration, never on absence from the described set."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, prune_disappeared=True)
+    _seed_item("gd-prune-safe")
+
+    # First sync mirrors the item to COMPLETE.
+    assert run_sync(config) == 0
+    archived = archive / "fake-src" / "coll1" / "gd-prune-safe"
+    staged = library / "fake-src" / "coll1" / "gd-prune-safe"
+    assert archived.is_dir() and staged.is_dir()
+
+    # Re-sync: enumeration still lists the item, but its per-item description fails
+    # transiently (describe_item returns None). It must be left exactly as recorded.
+    real_describe = FakePlugin.describe_item
+
+    def flaky_describe(self, identifier, collection):
+        if identifier == "gd-prune-safe":
+            return None  # transient per-item metadata fault
+        return real_describe(self, identifier, collection)
+
+    monkeypatch.setattr(FakePlugin, "describe_item", flaky_describe)
+    assert run_sync(config) == 0
+
+    # Archive files retained; the DB row is untouched (still COMPLETE) — never
+    # disappeared, pruned, or failed. status reports it exactly as before.
+    assert archived.is_dir(), "a describe failure must not remove archive files"
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    items = ItemRepo(conn)
+    row = items.get("fake-src", "coll1", "gd-prune-safe")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+    # The enumeration succeeded, so the collection is not stale either.
+    latest = RunRepo(conn).latest("fake-src", "coll1")
+    assert latest is not None and latest.stale is False
+
+    # A later clean re-sync (describe recovers) resolves the item normally.
+    monkeypatch.undo()
+    assert run_sync(config) == 0
+    row = items.get("fake-src", "coll1", "gd-prune-safe")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+    assert archived.is_dir()
+
+
 def test_stale_source_retains_items_and_flags_run(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:

@@ -77,6 +77,7 @@ def _stream_descriptors(
     plugin: SourcePlugin,
     collection: CollectionConfig,
     budget: SourceBudget,
+    enumerated: set[str] | None = None,
 ) -> Iterator[ItemDescriptor]:
     """Yield item descriptors as they resolve, fanning per-item metadata resolution
     across the shared per-source budget (SPEC §spec:discovery-pipeline).
@@ -88,12 +89,24 @@ def _stream_descriptors(
     per-item fault yields None from `describe_item` and is dropped, exactly as the serial
     path skipped a failed metadata fetch. Materializing the id list or a `describe_item`
     call raising propagates to the consumer, which treats it as an enumeration failure.
+
+    When ``enumerated`` is supplied, every identifier the enumeration returned is added
+    to it — including one whose `describe_item` transiently failed and was dropped. That
+    set, not the resolved descriptors, is the prune signal (SPEC §spec:prune-safety): an
+    enumerated-but-unresolved item is still present in the collection, so it must never be
+    read as `disappeared`. In the `discover()` fallback there is no enumerate/describe
+    split, so ``enumerated`` collects the resolved identifiers instead.
     """
     identifiers = plugin.enumerate_items(collection)
     if identifiers is None:
-        yield from plugin.discover(collection)
+        for desc in plugin.discover(collection):
+            if enumerated is not None:
+                enumerated.add(desc.identifier)
+            yield desc
         return
     ids = list(identifiers)  # materialize the enumeration (may raise -> stale)
+    if enumerated is not None:
+        enumerated.update(ids)
     if not ids:
         return
     with ThreadPoolExecutor(max_workers=min(budget.size, len(ids))) as pool:
@@ -115,9 +128,15 @@ def _discover_descriptors(
     """Materialize the full enumeration for the dry-run path (Discover + Plan, no fetch).
     The real run streams the same descriptors (`_stream_descriptors`) into the fetch
     pipeline instead of buffering them here.
+
+    Returns the resolved descriptors plus the set of *enumerated* identifiers — the prune
+    signal. The latter is a superset of the described identifiers: an item enumeration
+    listed but whose description failed is present for prune purposes even though it
+    resolved to no descriptor (SPEC §spec:prune-safety).
     """
-    descriptors = list(_stream_descriptors(plugin, collection, budget))
-    return descriptors, {d.identifier for d in descriptors}
+    enumerated: set[str] = set()
+    descriptors = list(_stream_descriptors(plugin, collection, budget, enumerated))
+    return descriptors, enumerated
 
 
 class PlanAction(StrEnum):
@@ -271,7 +290,9 @@ def _sync_collection(
         # no overlap to exploit, no writes. Materialize the enumeration and report the
         # plan without touching disk or DB.
         try:
-            descriptors, seen_identifiers = _discover_descriptors(plugin, collection, budget)
+            descriptors, enumerated_identifiers = _discover_descriptors(
+                plugin, collection, budget
+            )
         except Exception as e:
             log.warning("[%s/%s] source enumeration failed: %s", source.name, collection.name, e)
             stats.stale = True
@@ -279,7 +300,7 @@ def _sync_collection(
             return stats
         stats.discovered = len(descriptors)
         plan = _build_plan(
-            items, source.name, collection.name, descriptors, seen_identifiers,
+            items, source.name, collection.name, descriptors, enumerated_identifiers,
             prune_disappeared=collection.prune_disappeared,
         )
         _log_plan(source.name, collection.name, plan)
@@ -297,10 +318,10 @@ def _sync_collection(
 
     # Phases 1-4, pipelined: discover -> classify -> fetch + stage, overlapping downloads
     # with the remaining enumeration (SPEC §spec:discovery-pipeline, overlap lever).
-    seen_identifiers, deferred, enum_error = _pipelined_discover_and_fetch(
+    enumerated_identifiers, deferred, enum_error = _pipelined_discover_and_fetch(
         config, source, collection, plugin, items, stats, staged_paths, budget, by_identifier,
     )
-    stats.discovered = len(seen_identifiers)
+    stats.discovered = len(enumerated_identifiers)
 
     if enum_error is not None:
         # Enumeration failed (source unreachable or faulted partway). Flag the collection
@@ -320,8 +341,12 @@ def _sync_collection(
         return stats
 
     # Post-enumeration barrier: the enumeration is complete and successful, so the
-    # prune/`disappeared` set (in the DB but not seen this run) is now safe to compute.
-    disappeared = _disappeared_plan(by_identifier, seen_identifiers, collection.prune_disappeared)
+    # prune/`disappeared` set (in the DB but not returned by this enumeration) is now safe
+    # to compute. Keyed on `enumerated_identifiers` — an item enumeration listed but whose
+    # description failed counts as present and is never pruned (SPEC §spec:prune-safety).
+    disappeared = _disappeared_plan(
+        by_identifier, enumerated_identifiers, collection.prune_disappeared
+    )
     _log_pipeline_plan(source.name, collection.name, stats, deferred, disappeared)
 
     # Re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
@@ -381,10 +406,15 @@ def _pipelined_discover_and_fetch(
     shared per-source ``budget`` (SPEC §spec:source-budget). `unchanged`/`unavailable`
     items need no fetch and are deferred to the caller's post-enumeration barrier.
 
-    Returns ``(seen, deferred, enum_error)``:
+    Returns ``(enumerated, deferred, enum_error)``:
 
-    - ``seen`` — every identifier that resolved to a descriptor; the input to the
+    - ``enumerated`` — every identifier the enumeration returned; the input to the
       prune/`disappeared` barrier, which the caller runs only when ``enum_error`` is None.
+      Prune eligibility keys on absence from *this* set, never on absence from the
+      described set: an item enumeration listed but whose `describe_item` failed this run
+      is still present and must never be pruned or flagged `disappeared`
+      (SPEC §spec:prune-safety). Such an item is left entirely untouched — not in
+      ``deferred``, not fetched — so its DB row is reconsidered unchanged next run.
     - ``deferred`` — the UNCHANGED / UNAVAILABLE planned items.
     - ``enum_error`` — the exception if enumeration faulted partway (the collection goes
       stale and nothing is pruned), else None for a complete, successful enumeration.
@@ -395,7 +425,7 @@ def _pipelined_discover_and_fetch(
     consumers).
     """
     archive_root = config.archive_root / source.name / collection.name
-    seen: set[str] = set()
+    enumerated: set[str] = set()
     deferred: list[PlannedItem] = []
     enum_error: Exception | None = None
 
@@ -403,7 +433,6 @@ def _pipelined_discover_and_fetch(
         fetch_futures: dict[Future[_FetchOutcome], PlannedItem] = {}
 
         def dispatch(desc: ItemDescriptor) -> None:
-            seen.add(desc.identifier)
             planned = _classify_one(desc, by_identifier)
             if planned.action in (PlanAction.NEW, PlanAction.CHANGED_UPSTREAM):
                 archive_root.mkdir(parents=True, exist_ok=True)
@@ -415,16 +444,18 @@ def _pipelined_discover_and_fetch(
                 deferred.append(planned)
 
         def on_skip(identifier: str, existing: Item) -> None:
-            # Signal-unchanged: classify UNCHANGED without a metadata fetch. Recorded in
-            # `seen` so the prune barrier never mistakes it for disappeared, and deferred
-            # for the caller's idempotent re-stage pass (§spec:incremental-discovery).
-            seen.add(identifier)
+            # Signal-unchanged: classify UNCHANGED without a metadata fetch. The identifier
+            # is already in `enumerated` (the stream records every enumerated id), so the
+            # prune barrier never mistakes it for disappeared; deferred here for the
+            # caller's idempotent re-stage pass (§spec:incremental-discovery).
             deferred.append(PlannedItem(None, existing, PlanAction.UNCHANGED))
 
         descriptor_stream = (
-            _stream_descriptors_incremental(plugin, collection, budget, by_identifier, on_skip)
+            _stream_descriptors_incremental(
+                plugin, collection, budget, by_identifier, on_skip, enumerated
+            )
             if collection.incremental_discovery
-            else _stream_descriptors(plugin, collection, budget)
+            else _stream_descriptors(plugin, collection, budget, enumerated)
         )
         try:
             # Descriptors stream in as each resolves; dispatch classifies and fetches
@@ -443,7 +474,7 @@ def _pipelined_discover_and_fetch(
                 fut, fetch_futures[fut], config, source, collection, items, stats, staged_paths
             )
 
-    return seen, deferred, enum_error
+    return enumerated, deferred, enum_error
 
 
 def _fire_notifications(
@@ -556,6 +587,7 @@ def _stream_descriptors_incremental(
     budget: SourceBudget,
     by_identifier: dict[str, Item],
     on_skip: Callable[[str, Item], None],
+    enumerated: set[str] | None = None,
 ) -> Iterator[ItemDescriptor]:
     """Incremental-discovery variant of _stream_descriptors (§spec:incremental-discovery).
 
@@ -570,9 +602,11 @@ def _stream_descriptors_incremental(
     """
     signals = plugin.enumerate_with_signals(collection)
     if signals is None:
-        yield from _stream_descriptors(plugin, collection, budget)
+        yield from _stream_descriptors(plugin, collection, budget, enumerated)
         return
     pairs = list(signals)  # materialize the enumeration (may raise -> stale)
+    if enumerated is not None:
+        enumerated.update(identifier for identifier, _ in pairs)
     to_describe: list[tuple[str, str | None]] = []
     for identifier, signal in pairs:
         existing = by_identifier.get(identifier)
@@ -596,13 +630,18 @@ def _stream_descriptors_incremental(
 
 def _disappeared_plan(
     by_identifier: dict[str, Item],
-    seen_identifiers: set[str],
+    enumerated_identifiers: set[str],
     prune_disappeared: bool,
 ) -> list[PlannedItem]:
-    """Items in the DB but not in this (complete) enumeration — the prune/`disappeared`
+    """Items in the DB but absent from this (complete) enumeration — the prune/`disappeared`
     barrier. Callers MUST run this only after a complete, successful enumeration; a
     partial discovery is never read as items having disappeared
     (SPEC §spec:discovery-pipeline, §spec:failure-behavior).
+
+    Eligibility keys on absence from ``enumerated_identifiers`` — every identifier the
+    source *listed* — never on absence from the successfully-*described* set. An item the
+    enumeration returned counts as present even when its `describe_item` failed this run,
+    so a transient metadata fault can never masquerade as a takedown (SPEC §spec:prune-safety).
 
     Already-terminal states are skipped so a still-absent item isn't reprocessed every
     run — except that an item already flagged `disappeared` stays reachable for pruning
@@ -615,7 +654,7 @@ def _disappeared_plan(
     return [
         PlannedItem(None, existing, PlanAction.DISAPPEARED)
         for identifier, existing in by_identifier.items()
-        if identifier not in seen_identifiers and existing.status not in terminal
+        if identifier not in enumerated_identifiers and existing.status not in terminal
     ]
 
 
@@ -624,7 +663,7 @@ def _build_plan(
     source_name: str,
     collection_name: str,
     descriptors: list[ItemDescriptor],
-    seen_identifiers: set[str],
+    enumerated_identifiers: set[str],
     *,
     prune_disappeared: bool = False,
 ) -> list[PlannedItem]:
@@ -632,12 +671,16 @@ def _build_plan(
     enumeration. Used by the dry-run path, which reports what would happen without
     fetching; the real run pipelines the same classification (`_classify_one`) and
     prune barrier (`_disappeared_plan`) with the fetch stage.
+
+    ``enumerated_identifiers`` — every identifier the source listed — feeds the prune
+    barrier, so the dry-run reports the same prune-safe plan as the real path: an item
+    whose description failed is never shown as `disappeared` (SPEC §spec:prune-safety).
     """
     by_identifier: dict[str, Item] = {
         item.identifier: item for item in items.list_for_collection(source_name, collection_name)
     }
     plan = [_classify_one(desc, by_identifier) for desc in descriptors]
-    plan.extend(_disappeared_plan(by_identifier, seen_identifiers, prune_disappeared))
+    plan.extend(_disappeared_plan(by_identifier, enumerated_identifiers, prune_disappeared))
     return plan
 
 
