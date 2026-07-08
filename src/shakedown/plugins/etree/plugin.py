@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,9 @@ from shakedown.plugins.registry import register
 _BASE_URL = "https://archive.org"
 _PAGE_SIZE = 100
 _TIMEOUT = 60.0
+# Hard ceiling on enumeration pages, so a source that reports an inflated
+# numFound while always returning a non-empty page cannot loop forever.
+_MAX_PAGES = 10_000
 
 
 def _keep(name: str, fmt: str, formats: list[str], excludes: list[str]) -> bool:
@@ -58,6 +62,21 @@ def _coerce_size(raw: Any) -> int | None:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _is_contained(base: Path, name: str) -> bool:
+    """True iff joining ``name`` onto ``base`` stays within ``base``.
+
+    Manifest file names come from the remote source and are joined onto the
+    core-owned temp dir before writing; reject any that would escape it via a
+    ``..`` component, an absolute path, or a separator trick. Lexical
+    (``normpath``) check — it never touches the filesystem.
+    """
+    base_n = os.path.normpath(base)
+    target = os.path.normpath(base / name)
+    # Must land strictly *inside* base: a name that normalizes back to base
+    # itself (empty, ".", trailing slash) is not a real file and is rejected.
+    return target.startswith(base_n + os.sep)
 
 
 def _sanitize_identifier(identifier: str) -> str:
@@ -224,6 +243,10 @@ class EtreePlugin(SourcePlugin):
             if seen >= num_found:
                 break
             page += 1
+            if page > _MAX_PAGES:
+                # Bound a source that reports an inflated numFound while never
+                # returning an empty page.
+                break
 
     def _metadata(self, identifier: str) -> dict[str, Any]:
         resp = self._client.get(f"/metadata/{identifier}")
@@ -250,6 +273,18 @@ class EtreePlugin(SourcePlugin):
 
         total = 0
         for mf in item.manifest.files:
+            # Trust boundary: the file name comes from the remote source. Refuse
+            # to write anything that would escape the item directory. The core
+            # enforces this too, but guarding here keeps the plugin safe on its
+            # own and fails the item loudly rather than writing out of tree.
+            if not _is_contained(dest_dir, mf.name):
+                return FetchResult(
+                    success=False,
+                    bytes_downloaded=total,
+                    error=f"unsafe file name escapes item directory: {mf.name!r}",
+                    retriable=False,
+                )
+
             out = dest_dir / mf.name
             out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -258,9 +293,21 @@ class EtreePlugin(SourcePlugin):
                 total += out.stat().st_size
                 continue
 
+            # Stream to disk while hashing, so a multi-GB file never lands in
+            # memory in full (etree FLAC sets are large and fetches run
+            # concurrently).
+            hasher = hashlib.md5()
+            written = 0
             try:
-                resp = self._client.get(f"/download/{item.identifier}/{mf.name}")
-                resp.raise_for_status()
+                with self._client.stream(
+                    "GET", f"/download/{item.identifier}/{mf.name}"
+                ) as resp:
+                    resp.raise_for_status()
+                    with out.open("wb") as fh:
+                        for chunk in resp.iter_bytes():
+                            fh.write(chunk)
+                            hasher.update(chunk)
+                            written += len(chunk)
             except httpx.HTTPError as exc:
                 retriable, retry_after, message = _classify(exc)
                 return FetchResult(
@@ -271,9 +318,10 @@ class EtreePlugin(SourcePlugin):
                     retry_after=retry_after,
                 )
 
-            data = resp.content
-            if mf.md5 is not None and hashlib.md5(data).hexdigest() != mf.md5:
+            if mf.md5 is not None and hasher.hexdigest() != mf.md5:
                 # A checksum mismatch is a transient fault worth another attempt.
+                # Drop the corrupt partial so it can't be mistaken for complete.
+                out.unlink(missing_ok=True)
                 return FetchResult(
                     success=False,
                     bytes_downloaded=total,
@@ -281,8 +329,7 @@ class EtreePlugin(SourcePlugin):
                     retriable=True,
                 )
 
-            out.write_bytes(data)
-            total += len(data)
+            total += written
 
         return FetchResult(success=True, bytes_downloaded=total)
 

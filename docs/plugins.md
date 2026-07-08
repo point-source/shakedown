@@ -250,6 +250,13 @@ checksums as bytes arrive, and return a `FetchResult`. Rules:
   and must not construct it. The core atomically renames `dest_dir` into the
   archive on success and sweeps it on failure, so a partial or failed fetch can
   never corrupt an existing archived copy.
+- **Treat file names as untrusted.** Manifest `name`s come from the remote
+  source, so before writing confirm each one stays *inside* `dest_dir` — reject
+  any absolute path or `..` component. Joining a hostile name onto `dest_dir`
+  otherwise resolves outside it (`dest_dir / "/etc/x"` is `/etc/x`;
+  `dest_dir / "../../x"` escapes), turning a fetch into an arbitrary file write.
+  The core enforces this too — it refuses to fetch an item whose manifest holds
+  an escaping name — but guard in the plugin so it is correct on its own.
 - **Verify checksums as you go.** If the source provides an md5/size per file,
   confirm the downloaded bytes match. A mismatch is a transient fault (below).
 - **Be idempotent.** The core wipes `dest_dir` before each attempt, but write
@@ -404,6 +411,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -431,6 +439,13 @@ def _keep(name: str, fmt: str, formats: list[str], excludes: list[str]) -> bool:
     fmt = (fmt or "").lower()
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
     return any(f.lower() == fmt or f.lower() == ext for f in formats)
+
+
+def _contained(base: Path, name: str) -> bool:
+    """True iff joining a remote-supplied name onto base stays inside base."""
+    base_n = os.path.normpath(base)
+    target = os.path.normpath(base / name)
+    return target.startswith(base_n + os.sep)
 
 
 @register
@@ -494,6 +509,12 @@ class ExamplePlugin(SourcePlugin):
 
         total = 0
         for mf in item.manifest.files:
+            # Never write a remote-supplied name outside the item directory.
+            if not _contained(dest_dir, mf.name):
+                return FetchResult(
+                    success=False, bytes_downloaded=total,
+                    error=f"unsafe file name: {mf.name!r}", retriable=False,
+                )
             out = dest_dir / mf.name
             out.parent.mkdir(parents=True, exist_ok=True)
             # Idempotent: skip a file already present and correct.

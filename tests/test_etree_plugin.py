@@ -276,6 +276,27 @@ def test_fetch_fails_fast_on_restricted_without_download(tmp_path: Path) -> None
     assert calls == []  # no download attempted
 
 
+def test_fetch_rejects_path_traversal_file_name(tmp_path: Path) -> None:
+    """A remote file name that escapes the item dir is refused without a write."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, content=b"pwned")
+
+    dest = tmp_path / "item"
+    dest.mkdir()
+    plugin = _make_plugin(handler)
+    for evil in ("../escape.flac", "/etc/evil.flac", "a/../../escape.flac", "", "."):
+        item = _item_with_files([ManifestFile(evil, None, None)])
+        result = plugin.fetch(item, dest, [], [])
+        assert result.success is False
+        assert result.retriable is False
+        assert "unsafe file name" in (result.error or "")
+    assert calls == []  # no download attempted for any traversal name
+    assert not (tmp_path / "escape.flac").exists()
+
+
 def test_fetch_is_idempotent_over_existing_file(tmp_path: Path) -> None:
     content = b"flac-bytes"
     md5 = hashlib.md5(content).hexdigest()
