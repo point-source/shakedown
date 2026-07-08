@@ -201,11 +201,11 @@ never runs against a partial discovery.
 
 ## Discovery performance §spec:discovery-performance
 
-*Status: in progress — the shared per-source concurrency budget
+*Status: implemented — the shared per-source concurrency budget
 (§spec:source-budget), parallel per-item discovery and discover→download
-pipelining (§spec:discovery-pipeline, both levers), and the bounded slow-metadata
-envelope (§spec:slow-metadata) are implemented. Incremental discovery
-(§spec:incremental-discovery) remains.*
+pipelining (§spec:discovery-pipeline, both levers), the bounded slow-metadata
+envelope (§spec:slow-metadata), and opt-in incremental discovery
+(§spec:incremental-discovery) are all in place.*
 
 On a large collection (~14k items, e.g. IA GratefulDead), discovery is
 the wall-clock bottleneck in two regimes. A **first full sync**
@@ -284,6 +284,8 @@ mechanism.
 
 ### Incremental discovery §spec:incremental-discovery
 
+*Status: implemented*
+
 Opt-in per collection (`incremental_discovery`, default off,
 §spec:configuration). When enabled, discovery requests a cheap per-item
 **change signal in the search response itself** — a source-provided
@@ -291,13 +293,12 @@ token that moves whenever the item's contents change (for IA, the
 item's update timestamp together with its total size) — and persists it
 alongside the recorded manifest (§spec:state). On a later sync, an item
 whose current signal matches the stored one is classified `unchanged`
-**without** the per-item metadata round-trip — the expensive metadata
-fetch is skipped entirely. An item whose signal differs, or that has no
-stored signal, falls through to the full manifest comparison
-(§spec:sync-identity) exactly as today. This is what collapses a
-recurring no-op sync from N metadata calls to a single paginated search
-(§req:success-criteria #11): a weekly run's wall-clock scales with what
-changed, not with collection size.
+**without** the per-item metadata round-trip. An item whose signal
+differs, or that has no stored signal, falls through to the full
+manifest comparison (§spec:sync-identity) exactly as today. This
+collapses a recurring no-op sync from N metadata calls to a single
+paginated search (§req:success-criteria #11): a weekly run's wall-clock
+scales with what changed, not with collection size.
 
 **Correctness bound — speed never costs a missed change**
 (§req:quality-attributes). The fast-path is a *skip*, never a

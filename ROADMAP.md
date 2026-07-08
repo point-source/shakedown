@@ -6,39 +6,5 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Incremental discovery §road:incremental-discovery
-
-Closes the recurring-no-op-sync gap: an opt-in per-collection fast-path
-skips the per-item metadata fetch for items a cheap source change signal
-reports unchanged. Independent of §road:pipelined-sync — may proceed in
-parallel. (§spec:discovery-performance)
-
-### Persist source change signal §road:change-signal-column
-
-Add a per-item source change-signal column to the `Item` model and
-`items` table with a `SCHEMA_VERSION` bump and migration
-(`models.py`, `db.py`, `state.py`), populated from the descriptor.
-§spec:incremental-discovery
-
-### Surface the change signal from IA search §road:ia-change-signal
-
-Request `oai_updatedate` and `item_size` in `search_items(...)` and
-expose the combined signal on `ItemDescriptor` (`plugins/ia/plugin.py`,
-`plugins/base.py`). §spec:incremental-discovery — Depends on §road:change-signal-column
-
-### Opt-in incremental skip §road:incremental-skip
-
-Add the per-collection `incremental_discovery` flag (`config.py`) and,
-in `sync.py`/`plugins/ia/plugin.py`, short-circuit to `unchanged` —
-skipping `get_item()` — when the stored signal matches, falling through
-to the full manifest comparison otherwise. §spec:incremental-discovery — Depends on §road:ia-change-signal
-
-**Verify:** Set `incremental_discovery: true` on a collection and run
-`shakedown sync --collection <c>` twice (offline doubles). Confirm the
-second run performs no per-item metadata fetch for items whose signal is
-unchanged (observable via the instrumented double / logs); that an item
-whose signal changed is still classified `changed-upstream` and
-refetched; that an item with no stored signal falls through to full
-manifest comparison; and that with the flag off (default) behavior is
-unchanged from today. Confirm `verify --deep` still reports drift as the
-residual net.
+_No open workstreams. The discovery-performance increment is complete;
+see [SPEC.md](SPEC.md) §spec:discovery-performance._

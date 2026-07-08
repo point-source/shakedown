@@ -41,6 +41,12 @@ sources:
         query: 'collection:Phish'
         format_filters: [flac]
         # Default library_layout is `passthrough`: mirrors the archive layout 1:1.
+        # Opt-in fast-path for recurring no-op syncs (SPEC.md §spec:incremental-discovery):
+        # when the source's cheap change signal is unchanged, skip the per-item metadata
+        # fetch and classify the item `unchanged` without it. Off by default — a changed
+        # or absent signal always falls through to the full manifest comparison, and
+        # `verify --deep` stays the byte-level safety net.
+        incremental_discovery: false
 
   # The etree Live Music Archive. A second, independently written source plugin
   # that talks to archive.org's public HTTP/JSON API directly (httpx), rather
