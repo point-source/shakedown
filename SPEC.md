@@ -201,7 +201,11 @@ never runs against a partial discovery.
 
 ## Discovery performance §spec:discovery-performance
 
-*Status: not started*
+*Status: in progress — the shared per-source concurrency budget
+(§spec:source-budget), parallel per-item discovery (§spec:discovery-pipeline,
+concurrency lever), and the bounded slow-metadata envelope (§spec:slow-metadata)
+are implemented. Discover→download pipelining (§spec:discovery-pipeline, overlap
+lever) and incremental discovery (§spec:incremental-discovery) remain.*
 
 On a large collection (~14k items, e.g. IA GratefulDead), discovery is
 the wall-clock bottleneck in two regimes. A **first full sync**
@@ -222,12 +226,11 @@ bound.
 ### Shared source concurrency budget §spec:source-budget
 
 All of a source's concurrent traffic to its upstream host — per-item
-metadata calls during discovery, file downloads during fetch, and
-multiple collections syncing at once — draws from a **single shared
-concurrency budget per source**. That budget is the hard ceiling on
-simultaneous connections Shakedown opens to the host; discovery workers
-and download workers acquire from the same pool, and the ceiling can
-never be exceeded no matter how many collections run concurrently.
+metadata calls during discovery and file downloads during fetch, across
+every collection syncing at once — draws from a **single shared
+concurrency budget per source**: the hard ceiling on simultaneous
+connections Shakedown opens to the host, which the ceiling can never
+exceed no matter how many collections run concurrently.
 
 **Why per-source, not per-collection.** Politeness is a property of the
 upstream host, not of any one collection: archive.org sees the sum of
@@ -332,16 +335,14 @@ a metadata fetch to find out.
 ### Slow-metadata resilience §spec:slow-metadata
 
 A single slow or timing-out upstream metadata response never stalls the
-whole run. Structurally, parallel discovery (§spec:discovery-pipeline)
-removes head-of-line blocking — a slow item holds one budget slot while
-the others proceed. In addition, per-item metadata requests during
-discovery carry a **bounded timeout and retry envelope** matched to the
-upstream's real latency, so a slow endpoint costs a bounded wait rather
-than minutes of stacked timeout-then-retry cycles. Transient
-discovery-time upstream faults (a slow, 5xx, or 429 metadata response)
-are handled with the same back-off discipline the fetch path already
-owns (§spec:failure-behavior), rather than surfacing as an unhandled
-enumeration failure for what is merely transient slowness.
+whole run. Parallel discovery (§spec:discovery-pipeline) removes
+head-of-line blocking — a slow item holds one budget slot while the
+others proceed — and per-item metadata requests carry a **bounded
+timeout and retry envelope** matched to the upstream's real latency.
+Transient discovery-time faults (slow, 5xx, or 429) are classified and
+backed off with the same discipline the fetch path owns
+(§spec:failure-behavior), so mere transient slowness never surfaces as an
+enumeration failure.
 
 **Why both parallelism and a tuned timeout** (issue-complementary).
 Parallelism removes the *blocking* — the run no longer waits on the slow

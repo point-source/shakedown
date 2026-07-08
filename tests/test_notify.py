@@ -272,7 +272,7 @@ def test_sync_fires_failure_on_unreachable_source(tmp_roots: tuple[Path, Path]) 
         return httpx.Response(200)
 
     with (
-        patch.object(FakePlugin, "discover", side_effect=RuntimeError("source unreachable")),
+        patch.object(FakePlugin, "enumerate_items", side_effect=RuntimeError("source unreachable")),
         patch("shakedown.notify.httpx.post", side_effect=fake_post),
     ):
         assert run_sync(config) == 1  # a failed run exits non-zero

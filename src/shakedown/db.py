@@ -121,8 +121,17 @@ _MIGRATIONS = {
 
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    """Run a block as a single SQLite transaction."""
-    conn.execute("BEGIN")
+    """Run a block as a single SQLite transaction.
+
+    Uses ``BEGIN IMMEDIATE`` so the write lock is acquired up front. A plain
+    deferred ``BEGIN`` takes only a read lock and upgrades to a write on the first
+    mutation; when two collection workers (max_concurrent_collections) both hold a
+    read lock and try to upgrade, SQLite returns SQLITE_BUSY *immediately* to break
+    the deadlock — ``busy_timeout`` cannot help a write-upgrade. Taking the write
+    lock at BEGIN makes concurrent transactions serialize under ``busy_timeout``
+    instead of failing with "database is locked".
+    """
+    conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
     except BaseException:

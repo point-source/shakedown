@@ -137,6 +137,56 @@ sources:
     assert cfg.max_concurrent_collections == 5
 
 
+def test_max_concurrent_requests_defaults_to_none(tmp_path: Path) -> None:
+    """Unset, the per-source budget falls back to max_concurrent_downloads
+    (SPEC §spec:source-budget), so the field defaults to None."""
+    p = _write(tmp_path, """
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'q'
+""")
+    cfg = load(p)
+    assert cfg.sources[0].max_concurrent_requests is None
+
+
+def test_max_concurrent_requests_honored_from_yaml(tmp_path: Path) -> None:
+    p = _write(tmp_path, """
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    max_concurrent_requests: 3
+    collections:
+      - name: gd
+        query: 'q'
+""")
+    cfg = load(p)
+    assert cfg.sources[0].max_concurrent_requests == 3
+
+
+def test_max_concurrent_requests_must_be_positive(tmp_path: Path) -> None:
+    """A zero/negative per-source budget is a config error (ge=1)."""
+    p = _write(tmp_path, """
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    max_concurrent_requests: 0
+    collections:
+      - name: gd
+        query: 'q'
+""")
+    with pytest.raises(ConfigError):
+        load(p)
+
+
 def test_max_concurrent_collections_must_be_positive(tmp_path: Path) -> None:
     """A zero/negative cap is a config error (ge=1), named at startup."""
     p = _write(tmp_path, """

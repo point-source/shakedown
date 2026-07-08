@@ -10,8 +10,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -32,6 +35,80 @@ from shakedown.staging import stage_item, staging_dir_for, unstage_item
 from shakedown.state import ItemRepo, RunRepo
 
 log = logging.getLogger(__name__)
+
+
+class SourceBudget:
+    """Shared per-source concurrency ceiling (SPEC §spec:source-budget).
+
+    One instance per source, shared across all of that source's collections and
+    both its discovery and download workers, so the number of simultaneous
+    connections Shakedown opens to the upstream host never exceeds the configured
+    budget — no matter how many collections run concurrently.
+    """
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self._sem = threading.BoundedSemaphore(size)
+
+    @contextmanager
+    def slot(self) -> Iterator[None]:
+        self._sem.acquire()
+        try:
+            yield
+        finally:
+            self._sem.release()
+
+
+def _source_budget_size(config: Config, source: SourceConfig) -> int:
+    return source.max_concurrent_requests or config.max_concurrent_downloads
+
+
+def _describe_one(
+    plugin: SourcePlugin,
+    identifier: str,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+) -> ItemDescriptor | None:
+    with budget.slot():
+        return plugin.describe_item(identifier, collection)
+
+
+def _discover_descriptors(
+    plugin: SourcePlugin,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+) -> tuple[list[ItemDescriptor], set[str]]:
+    """Materialize the full enumeration, fanning per-item metadata resolution across
+    the shared per-source budget (SPEC §spec:discovery-pipeline).
+
+    Sources that expose `enumerate_items()` get concurrent `describe_item()` resolution
+    bounded by the source budget; the enumeration is fully materialized here (before
+    planning) so prune/`disappeared` semantics are unchanged. Sources without the
+    enumerate/describe split fall back to the serial `discover()` drain. A transient
+    per-item fault yields None and is dropped, exactly as the serial path skipped a
+    failed metadata fetch — so NEW/CHANGED/UNCHANGED/DISAPPEARED classification is
+    identical to the pre-change serial run.
+    """
+    identifiers = plugin.enumerate_items(collection)
+    descriptors: list[ItemDescriptor] = []
+    if identifiers is None:
+        # Serial fallback: this source can't split enumerate/describe.
+        descriptors.extend(plugin.discover(collection))
+    else:
+        ids = list(identifiers)  # fully materialize the enumeration (may raise -> stale)
+        if ids:
+            workers = min(budget.size, len(ids))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_describe_one, plugin, identifier, collection, budget)
+                    for identifier in ids
+                ]
+                for fut in as_completed(futures):
+                    desc = fut.result()
+                    if desc is not None:
+                        descriptors.append(desc)
+    seen = {d.identifier for d in descriptors}
+    return descriptors, seen
 
 
 class PlanAction(StrEnum):
@@ -96,12 +173,23 @@ def run_sync(
     # already-migrated DB). SPEC §spec:sync-workflow.
     connect(config.state_db).close()  # type: ignore[arg-type]
 
+    # One shared concurrency budget per distinct source, so all of that source's
+    # collections (and their discovery + download workers) draw on a single
+    # bounded pool — the hard ceiling on simultaneous upstream connections holds
+    # even with max_concurrent_collections > 1 (SPEC §spec:source-budget).
+    budgets: dict[str, SourceBudget] = {}
+    for source, _collection, _plugin in work:
+        if source.name not in budgets:
+            budgets[source.name] = SourceBudget(_source_budget_size(config, source))
+
     overall_failed = 0
     max_workers = min(config.max_concurrent_collections, len(work))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_sync_collection, config, source, collection, plugin, dry_run=dry_run):
-                (source, collection)
+            pool.submit(
+                _sync_collection, config, source, collection, plugin,
+                dry_run=dry_run, budget=budgets[source.name],
+            ): (source, collection)
             for source, collection, plugin in work
         }
         for fut in as_completed(futures):
@@ -133,6 +221,7 @@ def _sync_collection(
     plugin: SourcePlugin,
     *,
     dry_run: bool,
+    budget: SourceBudget,
 ) -> CollectionSyncStats:
     """Sync one (source, collection) end-to-end."""
     started = datetime.now()
@@ -145,14 +234,12 @@ def _sync_collection(
     stats = CollectionSyncStats()
     staged_paths: set[Path] = set()
 
-    # Phase 1: discover
-    descriptors: list[ItemDescriptor] = []
-    seen_identifiers: set[str] = set()
+    # Phase 1: discover. Fan per-item metadata resolution across the shared source
+    # budget, but fully materialize the enumeration before planning so prune/
+    # `disappeared` semantics are unchanged (SPEC §spec:discovery-pipeline).
     log.info("[%s/%s] discovering...", source.name, collection.name)
     try:
-        for desc in plugin.discover(collection):
-            descriptors.append(desc)
-            seen_identifiers.add(desc.identifier)
+        descriptors, seen_identifiers = _discover_descriptors(plugin, collection, budget)
     except Exception as e:
         # Source enumeration failed (unreachable or permanently-gone source). Flag
         # the collection stale so `status` reports it, and leave every existing item
@@ -185,7 +272,8 @@ def _sync_collection(
     # Phase 3 + 4: fetch + stage
     fetch_targets = [p for p in plan if p.action in (PlanAction.NEW, PlanAction.CHANGED_UPSTREAM)]
     _execute_fetch_and_stage(
-        config, source, collection, plugin, items, fetch_targets, stats, staged_paths
+        config, source, collection, plugin, items, fetch_targets, stats, staged_paths,
+        budget=budget,
     )
 
     # Phase 4b: re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
@@ -367,11 +455,17 @@ def _execute_fetch_and_stage(
     targets: list[PlannedItem],
     stats: CollectionSyncStats,
     staged_paths: set[Path] | None = None,
+    budget: SourceBudget | None = None,
 ) -> None:
     """Concurrent fetch (capped by max_concurrent_downloads); sequential staging.
 
     Each item is its own atomic unit: fetch into temp, persist row + create
     hardlinks once the bytes are on disk and the manifest is recorded.
+
+    When a per-source ``budget`` is supplied, each fetch acquires a slot from it
+    around the whole ``_fetch_one`` call, so simultaneous connections to the
+    source's upstream host never exceed the shared per-source ceiling — the pool's
+    worker count is only the per-collection parallelism (SPEC §spec:source-budget).
     """
     if not targets:
         return
@@ -381,7 +475,9 @@ def _execute_fetch_and_stage(
 
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as pool:
         futures = {
-            pool.submit(_fetch_one, plugin, target, archive_root, collection): target
+            pool.submit(
+                _fetch_one_budgeted, budget, plugin, target, archive_root, collection
+            ): target
             for target in targets
         }
         for fut in as_completed(futures):
@@ -495,13 +591,39 @@ def _fetch_with_retries(
         if result.success or not result.retriable or attempt == max_attempts:
             return result
 
-        delay = result.retry_after if result.retry_after is not None else _backoff_seconds(attempt)
+        # Clamp a source-supplied Retry-After to the backoff cap: the value is
+        # upstream-controlled and a fetch worker holds a SourceBudget slot while it
+        # sleeps, so an unbounded value must never pin slots for an attacker-chosen wait.
+        delay = (
+            _backoff_seconds(attempt)
+            if result.retry_after is None
+            else min(result.retry_after, _MAX_BACKOFF_SECONDS)
+        )
         log.warning(
             "fetch attempt %d/%d for %s failed (%s); retrying in %.1fs",
             attempt, max_attempts, desc.identifier, result.error, delay,
         )
         time.sleep(delay)
     raise AssertionError("unreachable: max_attempts must be >= 1")
+
+
+def _fetch_one_budgeted(
+    budget: SourceBudget | None,
+    plugin: SourcePlugin,
+    target: PlannedItem,
+    archive_root: Path,
+    collection: CollectionConfig,
+) -> _FetchOutcome:
+    """Acquire a per-source budget slot around the whole fetch (SPEC §spec:source-budget).
+
+    The slot is held for the entire ``_fetch_one`` call so it counts as one live
+    upstream connection; with no budget (e.g. a single-item refetch) the fetch runs
+    unbounded.
+    """
+    if budget is None:
+        return _fetch_one(plugin, target, archive_root, collection)
+    with budget.slot():
+        return _fetch_one(plugin, target, archive_root, collection)
 
 
 def _fetch_one(

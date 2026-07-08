@@ -5,6 +5,7 @@ import fnmatch
 import logging
 import os
 import shutil
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,23 @@ from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin, Ve
 from shakedown.plugins.registry import register
 
 log = logging.getLogger(__name__)
+
+
+# Bounded metadata timeout + retry envelope for discovery-time faults, matched to
+# archive.org's real latency (SPEC §spec:slow-metadata). Mirrors the fetch path's
+# core-owned retry discipline (sync.py) so a slow/5xx/429 metadata response costs a
+# bounded wait, not minutes of stacked retries, and never a spurious enumeration failure.
+_METADATA_CONNECT_TIMEOUT = 10.0
+_METADATA_READ_TIMEOUT = 30.0
+_METADATA_TIMEOUT = (_METADATA_CONNECT_TIMEOUT, _METADATA_READ_TIMEOUT)
+_MAX_METADATA_ATTEMPTS = 3
+_METADATA_BACKOFF_BASE_SECONDS = 1.0
+_METADATA_MAX_BACKOFF_SECONDS = 30.0
+
+
+def _metadata_backoff_seconds(attempt: int) -> float:
+    """Exponential backoff (seconds) for the Nth (1-based) metadata retry, capped."""
+    return min(_METADATA_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), _METADATA_MAX_BACKOFF_SECONDS)
 
 
 def _get_ia_session(source_config: SourceConfig) -> ia.ArchiveSession:
@@ -36,7 +54,14 @@ def _get_ia_session(source_config: SourceConfig) -> ia.ArchiveSession:
         if email and password:
             config["s3"] = {"access": email, "secret": password}
             config["cookies"] = {"logged-in-user": email}
-    return ia.get_session(config=config) if config else ia.get_session()
+    # Disable the internetarchive library's own internal retries so they don't stack
+    # under our bounded discovery/fetch retry loops (SPEC §spec:slow-metadata).
+    http_adapter_kwargs = {"max_retries": 0}
+    return (
+        ia.get_session(config=config, http_adapter_kwargs=http_adapter_kwargs)
+        if config
+        else ia.get_session(http_adapter_kwargs=http_adapter_kwargs)
+    )
 
 
 def _file_matches_filters(
@@ -92,31 +117,78 @@ class IAPlugin(SourcePlugin):
         super().__init__(source_config)
         self._session = _get_ia_session(source_config)
 
-    def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
-        """Enumerate items matching `collection.query` against IA's advanced search."""
+    def enumerate_items(self, collection: CollectionConfig) -> Iterator[str]:
+        """Yield identifiers matching the query (the cheap half of discovery)."""
         log.info("IA discover: query=%r", collection.query)
         search = self._session.search_items(collection.query, fields=["identifier"])
         for hit in search:
-            identifier = hit["identifier"]
+            yield hit["identifier"]
+
+    def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
+        for identifier in self.enumerate_items(collection):
+            desc = self.describe_item(identifier, collection)
+            if desc is not None:
+                yield desc
+
+    def describe_item(
+        self, identifier: str, collection: CollectionConfig
+    ) -> ItemDescriptor | None:
+        """Resolve one item's descriptor via a bounded, retrying metadata fetch.
+
+        Carries a bounded read timeout and mirrors the fetch path's retry/back-off
+        discipline (SPEC §spec:slow-metadata): a transient fault (slow, 5xx, 429,
+        connection reset) is retried up to `_MAX_METADATA_ATTEMPTS` with exponential
+        backoff, honoring a source-supplied `Retry-After`. A non-retriable fault, or
+        exhausted retries, logs a warning and returns None (the item is skipped for
+        this run — identical to the pre-change behavior of a failed get_item), so one
+        bad item never fails the whole enumeration.
+        """
+        item = self._get_item_with_retries(identifier)
+        if item is None:
+            return None
+        files: list[dict[str, Any]] = list(item.files)
+        metadata: dict[str, Any] = dict(item.metadata)
+        manifest = _build_manifest(files, collection.format_filters, collection.exclude_filters)
+        restricted, reason = _detect_restriction(metadata)
+        metadata = _normalize_template_fields(identifier, metadata)
+        return ItemDescriptor(
+            identifier=identifier,
+            manifest=manifest,
+            metadata=metadata,
+            is_restricted=restricted,
+            restriction_reason=reason,
+        )
+
+    def _get_item_with_retries(self, identifier: str):
+        """get_item with a bounded timeout and the fetch path's retry/back-off.
+
+        Returns the IA item, or None if it can't be resolved within the envelope.
+        """
+        for attempt in range(1, _MAX_METADATA_ATTEMPTS + 1):
             try:
-                item = self._session.get_item(identifier)
+                return self._session.get_item(
+                    identifier, request_kwargs={"timeout": _METADATA_TIMEOUT}
+                )
             except Exception as e:
-                log.warning("IA get_item failed for %s: %s", identifier, e)
-                continue
-
-            files: list[dict[str, Any]] = list(item.files)
-            metadata: dict[str, Any] = dict(item.metadata)
-            manifest = _build_manifest(files, collection.format_filters, collection.exclude_filters)
-            restricted, reason = _detect_restriction(metadata)
-            metadata = _normalize_template_fields(identifier, metadata)
-
-            yield ItemDescriptor(
-                identifier=identifier,
-                manifest=manifest,
-                metadata=metadata,
-                is_restricted=restricted,
-                restriction_reason=reason,
-            )
+                if not _is_retriable(e) or attempt == _MAX_METADATA_ATTEMPTS:
+                    log.warning("IA get_item failed for %s: %s", identifier, e)
+                    return None
+                # Honor a source-supplied Retry-After, but clamp it to the backoff
+                # cap: the header is upstream-controlled, and a describe worker holds
+                # a shared SourceBudget slot while it sleeps — an unbounded value would
+                # let a hostile/compromised endpoint pin slots and wedge the run.
+                retry_after = _retry_after_seconds(e)
+                delay = (
+                    _metadata_backoff_seconds(attempt)
+                    if retry_after is None
+                    else min(retry_after, _METADATA_MAX_BACKOFF_SECONDS)
+                )
+                log.warning(
+                    "IA get_item attempt %d/%d for %s failed (%s); retrying in %.1fs",
+                    attempt, _MAX_METADATA_ATTEMPTS, identifier, e, delay,
+                )
+                time.sleep(delay)
+        return None
 
     def fetch(
         self,
