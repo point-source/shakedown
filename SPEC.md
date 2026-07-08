@@ -125,7 +125,11 @@ Behavior the user can observe:
   §req:quality-attributes). A per-collection `prune_disappeared: true`
   opt-in instead removes the item's archive files and staging links;
   the database record is retained (marked pruned) so `status` can
-  still report the takedown.
+  still report the takedown. Enabling `prune_disappeared` later also
+  prunes items that had already disappeared under the retain default —
+  the retain→prune transition takes effect on the next sync, so the
+  flag is not silently no-op on a collection with an existing backlog
+  of disappeared items.
 
 **Why retention is the default.** Durable mirroring is the product's
 reason to exist; losing content must only ever be the user's explicit

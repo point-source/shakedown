@@ -26,7 +26,7 @@ fails loudly (not skips). To re-pin, pick another item meeting the criteria
 above (``https://archive.org/advancedsearch.php`` for candidates; confirm the
 item's ``metadata`` shows no ``access-restricted`` flag), then update
 ``PINNED_IDENTIFIER``, ``PINNED_FILE``, ``PINNED_FILE_MD5``, ``PINNED_FILE_SIZE``,
-and the two template fields asserted below (``PINNED_CREATOR``) to match the new
+and the template field asserted below (``PINNED_CREATOR``) to match the new
 item's metadata.
 """
 from __future__ import annotations
