@@ -47,6 +47,13 @@ class SourceConfig(BaseModel):
     auth: IAAuth | None = None
     collections: list[CollectionConfig]
 
+    # Per-source shared concurrency budget: the hard ceiling on simultaneous
+    # connections Shakedown opens to this source's upstream host, spanning
+    # discovery metadata calls and file downloads across all its collections
+    # (SPEC §spec:source-budget). Falls back to the global max_concurrent_downloads
+    # when unset.
+    max_concurrent_requests: int | None = Field(default=None, ge=1)
+
 
 class FailureNotification(BaseModel):
     model_config = ConfigDict(extra="forbid")

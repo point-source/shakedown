@@ -652,6 +652,66 @@ def test_collection_cap_of_one_serializes(tmp_roots: tuple[Path, Path], monkeypa
     assert run_sync(config) == 1, "serial execution can't satisfy a 2-party barrier"
 
 
+def test_source_budget_bounds_fetches_across_collections(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """SPEC §spec:source-budget: a source's shared concurrency budget is the hard
+    ceiling on simultaneous fetches, even across two collections of that source
+    running at once (max_concurrent_collections=2) and a larger per-collection
+    download pool (max_concurrent_downloads=4). With max_concurrent_requests=2,
+    the observed peak concurrency must never exceed 2."""
+    import time as _time
+
+    archive, library = tmp_roots
+    config = Config(
+        archive_root=archive,
+        library_root=library,
+        max_concurrent_downloads=4,
+        max_concurrent_collections=2,
+        sources=[
+            SourceConfig(
+                name="fake-src",
+                type="fake",
+                max_concurrent_requests=2,
+                collections=[
+                    CollectionConfig(name="c1", query="*"),
+                    CollectionConfig(name="c2", query="*"),
+                ],
+            )
+        ],
+    )
+    # Enough distinct items that both collections' pools (4 workers each) would
+    # overlap well past 2 in-flight fetches if the budget were not enforced.
+    for i in range(6):
+        _seed_item(f"gd-show-{i}")
+
+    lock = threading.Lock()
+    state = {"in_flight": 0, "max": 0}
+    real_fetch = FakePlugin.fetch
+
+    def instrumented_fetch(self, item, dest_dir, format_filters, exclude_filters):
+        with lock:
+            state["in_flight"] += 1
+            state["max"] = max(state["max"], state["in_flight"])
+        try:
+            _time.sleep(0.02)  # hold the slot so overlap is real
+            return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+        finally:
+            with lock:
+                state["in_flight"] -= 1
+
+    monkeypatch.setattr(FakePlugin, "fetch", instrumented_fetch)
+
+    assert run_sync(config) == 0
+    assert state["max"] <= 2, (
+        f"per-source budget breached: observed {state['max']} simultaneous fetches (cap 2)"
+    )
+    # Sanity: every item was actually fetched into both collections.
+    for coll in ("c1", "c2"):
+        for i in range(6):
+            assert (archive / "fake-src" / coll / f"gd-show-{i}" / f"gd-show-{i}.flac").is_file()
+
+
 def test_traversal_identifier_is_rejected(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
     """A remote source must not escape the archive tree via a `..`/absolute identifier.
     The core rejects it before any download, rename, or rmtree runs."""

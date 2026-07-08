@@ -14,6 +14,13 @@ max_concurrent_collections: 2
 sources:
   - name: internetarchive
     type: ia
+    # Per-source politeness ceiling: the hard cap on simultaneous connections
+    # Shakedown opens to this source's upstream host, shared across ALL of the
+    # source's collections and spanning discovery metadata calls + file downloads
+    # (SPEC.md §spec:source-budget). Bounds total upstream concurrency even when
+    # several of this source's collections sync at once. Falls back to
+    # max_concurrent_downloads when unset.
+    max_concurrent_requests: 4
     auth:
       # Only needed for download-restricted items. Leave unset to skip auth.
       email_env: IA_EMAIL

@@ -10,8 +10,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -32,6 +35,32 @@ from shakedown.staging import stage_item, staging_dir_for, unstage_item
 from shakedown.state import ItemRepo, RunRepo
 
 log = logging.getLogger(__name__)
+
+
+class SourceBudget:
+    """Shared per-source concurrency ceiling (SPEC §spec:source-budget).
+
+    One instance per source, shared across all of that source's collections and
+    both its discovery and download workers, so the number of simultaneous
+    connections Shakedown opens to the upstream host never exceeds the configured
+    budget — no matter how many collections run concurrently.
+    """
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self._sem = threading.BoundedSemaphore(size)
+
+    @contextmanager
+    def slot(self) -> Iterator[None]:
+        self._sem.acquire()
+        try:
+            yield
+        finally:
+            self._sem.release()
+
+
+def _source_budget_size(config: Config, source: SourceConfig) -> int:
+    return source.max_concurrent_requests or config.max_concurrent_downloads
 
 
 class PlanAction(StrEnum):
@@ -96,12 +125,23 @@ def run_sync(
     # already-migrated DB). SPEC §spec:sync-workflow.
     connect(config.state_db).close()  # type: ignore[arg-type]
 
+    # One shared concurrency budget per distinct source, so all of that source's
+    # collections (and their discovery + download workers) draw on a single
+    # bounded pool — the hard ceiling on simultaneous upstream connections holds
+    # even with max_concurrent_collections > 1 (SPEC §spec:source-budget).
+    budgets: dict[str, SourceBudget] = {}
+    for source, _collection, _plugin in work:
+        if source.name not in budgets:
+            budgets[source.name] = SourceBudget(_source_budget_size(config, source))
+
     overall_failed = 0
     max_workers = min(config.max_concurrent_collections, len(work))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_sync_collection, config, source, collection, plugin, dry_run=dry_run):
-                (source, collection)
+            pool.submit(
+                _sync_collection, config, source, collection, plugin,
+                dry_run=dry_run, budget=budgets[source.name],
+            ): (source, collection)
             for source, collection, plugin in work
         }
         for fut in as_completed(futures):
@@ -133,6 +173,7 @@ def _sync_collection(
     plugin: SourcePlugin,
     *,
     dry_run: bool,
+    budget: SourceBudget,
 ) -> CollectionSyncStats:
     """Sync one (source, collection) end-to-end."""
     started = datetime.now()
@@ -185,7 +226,8 @@ def _sync_collection(
     # Phase 3 + 4: fetch + stage
     fetch_targets = [p for p in plan if p.action in (PlanAction.NEW, PlanAction.CHANGED_UPSTREAM)]
     _execute_fetch_and_stage(
-        config, source, collection, plugin, items, fetch_targets, stats, staged_paths
+        config, source, collection, plugin, items, fetch_targets, stats, staged_paths,
+        budget=budget,
     )
 
     # Phase 4b: re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
@@ -367,11 +409,17 @@ def _execute_fetch_and_stage(
     targets: list[PlannedItem],
     stats: CollectionSyncStats,
     staged_paths: set[Path] | None = None,
+    budget: SourceBudget | None = None,
 ) -> None:
     """Concurrent fetch (capped by max_concurrent_downloads); sequential staging.
 
     Each item is its own atomic unit: fetch into temp, persist row + create
     hardlinks once the bytes are on disk and the manifest is recorded.
+
+    When a per-source ``budget`` is supplied, each fetch acquires a slot from it
+    around the whole ``_fetch_one`` call, so simultaneous connections to the
+    source's upstream host never exceed the shared per-source ceiling — the pool's
+    worker count is only the per-collection parallelism (SPEC §spec:source-budget).
     """
     if not targets:
         return
@@ -381,7 +429,9 @@ def _execute_fetch_and_stage(
 
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as pool:
         futures = {
-            pool.submit(_fetch_one, plugin, target, archive_root, collection): target
+            pool.submit(
+                _fetch_one_budgeted, budget, plugin, target, archive_root, collection
+            ): target
             for target in targets
         }
         for fut in as_completed(futures):
@@ -502,6 +552,25 @@ def _fetch_with_retries(
         )
         time.sleep(delay)
     raise AssertionError("unreachable: max_attempts must be >= 1")
+
+
+def _fetch_one_budgeted(
+    budget: SourceBudget | None,
+    plugin: SourcePlugin,
+    target: PlannedItem,
+    archive_root: Path,
+    collection: CollectionConfig,
+) -> _FetchOutcome:
+    """Acquire a per-source budget slot around the whole fetch (SPEC §spec:source-budget).
+
+    The slot is held for the entire ``_fetch_one`` call so it counts as one live
+    upstream connection; with no budget (e.g. a single-item refetch) the fetch runs
+    unbounded.
+    """
+    if budget is None:
+        return _fetch_one(plugin, target, archive_root, collection)
+    with budget.slot():
+        return _fetch_one(plugin, target, archive_root, collection)
 
 
 def _fetch_one(
