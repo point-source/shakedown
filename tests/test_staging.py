@@ -10,6 +10,7 @@ from shakedown.db import connect
 from shakedown.models import OperationStatus, OperationType
 from shakedown.restage import run_restage
 from shakedown.state import OperationOutcomeRepo
+from shakedown.status import print_status
 from shakedown.sync import run_sync
 from shakedown.utils.sanitize import sanitize
 from shakedown.utils.templates import TemplateError, render
@@ -131,7 +132,7 @@ def test_restage_rebuilds_after_library_wipe(tmp_roots: tuple[Path, Path]) -> No
 
 
 def test_restage_records_recovery_on_storage_failure(
-    tmp_roots: tuple[Path, Path], monkeypatch
+    tmp_roots: tuple[Path, Path], monkeypatch, capsys
 ) -> None:
     archive, library = tmp_roots
     config = make_config(archive, library)
@@ -157,6 +158,14 @@ def test_restage_records_recovery_on_storage_failure(
     assert recovery.affected_item == "gd-x"
     assert recovery.completed_work["items_staged"] == 0
     assert recovery.safe_next_action == "fix storage/path/layout and rerun restage"
+
+    print_status(config, as_json=True)
+    status_json = capsys.readouterr().out
+    assert '"recovery": {' in status_json
+    assert '"operation": "restage"' in status_json
+    assert '"status": "failed_before_completion"' in status_json
+    assert '"affected_item": "gd-x"' in status_json
+    assert '"safe_next_action": "fix storage/path/layout and rerun restage"' in status_json
 
 
 def test_passthrough_layout_mirrors_archive(tmp_roots: tuple[Path, Path]) -> None:
