@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = [
     """
@@ -27,6 +27,7 @@ _SCHEMA = [
         restriction_reason TEXT,
         source_metadata    TEXT NOT NULL DEFAULT '{}',
         recorded_manifest  TEXT,
+        change_signal      TEXT,
         PRIMARY KEY (source_name, collection_name, identifier)
     )
     """,
@@ -113,9 +114,21 @@ def _migrate_to_2(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE runs ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in cols)
+
+
+def _migrate_to_3(conn: sqlite3.Connection) -> None:
+    """v2 → v3: add items.change_signal for incremental discovery (§spec:incremental-discovery)."""
+    if not _has_column(conn, "items", "change_signal"):
+        conn.execute("ALTER TABLE items ADD COLUMN change_signal TEXT")
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
+    3: _migrate_to_3,
 }
 
 

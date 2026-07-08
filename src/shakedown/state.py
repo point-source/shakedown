@@ -33,6 +33,7 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         recorded_manifest=Manifest.from_json(json.loads(row["recorded_manifest"]))
         if row["recorded_manifest"]
         else None,
+        change_signal=row["change_signal"],
     )
 
 
@@ -54,8 +55,9 @@ class ItemRepo:
             INSERT INTO items (
                 source_name, collection_name, identifier, status,
                 archive_path, discovered_at, downloaded_at, last_verified_at,
-                restriction_reason, source_metadata, recorded_manifest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                restriction_reason, source_metadata, recorded_manifest,
+                change_signal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_name, collection_name, identifier) DO UPDATE SET
                 status=excluded.status,
                 archive_path=excluded.archive_path,
@@ -64,7 +66,8 @@ class ItemRepo:
                 last_verified_at=COALESCE(excluded.last_verified_at, items.last_verified_at),
                 restriction_reason=excluded.restriction_reason,
                 source_metadata=excluded.source_metadata,
-                recorded_manifest=COALESCE(excluded.recorded_manifest, items.recorded_manifest)
+                recorded_manifest=COALESCE(excluded.recorded_manifest, items.recorded_manifest),
+                change_signal=COALESCE(excluded.change_signal, items.change_signal)
             """,
             (
                 item.source_name,
@@ -78,6 +81,7 @@ class ItemRepo:
                 item.restriction_reason,
                 json.dumps(item.source_metadata),
                 json.dumps(item.recorded_manifest.to_json()) if item.recorded_manifest else None,
+                item.change_signal,
             ),
         )
 
