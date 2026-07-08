@@ -173,7 +173,10 @@ def _sync_collection(
     stats.discovered = len(descriptors)
 
     # Phase 2: plan
-    plan = _build_plan(items, source.name, collection.name, descriptors, seen_identifiers)
+    plan = _build_plan(
+        items, source.name, collection.name, descriptors, seen_identifiers,
+        prune_disappeared=collection.prune_disappeared,
+    )
     _log_plan(source.name, collection.name, plan)
 
     if dry_run:
@@ -301,6 +304,8 @@ def _build_plan(
     collection_name: str,
     descriptors: list[ItemDescriptor],
     seen_identifiers: set[str],
+    *,
+    prune_disappeared: bool = False,
 ) -> list[PlannedItem]:
     """Manifest-vs-manifest classification for every item.
 
@@ -332,13 +337,16 @@ def _build_plan(
         else:
             plan.append(PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM))
 
-    # Disappeared: in DB but not in this discover.
+    # Disappeared: in DB but not in this discover. Already-terminal states are
+    # skipped so a still-absent item isn't reprocessed every run — except that an
+    # item already flagged `disappeared` must still be reachable for pruning once a
+    # collection opts into `prune_disappeared`, so the retain→prune transition takes
+    # effect on the next sync (§spec:item-lifecycle).
+    terminal = {ItemStatus.UNAVAILABLE, ItemStatus.PRUNED}
+    if not prune_disappeared:
+        terminal.add(ItemStatus.DISAPPEARED)
     for identifier, existing in by_identifier.items():
-        if identifier not in seen_identifiers and existing.status not in (
-            ItemStatus.DISAPPEARED,
-            ItemStatus.UNAVAILABLE,
-            ItemStatus.PRUNED,
-        ):
+        if identifier not in seen_identifiers and existing.status not in terminal:
             plan.append(PlannedItem(None, existing, PlanAction.DISAPPEARED))
     return plan
 

@@ -108,6 +108,37 @@ uv pip install --python .venv/bin/python -e '.[dev,serve]'
 .venv/bin/pytest -v
 ```
 
+The default `pytest` run is fully offline (real archive.org HTTP is mocked), so
+it is safe to run anywhere and is the run CI executes.
+
+### Real-source end-to-end check
+
+One opt-in test (`tests/test_e2e_real_source.py`, marked `network`) drives the
+`ia` plugin against the real Internet Archive through the whole lifecycle —
+sync → hardlink staging → no-op re-sync → restage after a layout change →
+disappeared retention → prune → forget. It exists to catch what the offline
+suite can't: archive.org's real API drifting from the fixtures, and integration
+seams that only misbehave with real files. Run it deliberately before tagging a
+release; it is **not** part of CI.
+
+```bash
+.venv/bin/pytest -m network        # runs only the network check
+```
+
+It needs network access but **no** IA credentials. It downloads one small,
+pinned, public item (a few hundred KB) once into a throwaway temp tree, so it can
+never touch a real deployment's data. A network or upstream failure fails the
+check loudly — it never skips itself into a false pass.
+
+**Pinned item and replacement.** The item is pinned by identifier
+(`testmp3testfile`, Internet Archive's canonical MP3 test item) rather than
+queried live, so runs are comparable over time. If it ever disappears upstream
+the check fails (it does not skip). To re-pin, choose another item that is
+public and unrestricted (no `access-restricted` flag in its `metadata`), small
+(a few hundred KB), and long-lived, then update the `PINNED_*` constants at the
+top of `tests/test_e2e_real_source.py` to match the new item's metadata. The
+full procedure is documented in that file's module docstring.
+
 ## License
 
 MIT.

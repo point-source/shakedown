@@ -101,7 +101,7 @@ def test_core_rejects_manifest_file_name_escaping_item_dir(tmp_roots: tuple[Path
     assert not (archive / "escape.flac").exists()
     assert not (archive.parent / "escape.flac").exists()
 
-    conn = connect(config.state_db)
+    conn = connect(config.state_db)  # type: ignore[arg-type]
     item = ItemRepo(conn).get("fake-src", "coll1", "evil")
     assert item is not None
     assert item.status == ItemStatus.FAILED
@@ -194,6 +194,38 @@ def test_disappeared_pruned_when_opted_in(tmp_roots: tuple[Path, Path]) -> None:
     assert run_sync(config) == 0
     row = items.get("fake-src", "coll1", "gd-show-2")
     assert row is not None and row.status == ItemStatus.PRUNED
+
+
+def test_disappeared_item_pruned_when_prune_enabled_later(tmp_roots: tuple[Path, Path]) -> None:
+    """§spec:item-lifecycle: an item already flagged `disappeared` under the default
+    retain policy is pruned on the next sync once the collection opts into
+    `prune_disappeared` — the retain→prune transition is not stuck at `disappeared`."""
+    archive, library = tmp_roots
+    _seed_item("gd-show-3")
+
+    # First sync (retain default) fetches; then the source drops it → disappeared.
+    retain = make_config(archive, library, prune_disappeared=False)
+    assert run_sync(retain) == 0
+    archived = archive / "fake-src" / "coll1" / "gd-show-3"
+    staged = library / "fake-src" / "coll1" / "gd-show-3"
+    assert archived.is_dir() and staged.is_dir()
+
+    FakePlugin.items.clear()
+    assert run_sync(retain) == 0
+    conn = connect(retain.state_db)  # type: ignore[arg-type]
+    items = ItemRepo(conn)
+    row = items.get("fake-src", "coll1", "gd-show-3")
+    assert row is not None and row.status == ItemStatus.DISAPPEARED
+    assert archived.is_dir(), "retain default must keep local files"
+
+    # Operator opts into pruning; the next sync prunes the already-disappeared item.
+    prune = make_config(archive, library, prune_disappeared=True)
+    assert run_sync(prune) == 0
+    assert not archived.exists(), "enabling prune must remove the archive directory"
+    assert not staged.exists(), "enabling prune must remove staging links"
+    row = items.get("fake-src", "coll1", "gd-show-3")
+    assert row is not None and row.status == ItemStatus.PRUNED
+    assert row.archive_path is None
 
 
 def test_stale_source_retains_items_and_flags_run(
