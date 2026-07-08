@@ -152,6 +152,10 @@ class EtreePlugin(SourcePlugin):
         "venue",
         "coverage",
     )
+    # `identifier` is the etree recording's archive.org identifier — unique per item
+    # (§spec:layout-collision-safety); the other fields (date, venue, ...) repeat across
+    # the multiple recordings of a single show.
+    per_item_unique_fields = ("identifier",)
 
     def __init__(self, source_config: SourceConfig) -> None:
         super().__init__(source_config)

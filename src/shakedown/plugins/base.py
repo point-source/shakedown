@@ -133,3 +133,10 @@ class SourcePlugin(ABC):
     # Optional: declared metadata fields available for library_layout templates.
     #: subclass may override to advertise template variables it surfaces.
     template_fields: tuple[str, ...] = ()
+
+    # Subset of ``template_fields`` guaranteed to distinguish any two items in a
+    # collection — the source's per-item identity fields. The config layer uses this
+    # to guard against lossy `library_layout` templates that would render two items to
+    # the same staging path (§spec:layout-collision-safety). Empty means the plugin
+    # vouches for no field's uniqueness.
+    per_item_unique_fields: tuple[str, ...] = ()

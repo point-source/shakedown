@@ -1,11 +1,14 @@
 """Configuration loader for shakedown.yaml. Mirrors PRD §11."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Annotated
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+log = logging.getLogger(__name__)
 
 
 class IAAuth(BaseModel):
@@ -125,11 +128,21 @@ def load(path: Path) -> Config:
 
 
 def _validate_layouts(config: Config) -> None:
-    """Reject library_layout templates that reference fields the source plugin doesn't surface.
+    """Guard `library_layout` templates against fields the plugin can't surface and
+    against layouts that cannot distinguish two items (§spec:layout-collision-safety).
 
-    Catches the common first-run footgun where an example layout uses a placeholder
-    like `{filename}` that the plugin doesn't expose, which would otherwise raise
-    TemplateError mid-sync.
+    Three checks on every non-passthrough layout, in order of certainty:
+
+    - **Unknown field → hard error.** A placeholder the plugin doesn't expose (the
+      first-run `{filename}` footgun) would otherwise raise TemplateError mid-sync.
+    - **No plugin field at all → hard error.** A constant template renders every item
+      to the same path — a guaranteed total collapse config can prove, so it fails
+      fast like every other config fault (§spec:configuration).
+    - **No per-item-unique field → warning.** The layout keys only on shared fields
+      (e.g. `{year}/{venue}`); two items with the same values collide at staging time.
+      Config can't prove an arbitrary *combination* is lossy, so this is a proactive
+      heads-up, not a hard error — the runtime collision summary is the correctness
+      backstop that fires only on actual loss.
     """
     from shakedown.plugins import registry
     from shakedown.utils.templates import fields_in
@@ -140,6 +153,7 @@ def _validate_layouts(config: Config) -> None:
         except registry.UnknownPluginError as e:
             raise ConfigError(str(e)) from e
         allowed = set(plugin_cls.template_fields)
+        unique = set(plugin_cls.per_item_unique_fields)
         for collection in source.collections:
             if collection.library_layout == "passthrough":
                 continue
@@ -150,4 +164,22 @@ def _validate_layouts(config: Config) -> None:
                     f"{source.name}/{collection.name}: library_layout references "
                     f"unknown field(s) {sorted(unknown)!r}; plugin {source.type!r} "
                     f"surfaces {sorted(allowed)!r}"
+                )
+            if not referenced:
+                raise ConfigError(
+                    f"{source.name}/{collection.name}: library_layout "
+                    f"{collection.library_layout!r} references no source field, so every "
+                    f"item renders to the same path; include a per-item field such as "
+                    f"{{identifier}}"
+                )
+            if not (referenced & unique):
+                log.warning(
+                    "%s/%s: library_layout %r references no per-item-unique field %s; "
+                    "two items sharing these fields will collide at staging and the "
+                    "loser will be dropped from the library — add a unique component "
+                    "such as {identifier} to the leaf",
+                    source.name,
+                    collection.name,
+                    collection.library_layout,
+                    sorted(unique) or "(none declared by plugin)",
                 )
