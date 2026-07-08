@@ -72,6 +72,8 @@ class Item:
     restriction_reason: str | None = None
     source_metadata: dict[str, Any] = field(default_factory=dict)
     recorded_manifest: Manifest | None = None
+    # last-seen source change signal for incremental discovery (§spec:incremental-discovery)
+    change_signal: str | None = None
 
 
 @dataclass

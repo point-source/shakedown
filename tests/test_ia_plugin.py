@@ -52,6 +52,45 @@ def test_discover_yields_descriptors_with_manifests() -> None:
     assert desc.is_restricted is False
 
 
+def test_discover_surfaces_combined_change_signal() -> None:
+    plugin = _make_plugin()
+    plugin._session.search_items.return_value = iter(
+        [{"identifier": "gd1977-05-08", "oai_updatedate": "2024-05-01T00:00:00Z", "item_size": 12345}]
+    )
+    plugin._session.get_item.return_value = _fake_ia_item(
+        "gd1977-05-08",
+        files=[{"name": "d1t01.flac", "size": "1000", "md5": "aaa", "format": "Flac"}],
+    )
+
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+    desc = next(plugin.discover(coll))
+    assert desc.change_signal == "2024-05-01T00:00:00Z|12345"
+
+
+def test_combine_change_signal_handles_list_and_missing() -> None:
+    from shakedown.plugins.ia.plugin import _combine_change_signal
+
+    assert _combine_change_signal(
+        {"oai_updatedate": ["2020-01-01", "2024-05-01"], "item_size": 99}
+    ) == "2024-05-01|99"
+    assert _combine_change_signal({"identifier": "x"}) is None
+    # Size alone is not monotone in contents (a same-size re-derivation would
+    # be missed), so a signal missing oai_updatedate falls through to the full
+    # comparison rather than engaging the skip — §spec:incremental-discovery
+    # correctness bound.
+    assert _combine_change_signal({"item_size": 42}) is None
+
+
+def test_enumerate_with_signals_requests_extra_fields() -> None:
+    plugin = _make_plugin()
+    plugin._session.search_items.return_value = iter([])
+
+    coll = CollectionConfig(name="dead", query="x")
+    list(plugin.enumerate_with_signals(coll))
+    _, kwargs = plugin._session.search_items.call_args
+    assert kwargs["fields"] == ["identifier", "oai_updatedate", "item_size"]
+
+
 def test_discover_marks_restricted_items() -> None:
     plugin = _make_plugin()
     plugin._session.search_items.return_value = iter([{"identifier": "gd-stream-only"}])

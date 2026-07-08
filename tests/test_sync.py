@@ -1079,3 +1079,79 @@ def test_discovery_failure_partway_prunes_nothing(
     latest = RunRepo(conn).latest("fake-src", "coll1")
     assert latest is not None and latest.stale is True
     assert any("enumeration failed" in e for e in latest.errors)
+
+
+def test_incremental_skips_metadata_fetch_when_signal_unchanged(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """§road:incremental-skip: an unchanged change signal short-circuits the item to
+    UNCHANGED without the per-item metadata fetch."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=True)
+    item = _seed_item("gd1977-05-08")
+    item.change_signal = "sig-1"
+
+    # First run: item is NEW → fetched, and describe_item resolved it once.
+    assert run_sync(config) == 0
+    assert FakePlugin.describe_count["gd1977-05-08"] == 1
+    assert FakePlugin.fetch_count["gd1977-05-08"] == 1
+
+    # Second run: signal unchanged → skip the metadata fetch entirely.
+    assert run_sync(config) == 0
+    assert FakePlugin.describe_count["gd1977-05-08"] == 1, "no second metadata fetch"
+    assert FakePlugin.fetch_count["gd1977-05-08"] == 1, "no refetch"
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd1977-05-08")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+
+
+def test_incremental_changed_signal_refetches(tmp_roots: tuple[Path, Path]) -> None:
+    """A changed signal falls through to describe_item and the full manifest
+    comparison, which refetches when the manifest differs."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=True)
+    item = _seed_item("gd1977-05-08", content=b"v1")
+    item.change_signal = "sig-1"
+
+    assert run_sync(config) == 0
+    assert FakePlugin.describe_count["gd1977-05-08"] == 1
+    assert FakePlugin.fetch_count["gd1977-05-08"] == 1
+
+    # Source publishes new bytes (manifest changes) AND bumps the change signal.
+    item.files = [FakeFile(name="gd1977-05-08.flac", content=b"v2-much-longer-bytes")]
+    item.change_signal = "sig-2"
+
+    assert run_sync(config) == 0
+    assert FakePlugin.describe_count["gd1977-05-08"] == 2, "signal changed → metadata fetched"
+    assert FakePlugin.fetch_count["gd1977-05-08"] == 2, "changed-upstream → refetched"
+
+
+def test_incremental_no_stored_signal_falls_through(tmp_roots: tuple[Path, Path]) -> None:
+    """With no source change signal (None), incremental discovery has nothing to skip
+    on, so every run resolves the full descriptor."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=True)
+    item = _seed_item("gd1977-05-08")
+    item.change_signal = None
+
+    assert run_sync(config) == 0
+    assert FakePlugin.describe_count["gd1977-05-08"] == 1
+
+    assert run_sync(config) == 0
+    assert FakePlugin.describe_count["gd1977-05-08"] == 2, "no signal → full metadata pass each run"
+
+
+def test_incremental_flag_off_ignores_signal(tmp_roots: tuple[Path, Path]) -> None:
+    """Flag off (default): the change signal is ignored and the full manifest pass runs
+    every sync, exactly as today."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)  # incremental_discovery defaults off
+    item = _seed_item("gd1977-05-08")
+    item.change_signal = "sig-1"
+
+    assert run_sync(config) == 0
+    assert FakePlugin.describe_count["gd1977-05-08"] == 1
+
+    assert run_sync(config) == 0
+    assert FakePlugin.describe_count["gd1977-05-08"] == 2, "flag off → signal ignored, full pass"

@@ -33,6 +33,7 @@ class FakeItem:
     metadata: dict = field(default_factory=dict)
     is_restricted: bool = False
     restriction_reason: str | None = None
+    change_signal: str | None = None
 
 
 class FakePlugin(SourcePlugin):
@@ -45,6 +46,12 @@ class FakePlugin(SourcePlugin):
 
     def enumerate_items(self, collection: CollectionConfig) -> Iterator[str]:
         yield from self.items
+
+    def enumerate_with_signals(
+        self, collection: CollectionConfig
+    ) -> Iterator[tuple[str, str | None]]:
+        for identifier, it in self.items.items():
+            yield identifier, it.change_signal
 
     def describe_item(self, identifier: str, collection: CollectionConfig) -> ItemDescriptor | None:
         self.describe_count[identifier] = self.describe_count.get(identifier, 0) + 1

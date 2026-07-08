@@ -14,7 +14,7 @@ def _make_item(identifier: str = "x") -> Item:
         source_name="s", collection_name="c", identifier=identifier,
         status=ItemStatus.COMPLETE, archive_path=Path("/data/archive/s/c/x"),
         discovered_at=datetime(2026, 4, 26), downloaded_at=datetime(2026, 4, 26),
-        recorded_manifest=m,
+        recorded_manifest=m, change_signal="2024-05-01T00:00:00Z|12345",
     )
 
 
@@ -27,6 +27,21 @@ def test_item_round_trip(tmp_path: Path) -> None:
     assert fetched is not None
     assert fetched.identifier == "x"
     assert fetched.recorded_manifest == item.recorded_manifest
+    assert fetched.change_signal == "2024-05-01T00:00:00Z|12345"
+
+
+def test_item_upsert_preserves_change_signal(tmp_path: Path) -> None:
+    """Re-upserting with change_signal=None must not clobber the prior signal."""
+    conn = connect(tmp_path / "s.db")
+    repo = ItemRepo(conn)
+    item = _make_item()
+    repo.upsert(item)
+    item2 = _make_item()
+    item2.change_signal = None
+    repo.upsert(item2)
+    fetched = repo.get("s", "c", "x")
+    assert fetched is not None
+    assert fetched.change_signal == item.change_signal
 
 
 def test_item_upsert_preserves_unchanged_timestamps(tmp_path: Path) -> None:
@@ -123,9 +138,57 @@ def test_v1_db_migrates_to_current_schema(tmp_path: Path) -> None:
 
     conn = connect(db_path)  # triggers migration
     version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
-    assert version == 2
+    assert version == 3
     latest = RunRepo(conn).latest("s", "c")
     assert latest is not None and latest.stale is False
+
+
+def test_v2_db_migrates_change_signal_column(tmp_path: Path) -> None:
+    """An existing v2 database (items table without change_signal) upgrades in place:
+    the column is added and subsequent upserts can store/read a change signal."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy_v2.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version (version) VALUES (2);
+        CREATE TABLE items (
+            source_name        TEXT NOT NULL,
+            collection_name    TEXT NOT NULL,
+            identifier         TEXT NOT NULL,
+            status             TEXT NOT NULL,
+            archive_path       TEXT,
+            discovered_at      TEXT,
+            downloaded_at      TEXT,
+            last_verified_at   TEXT,
+            restriction_reason TEXT,
+            source_metadata    TEXT NOT NULL DEFAULT '{}',
+            recorded_manifest  TEXT,
+            PRIMARY KEY (source_name, collection_name, identifier)
+        );
+        INSERT INTO items (source_name, collection_name, identifier, status)
+            VALUES ('s', 'c', 'x', 'complete');
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = connect(db_path)  # triggers migration
+    version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
+    assert version == 3
+    cols = [row["name"] for row in conn.execute("PRAGMA table_info(items)").fetchall()]
+    assert "change_signal" in cols
+
+    repo = ItemRepo(conn)
+    item = repo.get("s", "c", "x")
+    assert item is not None
+    item.change_signal = "2024-06-01T00:00:00Z|999"
+    repo.upsert(item)
+    fetched = repo.get("s", "c", "x")
+    assert fetched is not None
+    assert fetched.change_signal == "2024-06-01T00:00:00Z|999"
 
 
 def test_drift_repo(tmp_path: Path) -> None:

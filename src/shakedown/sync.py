@@ -12,10 +12,10 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -414,10 +414,22 @@ def _pipelined_discover_and_fetch(
             else:
                 deferred.append(planned)
 
+        def on_skip(identifier: str, existing: Item) -> None:
+            # Signal-unchanged: classify UNCHANGED without a metadata fetch. Recorded in
+            # `seen` so the prune barrier never mistakes it for disappeared, and deferred
+            # for the caller's idempotent re-stage pass (§spec:incremental-discovery).
+            seen.add(identifier)
+            deferred.append(PlannedItem(None, existing, PlanAction.UNCHANGED))
+
+        descriptor_stream = (
+            _stream_descriptors_incremental(plugin, collection, budget, by_identifier, on_skip)
+            if collection.incremental_discovery
+            else _stream_descriptors(plugin, collection, budget)
+        )
         try:
             # Descriptors stream in as each resolves; dispatch classifies and fetches
             # each immediately, so downloads overlap the remaining enumeration.
-            for desc in _stream_descriptors(plugin, collection, budget):
+            for desc in descriptor_stream:
                 dispatch(desc)
         except Exception as e:  # any enumeration fault marks the collection stale
             enum_error = e
@@ -520,6 +532,66 @@ def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> Plann
             return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
         return PlannedItem(desc, existing, PlanAction.UNCHANGED)
     return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
+
+
+def _signal_unchanged(signal: str | None, existing: Item | None) -> bool:
+    """True iff the source's cheap change signal proves this item is unchanged and
+    still on disk, so the per-item metadata fetch can be skipped
+    (§spec:incremental-discovery). A missing current signal, a missing stored
+    signal, a mismatch, or vanished files all return False and fall through to the
+    full manifest comparison — the skip is only ever a *skip*, never a substitute
+    for the manifest source of truth (§spec:sync-identity)."""
+    return (
+        signal is not None
+        and existing is not None
+        and existing.change_signal is not None
+        and existing.change_signal == signal
+        and not _files_missing(existing)
+    )
+
+
+def _stream_descriptors_incremental(
+    plugin: SourcePlugin,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+    by_identifier: dict[str, Item],
+    on_skip: Callable[[str, Item], None],
+) -> Iterator[ItemDescriptor]:
+    """Incremental-discovery variant of _stream_descriptors (§spec:incremental-discovery).
+
+    Requests the cheap per-item change signal from the source's search. An item whose
+    stored signal matches (and whose files are present) is reported UNCHANGED via
+    on_skip WITHOUT the per-item metadata fetch — describe_item()/get_item() is never
+    called for it. Every other item (signal changed, no stored signal, or vanished
+    files) falls through to describe_item() and the full manifest comparison, exactly
+    as today; the fresh signal is attached to its descriptor so a successful fetch
+    persists it. Falls back to the non-incremental stream when the plugin exposes no
+    signal (enumerate_with_signals returns None).
+    """
+    signals = plugin.enumerate_with_signals(collection)
+    if signals is None:
+        yield from _stream_descriptors(plugin, collection, budget)
+        return
+    pairs = list(signals)  # materialize the enumeration (may raise -> stale)
+    to_describe: list[tuple[str, str | None]] = []
+    for identifier, signal in pairs:
+        existing = by_identifier.get(identifier)
+        if _signal_unchanged(signal, existing):
+            assert existing is not None  # _signal_unchanged guarantees it
+            on_skip(identifier, existing)
+        else:
+            to_describe.append((identifier, signal))
+    if not to_describe:
+        return
+    with ThreadPoolExecutor(max_workers=min(budget.size, len(to_describe))) as pool:
+        futures = {
+            pool.submit(_describe_one, plugin, identifier, collection, budget): signal
+            for identifier, signal in to_describe
+        }
+        for fut in as_completed(futures):
+            desc = fut.result()
+            if desc is not None:
+                yield replace(desc, change_signal=futures[fut])
 
 
 def _disappeared_plan(
@@ -922,6 +994,7 @@ def _record_complete(
         last_verified_at=now,
         source_metadata=desc.metadata,
         recorded_manifest=desc.manifest,
+        change_signal=desc.change_signal,
     )
     items.upsert(item)
     return item
