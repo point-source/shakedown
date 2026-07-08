@@ -90,25 +90,41 @@ class SyncFailedPayload:
 
 def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) -> str | None:
     """Fire a collection's ``on_complete`` handoff. Returns a delivery-error string
-    (for the caller to record in run errors) or ``None`` on success/no-op."""
+    (for the caller to record in run errors) or ``None`` on success/no-op.
+
+    Best-effort: any delivery fault — a malformed URL, an unparseable/empty exec
+    command, a down listener — is turned into a returned error string and never
+    raised, so a handoff can never abort the sync (SPEC §spec:handoff)."""
     handoff = collection.on_complete
     if handoff is None:
         return None
-    return _dispatch(handoff, payload.to_body())
+    try:
+        return _dispatch(handoff, payload.to_body())
+    except Exception as e:
+        msg = f"handoff delivery failed: {e}"
+        log.warning(msg)
+        return msg
 
 
 def fire_failure(
     notifications: NotificationsConfig | None, payload: SyncFailedPayload
 ) -> str | None:
     """Fire the global ``notifications.on_failure`` webhook. Returns a
-    delivery-error string (for the caller to record) or ``None`` on success/no-op."""
+    delivery-error string (for the caller to record) or ``None`` on success/no-op.
+
+    Best-effort with the same never-raise contract as :func:`fire_complete`."""
     if notifications is None or notifications.on_failure is None:
         return None
     url = notifications.on_failure.webhook
     if not url:
         return None
-    body = payload.to_body()
-    return _post(_expand(url, body), body)
+    try:
+        body = payload.to_body()
+        return _post(_expand(url, body), body)
+    except Exception as e:
+        msg = f"failure notification delivery failed: {e}"
+        log.warning(msg)
+        return msg
 
 
 def _dispatch(handoff: Handoff, body: dict[str, Any]) -> str | None:

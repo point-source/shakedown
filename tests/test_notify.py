@@ -157,6 +157,28 @@ def test_no_handoff_is_a_noop() -> None:
     assert fire_complete(coll, _complete()) is None
 
 
+def test_complete_exec_unparseable_command_returns_error() -> None:
+    """An unbalanced-quote exec command must be reported, never raised."""
+    coll = _make_collection(ExecHandoff(exec='beet import "unterminated'))
+    err = fire_complete(coll, _complete())  # shlex.split would raise ValueError
+    assert err is not None
+
+
+def test_complete_exec_empty_command_returns_error() -> None:
+    """A command that expands to nothing must be reported, never raised."""
+    coll = _make_collection(ExecHandoff(exec="   "))
+    err = fire_complete(coll, _complete())  # subprocess.run([]) would raise IndexError
+    assert err is not None
+
+
+def test_complete_webhook_invalid_url_returns_error() -> None:
+    """A malformed URL (control char) raises httpx.InvalidURL, not HTTPError — the
+    best-effort net must still turn it into a returned error, never a raise."""
+    coll = _make_collection(WebhookHandoff(webhook="http://beets:8337/\x00import"))
+    err = fire_complete(coll, _complete())
+    assert err is not None
+
+
 # --- sync.failed notification -----------------------------------------------
 
 
