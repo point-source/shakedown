@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = [
     """
@@ -48,7 +48,9 @@ _SCHEMA = [
         items_failed       INTEGER NOT NULL DEFAULT 0,
         bytes_downloaded   INTEGER NOT NULL DEFAULT 0,
         errors             TEXT NOT NULL DEFAULT '[]',
-        stale              INTEGER NOT NULL DEFAULT 0
+        stale              INTEGER NOT NULL DEFAULT 0,
+        collisions_dropped INTEGER NOT NULL DEFAULT 0,
+        collision_paths    TEXT NOT NULL DEFAULT '[]'
     )
     """,
     """
@@ -125,10 +127,20 @@ def _migrate_to_3(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE items ADD COLUMN change_signal TEXT")
 
 
+def _migrate_to_4(conn: sqlite3.Connection) -> None:
+    """v3 → v4: add runs.collisions_dropped / runs.collision_paths so `status` can report
+    recordings dropped to layout collisions (§spec:layout-collision-safety)."""
+    if not _has_column(conn, "runs", "collisions_dropped"):
+        conn.execute("ALTER TABLE runs ADD COLUMN collisions_dropped INTEGER NOT NULL DEFAULT 0")
+    if not _has_column(conn, "runs", "collision_paths"):
+        conn.execute("ALTER TABLE runs ADD COLUMN collision_paths TEXT NOT NULL DEFAULT '[]'")
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
     3: _migrate_to_3,
+    4: _migrate_to_4,
 }
 
 

@@ -423,7 +423,10 @@ def test_unchanged_with_missing_staging_link_is_restored(tmp_roots: tuple[Path, 
 
 
 def test_staging_collision_returns_nonzero(tmp_roots: tuple[Path, Path]) -> None:
-    """PRD §8: collisions are an error, not a silent overwrite."""
+    """PRD §8 / §spec:layout-collision-safety: same-run template collisions are an
+    error, not a silent overwrite. The run completes, exits non-zero, and the losing
+    recording is aggregated into a per-run collision summary — distinct from an
+    ordinary fetch failure (the archive copy survives)."""
     archive, library = tmp_roots
     config = make_config(
         archive, library, library_layout="{year}/same-folder",
@@ -438,6 +441,42 @@ def test_staging_collision_returns_nonzero(tmp_roots: tuple[Path, Path]) -> None
 
     rc = run_sync(config)
     assert rc == 1, "staging collisions must escalate to nonzero exit"
+
+    # The collision is aggregated into the persisted run record, kept apart from
+    # items_failed, with the colliding path retained for the summary.
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    run = RunRepo(conn).latest("fake-src", "coll1")
+    assert run is not None
+    assert run.collisions_dropped == 1, "exactly one recording lost the collision"
+    assert run.items_failed == 0, "a collision is not an ordinary fetch failure"
+    assert any("same-folder" in p for p in run.collision_paths)
+
+    # Both items are still archived — only the loser's library link was dropped.
+    assert (archive / "fake-src" / "coll1" / "show-A" / "track.flac").is_file()
+    assert (archive / "fake-src" / "coll1" / "show-B" / "track.flac").is_file()
+
+
+def test_collision_summary_surfaced_in_status(
+    tmp_roots: tuple[Path, Path], capsys
+) -> None:
+    """§spec:layout-collision-safety: `shakedown status` reports the recordings dropped
+    to layout collisions on the last run, with the colliding path."""
+    from shakedown.status import print_status
+
+    archive, library = tmp_roots
+    config = make_config(archive, library, library_layout="{year}/same-folder")
+    for ident in ("show-A", "show-B"):
+        FakePlugin.items[ident] = FakeItem(
+            identifier=ident,
+            files=[FakeFile(name="track.flac", content=ident.encode())],
+            metadata={"year": "1977"},
+        )
+    assert run_sync(config) == 1
+
+    print_status(config, as_json=False)
+    out = capsys.readouterr().out
+    assert "layout collisions: 1 recording(s)" in out
+    assert "same-folder" in out
 
 
 def test_changed_upstream_preserves_old_bytes_on_fetch_failure(
