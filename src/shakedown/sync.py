@@ -77,7 +77,7 @@ def _stream_descriptors(
     plugin: SourcePlugin,
     collection: CollectionConfig,
     budget: SourceBudget,
-    enumerated: set[str] | None = None,
+    enumerated: set[str],
 ) -> Iterator[ItemDescriptor]:
     """Yield item descriptors as they resolve, fanning per-item metadata resolution
     across the shared per-source budget (SPEC §spec:discovery-pipeline).
@@ -90,23 +90,21 @@ def _stream_descriptors(
     path skipped a failed metadata fetch. Materializing the id list or a `describe_item`
     call raising propagates to the consumer, which treats it as an enumeration failure.
 
-    When ``enumerated`` is supplied, every identifier the enumeration returned is added
-    to it — including one whose `describe_item` transiently failed and was dropped. That
-    set, not the resolved descriptors, is the prune signal (SPEC §spec:prune-safety): an
-    enumerated-but-unresolved item is still present in the collection, so it must never be
-    read as `disappeared`. In the `discover()` fallback there is no enumerate/describe
-    split, so ``enumerated`` collects the resolved identifiers instead.
+    Every identifier the enumeration returned is added to ``enumerated`` — including one
+    whose `describe_item` transiently failed and was dropped. That set, not the resolved
+    descriptors, is the prune signal (SPEC §spec:prune-safety): an enumerated-but-unresolved
+    item is still present in the collection, so it must never be read as `disappeared`. In
+    the `discover()` fallback there is no enumerate/describe split, so ``enumerated``
+    collects the resolved identifiers instead.
     """
     identifiers = plugin.enumerate_items(collection)
     if identifiers is None:
         for desc in plugin.discover(collection):
-            if enumerated is not None:
-                enumerated.add(desc.identifier)
+            enumerated.add(desc.identifier)
             yield desc
         return
     ids = list(identifiers)  # materialize the enumeration (may raise -> stale)
-    if enumerated is not None:
-        enumerated.update(ids)
+    enumerated.update(ids)
     if not ids:
         return
     with ThreadPoolExecutor(max_workers=min(budget.size, len(ids))) as pool:
@@ -587,7 +585,7 @@ def _stream_descriptors_incremental(
     budget: SourceBudget,
     by_identifier: dict[str, Item],
     on_skip: Callable[[str, Item], None],
-    enumerated: set[str] | None = None,
+    enumerated: set[str],
 ) -> Iterator[ItemDescriptor]:
     """Incremental-discovery variant of _stream_descriptors (§spec:incremental-discovery).
 
@@ -605,8 +603,7 @@ def _stream_descriptors_incremental(
         yield from _stream_descriptors(plugin, collection, budget, enumerated)
         return
     pairs = list(signals)  # materialize the enumeration (may raise -> stale)
-    if enumerated is not None:
-        enumerated.update(identifier for identifier, _ in pairs)
+    enumerated.update(identifier for identifier, _ in pairs)
     to_describe: list[tuple[str, str | None]] = []
     for identifier, signal in pairs:
         existing = by_identifier.get(identifier)
