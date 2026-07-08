@@ -226,7 +226,7 @@ documented interface" — not "installable third-party ecosystem."
 
 ## Library staging §spec:library-staging
 
-*Status: in progress — missing template fields raise instead of rendering `unknown`; see §road:template-unknown-fallback*
+*Status: complete*
 
 Per collection, the user provides a `library_layout` template that
 renders each item's **staging directory** under the library tree, from

@@ -22,6 +22,12 @@ class TemplateError(Exception):
 
 _PLACEHOLDER_RE = re.compile(r"\{([^{}]+)\}")
 
+# Segment rendered when a template field is missing or null. Library metadata is
+# patchy (§spec:library-staging); dropping an item because its venue tag is absent
+# serves no one, so the field renders as `unknown` and collision detection catches
+# any resulting conflicts.
+UNKNOWN = "unknown"
+
 
 Filter = Callable[[str], str]
 _FILTERS: dict[str, Filter] = {
@@ -39,10 +45,13 @@ def render(template: str, fields: dict[str, Any]) -> str:
         spec = match.group(1)
         parts = [p.strip() for p in spec.split("|")]
         name, filter_names = parts[0], parts[1:]
-        if name not in fields:
-            raise TemplateError(f"unknown template field: {name!r}")
-        value = fields[name]
-        out = "" if value is None else str(value)
+        value = fields.get(name)
+        if value is None:
+            # Missing or null field: render a literal `unknown` segment rather than
+            # failing the item. Filters are skipped — the segment is the fixed
+            # sentinel, not source metadata to be transformed.
+            return UNKNOWN
+        out = str(value)
         for fname in filter_names:
             if fname not in _FILTERS:
                 raise TemplateError(f"unknown filter: {fname!r}")
