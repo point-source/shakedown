@@ -80,6 +80,33 @@ def test_tag_rewrite_does_not_trigger_refetch(tmp_roots: tuple[Path, Path]) -> N
     assert FakePlugin.fetch_count["gd1977-05-08"] == 1, "tag rewrite must not trigger re-fetch"
 
 
+def test_core_rejects_manifest_file_name_escaping_item_dir(tmp_roots: tuple[Path, Path]) -> None:
+    """A remote manifest file name that escapes the item dir is refused before fetch.
+
+    The write happens inside the plugin's fetch(), so the core must reject the
+    unsafe name up front — not merely refuse to promote afterwards.
+    """
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["evil"] = FakeItem(
+        identifier="evil",
+        files=[FakeFile(name="../../escape.flac", content=b"pwned")],
+        metadata={"date": "1977-05-08"},
+    )
+
+    rc = run_sync(config)
+    assert rc == 1  # the item failed, so the run reports failure
+    assert "evil" not in FakePlugin.fetch_count, "fetch must not run for an unsafe name"
+    # Nothing was written anywhere near the traversal target.
+    assert not (archive / "escape.flac").exists()
+    assert not (archive.parent / "escape.flac").exists()
+
+    conn = connect(config.state_db)
+    item = ItemRepo(conn).get("fake-src", "coll1", "evil")
+    assert item is not None
+    assert item.status == ItemStatus.FAILED
+
+
 def test_changed_upstream_triggers_refetch(tmp_roots: tuple[Path, Path]) -> None:
     archive, library = tmp_roots
     config = make_config(archive, library)

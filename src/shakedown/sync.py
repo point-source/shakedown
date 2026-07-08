@@ -527,6 +527,22 @@ def _fetch_one(
             error=f"unsafe identifier escapes archive tree: {desc.identifier!r}",
         )
 
+    # Trust boundary: manifest file names also come from the remote source and
+    # are joined onto the temp dir by the plugin's fetch(). Reject any that would
+    # escape the item directory *before* fetch runs — the write happens during
+    # fetch, so the post-fetch verify() can't catch an escape (it resolves to the
+    # same out-of-tree path). This guards every plugin, not just well-behaved ones.
+    unsafe_names = [
+        mf.name for mf in desc.manifest.files if not _within_archive(dest, dest / mf.name)
+    ]
+    if unsafe_names:
+        log.warning("[%s] rejecting unsafe manifest file name(s): %r", desc.identifier, unsafe_names[:5])
+        return _FetchOutcome(
+            success=False,
+            archive_path=dest,
+            error=f"unsafe file name(s) escape item directory: {unsafe_names[:5]}",
+        )
+
     tmp_dir = archive_root / f".tmp-{desc.identifier}"
     stale_dir = archive_root / f".stale-{desc.identifier}"
 
