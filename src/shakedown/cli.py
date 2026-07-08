@@ -62,14 +62,24 @@ def main(ctx: click.Context, config_path: Path, verbose: bool) -> None:
 @click.option("--source", "source_filter", help="Restrict to a single source name.")
 @click.option("--collection", "collection_filter", help="Restrict to a single collection name.")
 @click.option("--dry-run", is_flag=True, help="Show plan without fetching or staging.")
+@click.option(
+    "--refresh-metadata",
+    is_flag=True,
+    help="Re-resolve and rewrite metadata.json sidecars for preserve-opted collections "
+    "without re-downloading media.",
+)
 @click.pass_context
 def sync(
     ctx: click.Context,
     source_filter: str | None,
     collection_filter: str | None,
     dry_run: bool,
+    refresh_metadata: bool,
 ) -> None:
     """Run a sync now (PRD §9). Default: all configured collections."""
+    if dry_run and refresh_metadata:
+        click.echo("error: --dry-run and --refresh-metadata are mutually exclusive", err=True)
+        ctx.exit(2)
     cfg = _load_config(ctx)
     from shakedown.sync import run_sync
 
@@ -78,6 +88,7 @@ def sync(
         source_filter=source_filter,
         collection_filter=collection_filter,
         dry_run=dry_run,
+        refresh_metadata=refresh_metadata,
     )
     ctx.exit(exit_code)
 

@@ -185,6 +185,7 @@ def run_sync(
     source_filter: str | None = None,
     collection_filter: str | None = None,
     dry_run: bool = False,
+    refresh_metadata: bool = False,
 ) -> int:
     """Top-level sync entrypoint. Returns process exit code.
 
@@ -192,6 +193,10 @@ def run_sync(
     `max_concurrent_collections` (SPEC §spec:configuration, §spec:sync-workflow).
     Each collection opens its own DB connection and is otherwise independent, so
     one collection's failure degrades only that collection's run.
+
+    With ``refresh_metadata`` the run instead re-resolves and rewrites the
+    metadata.json sidecars for preserve-opted collections, without re-downloading
+    media (§spec:metadata-preservation).
     """
     work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
     for source in config.sources:
@@ -220,6 +225,9 @@ def run_sync(
     for source, _collection, _plugin in work:
         if source.name not in budgets:
             budgets[source.name] = SourceBudget(_source_budget_size(config, source))
+
+    if refresh_metadata:
+        return _run_refresh(config, work, budgets)
 
     overall_failed = 0
     max_workers = min(config.max_concurrent_collections, len(work))
@@ -265,6 +273,101 @@ def run_sync(
             if stats.failed > 0 or stats.stale or stats.collisions_dropped > 0:
                 overall_failed += 1
     return 0 if overall_failed == 0 else 1
+
+
+def _run_refresh(
+    config: Config,
+    work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]],
+    budgets: dict[str, SourceBudget],
+) -> int:
+    """Drive `sync --refresh-metadata` across the selected collections (§spec:metadata-preservation).
+
+    Only preserve-opted collections are refreshed; others are skipped with a note. Serial
+    per collection — an explicit, operator-invoked maintenance pass, not the hot sync path —
+    but each source's re-resolution still draws on its shared politeness budget.
+    """
+    overall_failed = 0
+    for source, collection, plugin in work:
+        if not collection.preserve_source_metadata:
+            log.info(
+                "[%s/%s] skipping metadata refresh: preserve_source_metadata not enabled",
+                source.name, collection.name,
+            )
+            continue
+        try:
+            overall_failed += _refresh_collection(
+                config, source, collection, plugin, budgets[source.name]
+            )
+        except Exception:
+            log.exception("metadata refresh failed for %s/%s", source.name, collection.name)
+            overall_failed += 1
+    return 0 if overall_failed == 0 else 1
+
+
+def _refresh_collection(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    plugin: SourcePlugin,
+    budget: SourceBudget,
+) -> int:
+    """Re-resolve source metadata for already-mirrored items and rewrite their sidecars.
+
+    Re-resolution reuses the budgeted descriptor stream, so it honors the shared per-source
+    politeness ceiling (§spec:source-budget). For each mirrored item still enumerated
+    upstream, the fresh metadata is written to `metadata.json` (in place, so the library
+    hardlink tracks it) and to the recorded `source_metadata`, then the item is restaged —
+    media is never re-downloaded. Returns 1 if any item hit a staging collision, else 0.
+    """
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    items = ItemRepo(conn)
+    mirrored = [
+        it
+        for it in items.list_for_collection(source.name, collection.name)
+        if it.status == ItemStatus.COMPLETE
+        and it.archive_path is not None
+        and it.recorded_manifest is not None
+    ]
+    if not mirrored:
+        log.info("[%s/%s] metadata refresh: no mirrored items", source.name, collection.name)
+        return 0
+
+    enumerated: set[str] = set()
+    fresh: dict[str, ItemDescriptor] = {}
+    try:
+        for desc in _stream_descriptors(plugin, collection, budget, enumerated):
+            fresh[desc.identifier] = desc
+    except Exception as e:
+        log.warning(
+            "[%s/%s] metadata refresh enumeration failed: %s", source.name, collection.name, e
+        )
+        return 1
+
+    staged_paths: set[Path] = set()
+    refreshed = 0
+    failed = 0
+    for item in mirrored:
+        desc = fresh.get(item.identifier)
+        if desc is None:
+            continue  # no longer enumerated upstream; nothing to re-resolve from
+        assert item.archive_path is not None and item.recorded_manifest is not None
+        item.source_metadata = desc.metadata
+        write_sidecar(item.archive_path / METADATA_SIDECAR, desc.metadata)
+        items.upsert(item)
+        result = stage_item(
+            config, collection, source.name, item, item.recorded_manifest,
+            staged_paths=staged_paths,
+        )
+        if result.collisions:
+            failed += 1
+            for c in result.collisions:
+                log.warning("[%s/%s] %s", source.name, collection.name, c)
+        refreshed += 1
+    log.info(
+        "[%s/%s] metadata refresh: refreshed=%d of %d mirrored",
+        source.name, collection.name, refreshed, len(mirrored),
+    )
+    return 1 if failed else 0
 
 
 # Upper bound on the colliding-path *sample* retained per run. The count
