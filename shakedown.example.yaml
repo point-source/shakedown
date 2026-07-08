@@ -34,6 +34,13 @@ sources:
         # automatically (SPEC.md §spec:library-staging). Available IA fields: identifier, title, creator,
         # date, year, venue, coverage. Filters: sanitize, short, lower, upper.
         library_layout: '{year}/{date} - {venue|sanitize}'
+        # Opt-in metadata preservation (SPEC.md §spec:metadata-preservation): write the
+        # item's raw source metadata as a `metadata.json` sidecar into the archive item
+        # directory and hardlink it into the library beside the media, so a browsed folder
+        # carries its own lineage/notes/setlist context. Off by default. The sidecar is
+        # excluded from change detection — an upstream notes edit never re-fetches media;
+        # run `shakedown sync --refresh-metadata` to explicitly re-pull and rewrite it.
+        preserve_source_metadata: false
         on_complete:
           webhook: http://beets:8337/import?path={staging_root}
 

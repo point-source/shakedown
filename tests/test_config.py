@@ -29,6 +29,24 @@ sources:
     assert cfg.state_db == Path("/data/archive/.shakedown/state.db"), "state_db default"
     assert cfg.max_concurrent_downloads == 4
     assert cfg.sources[0].collections[0].library_layout == "passthrough"
+    # preserve_source_metadata is opt-in and defaults off (§spec:metadata-preservation).
+    assert cfg.sources[0].collections[0].preserve_source_metadata is False
+
+
+def test_preserve_source_metadata_opt_in(tmp_path: Path) -> None:
+    p = _write(tmp_path, """
+archive_root: /data/archive
+library_root: /data/library
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'collection:GratefulDead'
+        preserve_source_metadata: true
+""")
+    cfg = load(p)
+    assert cfg.sources[0].collections[0].preserve_source_metadata is True
 
 
 def test_duplicate_collection_names_rejected(tmp_path: Path) -> None:

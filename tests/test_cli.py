@@ -65,6 +65,49 @@ def test_sync_dry_run_succeeds(tmp_path: Path, tmp_roots) -> None:
     assert FakePlugin.fetch_count == {}, "dry-run must not fetch"
 
 
+def test_sync_refresh_metadata_and_dry_run_mutually_exclusive(
+    tmp_path: Path, tmp_roots
+) -> None:
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+    result = CliRunner().invoke(
+        main, ["--config", str(cfg), "sync", "--dry-run", "--refresh-metadata"]
+    )
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
+def test_sync_refresh_metadata_rewrites_sidecar_without_refetch(
+    tmp_path: Path, tmp_roots
+) -> None:
+    archive, library = tmp_roots
+    cfg = tmp_path / "shakedown.yaml"
+    cfg.write_text(f"""
+archive_root: {archive}
+library_root: {library}
+sources:
+  - name: fake-src
+    type: fake
+    collections:
+      - name: coll1
+        query: '*'
+        preserve_source_metadata: true
+""")
+    FakePlugin.items["gd-r"] = FakeItem(
+        identifier="gd-r", files=[FakeFile(name="r.flac", content=b"a")], metadata={"notes": "v1"}
+    )
+    assert CliRunner().invoke(main, ["--config", str(cfg), "sync"]).exit_code == 0
+    assert FakePlugin.fetch_count == {"gd-r": 1}
+
+    FakePlugin.items["gd-r"].metadata = {"notes": "v2"}
+    result = CliRunner().invoke(main, ["--config", str(cfg), "sync", "--refresh-metadata"])
+    assert result.exit_code == 0
+    assert FakePlugin.fetch_count == {"gd-r": 1}  # no media re-download
+    import json
+    sidecar = archive / "fake-src" / "coll1" / "gd-r" / "metadata.json"
+    assert json.loads(sidecar.read_text())["notes"] == "v2"
+
+
 def test_sync_filters_apply(tmp_path: Path, tmp_roots) -> None:
     archive, library = tmp_roots
     cfg = _write_config(tmp_path, archive, library)
