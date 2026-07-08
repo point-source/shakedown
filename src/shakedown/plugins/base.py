@@ -26,6 +26,10 @@ class ItemDescriptor:
     metadata: dict[str, Any] = field(default_factory=dict)
     is_restricted: bool = False
     restriction_reason: str | None = None
+    # source-provided change signal for incremental discovery (§spec:incremental-discovery);
+    # a token that moves whenever the item's contents change. None when the source exposes
+    # no cheap signal.
+    change_signal: str | None = None
 
 
 @dataclass
@@ -78,6 +82,18 @@ class SourcePlugin(ABC):
         the core then drains `discover()` serially. Raising signals an enumeration
         failure (the core marks the collection stale), exactly like `discover()`.
         """
+        return None
+
+    def enumerate_with_signals(
+        self, collection: CollectionConfig
+    ) -> Iterator[tuple[str, str | None]] | None:
+        """Cheap enumeration paired with each item's source change signal
+        (§spec:incremental-discovery): the same single search as enumerate_items,
+        but also yielding the change signal per item so the core can skip the
+        per-item metadata fetch when the stored signal is unchanged. Return None
+        (the default) when the source has no cheap change signal; the core then
+        always resolves the full descriptor via describe_item(). Raising signals an
+        enumeration failure, exactly like enumerate_items()."""
         return None
 
     def describe_item(

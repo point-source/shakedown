@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,26 @@ def _build_manifest(
     return Manifest(files=tuple(entries))
 
 
+def _combine_change_signal(hit: dict[str, Any]) -> str | None:
+    """Combine IA's oai_updatedate and item_size into one change signal.
+
+    The signal moves whenever the item's contents change: a new derivation
+    bumps oai_updatedate, and a file added/removed/resized moves item_size —
+    so any change the recorded manifest would catch also moves the signal
+    (§spec:incremental-discovery, monotonicity bound). Returns None when the
+    search exposed neither field, so the core falls through to the full
+    manifest comparison rather than trusting an empty signal.
+    """
+    updated = hit.get("oai_updatedate")
+    # IA returns multi-valued fields as lists; take the most recent.
+    if isinstance(updated, list):
+        updated = updated[-1] if updated else None
+    size = hit.get("item_size")
+    if updated is None and size is None:
+        return None
+    return f"{updated}|{size}"
+
+
 @register
 class IAPlugin(SourcePlugin):
     type_name = "ia"
@@ -117,18 +138,25 @@ class IAPlugin(SourcePlugin):
         super().__init__(source_config)
         self._session = _get_ia_session(source_config)
 
-    def enumerate_items(self, collection: CollectionConfig) -> Iterator[str]:
-        """Yield identifiers matching the query (the cheap half of discovery)."""
+    def enumerate_with_signals(
+        self, collection: CollectionConfig
+    ) -> Iterator[tuple[str, str | None]]:
         log.info("IA discover: query=%r", collection.query)
-        search = self._session.search_items(collection.query, fields=["identifier"])
+        search = self._session.search_items(
+            collection.query, fields=["identifier", "oai_updatedate", "item_size"]
+        )
         for hit in search:
-            yield hit["identifier"]
+            yield hit["identifier"], _combine_change_signal(hit)
+
+    def enumerate_items(self, collection: CollectionConfig) -> Iterator[str]:
+        for identifier, _signal in self.enumerate_with_signals(collection):
+            yield identifier
 
     def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
-        for identifier in self.enumerate_items(collection):
+        for identifier, signal in self.enumerate_with_signals(collection):
             desc = self.describe_item(identifier, collection)
             if desc is not None:
-                yield desc
+                yield replace(desc, change_signal=signal)
 
     def describe_item(
         self, identifier: str, collection: CollectionConfig
