@@ -91,3 +91,8 @@ class Run:
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items retained
+    # Recordings dropped this run because their library_layout rendered to a path
+    # another item already staged (§spec:layout-collision-safety). Distinct from
+    # items_failed: the archive copy is intact, only the library link was dropped.
+    collisions_dropped: int = 0
+    collision_paths: list[str] = field(default_factory=list)

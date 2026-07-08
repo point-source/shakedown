@@ -132,7 +132,8 @@ class RunRepo:
             """
             UPDATE runs SET
                 finished_at=?, items_discovered=?, items_new=?, items_updated=?,
-                items_failed=?, bytes_downloaded=?, errors=?, stale=?
+                items_failed=?, bytes_downloaded=?, errors=?, stale=?,
+                collisions_dropped=?, collision_paths=?
             WHERE id=?
             """,
             (
@@ -144,6 +145,8 @@ class RunRepo:
                 run.bytes_downloaded,
                 json.dumps(run.errors),
                 int(run.stale),
+                run.collisions_dropped,
+                json.dumps(run.collision_paths),
                 run.id,
             ),
         )
@@ -173,6 +176,8 @@ class RunRepo:
             bytes_downloaded=row["bytes_downloaded"],
             errors=json.loads(row["errors"]),
             stale=bool(row["stale"]),
+            collisions_dropped=row["collisions_dropped"],
+            collision_paths=json.loads(row["collision_paths"]),
         )
 
 

@@ -31,7 +31,7 @@ from shakedown.notify import (
 )
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
-from shakedown.staging import stage_item, staging_dir_for, unstage_item
+from shakedown.staging import StageResult, stage_item, unstage_item
 from shakedown.state import ItemRepo, RunRepo
 
 log = logging.getLogger(__name__)
@@ -161,6 +161,13 @@ class CollectionSyncStats:
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items left untouched
+    # Recordings dropped this run because their library_layout rendered onto a path
+    # another item already staged (§spec:layout-collision-safety). Counted once per
+    # dropped recording and kept distinct from `failed` — the item's archive copy is
+    # intact, only its library link was dropped. `collision_paths` holds the colliding
+    # staging directories for the consolidated run/status summary.
+    collisions_dropped: int = 0
+    collision_paths: list[str] = field(default_factory=list)
     # Items fetched and staged this run, for the sync.complete batch payload
     # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
     staged: list[dict[str, str]] = field(default_factory=list)
@@ -230,14 +237,61 @@ def run_sync(
                 log.warning("%s/%s: STALE (source enumeration failed)", source.name, collection.name)
             else:
                 log.info(
-                    "%s/%s: discovered=%d new=%d updated=%d failed=%d bytes=%d",
+                    "%s/%s: discovered=%d new=%d updated=%d failed=%d collisions=%d bytes=%d",
                     source.name, collection.name,
                     stats.discovered, stats.new, stats.updated, stats.failed,
-                    stats.bytes_downloaded,
+                    stats.collisions_dropped, stats.bytes_downloaded,
                 )
-            if stats.failed > 0 or stats.stale:
+                if stats.collisions_dropped:
+                    # Consolidated per-run collision summary (§spec:layout-collision-safety):
+                    # one line naming how many recordings were dropped and to which paths,
+                    # not a WARNING buried per file. Paths are rendered with `!r` because
+                    # they derive from remote metadata via the layout template and may hold
+                    # control characters — repr neutralizes terminal-escape injection.
+                    log.warning(
+                        "%s/%s: %d recording(s) dropped to layout collisions; "
+                        "colliding paths: %s",
+                        source.name, collection.name, stats.collisions_dropped,
+                        ", ".join(repr(p) for p in stats.collision_paths),
+                    )
+            # A same-run layout collision is a loud non-zero exit like any other loss —
+            # the run still completes and the rest of the collection stages normally.
+            if stats.failed > 0 or stats.stale or stats.collisions_dropped > 0:
                 overall_failed += 1
     return 0 if overall_failed == 0 else 1
+
+
+# Upper bound on the colliding-path *sample* retained per run. The count
+# (`collisions_dropped`) is always exact; this only caps the illustrative path list
+# that lands in the DB, the notification payload, and the summary line.
+_MAX_COLLISION_PATHS = 100
+
+
+def _record_collision(
+    stats: CollectionSyncStats,
+    source_name: str,
+    collection_name: str,
+    stage_result: StageResult,
+) -> None:
+    """Record one recording dropped to a same-run layout collision, counted once per
+    recording (not per colliding file) into ``collisions_dropped``
+    (§spec:layout-collision-safety).
+
+    No-op when the stage had no collision. The per-file detail is logged at DEBUG; the
+    single consolidated WARNING is emitted once per collection by ``run_sync``.
+
+    ``collisions_dropped`` stays exact, but the retained path *sample* is capped
+    (``_MAX_COLLISION_PATHS``): a lossy layout over a large source can drop tens of
+    thousands of recordings, and an unbounded list would bloat the DB blob, the
+    notification payload, and the summary line without adding signal.
+    """
+    if not stage_result.collisions:
+        return
+    stats.collisions_dropped += 1
+    if len(stats.collision_paths) < _MAX_COLLISION_PATHS:
+        stats.collision_paths.append(str(stage_result.staging_dir))
+    for c in stage_result.collisions:
+        log.debug("[%s/%s] layout collision detail: %s", source_name, collection_name, c)
 
 
 def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: datetime) -> None:
@@ -249,6 +303,8 @@ def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: d
     run.bytes_downloaded = stats.bytes_downloaded
     run.stale = stats.stale
     run.errors = stats.errors
+    run.collisions_dropped = stats.collisions_dropped
+    run.collision_paths = stats.collision_paths
     run.finished_at = finished
     runs.finish(run)
 
@@ -359,10 +415,7 @@ def _sync_collection(
                 config, collection, source.name, p.existing, p.existing.recorded_manifest,
                 staged_paths=staged_paths,
             )
-            for c in stage_result.collisions:
-                log.warning("[%s/%s] staging collision: %s", source.name, collection.name, c)
-                stats.errors.append(f"staging collision: {c}")
-                stats.failed += 1
+            _record_collision(stats, source.name, collection.name, stage_result)
 
     # Persist new state for unavailable / disappeared in one shot.
     with transaction(conn):
@@ -487,11 +540,17 @@ def _fire_notifications(
     (SPEC §spec:handoff).
 
     ``sync.complete`` fires when the run staged at least one item; ``sync.failed``
-    fires when the run failed (source enumeration stale, or one or more items
-    failed). Both are best-effort: a delivery failure is appended to
-    ``stats.errors`` (recorded in the run, surfaced by `status`) and never raises.
+    fires when the run failed (source enumeration stale, one or more items failed, or
+    recordings were dropped to layout collisions, §spec:layout-collision-safety). Both
+    are best-effort: a delivery failure is appended to ``stats.errors`` (recorded in the
+    run, surfaced by `status`) and never raises.
     """
     run_errors = list(stats.errors)  # substantive errors, before any delivery attempt
+    if stats.collisions_dropped:
+        run_errors.append(
+            f"{stats.collisions_dropped} recording(s) dropped to layout collisions: "
+            f"{', '.join(stats.collision_paths)}"
+        )
     staging_root = str(config.library_root / source.name / collection.name)
     run_obj = {
         "started_at": started.isoformat(),
@@ -499,6 +558,7 @@ def _fire_notifications(
         "items_new": stats.new,
         "items_updated": stats.updated,
         "items_failed": stats.failed,
+        "collisions_dropped": stats.collisions_dropped,
         "bytes_downloaded": stats.bytes_downloaded,
     }
 
@@ -516,7 +576,7 @@ def _fire_notifications(
         if err:
             stats.errors.append(err)
 
-    if stats.stale or stats.failed > 0:
+    if stats.stale or stats.failed > 0 or stats.collisions_dropped > 0:
         err = fire_failure(
             config.notifications,
             SyncFailedPayload(
@@ -794,21 +854,20 @@ def _process_fetch_result(
         config, collection, source.name, new_item, desc.manifest, staged_paths=staged_paths,
     )
     if stage_result.collisions:
-        for c in stage_result.collisions:
-            log.warning("[%s/%s] staging collision: %s", source.name, collection.name, c)
-            stats.errors.append(f"staging collision: {c}")
-            stats.failed += 1
+        # Layout collision: this recording lost its staging path to another item this
+        # run. The archive copy is intact; only the library link was dropped
+        # (§spec:layout-collision-safety). Skip the handoff entry — nothing landed in
+        # the library for this item.
+        _record_collision(stats, source.name, collection.name, stage_result)
+        return
 
     # Collect for the once-per-run sync.complete batch payload; the handoff
     # fires once after the run, not per item (SPEC §spec:handoff).
-    staging_dir = staging_dir_for(
-        config, collection, source.name, new_item.source_metadata, new_item.archive_path  # type: ignore[arg-type]
-    )
     stats.staged.append(
         {
             "identifier": desc.identifier,
             "archive_path": str(new_item.archive_path),
-            "staging_path": str(staging_dir),
+            "staging_path": str(stage_result.staging_dir),
         }
     )
 
@@ -1136,7 +1195,7 @@ def refetch_item(config: Config, identifier: str) -> int:
                 _execute_fetch_and_stage(
                     config, source, collection, plugin, items, [target], stats
                 )
-                return 0 if stats.failed == 0 else 1
+                return 0 if stats.failed == 0 and stats.collisions_dropped == 0 else 1
     log.warning("identifier %s not found in any configured collection", identifier)
     return 1
 

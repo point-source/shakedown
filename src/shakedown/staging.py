@@ -21,6 +21,9 @@ class StageResult:
     linked: int = 0
     already_present: int = 0
     collisions: list[str] = None  # type: ignore[assignment]
+    # The item's resolved staging directory. Callers reuse it (e.g. the collision
+    # summary, the handoff payload) instead of re-rendering the layout template.
+    staging_dir: Path | None = None
 
     def __post_init__(self) -> None:
         if self.collisions is None:
@@ -81,7 +84,7 @@ def stage_item(
         config, collection, source_name, item.source_metadata, item.archive_path
     )
 
-    result = StageResult()
+    result = StageResult(staging_dir=staging_dir)
     for mf in manifest.files:
         src = item.archive_path / mf.name
         dst = staging_dir / mf.name

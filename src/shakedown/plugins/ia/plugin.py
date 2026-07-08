@@ -134,6 +134,9 @@ def _combine_change_signal(hit: dict[str, Any]) -> str | None:
 class IAPlugin(SourcePlugin):
     type_name = "ia"
     template_fields = ("identifier", "title", "creator", "date", "year", "venue", "coverage")
+    # `identifier` is the item's IA identifier — globally unique, the composite key
+    # (§spec:layout-collision-safety); no other surfaced field is guaranteed distinct.
+    per_item_unique_fields = ("identifier",)
 
     def __init__(self, source_config: SourceConfig) -> None:
         super().__init__(source_config)

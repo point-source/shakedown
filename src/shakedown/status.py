@@ -58,6 +58,10 @@ def _summarize_run(run: Any) -> dict[str, Any]:
         "items_failed": run.items_failed,
         "bytes_downloaded": run.bytes_downloaded,
         "errors": run.errors,
+        # Recordings dropped to layout collisions last run, distinct from item_failed
+        # (§spec:layout-collision-safety).
+        "collisions_dropped": run.collisions_dropped,
+        "collision_paths": run.collision_paths,
     }
 
 
@@ -93,6 +97,20 @@ def print_status(config: Config, *, as_json: bool) -> None:
             click.echo("  last run: never")
         click.echo("  items: " + ", ".join(f"{k}={v}" for k, v in s["counts"].items() if v))
         click.echo(f"  disk:  {s['bytes_on_disk'] / 1e9:.2f} GiB")
+        if last and last["collisions_dropped"]:
+            # Recordings dropped to layout collisions last run — a loud line separate
+            # from ordinary fetch failures (§spec:layout-collision-safety).
+            click.echo(
+                f"  layout collisions: {last['collisions_dropped']} recording(s) "
+                f"dropped to a shared path last run"
+            )
+            for path in last["collision_paths"][:10]:
+                # `!r`: paths derive from remote metadata via the layout template and
+                # may carry control characters — repr neutralizes terminal-escape
+                # injection into `status` output (§spec:layout-collision-safety).
+                click.echo(f"    - {path!r}")
+            if len(last["collision_paths"]) > 10:
+                click.echo(f"    ... and {len(last['collision_paths']) - 10} more")
         if s["drift_files"]:
             click.echo(f"  drift: {s['drift_files']} files (run `verify --deep --list` for paths)")
         if s["restricted"]:

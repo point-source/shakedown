@@ -415,17 +415,17 @@ discovery-performance increment bought (§spec:discovery-pipeline).
 
 ## Layout collision safety §spec:layout-collision-safety
 
-*Status: not started*
+*Status: complete*
 
 A `library_layout` that cannot distinguish two items in the same
 collection renders them to the same staging path; when their filenames
 also match, the later items lose the collision and are skipped
-(§spec:library-staging). Today that surfaces as one buried per-file
-`WARNING` and an incremented `failed` count — easily read as a transient
-glitch rather than "recordings are missing from the library." A
-live-music collection with multiple recordings of one show (different
-tapers or sources, same date and venue) hits this whenever the layout
-keys on date/venue with no per-item-unique component.
+(§spec:library-staging). A live-music collection with multiple recordings
+of one show (different tapers or sources, same date and venue) hits this
+whenever the layout keys on date/venue with no per-item-unique component
+— and left unguarded it surfaces only as a buried per-file `WARNING` and
+an incremented `failed` count, easily read as a transient glitch rather
+than "recordings are missing from the library."
 (§req:success-criteria #14, §req:quality-attributes: no silent library
 data loss)
 
@@ -435,25 +435,26 @@ Two defenses, one proactive and one at runtime:
   `template_fields` are **per-item-unique** — guaranteed to distinguish
   any two items in a collection (for the IA and etree plugins,
   `identifier`; §spec:source-plugins). At load time, a non-`passthrough`
-  `library_layout` that references no per-item-unique field is flagged
-  with a named warning naming the collection and suggesting a unique
-  component (e.g. `{identifier}` in the leaf). A non-passthrough template
-  that references **no plugin field at all** — one constant path for
-  every item, a guaranteed total collapse — is a hard config error,
-  consistent with the fail-fast config contract (§spec:configuration).
-- **Runtime summary.** When items are nonetheless dropped to same-run
-  template collisions, the run reports a single consolidated line — how
-  many recordings were dropped and to which colliding paths — and that
-  count is surfaced in `shakedown status`, distinct from ordinary fetch
-  failures. Colliding items are still skipped rather than aborting the
-  run: the rest of the collection stages normally, and the run's
-  non-zero exit still signals that something needs attention.
+  `library_layout` that references no per-item-unique field draws a named
+  warning naming the collection and suggesting a unique component (e.g.
+  `{identifier}` in the leaf). A non-passthrough template that references
+  **no plugin field at all** — one constant path for every item, a
+  guaranteed total collapse — is a hard config error, consistent with the
+  fail-fast config contract (§spec:configuration).
+- **Runtime summary.** Recordings dropped to same-run template collisions
+  are aggregated into one consolidated per-run line — how many were
+  dropped and to which colliding paths — surfaced in the run summary and
+  in `shakedown status`, counted separately from ordinary fetch failures.
+  The archive copy is untouched; only the library link is dropped. The
+  losers are skipped rather than aborting the run — the rest of the
+  collection stages normally — while the run's non-zero exit still
+  signals that something needs attention.
 
 **Why a warning, not a hard error, for the missing-unique-field case.**
 Uniqueness of an arbitrary *combination* of fields is undecidable from
 config alone — `{date} - {venue} - {title}` is unique in practice for
-most collections yet references no single guaranteed-unique field.
-Hard-failing it would reject legitimate layouts. The plugin can vouch
+most collections yet references no single guaranteed-unique field, so
+hard-failing it would reject legitimate layouts. The plugin can vouch
 only that `identifier` is always unique, so the load-time check warns (a
 proactive heads-up before the first sync) while the runtime summary is
 the correctness backstop — it fires only on *actual* loss and can never
