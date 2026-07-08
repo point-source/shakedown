@@ -74,7 +74,11 @@ def test_combine_change_signal_handles_list_and_missing() -> None:
         {"oai_updatedate": ["2020-01-01", "2024-05-01"], "item_size": 99}
     ) == "2024-05-01|99"
     assert _combine_change_signal({"identifier": "x"}) is None
-    assert _combine_change_signal({"item_size": 42}) == "None|42"
+    # Size alone is not monotone in contents (a same-size re-derivation would
+    # be missed), so a signal missing oai_updatedate falls through to the full
+    # comparison rather than engaging the skip — §spec:incremental-discovery
+    # correctness bound.
+    assert _combine_change_signal({"item_size": 42}) is None
 
 
 def test_enumerate_with_signals_requests_extra_fields() -> None:
