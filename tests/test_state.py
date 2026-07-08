@@ -4,8 +4,16 @@ from datetime import datetime
 from pathlib import Path
 
 from shakedown.db import connect
-from shakedown.models import Item, ItemStatus, Manifest, ManifestFile, Run
-from shakedown.state import DriftRepo, ItemRepo, RunRepo
+from shakedown.models import (
+    Item,
+    ItemStatus,
+    Manifest,
+    ManifestFile,
+    OperationStatus,
+    OperationType,
+    Run,
+)
+from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 
 
 def _make_item(identifier: str = "x") -> Item:
@@ -105,6 +113,75 @@ def test_run_stale_round_trips(tmp_path: Path) -> None:
     assert latest.errors == ["source enumeration failed: unreachable"]
 
 
+def test_operation_outcome_round_trip_and_latest_actionable(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "s.db")
+    repo = OperationOutcomeRepo(conn)
+    started = datetime(2026, 4, 26, 12, 0)
+    finished = datetime(2026, 4, 26, 12, 3)
+
+    sync = repo.start(OperationType.SYNC, "s", "c", started, phase="discover")
+    repo.finish(
+        sync,
+        OperationStatus.STALE_ENUMERATION,
+        finished,
+        phase="discover",
+        affected_item="x",
+        completed_work={"items_discovered": 1, "items_fetched": 1},
+        preservation_context="local recordings retained; no pruning performed",
+        deletion_context="no deletion requested",
+        safe_next_action="restore source access and rerun sync",
+        errors=["source enumeration failed: unreachable"],
+    )
+
+    restage = repo.start(OperationType.RESTAGE, "s", "c", finished, phase="stage")
+    repo.finish(restage, OperationStatus.COMPLETED, finished, phase="stage")
+
+    latest = repo.latest_actionable("s", "c")
+    assert latest is not None
+    assert latest.operation == OperationType.SYNC
+    assert latest.status == OperationStatus.STALE_ENUMERATION
+    assert latest.phase == "discover"
+    assert latest.affected_item == "x"
+    assert latest.completed_work == {"items_discovered": 1, "items_fetched": 1}
+    assert latest.preservation_context == "local recordings retained; no pruning performed"
+    assert latest.deletion_context == "no deletion requested"
+    assert latest.safe_next_action == "restore source access and rerun sync"
+    assert latest.errors == ["source enumeration failed: unreachable"]
+
+
+def test_operation_outcome_resolution_is_scoped(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "s.db")
+    repo = OperationOutcomeRepo(conn)
+    started = datetime(2026, 4, 26, 12, 0)
+    finished = datetime(2026, 4, 26, 12, 1)
+
+    sync = repo.start(OperationType.SYNC, "s", "c", started, phase="discover")
+    repo.finish(
+        sync,
+        OperationStatus.STALE_ENUMERATION,
+        finished,
+        phase="discover",
+        safe_next_action="rerun sync",
+    )
+    restage = repo.start(OperationType.RESTAGE, "s", "c", started, phase="stage")
+    repo.finish(
+        restage,
+        OperationStatus.FAILED_BEFORE_COMPLETION,
+        finished,
+        phase="stage",
+        safe_next_action="rerun restage",
+    )
+
+    repo.resolve_actionable(
+        OperationType.SYNC, "s", "c", datetime(2026, 4, 26, 12, 2)
+    )
+
+    latest = repo.latest_actionable("s", "c")
+    assert latest is not None
+    assert latest.operation == OperationType.RESTAGE
+    assert latest.safe_next_action == "rerun restage"
+
+
 def test_v1_db_migrates_to_current_schema(tmp_path: Path) -> None:
     """An existing v1 database (no runs.stale column) upgrades in place; the added
     column defaults to non-stale so historical runs read back cleanly."""
@@ -138,7 +215,7 @@ def test_v1_db_migrates_to_current_schema(tmp_path: Path) -> None:
 
     conn = connect(db_path)  # triggers migration
     version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
-    assert version == 4
+    assert version == 5
     latest = RunRepo(conn).latest("s", "c")
     assert latest is not None and latest.stale is False
     # The collision columns added in later migrations default cleanly for old runs.
@@ -180,7 +257,7 @@ def test_v2_db_migrates_change_signal_column(tmp_path: Path) -> None:
 
     conn = connect(db_path)  # triggers migration
     version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
-    assert version == 4
+    assert version == 5
     cols = [row["name"] for row in conn.execute("PRAGMA table_info(items)").fetchall()]
     assert "change_signal" in cols
     run_cols = [row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()]
@@ -195,6 +272,58 @@ def test_v2_db_migrates_change_signal_column(tmp_path: Path) -> None:
     fetched = repo.get("s", "c", "x")
     assert fetched is not None
     assert fetched.change_signal == "2024-06-01T00:00:00Z|999"
+
+
+def test_v4_db_migrates_operation_outcomes_table(tmp_path: Path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "legacy_v4.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version (version) VALUES (4);
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_name TEXT NOT NULL,
+            collection_name TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            items_discovered INTEGER NOT NULL DEFAULT 0,
+            items_new INTEGER NOT NULL DEFAULT 0,
+            items_updated INTEGER NOT NULL DEFAULT 0,
+            items_failed INTEGER NOT NULL DEFAULT 0,
+            bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+            errors TEXT NOT NULL DEFAULT '[]',
+            stale INTEGER NOT NULL DEFAULT 0,
+            collisions_dropped INTEGER NOT NULL DEFAULT 0,
+            collision_paths TEXT NOT NULL DEFAULT '[]'
+        );
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = connect(db_path)
+    version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
+    assert version == 5
+    tables = [
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    ]
+    assert "operation_outcomes" in tables
+
+    repo = OperationOutcomeRepo(conn)
+    outcome = repo.start(
+        OperationType.VALIDATE,
+        "s",
+        "c",
+        datetime(2026, 4, 26, 12, 0),
+        phase="paths",
+    )
+    assert outcome.id is not None
 
 
 def test_drift_repo(tmp_path: Path) -> None:

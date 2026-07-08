@@ -6,8 +6,17 @@ import sqlite3
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from shakedown.models import Item, ItemStatus, Manifest, Run
+from shakedown.models import (
+    Item,
+    ItemStatus,
+    Manifest,
+    OperationOutcome,
+    OperationStatus,
+    OperationType,
+    Run,
+)
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -34,6 +43,28 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         if row["recorded_manifest"]
         else None,
         change_signal=row["change_signal"],
+    )
+
+
+def _row_to_operation_outcome(row: sqlite3.Row) -> OperationOutcome:
+    return OperationOutcome(
+        id=row["id"],
+        operation=OperationType(row["operation"]),
+        status=OperationStatus(row["status"]),
+        source_name=row["source_name"],
+        collection_name=row["collection_name"],
+        started_at=_parse_iso(row["started_at"]),  # type: ignore[arg-type]
+        updated_at=_parse_iso(row["updated_at"]),  # type: ignore[arg-type]
+        finished_at=_parse_iso(row["finished_at"]),
+        phase=row["phase"],
+        affected_item=row["affected_item"],
+        affected_path=row["affected_path"],
+        completed_work=json.loads(row["completed_work"]),
+        preservation_context=row["preservation_context"],
+        deletion_context=row["deletion_context"],
+        safe_next_action=row["safe_next_action"],
+        errors=json.loads(row["errors"]),
+        resolved_at=_parse_iso(row["resolved_at"]),
     )
 
 
@@ -179,6 +210,170 @@ class RunRepo:
             collisions_dropped=row["collisions_dropped"],
             collision_paths=json.loads(row["collision_paths"]),
         )
+
+
+class OperationOutcomeRepo:
+    ACTIONABLE_STATUSES = (
+        OperationStatus.IN_PROGRESS,
+        OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
+        OperationStatus.FAILED_BEFORE_COMPLETION,
+        OperationStatus.STALE_ENUMERATION,
+    )
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def start(
+        self,
+        operation: OperationType,
+        source: str,
+        collection: str,
+        started_at: datetime,
+        *,
+        phase: str | None = None,
+        safe_next_action: str | None = None,
+    ) -> OperationOutcome:
+        cur = self.conn.execute(
+            """
+            INSERT INTO operation_outcomes (
+                operation, status, source_name, collection_name, started_at, updated_at,
+                phase, safe_next_action
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                operation.value,
+                OperationStatus.IN_PROGRESS.value,
+                source,
+                collection,
+                _iso(started_at),
+                _iso(started_at),
+                phase,
+                safe_next_action,
+            ),
+        )
+        return OperationOutcome(
+            id=cur.lastrowid,
+            operation=operation,
+            status=OperationStatus.IN_PROGRESS,
+            source_name=source,
+            collection_name=collection,
+            started_at=started_at,
+            updated_at=started_at,
+            phase=phase,
+            safe_next_action=safe_next_action,
+        )
+
+    def finish(
+        self,
+        outcome: OperationOutcome,
+        status: OperationStatus,
+        finished_at: datetime,
+        *,
+        phase: str | None = None,
+        affected_item: str | None = None,
+        affected_path: str | None = None,
+        completed_work: dict[str, Any] | None = None,
+        preservation_context: str | None = None,
+        deletion_context: str | None = None,
+        safe_next_action: str | None = None,
+        errors: list[str] | None = None,
+    ) -> None:
+        outcome.status = status
+        outcome.finished_at = finished_at
+        outcome.updated_at = finished_at
+        outcome.phase = phase
+        outcome.affected_item = affected_item
+        outcome.affected_path = affected_path
+        outcome.completed_work = completed_work or {}
+        outcome.preservation_context = preservation_context
+        outcome.deletion_context = deletion_context
+        outcome.safe_next_action = safe_next_action
+        outcome.errors = errors or []
+        self.conn.execute(
+            """
+            UPDATE operation_outcomes SET
+                status=?, updated_at=?, finished_at=?, phase=?, affected_item=?,
+                affected_path=?, completed_work=?, preservation_context=?,
+                deletion_context=?, safe_next_action=?, errors=?
+            WHERE id=?
+            """,
+            (
+                outcome.status.value,
+                _iso(outcome.updated_at),
+                _iso(outcome.finished_at),
+                outcome.phase,
+                outcome.affected_item,
+                outcome.affected_path,
+                json.dumps(outcome.completed_work),
+                outcome.preservation_context,
+                outcome.deletion_context,
+                outcome.safe_next_action,
+                json.dumps(outcome.errors),
+                outcome.id,
+            ),
+        )
+
+    def resolve_actionable(
+        self,
+        operation: OperationType,
+        source: str,
+        collection: str,
+        resolved_at: datetime,
+        *,
+        affected_item: str | None = None,
+    ) -> None:
+        statuses = tuple(s.value for s in self.ACTIONABLE_STATUSES)
+        placeholders = ", ".join("?" for _ in statuses)
+        params: list[object] = [
+            _iso(resolved_at),
+            operation.value,
+            source,
+            collection,
+            *statuses,
+        ]
+        item_filter = ""
+        if affected_item is not None:
+            item_filter = "AND (affected_item IS NULL OR affected_item=?)"
+            params.append(affected_item)
+        self.conn.execute(
+            f"""
+            UPDATE operation_outcomes
+            SET resolved_at=?
+            WHERE operation=?
+              AND source_name=?
+              AND collection_name=?
+              AND resolved_at IS NULL
+              AND status IN ({placeholders})
+              {item_filter}
+            """,
+            params,
+        )
+
+    def latest_actionable(self, source: str, collection: str) -> OperationOutcome | None:
+        statuses = tuple(s.value for s in self.ACTIONABLE_STATUSES)
+        placeholders = ", ".join("?" for _ in statuses)
+        cur = self.conn.execute(
+            f"""
+            SELECT * FROM operation_outcomes
+            WHERE source_name=?
+              AND collection_name=?
+              AND resolved_at IS NULL
+              AND status IN ({placeholders})
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            """,
+            (source, collection, *statuses),
+        )
+        row = cur.fetchone()
+        return _row_to_operation_outcome(row) if row else None
+
+    def get(self, outcome_id: int) -> OperationOutcome | None:
+        cur = self.conn.execute(
+            "SELECT * FROM operation_outcomes WHERE id=?",
+            (outcome_id,),
+        )
+        row = cur.fetchone()
+        return _row_to_operation_outcome(row) if row else None
 
 
 class DriftRepo:
