@@ -185,26 +185,24 @@ manifest recorded, or not there at all — the invariant that makes
 
 ## Source plugins §spec:source-plugins
 
-*Status: in progress — interface and IA plugin done; interface doc and etree plugin missing; see §road:plugin-interface-doc, §road:etree-plugin*
+*Status: complete*
 
 Sources are pluggable so that new archives can be added without core
-changes (§req:constraints). A plugin implements three operations plus
-a capability declaration:
+changes (§req:constraints). A plugin implements `discover`, `fetch`, and
+`verify`, plus a capability declaration (`type_name` and the metadata
+`template_fields` it surfaces for library layout, §spec:library-staging).
+The authoring contract — exact method signatures, the durability and
+backoff the core owns, and a worked example — is documented for third-party
+authors in [`docs/plugins.md`](docs/plugins.md).
 
-- `discover(collection_config) → iterator of item descriptors` —
-  enumerate all items matching the collection's query; each descriptor
-  carries the identifier, the current file manifest, and source-native
-  metadata.
-- `fetch(item, dest_dir, filters) → result` — download files matching
-  the collection's format/exclude filters into `dest_dir`, verifying
-  source-provided checksums. Idempotent: re-running against an
-  existing directory skips files that already match.
-- `verify(item, archive_path) → result` — cheap re-check that expected
-  files still exist. Existence only; byte hashing is `verify --deep`'s
-  job, implemented by the core, not plugins.
-- A declaration of which query kinds the plugin understands and which
-  metadata fields it surfaces (date, venue, lineage, …) for library
-  layout templates (§spec:library-staging).
+The seam's load-bearing invariant: **plugins never own durability.** A
+plugin only writes into a fresh, core-owned temp directory and reports an
+outcome; the core performs the atomic archive promotion, the bounded
+retries with backoff (honoring a plugin-surfaced `Retry-After`), and the
+post-fetch completeness guard (§spec:sync-workflow, §spec:failure-behavior).
+This keeps every plugin small and correct-by-default — the hard parts can't
+be reimplemented wrong per source. `verify` is existence-only by contract;
+byte hashing lives only in the core's `verify --deep` (§spec:verify-drift).
 
 Plugins shipped in v1:
 
@@ -214,9 +212,10 @@ Plugins shipped in v1:
   reimplement them. Optional credentials (for download-restricted
   items) are read from environment variables only.
 - **etree (`etree`).** A second, independently written plugin that
-  proves the seam is real (§req:success-criteria #8): the interface
-  documentation must be sufficient to write it without reading the IA
-  plugin's internals.
+  proves the seam is real (§req:success-criteria #8): it drives
+  archive.org's public HTTP/JSON API directly — a different integration
+  path from the `internetarchive` package — and was authored from
+  `docs/plugins.md` alone, without reading the IA plugin's internals.
 
 Plugins are built-in and registered in code in v1; external plugin
 distribution is deferred. **Why:** a packaging/distribution story is a

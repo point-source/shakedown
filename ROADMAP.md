@@ -6,31 +6,6 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Plugin seam proof
-
-Success criterion 8 requires a documented interface and a second plugin
-written against it; neither exists yet.
-
-### §road:plugin-interface-doc
-
-Write the source-plugin interface documentation (`docs/plugins.md`,
-linked from `README.md`) sufficient to author a plugin without reading
-the IA plugin's internals. §spec:source-plugins. Depends on
-§road:core-atomic-fetch and §road:core-retry-backoff (the documented
-contract must reflect core-owned durability and backoff).
-
-### §road:etree-plugin
-
-Implement and register the etree source plugin against the documented
-interface only (`src/shakedown/plugins/etree/`, `tests/test_etree_plugin.py`).
-§spec:source-plugins. Depends on §road:plugin-interface-doc.
-
-**Verify:** Add a `type: etree` source with one collection to
-`shakedown.yaml` and run `shakedown sync`; confirm items mirror into the
-archive and library trees and appear in `shakedown status`. Confirm via
-review that the plugin was written from `docs/plugins.md` alone, without
-reference to the IA plugin's internals.
-
 ## Serve auth conformance
 
 ### §road:serve-bearer-auth
