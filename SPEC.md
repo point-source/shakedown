@@ -421,7 +421,7 @@ Payloads contain paths and counts only, never credentials.
 
 ## Serve control plane §spec:serve
 
-*Status: in progress — auth uses a custom header instead of bearer tokens; see §road:serve-bearer-auth*
+*Status: implemented*
 
 An optional `shakedown serve` command exposes a small HTTP API for
 users who want ad-hoc triggers and monitoring without `docker exec`

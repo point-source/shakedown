@@ -44,7 +44,11 @@ services:
       ofelia.job-exec.phish-sync.command: "shakedown sync --collection phish"
 
   # Optional: HTTP control plane for ad-hoc triggers + Prometheus metrics.
-  # Uncomment and set SHAKEDOWN_API_TOKEN if you want it.
+  # Uncomment and set SHAKEDOWN_API_TOKEN if you want it. Mutating endpoints
+  # authenticate with a standard bearer token; with no token set they are
+  # disabled (not open). Trigger a sync with:
+  #   curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" \
+  #     http://host:8080/sync
   #
   # shakedown-serve:
   #   image: ghcr.io/OWNER/shakedown:latest

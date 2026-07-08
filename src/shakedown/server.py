@@ -1,11 +1,12 @@
 """Optional HTTP control plane: `shakedown serve`. PRD §10.
 
 Lives behind an extras dep (`pip install shakedown[serve]`) so the core CLI
-container stays small. Auth is a shared secret via X-Shakedown-Token; the
-endpoints are explicitly NOT for public exposure.
+container stays small. Auth is a shared secret via `Authorization: Bearer`;
+the endpoints are explicitly NOT for public exposure.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -61,12 +62,19 @@ def build_app(config: Config) -> FastAPI:
         registry=registry,
     )
 
-    def require_token(token: str | None) -> None:
+    def require_token(authorization: str | None) -> None:
         expected = os.environ.get(TOKEN_ENV)
         if not expected:
-            raise HTTPException(503, f"server not configured: set {TOKEN_ENV} in env")
-        if token != expected:
-            raise HTTPException(401, "invalid token")
+            raise HTTPException(
+                503, f"mutating endpoints disabled: set {TOKEN_ENV} in env"
+            )
+        scheme, _, token = (authorization or "").partition(" ")
+        # Compare as bytes: hmac.compare_digest rejects non-ASCII str operands
+        # with TypeError, which would surface a malformed header as a 500.
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+            token.encode(), expected.encode()
+        ):
+            raise HTTPException(401, "invalid or missing bearer token")
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -109,9 +117,9 @@ def build_app(config: Config) -> FastAPI:
     def trigger_sync(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
-        x_shakedown_token: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        require_token(x_shakedown_token)
+        require_token(authorization)
         rc = do_sync(config, source_filter=source, collection_filter=collection)
         c_sync.labels("ok" if rc == 0 else "fail").inc()
         return {"exit_code": rc}
@@ -122,9 +130,9 @@ def build_app(config: Config) -> FastAPI:
         collection: str | None = Query(default=None),
         deep: bool = Query(default=False),
         reconform: bool = Query(default=False),
-        x_shakedown_token: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        require_token(x_shakedown_token)
+        require_token(authorization)
         rc = do_verify(
             config,
             source_filter=source,
