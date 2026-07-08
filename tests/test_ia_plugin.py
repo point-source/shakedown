@@ -71,15 +71,20 @@ def test_discover_marks_restricted_items() -> None:
     assert "soundboard" in (desc.restriction_reason or "")
 
 
-def test_discover_skips_items_whose_metadata_fetch_raises() -> None:
+def test_discover_skips_items_whose_metadata_fetch_raises(monkeypatch) -> None:
+    from shakedown.plugins.ia import plugin as ia_plugin
+
+    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
+
     plugin = _make_plugin()
     plugin._session.search_items.return_value = iter(
         [{"identifier": "good-1"}, {"identifier": "bad-1"}, {"identifier": "good-2"}]
     )
 
-    def get_item(identifier):
+    def get_item(identifier, **kwargs):
         if identifier == "bad-1":
-            raise ConnectionError("upstream hiccup")
+            # Retriable transient fault → retried up to the cap, then skipped.
+            raise ConnectionError("connection reset by peer")
         return _fake_ia_item(
             identifier, files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
         )
@@ -88,6 +93,113 @@ def test_discover_skips_items_whose_metadata_fetch_raises() -> None:
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
     descriptors = list(plugin.discover(coll))
     assert {d.identifier for d in descriptors} == {"good-1", "good-2"}
+
+
+def test_describe_item_retries_transient_fault_then_resolves(monkeypatch) -> None:
+    from shakedown.plugins.ia import plugin as ia_plugin
+
+    delays: list[float] = []
+    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
+
+    plugin = _make_plugin()
+    good_item = _fake_ia_item(
+        "gd-transient", files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
+    )
+    calls = {"n": 0}
+
+    def get_item(identifier, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _HTTPError("service unavailable", _FakeResponse(503))
+        return good_item
+
+    plugin._session.get_item.side_effect = get_item
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+
+    desc = plugin.describe_item("gd-transient", coll)
+    assert desc is not None
+    assert desc.identifier == "gd-transient"
+    assert calls["n"] == 3  # two transient failures, third succeeds
+    # Two backoff sleeps recorded (attempts 1 and 2 failed transiently).
+    assert delays == [ia_plugin._metadata_backoff_seconds(1), ia_plugin._metadata_backoff_seconds(2)]
+
+
+def test_describe_item_gives_up_after_max_attempts(monkeypatch) -> None:
+    from shakedown.plugins.ia import plugin as ia_plugin
+
+    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
+
+    plugin = _make_plugin()
+    calls = {"n": 0}
+
+    def get_item(identifier, **kwargs):
+        calls["n"] += 1
+        raise _HTTPError("still down", _FakeResponse(503))
+
+    plugin._session.get_item.side_effect = get_item
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+
+    assert plugin.describe_item("gd-down", coll) is None
+    assert calls["n"] == ia_plugin._MAX_METADATA_ATTEMPTS
+
+
+def test_describe_item_does_not_retry_non_retriable_fault(monkeypatch) -> None:
+    from shakedown.plugins.ia import plugin as ia_plugin
+
+    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
+
+    plugin = _make_plugin()
+    calls = {"n": 0}
+
+    def get_item(identifier, **kwargs):
+        calls["n"] += 1
+        raise RuntimeError("malformed metadata")
+
+    plugin._session.get_item.side_effect = get_item
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+
+    assert plugin.describe_item("gd-bad", coll) is None
+    assert calls["n"] == 1  # non-retriable → exactly one attempt
+
+
+def test_describe_item_honors_retry_after_header(monkeypatch) -> None:
+    from shakedown.plugins.ia import plugin as ia_plugin
+
+    delays: list[float] = []
+    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
+
+    plugin = _make_plugin()
+    good_item = _fake_ia_item(
+        "gd-429", files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
+    )
+    calls = {"n": 0}
+
+    def get_item(identifier, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _HTTPError("rate limited", _FakeResponse(429, {"Retry-After": "7"}))
+        return good_item
+
+    plugin._session.get_item.side_effect = get_item
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+
+    desc = plugin.describe_item("gd-429", coll)
+    assert desc is not None
+    assert delays == [7.0]  # honored the Retry-After delta, not the backoff schedule
+
+
+def test_describe_item_passes_bounded_timeout_in_request_kwargs() -> None:
+    from shakedown.plugins.ia import plugin as ia_plugin
+
+    plugin = _make_plugin()
+    plugin._session.get_item.return_value = _fake_ia_item(
+        "gd-timeout", files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
+    )
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+
+    assert plugin.describe_item("gd-timeout", coll) is not None
+    _, kwargs = plugin._session.get_item.call_args
+    assert kwargs["request_kwargs"] == {"timeout": ia_plugin._METADATA_TIMEOUT}
 
 
 def test_fetch_flattens_ia_subdir_into_dest(tmp_path: Path) -> None:
