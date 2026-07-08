@@ -24,6 +24,7 @@ def _ensure_builtins_loaded() -> None:
     if _builtins_loaded:
         return
     _builtins_loaded = True
+    from shakedown.plugins.etree.plugin import EtreePlugin  # noqa: F401
     from shakedown.plugins.ia.plugin import IAPlugin  # noqa: F401
 
 
