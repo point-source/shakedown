@@ -202,10 +202,10 @@ never runs against a partial discovery.
 ## Discovery performance §spec:discovery-performance
 
 *Status: in progress — the shared per-source concurrency budget
-(§spec:source-budget), parallel per-item discovery (§spec:discovery-pipeline,
-concurrency lever), and the bounded slow-metadata envelope (§spec:slow-metadata)
-are implemented. Discover→download pipelining (§spec:discovery-pipeline, overlap
-lever) and incremental discovery (§spec:incremental-discovery) remain.*
+(§spec:source-budget), parallel per-item discovery and discover→download
+pipelining (§spec:discovery-pipeline, both levers), and the bounded slow-metadata
+envelope (§spec:slow-metadata) are implemented. Incremental discovery
+(§spec:incremental-discovery) remains.*
 
 On a large collection (~14k items, e.g. IA GratefulDead), discovery is
 the wall-clock bottleneck in two regimes. A **first full sync**
@@ -261,29 +261,26 @@ budget (§spec:source-budget). Because file downloads take far longer
 than metadata calls, overlapping them hides most discovery latency
 behind download time on a first full sync.
 
-**The enumeration-completeness contract is preserved.** A per-item fetch
-decision (`new`/`changed-upstream`/`unchanged`) is a comparison of one
-item's current manifest against its recorded manifest
-(§spec:sync-identity) and needs no knowledge of the rest of the
-collection — so it is safe to act on the moment an item is discovered.
-But the prune/`disappeared` decision ("in the database but not in this
-discovery") requires the *complete* enumeration and remains a
-**post-discovery barrier**: it runs only after discovery finishes
-successfully, never against a partial set. The invariants that must
-hold:
+**The enumeration-completeness contract.** A per-item fetch decision
+(`new`/`changed-upstream`/`unchanged`) is a comparison of one item's
+current manifest against its recorded manifest (§spec:sync-identity) and
+needs no knowledge of the rest of the collection — so it is safe to act on
+the moment an item is discovered. But the prune/`disappeared` decision
+("in the database but not in this discovery") requires the *complete*
+enumeration, so it is a **post-discovery barrier** that runs only after
+discovery finishes successfully, never against a partial set. The load-
+bearing invariants:
 
 - An item may be fetched and staged before discovery completes.
 - Pruning runs only after a complete, successful enumeration.
 - A partial or failed enumeration prunes nothing and marks the
   collection stale (§spec:failure-behavior) — a failed discovery is
-  never read as items having disappeared, unchanged from today.
+  never read as items having disappeared.
 
-**Tradeoff.** Run counters now accumulate from concurrent producers
-(discovery) and consumers (fetch) rather than the current
-single-threaded completion loop, so per-run stats must remain correct
-under concurrency. The spec requires the invariant (counts are exact),
-not a mechanism; the fetch pool already establishes the pattern of
-isolating per-worker state.
+**Tradeoff.** Run counters accumulate from concurrent producers
+(discovery) and consumers (fetch), so per-run counts must be exact under
+concurrency. The invariant is what matters (counts are exact), not the
+mechanism.
 
 ### Incremental discovery §spec:incremental-discovery
 
