@@ -439,6 +439,13 @@ def _deletion_context(collection: CollectionConfig) -> str:
     return "no deletion requested"
 
 
+def _affected_item_from_errors(errors: list[str]) -> str | None:
+    if not errors:
+        return None
+    identifier, sep, _detail = errors[0].partition(":")
+    return identifier if sep and identifier else None
+
+
 def _sync_collection(
     config: Config,
     source: SourceConfig,
@@ -602,6 +609,7 @@ def _sync_collection(
                 OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
                 finished,
                 phase=phase,
+                affected_item=_affected_item_from_errors(stats.errors),
                 completed_work=_completed_work(stats),
                 preservation_context="completed archive work retained",
                 deletion_context=_deletion_context(collection),
@@ -1405,8 +1413,18 @@ def forget_item(config: Config, identifier: str) -> None:
     """Drop an item from the DB (does not delete files)."""
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
+    outcomes = OperationOutcomeRepo(conn)
     for source in config.sources:
         for collection in source.collections:
             if items.get(source.name, collection.name, identifier):
                 items.delete(source.name, collection.name, identifier)
+                now = datetime.now()
+                for operation in OperationType:
+                    outcomes.resolve_actionable(
+                        operation,
+                        source.name,
+                        collection.name,
+                        now,
+                        affected_item=identifier,
+                    )
                 log.info("forgot %s/%s/%s", source.name, collection.name, identifier)

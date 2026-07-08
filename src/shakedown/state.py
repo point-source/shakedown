@@ -333,7 +333,7 @@ class OperationOutcomeRepo:
         ]
         item_filter = ""
         if affected_item is not None:
-            item_filter = "AND (affected_item IS NULL OR affected_item=?)"
+            item_filter = "AND affected_item=?"
             params.append(affected_item)
         self.conn.execute(
             f"""

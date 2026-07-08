@@ -10,7 +10,7 @@ from shakedown.db import connect
 from shakedown.models import ItemStatus, OperationStatus, OperationType
 from shakedown.plugins.base import FetchResult
 from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
-from shakedown.sync import run_sync
+from shakedown.sync import forget_item, run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 
@@ -114,6 +114,9 @@ def test_core_rejects_manifest_file_name_escaping_item_dir(tmp_roots: tuple[Path
     assert recovery.completed_work["items_failed"] == 1
     assert recovery.preservation_context == "completed archive work retained"
     assert recovery.safe_next_action == "fix failed item issues and rerun sync"
+
+    forget_item(config, "evil")
+    assert OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1") is None
 
 
 def test_changed_upstream_triggers_refetch(tmp_roots: tuple[Path, Path]) -> None:
