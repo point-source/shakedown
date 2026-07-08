@@ -385,46 +385,23 @@ pretending otherwise would be false durability.
 
 ## Library handoff and notifications §spec:handoff
 
-*Status: in progress — implementation fires per item with an unversioned payload and never sends failure notifications; see §road:handoff-batch-payload, §road:failure-notifications*
+*Status: implemented*
 
 After a sync that staged at least one item for a collection, the
 system fires that collection's `on_complete` action — this is how new
 shows flow into the library tool with nobody watching
 (§req:user-stories). Two mechanisms, webhook as default and exec as
-fallback (§req:constraints):
+fallback (§req:constraints), both fired once per (collection, run) with
+the `{source}`/`{collection}`/`{staging_root}` template fields available
+in the URL or command:
 
-- **Webhook** (`on_complete.webhook: <url>`): HTTP POST, fired once
-  per (collection, run). The URL may embed template fields
-  (`{source}`, `{collection}`, `{staging_root}`).
+- **Webhook** (`on_complete.webhook: <url>`): HTTP POST of a versioned
+  JSON body (`payload_version`, `event: sync.complete`, a `run` counts/
+  timing object, and a `staged` array of per-item identifier + archive/
+  staging paths). See `notify.py` for the exact shape.
 - **Exec** (`on_complete.exec: <command>`): a configured command run
-  once per (collection, run), with the same template fields available
-  (e.g. `beet import -q {staging_root}`). Exists because many library
-  tools have a CLI but no HTTP listener.
-
-The webhook body is JSON, versioned so downstream integrations can
-rely on it:
-
-```json
-{
-  "payload_version": 1,
-  "event": "sync.complete",
-  "source": "internetarchive",
-  "collection": "grateful-dead",
-  "staging_root": "/data/library/internetarchive/grateful-dead",
-  "run": {
-    "started_at": "…", "finished_at": "…",
-    "items_new": 3, "items_updated": 1, "items_failed": 0,
-    "bytes_downloaded": 5813772288
-  },
-  "staged": [
-    {
-      "identifier": "gd1977-05-08.sbd…",
-      "archive_path": "…",
-      "staging_path": "…"
-    }
-  ]
-}
-```
+  with the same JSON on stdin (e.g. `beet import -q {staging_root}`).
+  Exists because many library tools have a CLI but no HTTP listener.
 
 **Why once-per-run with a batch payload, not once-per-item.** A weekly
 sync can stage dozens of items; per-item firing would hammer the
@@ -432,15 +409,16 @@ receiver, and library imports are naturally batch operations (`beet
 import` on a directory). The `staged` array preserves per-item
 precision for receivers that want it. **Why webhook is the default:**
 loose coupling — the library tool needs no Shakedown-specific code,
-and the contract is one JSON document.
+and the contract is one JSON document. **Why versioned:** downstream
+integrations can rely on the shape and detect a breaking change.
 
 Failure notifications: a global `notifications.on_failure.webhook`
 fires (same envelope, `event: sync.failed`, plus an `errors` array)
-when a run fails. Handoff/notification delivery failures are logged
-and recorded in the run's errors — visible in `status` — but never
-fail the sync itself: the mirror's integrity does not depend on a
-listener being up. Payloads contain paths and counts only, never
-credentials.
+when a run fails — a stale source enumeration or one or more failed
+items. Handoff/notification delivery failures are logged and recorded
+in the run's errors — visible in `status` — but never fail the sync
+itself: the mirror's integrity does not depend on a listener being up.
+Payloads contain paths and counts only, never credentials.
 
 ## Serve control plane §spec:serve
 

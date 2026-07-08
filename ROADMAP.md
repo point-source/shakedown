@@ -6,35 +6,6 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Handoff contract
-
-The implemented webhook fires per item with an unversioned payload; the
-spec contract is versioned, batched, once per (collection, run), and the
-failure-notification path is configured but never fires.
-
-### §road:handoff-batch-payload
-
-Replace the per-item `item_complete` webhook/exec with the versioned
-once-per-(collection, run) `sync.complete` batch payload and the
-`{source}`/`{collection}`/`{staging_root}` template fields
-(`src/shakedown/notify.py`, `src/shakedown/sync.py`,
-`tests/test_notify.py`). §spec:handoff
-
-### §road:failure-notifications
-
-Implement the `notifications.on_failure` webhook, firing
-`event: sync.failed` with an `errors` array when a run fails
-(`src/shakedown/notify.py`, `src/shakedown/sync.py`). §spec:handoff.
-Depends on §road:handoff-batch-payload.
-
-**Verify:** Point a collection's `on_complete.webhook` at a local
-listener and run `shakedown sync`; confirm exactly one POST per
-(collection, run) carrying `payload_version: 1`,
-`event: "sync.complete"`, a `run` object, and a `staged` array. Force a
-run failure (unreachable source) and confirm the `on_failure` webhook
-receives `event: "sync.failed"` with errors. Confirm a down listener is
-logged in run errors, visible in `status`, and never fails the sync.
-
 ## Plugin seam proof
 
 Success criterion 8 requires a documented interface and a second plugin
