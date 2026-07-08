@@ -6,22 +6,6 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-## Library staging robustness
-
-### §road:template-unknown-fallback
-
-Render missing or null `library_layout` template fields as a literal
-`unknown` path segment instead of raising
-(`src/shakedown/utils/templates.py`, `src/shakedown/staging.py`,
-`tests/test_staging.py`), relying on collision detection to catch any
-resulting conflicts. §spec:library-staging
-
-**Verify:** Mirror an item whose metadata lacks a field used by the
-collection's `library_layout` (e.g. no venue) and run
-`shakedown restage`; confirm the item stages under an `unknown` segment
-rather than failing. Wipe the library tree and confirm `restage`
-rebuilds it fully with zero downloads.
-
 ## Handoff contract
 
 The implemented webhook fires per item with an unversioned payload; the
