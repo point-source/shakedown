@@ -23,6 +23,16 @@ PASSTHROUGH = "passthrough"
 METADATA_SIDECAR = "metadata.json"
 
 
+def manifest_reserves_sidecar_name(manifest: Manifest) -> bool:
+    """True if a media file in the manifest legitimately claims the sidecar's reserved
+    name. When it does, the sidecar must NOT be written: overwriting the media would make
+    the archive silently disagree with its recorded manifest (§spec:sync-identity). Media
+    integrity wins over preserved context — the pathological name loses the sidecar, not
+    its bytes.
+    """
+    return any(mf.name == METADATA_SIDECAR for mf in manifest.files)
+
+
 def write_sidecar(path: Path, metadata: dict[str, Any]) -> None:
     """Serialize an item's raw source metadata to a `metadata.json` sidecar at `path`.
 
@@ -123,7 +133,7 @@ def stage_item(
     # The metadata.json sidecar is staged as an explicit additional link, not a manifest
     # entry (§spec:metadata-preservation). It is regenerated from the DB-recorded metadata
     # when the archive copy is absent, so restage/reconcile stay network-free.
-    if collection.preserve_source_metadata:
+    if collection.preserve_source_metadata and not manifest_reserves_sidecar_name(manifest):
         sidecar_src = _ensure_archive_sidecar(item)
         if sidecar_src is not None:
             _link_file(

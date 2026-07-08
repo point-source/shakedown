@@ -34,6 +34,7 @@ from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
 from shakedown.staging import (
     METADATA_SIDECAR,
     StageResult,
+    manifest_reserves_sidecar_name,
     stage_item,
     unstage_item,
     write_sidecar,
@@ -352,7 +353,10 @@ def _refresh_collection(
             continue  # no longer enumerated upstream; nothing to re-resolve from
         assert item.archive_path is not None and item.recorded_manifest is not None
         item.source_metadata = desc.metadata
-        write_sidecar(item.archive_path / METADATA_SIDECAR, desc.metadata)
+        # Rewrite the DB record always, but skip the sidecar when a media file claims its
+        # reserved name (stage_item applies the same guard, §spec:sync-identity).
+        if not manifest_reserves_sidecar_name(item.recorded_manifest):
+            write_sidecar(item.archive_path / METADATA_SIDECAR, desc.metadata)
         items.upsert(item)
         result = stage_item(
             config, collection, source.name, item, item.recorded_manifest,
@@ -1157,9 +1161,16 @@ def _fetch_one(
     # atomic promotion, so it lands in the archive atomically with the media or not at
     # all (§spec:metadata-preservation). It is written by the core, not the plugin, and
     # is deliberately absent from the recorded manifest — change detection stays over
-    # media only (§spec:sync-identity).
+    # media only (§spec:sync-identity). A media file legitimately named metadata.json
+    # takes precedence — writing the sidecar would clobber it and desync the manifest.
     if collection.preserve_source_metadata:
-        write_sidecar(tmp_dir / METADATA_SIDECAR, desc.metadata)
+        if manifest_reserves_sidecar_name(desc.manifest):
+            log.warning(
+                "[%s] a manifest file is named %s; skipping metadata sidecar to keep the "
+                "archive consistent with its manifest", desc.identifier, METADATA_SIDECAR,
+            )
+        else:
+            write_sidecar(tmp_dir / METADATA_SIDECAR, desc.metadata)
 
     _promote_atomically(tmp_dir, dest, stale_dir)
     return _FetchOutcome(

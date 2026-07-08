@@ -85,6 +85,28 @@ def test_metadata_edit_does_not_trigger_media_refetch(tmp_roots: tuple[Path, Pat
     assert FakePlugin.fetch_count == {"gd-3": 1}  # no re-download
 
 
+def test_media_file_named_metadata_json_is_not_clobbered(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    # A media file legitimately named metadata.json must win over the sidecar, or the
+    # archive would silently disagree with its recorded manifest (§spec:sync-identity).
+    archive, library = tmp_roots
+    config = make_config(archive, library, preserve_source_metadata=True)
+    FakePlugin.items["gd-clash"] = FakeItem(
+        identifier="gd-clash",
+        files=[FakeFile(name=METADATA_SIDECAR, content=b"real audio payload")],
+        metadata={"notes": "context"},
+    )
+
+    assert run_sync(config) == 0
+
+    arc = archive / "fake-src" / "coll1" / "gd-clash" / METADATA_SIDECAR
+    assert arc.read_bytes() == b"real audio payload"  # media bytes preserved, not JSON
+    # And it stays a normal manifest-staged file hardlinked into the library.
+    lib = library / "fake-src" / "coll1" / "gd-clash" / METADATA_SIDECAR
+    assert lib.stat().st_ino == arc.stat().st_ino
+
+
 # --- §road:sidecar-stage ---------------------------------------------------------------
 
 
