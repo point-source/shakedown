@@ -173,9 +173,16 @@ class IAPlugin(SourcePlugin):
                 if not _is_retriable(e) or attempt == _MAX_METADATA_ATTEMPTS:
                     log.warning("IA get_item failed for %s: %s", identifier, e)
                     return None
-                delay = _retry_after_seconds(e)
-                if delay is None:
-                    delay = _metadata_backoff_seconds(attempt)
+                # Honor a source-supplied Retry-After, but clamp it to the backoff
+                # cap: the header is upstream-controlled, and a describe worker holds
+                # a shared SourceBudget slot while it sleeps — an unbounded value would
+                # let a hostile/compromised endpoint pin slots and wedge the run.
+                retry_after = _retry_after_seconds(e)
+                delay = (
+                    _metadata_backoff_seconds(attempt)
+                    if retry_after is None
+                    else min(retry_after, _METADATA_MAX_BACKOFF_SECONDS)
+                )
                 log.warning(
                     "IA get_item attempt %d/%d for %s failed (%s); retrying in %.1fs",
                     attempt, _MAX_METADATA_ATTEMPTS, identifier, e, delay,

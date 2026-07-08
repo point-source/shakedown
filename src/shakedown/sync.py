@@ -591,7 +591,14 @@ def _fetch_with_retries(
         if result.success or not result.retriable or attempt == max_attempts:
             return result
 
-        delay = result.retry_after if result.retry_after is not None else _backoff_seconds(attempt)
+        # Clamp a source-supplied Retry-After to the backoff cap: the value is
+        # upstream-controlled and a fetch worker holds a SourceBudget slot while it
+        # sleeps, so an unbounded value must never pin slots for an attacker-chosen wait.
+        delay = (
+            _backoff_seconds(attempt)
+            if result.retry_after is None
+            else min(result.retry_after, _MAX_BACKOFF_SECONDS)
+        )
         log.warning(
             "fetch attempt %d/%d for %s failed (%s); retrying in %.1fs",
             attempt, max_attempts, desc.identifier, result.error, delay,

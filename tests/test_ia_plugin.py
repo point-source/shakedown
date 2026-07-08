@@ -188,6 +188,35 @@ def test_describe_item_honors_retry_after_header(monkeypatch) -> None:
     assert delays == [7.0]  # honored the Retry-After delta, not the backoff schedule
 
 
+def test_describe_item_clamps_hostile_retry_after(monkeypatch) -> None:
+    """A describe worker holds a shared SourceBudget slot while it sleeps, so an
+    upstream-controlled Retry-After must be clamped to the backoff cap — a hostile
+    endpoint can't pin the slot for an attacker-chosen wait."""
+    from shakedown.plugins.ia import plugin as ia_plugin
+
+    delays: list[float] = []
+    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
+
+    plugin = _make_plugin()
+    good_item = _fake_ia_item(
+        "gd-evil", files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
+    )
+    calls = {"n": 0}
+
+    def get_item(identifier, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _HTTPError("rate limited", _FakeResponse(429, {"Retry-After": "31536000"}))
+        return good_item
+
+    plugin._session.get_item.side_effect = get_item
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+
+    desc = plugin.describe_item("gd-evil", coll)
+    assert desc is not None
+    assert delays == [ia_plugin._METADATA_MAX_BACKOFF_SECONDS]  # clamped, not a year
+
+
 def test_describe_item_passes_bounded_timeout_in_request_kwargs() -> None:
     from shakedown.plugins.ia import plugin as ia_plugin
 

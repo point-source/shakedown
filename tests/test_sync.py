@@ -581,6 +581,37 @@ def test_retry_after_is_honored_over_backoff(
     assert delays == [7.5], "the Retry-After value, not exponential backoff"
 
 
+def test_retry_after_is_clamped_to_backoff_cap(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A fetch worker holds a SourceBudget slot while it sleeps, so an
+    upstream-controlled Retry-After is clamped to the backoff cap — a hostile source
+    can't pin the slot (and stall the source's whole run) for an attacker-chosen wait."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show", content=b"good bytes")
+
+    delays: list[float] = []
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: delays.append(d))
+
+    attempts = {"n": 0}
+    real_fetch = FakePlugin.fetch
+
+    def rate_limited(self, item, dest_dir, format_filters, exclude_filters):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return FetchResult(
+                success=False, bytes_downloaded=0,
+                error="429 too many requests", retriable=True, retry_after=31_536_000.0,
+            )
+        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+
+    monkeypatch.setattr(FakePlugin, "fetch", rate_limited)
+
+    assert run_sync(config) == 0
+    assert delays == [sync_module._MAX_BACKOFF_SECONDS], "clamped to the cap, not a year"
+
+
 def _two_collection_config(archive: Path, library: Path, *, max_collections: int = 2) -> Config:
     return Config(
         archive_root=archive,
