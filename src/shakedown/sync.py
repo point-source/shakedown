@@ -31,7 +31,7 @@ from shakedown.notify import (
 )
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
-from shakedown.staging import stage_item, staging_dir_for, unstage_item
+from shakedown.staging import StageResult, stage_item, unstage_item
 from shakedown.state import ItemRepo, RunRepo
 
 log = logging.getLogger(__name__)
@@ -245,12 +245,14 @@ def run_sync(
                 if stats.collisions_dropped:
                     # Consolidated per-run collision summary (§spec:layout-collision-safety):
                     # one line naming how many recordings were dropped and to which paths,
-                    # not a WARNING buried per file.
+                    # not a WARNING buried per file. Paths are rendered with `!r` because
+                    # they derive from remote metadata via the layout template and may hold
+                    # control characters — repr neutralizes terminal-escape injection.
                     log.warning(
                         "%s/%s: %d recording(s) dropped to layout collisions; "
                         "colliding paths: %s",
                         source.name, collection.name, stats.collisions_dropped,
-                        ", ".join(stats.collision_paths),
+                        ", ".join(repr(p) for p in stats.collision_paths),
                     )
             # A same-run layout collision is a loud non-zero exit like any other loss —
             # the run still completes and the rest of the collection stages normally.
@@ -259,28 +261,37 @@ def run_sync(
     return 0 if overall_failed == 0 else 1
 
 
+# Upper bound on the colliding-path *sample* retained per run. The count
+# (`collisions_dropped`) is always exact; this only caps the illustrative path list
+# that lands in the DB, the notification payload, and the summary line.
+_MAX_COLLISION_PATHS = 100
+
+
 def _record_collision(
     stats: CollectionSyncStats,
     source_name: str,
     collection_name: str,
-    staging_dir: Path,
-    collisions: list[str],
+    stage_result: StageResult,
 ) -> None:
-    """Record one recording dropped to a same-run layout collision
+    """Record one recording dropped to a same-run layout collision, counted once per
+    recording (not per colliding file) into ``collisions_dropped``
     (§spec:layout-collision-safety).
 
-    Counted once per dropped recording (not once per colliding file) and kept apart
-    from ``failed`` — an ordinary fetch failure loses the archive copy, whereas a
-    layout collision keeps the archive copy and drops only the library link. The
-    per-file detail is logged; the colliding staging directory is retained for the
-    consolidated run/status summary.
+    No-op when the stage had no collision. The per-file detail is logged at DEBUG; the
+    single consolidated WARNING is emitted once per collection by ``run_sync``.
+
+    ``collisions_dropped`` stays exact, but the retained path *sample* is capped
+    (``_MAX_COLLISION_PATHS``): a lossy layout over a large source can drop tens of
+    thousands of recordings, and an unbounded list would bloat the DB blob, the
+    notification payload, and the summary line without adding signal.
     """
-    if not collisions:
+    if not stage_result.collisions:
         return
     stats.collisions_dropped += 1
-    stats.collision_paths.append(str(staging_dir))
-    for c in collisions:
-        log.warning("[%s/%s] layout collision: %s", source_name, collection_name, c)
+    if len(stats.collision_paths) < _MAX_COLLISION_PATHS:
+        stats.collision_paths.append(str(stage_result.staging_dir))
+    for c in stage_result.collisions:
+        log.debug("[%s/%s] layout collision detail: %s", source_name, collection_name, c)
 
 
 def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: datetime) -> None:
@@ -404,14 +415,7 @@ def _sync_collection(
                 config, collection, source.name, p.existing, p.existing.recorded_manifest,
                 staged_paths=staged_paths,
             )
-            if stage_result.collisions:
-                staging_dir = staging_dir_for(
-                    config, collection, source.name,
-                    p.existing.source_metadata, p.existing.archive_path,  # type: ignore[arg-type]
-                )
-                _record_collision(
-                    stats, source.name, collection.name, staging_dir, stage_result.collisions
-                )
+            _record_collision(stats, source.name, collection.name, stage_result)
 
     # Persist new state for unavailable / disappeared in one shot.
     with transaction(conn):
@@ -849,15 +853,12 @@ def _process_fetch_result(
     stage_result = stage_item(
         config, collection, source.name, new_item, desc.manifest, staged_paths=staged_paths,
     )
-    staging_dir = staging_dir_for(
-        config, collection, source.name, new_item.source_metadata, new_item.archive_path  # type: ignore[arg-type]
-    )
     if stage_result.collisions:
         # Layout collision: this recording lost its staging path to another item this
         # run. The archive copy is intact; only the library link was dropped
         # (§spec:layout-collision-safety). Skip the handoff entry — nothing landed in
         # the library for this item.
-        _record_collision(stats, source.name, collection.name, staging_dir, stage_result.collisions)
+        _record_collision(stats, source.name, collection.name, stage_result)
         return
 
     # Collect for the once-per-run sync.complete batch payload; the handoff
@@ -866,7 +867,7 @@ def _process_fetch_result(
         {
             "identifier": desc.identifier,
             "archive_path": str(new_item.archive_path),
-            "staging_path": str(staging_dir),
+            "staging_path": str(stage_result.staging_dir),
         }
     )
 

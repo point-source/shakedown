@@ -105,7 +105,10 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 f"dropped to a shared path last run"
             )
             for path in last["collision_paths"][:10]:
-                click.echo(f"    - {path}")
+                # `!r`: paths derive from remote metadata via the layout template and
+                # may carry control characters — repr neutralizes terminal-escape
+                # injection into `status` output (§spec:layout-collision-safety).
+                click.echo(f"    - {path!r}")
             if len(last["collision_paths"]) > 10:
                 click.echo(f"    ... and {len(last['collision_paths']) - 10} more")
         if s["drift_files"]:
