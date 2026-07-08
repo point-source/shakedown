@@ -18,7 +18,7 @@ RUN useradd -u 1000 -m shakedown
 WORKDIR /home/shakedown
 
 COPY --from=builder /dist/*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl[serve] && rm -f /tmp/*.whl
+RUN whl="$(ls /tmp/*.whl)" && pip install --no-cache-dir "${whl}[serve]" && rm -f /tmp/*.whl
 
 USER shakedown
 
