@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
+import shakedown.restage as restage_module
+from shakedown.db import connect
+from shakedown.models import OperationStatus, OperationType
 from shakedown.restage import run_restage
+from shakedown.state import OperationOutcomeRepo
 from shakedown.sync import run_sync
 from shakedown.utils.sanitize import sanitize
 from shakedown.utils.templates import TemplateError, render
@@ -124,6 +128,35 @@ def test_restage_rebuilds_after_library_wipe(tmp_roots: tuple[Path, Path]) -> No
 
     # And restage didn't trigger any new fetches.
     assert FakePlugin.fetch_count == {f"gd-{n}": 1 for n in range(5)}
+
+
+def test_restage_records_recovery_on_storage_failure(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x",
+        files=[FakeFile(name="x.flac", content=b"audio")],
+    )
+    assert run_sync(config) == 0
+
+    def fail_stage(*args, **kwargs):
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(restage_module, "stage_item", fail_stage)
+
+    assert run_restage(config) == 1
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    recovery = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
+    assert recovery is not None
+    assert recovery.operation == OperationType.RESTAGE
+    assert recovery.status == OperationStatus.FAILED_BEFORE_COMPLETION
+    assert recovery.phase == "stage"
+    assert recovery.affected_item == "gd-x"
+    assert recovery.completed_work["items_staged"] == 0
+    assert recovery.safe_next_action == "fix storage/path/layout and rerun restage"
 
 
 def test_passthrough_layout_mirrors_archive(tmp_roots: tuple[Path, Path]) -> None:
