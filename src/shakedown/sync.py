@@ -67,10 +67,8 @@ def _describe_one(
     plugin: SourcePlugin,
     identifier: str,
     collection: CollectionConfig,
-    budget: SourceBudget | None,
+    budget: SourceBudget,
 ) -> ItemDescriptor | None:
-    if budget is None:
-        return plugin.describe_item(identifier, collection)
     with budget.slot():
         return plugin.describe_item(identifier, collection)
 
@@ -78,7 +76,7 @@ def _describe_one(
 def _discover_descriptors(
     plugin: SourcePlugin,
     collection: CollectionConfig,
-    budget: SourceBudget | None,
+    budget: SourceBudget,
 ) -> tuple[list[ItemDescriptor], set[str]]:
     """Materialize the full enumeration, fanning per-item metadata resolution across
     the shared per-source budget (SPEC §spec:discovery-pipeline).
@@ -99,8 +97,7 @@ def _discover_descriptors(
     else:
         ids = list(identifiers)  # fully materialize the enumeration (may raise -> stale)
         if ids:
-            workers = budget.size if budget is not None else len(ids)
-            workers = max(1, min(workers, len(ids)))
+            workers = min(budget.size, len(ids))
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [
                     pool.submit(_describe_one, plugin, identifier, collection, budget)
