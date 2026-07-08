@@ -956,3 +956,126 @@ def test_concurrent_discovery_classifies_identically_to_serial(
     fetches_before = dict(FakePlugin.fetch_count)
     assert run_sync(concurrent_cfg) == 0
     assert FakePlugin.fetch_count == fetches_before, "no-op re-sync must not re-fetch"
+
+
+# --- §road:stream-fetch: discover→download pipelining (overlap + prune barrier) ---
+
+
+def test_download_overlaps_discovery(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
+    """§spec:discovery-pipeline (overlap lever): a download begins while discovery is
+    still enumerating. With the shared budget wide enough that every describe runs at
+    once, a fast item's fetch starts while a deliberately slow item is still being
+    described — so the first download starts before discovery resolves the last item.
+    A non-pipelined implementation (fetch only after the full drain) fails this."""
+    import time as _time
+
+    archive, library = tmp_roots
+    config = Config(
+        archive_root=archive,
+        library_root=library,
+        max_concurrent_downloads=4,
+        sources=[
+            SourceConfig(
+                name="fake-src",
+                type="fake",
+                max_concurrent_requests=8,  # >= items, so no describe/fetch slot contention
+                collections=[CollectionConfig(name="coll1", query="*")],
+            )
+        ],
+    )
+    for i in range(3):
+        _seed_item(f"fast-{i}")
+    _seed_item("slow")
+
+    lock = threading.Lock()
+    describe_end: dict[str, float] = {}
+    fetch_start: dict[str, float] = {}
+    real_describe = FakePlugin.describe_item
+    real_fetch = FakePlugin.fetch
+
+    def timed_describe(self, identifier, collection):
+        _time.sleep(0.3 if identifier == "slow" else 0.01)
+        result = real_describe(self, identifier, collection)
+        with lock:
+            describe_end[identifier] = _time.perf_counter()
+        return result
+
+    def timed_fetch(self, item, dest_dir, format_filters, exclude_filters):
+        with lock:
+            fetch_start[item.identifier] = _time.perf_counter()
+        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+
+    monkeypatch.setattr(FakePlugin, "describe_item", timed_describe)
+    monkeypatch.setattr(FakePlugin, "fetch", timed_fetch)
+
+    assert run_sync(config) == 0
+    assert set(fetch_start) == {"fast-0", "fast-1", "fast-2", "slow"}
+    # The first download started before discovery finished resolving the last (slow)
+    # item — proof the stages overlap rather than running strictly sequentially.
+    assert min(fetch_start.values()) < max(describe_end.values()), (
+        "no download overlapped discovery — fetch did not start until discovery completed"
+    )
+
+
+def test_discovery_failure_partway_prunes_nothing(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """§spec:discovery-pipeline: a discovery failure PARTWAY through leaves the
+    collection stale with ZERO items pruned — a partial enumeration is never read as
+    items disappearing, even on a prune_disappeared collection. An item resolved and
+    fetched before the fault is still retained (fetch may precede completion)."""
+    archive, library = tmp_roots
+    # budget=1 serializes describe resolution, so the fault is deterministic: the new
+    # item resolves and is fetched, then the next describe raises.
+    config = Config(
+        archive_root=archive,
+        library_root=library,
+        sources=[
+            SourceConfig(
+                name="fake-src",
+                type="fake",
+                max_concurrent_requests=1,
+                collections=[
+                    CollectionConfig(name="coll1", query="*", prune_disappeared=True)
+                ],
+            )
+        ],
+    )
+    _seed_item("keep-me")  # pre-existing; will vanish from the (failed) enumeration
+
+    assert run_sync(config) == 0
+    assert (archive / "fake-src" / "coll1" / "keep-me").is_dir()
+
+    # Second sync: the source no longer lists keep-me; it lists a new item then faults
+    # resolving the next one — so the enumeration never completes.
+    FakePlugin.items.clear()
+    _seed_item("new-good")
+    _seed_item("faulty")
+
+    real_describe = FakePlugin.describe_item
+
+    def flaky_describe(self, identifier, collection):
+        if identifier == "faulty":
+            raise ConnectionError("metadata endpoint failed mid-enumeration")
+        return real_describe(self, identifier, collection)
+
+    monkeypatch.setattr(FakePlugin, "describe_item", flaky_describe)
+
+    assert run_sync(config) == 1  # a stale run surfaces as failure
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    items = ItemRepo(conn)
+
+    # keep-me is NOT pruned despite prune_disappeared — the enumeration failed, so its
+    # absence is not treated as a disappearance.
+    assert (archive / "fake-src" / "coll1" / "keep-me").is_dir(), "must not prune on failed enumeration"
+    keep = items.get("fake-src", "coll1", "keep-me")
+    assert keep is not None and keep.status == ItemStatus.COMPLETE
+
+    # The item resolved+fetched before the fault is retained (fetch precedes completion).
+    assert (archive / "fake-src" / "coll1" / "new-good").is_dir(), "item fetched before the fault is retained"
+
+    # And the run is flagged stale — the signal `status` reports.
+    latest = RunRepo(conn).latest("fake-src", "coll1")
+    assert latest is not None and latest.stale is True
+    assert any("enumeration failed" in e for e in latest.errors)
