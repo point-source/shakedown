@@ -56,7 +56,8 @@ not scale to "add Phish next month and etree the month after."
 Observable outcomes that define the product as done. Each is
 demonstrable end-to-end from the product's surface (CLI, config,
 on-disk trees, status output). Criteria 1–10 defined v1 (shipped);
-criteria 11–12 define the current discovery-performance increment.
+criteria 11–12 defined the discovery-performance increment (shipped);
+criteria 13–15 define the current mirror-integrity & metadata increment.
 
 1. **Unattended weekly mirror that actually fires.** A weekly sync of
    the IA Grateful Dead collection runs unattended for a month with no
@@ -120,6 +121,40 @@ criteria 11–12 define the current discovery-performance increment.
     politeness ceiling as a single shared budget — so a large first
     sync is faster without ever being throttled or blacklisted, and a
     partial or failed discovery still never prunes.
+13. **A metadata hiccup never deletes a present item.** On a collection
+    with `prune_disappeared: true`, an item is deleted only when it is
+    genuinely absent from a **successful enumeration** of the
+    collection — never because fetching *that item's own* details
+    failed. A run in which the collection enumerated fine but some
+    items' metadata could not be fetched leaves those items' local
+    files untouched and retries them next run, and does not report them
+    as disappeared. Verifiable by forcing a per-item metadata failure
+    on a prune-opted collection and confirming the item's archive
+    survives and it is not flagged `disappeared`.
+14. **A custom layout can't silently lose recordings.** A non-passthrough
+    `library_layout` that cannot tell two items in the same collection
+    apart (renders multiple items to the same path) is flagged at
+    config-validation time, before the first sync — not discovered later
+    as missing files. If items still collide during a run, the run
+    completes (colliding items are skipped, the rest of the sync
+    proceeds) but a visible per-run summary reports how many recordings
+    were dropped to template collisions and where, so a lone WARNING can
+    never be mistaken for a clean sync. Verifiable by configuring a
+    colliding layout against a collection with multiple items per
+    date/venue and seeing both the config-time guard and the drop count
+    in the run summary.
+15. **An opt-in, self-describing library.** A collection can opt into
+    preserving each item's source metadata alongside its media — written
+    into the library as a `metadata.json` sidecar carrying the item's
+    full raw source metadata — so browsing the library yields the
+    listing context (lineage, taper, setlist, description), not just
+    audio. Preserving metadata does not disturb sync's change detection:
+    an upstream edit to notes does not, on its own, trigger a re-fetch or
+    replan of the item's media. Refreshing the preserved metadata is an
+    explicit, user-invoked operation. Verifiable by enabling the option,
+    syncing, and finding `metadata.json` hardlinked into the library
+    beside the media, then running the explicit metadata-resync to
+    update it.
 
 ## User stories §req:user-stories
 
@@ -195,6 +230,25 @@ criterion and implies a testable path through the product's surface.
   Shakedown to stay within the source's politeness limits even when it
   works in parallel, so that speeding up a sync never gets me
   rate-limited or blacklisted by archive.org. *(→ criterion 12)*
+- **Never lose a recording to a hiccup.** As a homelab operator who
+  opted into pruning, I want an item whose metadata momentarily fails to
+  fetch to stay on disk and be retried next run, so that a transient
+  upstream glitch never deletes a recording that is still in the
+  collection. *(→ criterion 13)*
+- **Warned before my own layout loses data.** As a homelab operator, I
+  want to be told — when I configure a layout that can't tell two
+  recordings of the same show apart — before my first sync, and to get a
+  clear count of anything dropped to a collision when a run does hit one,
+  so that I never mistake a lossy layout for a working sync.
+  *(→ criterion 14)*
+- **Keep the liner notes.** As an archival-music collector, I want to opt
+  a collection into saving each item's source metadata next to the audio,
+  so that lineage/taper/setlist/description context lives in my library
+  and not only in a database I might lose. *(→ criterion 15)*
+- **Refresh notes on demand.** As a homelab operator, I want an explicit
+  way to re-pull source metadata for items I have already mirrored, so
+  that I can update the preserved notes without re-downloading audio and
+  without every routine run re-checking them. *(→ criterion 15)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -214,7 +268,19 @@ constraints that drive architecture.
   in the takedown direction: an item vanishing from the source never
   deletes the user's local copy unless they have explicitly opted into
   pruning. Losing content is only ever the user's choice, never an
-  upstream side effect.
+  upstream side effect. Pruning is driven solely by an item's genuine
+  absence from a **successful enumeration** of the collection. A failure
+  to fetch a *single item's* details is not evidence the item is gone
+  and never makes it prune-eligible; when enumeration succeeds but some
+  item descriptions fail, those items are left intact and retried, not
+  deleted.
+- **No silent library data loss.** The library never silently drops a
+  recording it successfully fetched. If a configured layout cannot
+  represent two distinct items distinctly, that is surfaced — guarded at
+  config time and, if a run still collides, counted in a visible per-run
+  summary — never left as a lone warning buried in the logs. Skipping
+  colliding items does not abort the rest of the run, but a run that
+  dropped recordings to collisions is never reported as clean.
 - **Storage efficiency.** Archive + library staging together cost
   effectively 1x storage. Any further duplication is a library-tool
   decision, not Shakedown's.
@@ -305,6 +371,13 @@ Technical, operational, and scope bounds on the solution space.
   end-to-end check is invoked explicitly by a developer, downloads a
   single small public item (a few megabytes) to stay polite to the
   upstream archive, and its flakiness never blocks pull requests.
+- **Preserved metadata is context, not media.** When a collection opts
+  into preserving source metadata, the sidecar lands in the library like
+  any mirrored file, but it does not participate in the media manifest
+  that drives change detection — an upstream metadata change never, by
+  itself, re-fetches media or replans the item. Refreshing preserved
+  metadata is a distinct, explicitly-invoked operation, not something a
+  routine sync does on its own.
 - **Not a library manager, discovery tool, transcoder, or general
   downloader.** Shakedown does not tag, rename inside the library, serve
   audio, recommend/scrobble, transcode, or wrap arbitrary downloaders.
@@ -316,8 +389,9 @@ Technical, operational, and scope bounds on the solution space.
 ## Priorities §req:priorities
 
 Ordered by user impact. v1 shipped; a second (etree) plugin was pulled
-in to prove the plugin seam. The current increment is discovery
-performance (items 13–15).
+in to prove the plugin seam. The discovery-performance increment (items
+13–15) has shipped; the current increment is mirror integrity & metadata
+preservation (items 16–18).
 
 **Must have (v1 core):**
 
@@ -363,9 +437,25 @@ performance (items 13–15).
 15. No head-of-line stalls: a single slow upstream metadata response
     never freezes the whole run for minutes (→ criterion 11; GH #10).
 
+**Next — mirror integrity & metadata preservation (post-v1, current
+increment). Three independently-shippable items addressed in one pass:**
+
+16. Prune-safety hardening: a per-item metadata-fetch failure never
+    makes a still-enumerated item prune-eligible; pruning follows only
+    genuine absence from a successful enumeration (→ criterion 13;
+    GH #13).
+17. Lossy-layout protection: a config-time guard for layouts that cannot
+    distinguish items, plus a visible per-run summary of any recordings
+    dropped to template collisions, without collisions aborting the rest
+    of the run (→ criterion 14; GH #14).
+18. Opt-in metadata sidecars: per-collection preservation of source
+    metadata as a `metadata.json` sidecar in the library, excluded from
+    media change-detection, with an explicit metadata-resync operation
+    to refresh it (→ criterion 15; GH #15).
+
 **Nice to have / out of scope (candidates for later):**
 
-16. Web UI for status and config; push notifications beyond webhooks
+19. Web UI for status and config; push notifications beyond webhooks
     (Pushover, Discord); direct library-tool integrations; multiple
     archive roots / tiered storage; BitTorrent as a source; cross-host
     sync. These are explicitly deferred.
