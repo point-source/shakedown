@@ -39,6 +39,23 @@ log = logging.getLogger(__name__)
 PAYLOAD_VERSION = 1
 
 
+def _envelope(
+    event: str, source: str, collection: str, staging_root: str,
+    run: dict[str, Any], **extra: Any,
+) -> dict[str, Any]:
+    """Shared versioned envelope for both payloads, so the version/event contract
+    lives in one place and can't drift between sync.complete and sync.failed."""
+    return {
+        "payload_version": PAYLOAD_VERSION,
+        "event": event,
+        "source": source,
+        "collection": collection,
+        "staging_root": staging_root,
+        "run": run,
+        **extra,
+    }
+
+
 @dataclass
 class SyncCompletePayload:
     """Batch ``sync.complete`` body: one per (collection, run) that staged items."""
@@ -49,15 +66,10 @@ class SyncCompletePayload:
     staged: list[dict[str, str]] = field(default_factory=list)
 
     def to_body(self) -> dict[str, Any]:
-        return {
-            "payload_version": PAYLOAD_VERSION,
-            "event": "sync.complete",
-            "source": self.source,
-            "collection": self.collection,
-            "staging_root": self.staging_root,
-            "run": self.run,
-            "staged": self.staged,
-        }
+        return _envelope(
+            "sync.complete", self.source, self.collection, self.staging_root,
+            self.run, staged=self.staged,
+        )
 
 
 @dataclass
@@ -70,15 +82,10 @@ class SyncFailedPayload:
     errors: list[str] = field(default_factory=list)
 
     def to_body(self) -> dict[str, Any]:
-        return {
-            "payload_version": PAYLOAD_VERSION,
-            "event": "sync.failed",
-            "source": self.source,
-            "collection": self.collection,
-            "staging_root": self.staging_root,
-            "run": self.run,
-            "errors": self.errors,
-        }
+        return _envelope(
+            "sync.failed", self.source, self.collection, self.staging_root,
+            self.run, errors=self.errors,
+        )
 
 
 def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) -> str | None:
@@ -100,7 +107,8 @@ def fire_failure(
     url = notifications.on_failure.webhook
     if not url:
         return None
-    return _post(_expand(url, payload.to_body()), payload.to_body())
+    body = payload.to_body()
+    return _post(_expand(url, body), body)
 
 
 def _dispatch(handoff: Handoff, body: dict[str, Any]) -> str | None:
