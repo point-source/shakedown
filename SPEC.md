@@ -467,66 +467,48 @@ working configs on upgrade.
 
 ## Source metadata preservation §spec:metadata-preservation
 
-*Status: not started*
+*Status: complete*
 
 For archival and live-music collections the listing context — lineage,
 source, taper notes, setlist, description — is often as valuable as the
-audio, but today it reaches only the state DB (as `source_metadata`,
-§spec:state) and never the library. Browse the library and you have the
-audio with none of the context. (§req:success-criteria #15)
+audio, but it reaches only the state DB (as `source_metadata`,
+§spec:state) and never the library. A collection may opt in with
+`preserve_source_metadata` (default off, §spec:configuration) to carry
+that context into the library as a `metadata.json` sidecar
+(§req:success-criteria #15).
 
-A collection may opt in with `preserve_source_metadata` (default off,
-§spec:configuration). When enabled:
+Observable behavior when enabled:
 
-- At fetch time the system writes the item's full raw source metadata —
-  the same dict already recorded as `source_metadata` — as a
-  `metadata.json` sidecar inside the item's archive directory, and
-  hardlinks it into the library staging directory beside the media, so a
-  browsed library folder carries its own context. The sidecar is written
-  by the **core**, not the plugin: every plugin already surfaces this
-  metadata dict on its descriptor, so preservation is source-agnostic
-  with no plugin-contract change, and the seam invariant that plugins
-  never own durability holds (§spec:source-plugins).
-- The sidecar is written into the fetch's temp directory **before** the
-  atomic archive promotion (§spec:sync-workflow), so it appears in the
-  archive atomically with the media or not at all — never as a post-hoc
-  write that could half-succeed.
-- **The sidecar is excluded from the recorded manifest.** Change
-  detection stays manifest-vs-manifest over media only
-  (§spec:sync-identity): an upstream edit to a description or notes field
-  never, on its own, flips an item to `changed-upstream` or triggers a
-  media re-download. Preserved metadata is context, not media
-  (§req:constraints). Because staging links the manifest's files, the
-  sidecar is staged as an explicit additional link, not as a manifest
-  entry.
-- The metadata dict is already in the state DB, so the sidecar is
-  reconstructable without the network: `restage` and the archive walk in
-  `reconcile` (§spec:state) reproduce it from recorded state — metadata
-  preservation adds no network cost to restage and keeps the archive
-  self-describing.
-- **Refreshing preserved metadata is an explicit, operator-invoked
-  operation** (`sync --refresh-metadata`, §spec:cli). It re-resolves
-  source metadata for already-mirrored items in preserve-opted
-  collections under the shared politeness budget (§spec:source-budget),
-  rewrites each `metadata.json` and its recorded `source_metadata`, and
-  restages — without re-downloading media. A routine sync never does this
-  on its own; keeping refresh explicit is what lets change detection
-  ignore metadata drift (above) without the library's context going
-  permanently stale.
+| Operation | Sidecar effect |
+| --- | --- |
+| `sync` fetch of a new/changed item | Core writes the item's full raw metadata dict (the same one recorded as `source_metadata`) to `metadata.json` in the fetch temp dir **before** atomic promotion (§spec:sync-workflow), then hardlinks it into the library staging dir beside the media (§spec:library-staging). |
+| `sync` re-run, metadata edited upstream | No effect: the sidecar is **excluded from the recorded manifest**, so an edit to prose never flips an item to `changed-upstream` or triggers a media re-download (§spec:sync-identity). |
+| `restage` / library wipe | Sidecar reappears with no network — regenerated from the DB `source_metadata` when the archive copy is absent (§spec:state). |
+| `sync --refresh-metadata` | Explicit, operator-invoked: re-resolves metadata for already-mirrored preserve-opted items under the shared politeness budget (§spec:source-budget), rewrites each `metadata.json` and its recorded `source_metadata`, and restages — without re-downloading media (§spec:cli). |
+
+The sidecar is written by the **core**, not the plugin: every plugin
+already surfaces this metadata dict on its descriptor, so preservation is
+source-agnostic with no plugin-contract change and the seam invariant
+that plugins never own durability holds (§spec:source-plugins). Writing
+before promotion means it lands in the archive atomically with the media
+or not at all; excluding it from the manifest means it stages as an
+explicit additional link, not a manifest entry.
 
 **Why a manifest-excluded sidecar, refreshed on demand.** Putting the
 sidecar in the manifest was the simplest route to auto-propagation, but
 it would make every upstream notes edit churn a media re-fetch and force
 the sidecar through `verify` and existence checks — coupling the media
-mirror's change detection to volatile prose. Excluding it keeps the
-media identity guarantee (§spec:sync-identity) intact and makes metadata
-a separate, explicitly-refreshed concern. **Rejected:** manifest-included
-sidecars (churn, coupling). **Rejected (this increment):** granular
-per-field sidecars (`description.txt`, `notes.md`) — the full
-`metadata.json` carries every field losslessly and is source-agnostic,
-whereas splitting fields invites source-specific naming the plugin
-contract would then have to standardize; per-field extracts can be
-layered later without changing what is preserved.
+mirror's change detection to volatile prose. Excluding it keeps the media
+identity guarantee (§spec:sync-identity) intact and makes metadata a
+separate, explicitly-refreshed concern; keeping refresh explicit is what
+lets change detection ignore metadata drift without the library's context
+going permanently stale. **Rejected:** manifest-included sidecars (churn,
+coupling). **Rejected (this increment):** granular per-field sidecars
+(`description.txt`, `notes.md`) — the full `metadata.json` carries every
+field losslessly and is source-agnostic, whereas splitting fields invites
+source-specific naming the plugin contract would then have to
+standardize; per-field extracts can be layered later without changing
+what is preserved.
 
 ## Source plugins §spec:source-plugins
 
