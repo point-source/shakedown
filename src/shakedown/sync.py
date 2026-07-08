@@ -20,7 +20,12 @@ from pathlib import Path
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
 from shakedown.models import Item, ItemStatus
-from shakedown.notify import SyncCompletePayload, fire_complete
+from shakedown.notify import (
+    SyncCompletePayload,
+    SyncFailedPayload,
+    fire_complete,
+    fire_failure,
+)
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
 from shakedown.staging import stage_item, staging_dir_for, unstage_item
@@ -235,10 +240,12 @@ def _fire_notifications(
     """Fire the once-per-(collection, run) handoff and failure notifications
     (SPEC §spec:handoff).
 
-    ``sync.complete`` fires when the run staged at least one item. Delivery is
-    best-effort: a failure is appended to ``stats.errors`` (recorded in the run,
-    surfaced by `status`) and never raises.
+    ``sync.complete`` fires when the run staged at least one item; ``sync.failed``
+    fires when the run failed (source enumeration stale, or one or more items
+    failed). Both are best-effort: a delivery failure is appended to
+    ``stats.errors`` (recorded in the run, surfaced by `status`) and never raises.
     """
+    run_errors = list(stats.errors)  # substantive errors, before any delivery attempt
     staging_root = str(config.library_root / source.name / collection.name)
     run_obj = {
         "started_at": started.isoformat(),
@@ -258,6 +265,20 @@ def _fire_notifications(
                 staging_root=staging_root,
                 run=run_obj,
                 staged=stats.staged,
+            ),
+        )
+        if err:
+            stats.errors.append(err)
+
+    if stats.stale or stats.failed > 0:
+        err = fire_failure(
+            config.notifications,
+            SyncFailedPayload(
+                source=source.name,
+                collection=collection.name,
+                staging_root=staging_root,
+                run=run_obj,
+                errors=run_errors,
             ),
         )
         if err:

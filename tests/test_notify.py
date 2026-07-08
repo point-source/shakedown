@@ -1,8 +1,9 @@
-"""Library handoff notifications (SPEC §spec:handoff).
+"""Library handoff + failure notifications (SPEC §spec:handoff).
 
 Covers the versioned once-per-(collection, run) ``sync.complete`` batch payload,
-template-field expansion, and the best-effort delivery contract (a down listener
-is recorded in run errors but never fails the sync).
+the ``sync.failed`` notification, template-field expansion, and the best-effort
+delivery contract (a down listener is recorded in run errors but never fails the
+sync).
 """
 from __future__ import annotations
 
@@ -12,9 +13,20 @@ from unittest.mock import patch
 
 import httpx
 
-from shakedown.config import ExecHandoff, WebhookHandoff
+from shakedown.config import (
+    ExecHandoff,
+    FailureNotification,
+    NotificationsConfig,
+    WebhookHandoff,
+)
 from shakedown.db import connect
-from shakedown.notify import PAYLOAD_VERSION, SyncCompletePayload, fire_complete
+from shakedown.notify import (
+    PAYLOAD_VERSION,
+    SyncCompletePayload,
+    SyncFailedPayload,
+    fire_complete,
+    fire_failure,
+)
 from shakedown.state import RunRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
@@ -145,7 +157,50 @@ def test_no_handoff_is_a_noop() -> None:
     assert fire_complete(coll, _complete()) is None
 
 
-# --- vertical slice: sync fires the handoff through the CLI path -----------
+# --- sync.failed notification -----------------------------------------------
+
+
+def test_failure_webhook_posts_errors() -> None:
+    notifications = NotificationsConfig(
+        on_failure=FailureNotification(webhook="http://ntfy/shakedown?src={source}")
+    )
+    captured: dict = {}
+
+    def fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return httpx.Response(200)
+
+    payload = SyncFailedPayload(
+        source="fake-src",
+        collection="coll1",
+        staging_root="/data/library/fake-src/coll1",
+        run={"started_at": "t0", "finished_at": "t1", "items_new": 0,
+             "items_updated": 0, "items_failed": 1, "bytes_downloaded": 0},
+        errors=["source enumeration failed: boom"],
+    )
+    with patch("shakedown.notify.httpx.post", side_effect=fake_post):
+        assert fire_failure(notifications, payload) is None
+
+    assert "src=fake-src" in captured["url"]
+    body = captured["json"]
+    assert body["payload_version"] == 1
+    assert body["event"] == "sync.failed"
+    assert body["errors"] == ["source enumeration failed: boom"]
+
+
+def test_failure_noop_when_unconfigured() -> None:
+    payload = SyncFailedPayload(
+        source="s", collection="c", staging_root="/l", run={}, errors=["x"]
+    )
+    assert fire_failure(None, payload) is None
+    assert fire_failure(NotificationsConfig(on_failure=None), payload) is None
+    assert fire_failure(
+        NotificationsConfig(on_failure=FailureNotification(webhook=None)), payload
+    ) is None
+
+
+# --- vertical slice: sync fires notifications through the CLI path ----------
 
 
 def test_sync_fires_one_complete_per_run(tmp_roots: tuple[Path, Path]) -> None:
@@ -179,6 +234,32 @@ def test_sync_fires_one_complete_per_run(tmp_roots: tuple[Path, Path]) -> None:
     with patch("shakedown.notify.httpx.post", side_effect=fake_post):
         assert run_sync(config) == 0
     assert len(bodies) == 1
+
+
+def test_sync_fires_failure_on_unreachable_source(tmp_roots: tuple[Path, Path]) -> None:
+    """A failed run (unreachable source) fires sync.failed with errors."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    config.notifications = NotificationsConfig(
+        on_failure=FailureNotification(webhook="http://ntfy/shakedown")
+    )
+    bodies: list[dict] = []
+
+    def fake_post(url, json=None, timeout=None):
+        bodies.append(json)
+        return httpx.Response(200)
+
+    with (
+        patch.object(FakePlugin, "discover", side_effect=RuntimeError("source unreachable")),
+        patch("shakedown.notify.httpx.post", side_effect=fake_post),
+    ):
+        assert run_sync(config) == 1  # a failed run exits non-zero
+
+    assert len(bodies) == 1
+    body = bodies[0]
+    assert body["event"] == "sync.failed"
+    assert body["errors"]
+    assert any("source enumeration failed" in e for e in body["errors"])
 
 
 def test_down_listener_recorded_in_run_errors_and_does_not_fail_sync(

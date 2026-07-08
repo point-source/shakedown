@@ -1,8 +1,12 @@
-"""Library handoff notifications (SPEC §spec:handoff).
+"""Library handoff and failure notifications (SPEC §spec:handoff).
 
-``sync.complete`` fires a collection's ``on_complete`` webhook/exec once per
-(collection, run) after the run staged at least one item — the batch handoff that
-flows new shows into the library tool.
+Two versioned, once-per-(collection, run) payloads over the same envelope:
+
+- ``sync.complete`` fires a collection's ``on_complete`` webhook/exec after a
+  run staged at least one item — the batch handoff that flows new shows into the
+  library tool.
+- ``sync.failed`` fires the global ``notifications.on_failure`` webhook when a
+  run fails, carrying the run's ``errors`` array.
 
 Delivery is best-effort: a failure is logged and returned to the caller (which
 records it in the run's errors, visible in ``status``) but never aborts the sync
@@ -21,7 +25,12 @@ from typing import Any
 
 import httpx
 
-from shakedown.config import CollectionConfig, Handoff, WebhookHandoff
+from shakedown.config import (
+    CollectionConfig,
+    Handoff,
+    NotificationsConfig,
+    WebhookHandoff,
+)
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +60,27 @@ class SyncCompletePayload:
         }
 
 
+@dataclass
+class SyncFailedPayload:
+    """``sync.failed`` body: same envelope as complete, plus an ``errors`` array."""
+    source: str
+    collection: str
+    staging_root: str
+    run: dict[str, Any]
+    errors: list[str] = field(default_factory=list)
+
+    def to_body(self) -> dict[str, Any]:
+        return {
+            "payload_version": PAYLOAD_VERSION,
+            "event": "sync.failed",
+            "source": self.source,
+            "collection": self.collection,
+            "staging_root": self.staging_root,
+            "run": self.run,
+            "errors": self.errors,
+        }
+
+
 def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) -> str | None:
     """Fire a collection's ``on_complete`` handoff. Returns a delivery-error string
     (for the caller to record in run errors) or ``None`` on success/no-op."""
@@ -58,6 +88,19 @@ def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) ->
     if handoff is None:
         return None
     return _dispatch(handoff, payload.to_body())
+
+
+def fire_failure(
+    notifications: NotificationsConfig | None, payload: SyncFailedPayload
+) -> str | None:
+    """Fire the global ``notifications.on_failure`` webhook. Returns a
+    delivery-error string (for the caller to record) or ``None`` on success/no-op."""
+    if notifications is None or notifications.on_failure is None:
+        return None
+    url = notifications.on_failure.webhook
+    if not url:
+        return None
+    return _post(_expand(url, payload.to_body()), payload.to_body())
 
 
 def _dispatch(handoff: Handoff, body: dict[str, Any]) -> str | None:
