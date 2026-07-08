@@ -135,7 +135,10 @@ Behavior the user can observe:
   prunes items that had already disappeared under the retain default —
   the retain→prune transition takes effect on the next sync, so the
   flag is not silently no-op on a collection with an existing backlog
-  of disappeared items.
+  of disappeared items. An item the source still lists but whose
+  per-item metadata failed to resolve this run is **not** `disappeared`
+  — it is left as recorded and retried, since only absence from a
+  successful enumeration marks disappearance (§spec:prune-safety).
 
 **Why retention is the default.** Durable mirroring is the product's
 reason to exist; losing content must only ever be the user's explicit
@@ -276,6 +279,10 @@ bearing invariants:
 - A partial or failed enumeration prunes nothing and marks the
   collection stale (§spec:failure-behavior) — a failed discovery is
   never read as items having disappeared.
+- Within a successful enumeration, an item that was listed but whose
+  per-item *description* failed is treated as present-but-unresolved and
+  is never pruned — enumeration, not description, is the prune signal
+  (§spec:prune-safety).
 
 **Tradeoff.** Run counters accumulate from concurrent producers
 (discovery) and consumers (fetch), so per-run counts must be exact under
@@ -349,14 +356,187 @@ alone leaves value on the table; together they satisfy
 §req:success-criteria #11's "never stalls for minutes on a single slow
 upstream response."
 
+## Prune safety: enumeration versus description §spec:prune-safety
+
+*Status: not started*
+
+On a `prune_disappeared` collection, a transient failure to fetch a
+*single item's* metadata during discovery must not cost the user that
+item's archive files. Discovery is two steps: a cheap **enumeration**
+that returns the collection's current identifiers (with change signals)
+and a per-item **description** that resolves each identifier's full
+manifest (§spec:discovery-pipeline). When an item is enumerated but its
+description fails — its bounded retry envelope (§spec:slow-metadata)
+exhausted on a transient fault — that item must not be read as having
+left the collection. It was still listed by the source; only its
+metadata call failed. (§req:success-criteria #13,
+§req:quality-attributes: durable mirroring)
+
+The system distinguishes three post-enumeration outcomes for a
+DB item, not two:
+
+| Enumeration listed it? | Description resolved? | Outcome |
+| --- | --- | --- |
+| Yes | Yes | Normal plan: `unchanged` / `changed-upstream` |
+| Yes | No (transient) | **Present-but-unresolved**: left exactly as recorded — never pruned or flagged `disappeared` — and reconsidered next run |
+| No | — | `disappeared` (retained by default; pruned only if opted in) |
+
+- Prune/`disappeared` eligibility is keyed on **absence from a
+  successful enumeration**, never on absence from the set of
+  successfully-*described* items. An identifier the enumeration returned
+  counts as still present for prune purposes even when its description
+  failed this run.
+- A present-but-unresolved item's DB row is untouched — status, recorded
+  manifest, and files left as they were — so it is simply reconsidered
+  next run, when its metadata call may succeed. It is not marked
+  `failed`: it was already `complete` and nothing was attempted against
+  its bytes.
+- This finer distinction applies only on the successful-enumeration
+  branch, where the prune barrier runs at all. A partial or failed
+  *enumeration* still marks the whole collection stale and prunes
+  nothing (§spec:discovery-pipeline); that pre-existing barrier is
+  unchanged.
+
+**Why enumeration is the sole prune signal.** Enumeration answers the
+collection-level question "what does the source list right now?" — the
+only signal that actually reports whether an item left the collection.
+Description answers a different question ("what files does this item
+have?"), and its failure reflects one metadata endpoint's momentary
+health, not the item's membership. Conflating the two let a transient
+hiccup masquerade as a takedown — precisely the failure the
+durable-mirroring guarantee forbids. **Rejected:** treating a describe
+failure as `failed` and leaning on retry/backoff — the identifier still
+falls out of the run's seen set and so still prunes; the fix must be in
+what feeds the prune barrier, not in retry counts. **Rejected:** tripping
+the stale-collection barrier on any per-item describe failure — that
+would discard the whole run's plan, and every legitimate fetch in it,
+because one item's metadata was slow, throwing away the pipelining the
+discovery-performance increment bought (§spec:discovery-pipeline).
+
+## Layout collision safety §spec:layout-collision-safety
+
+*Status: not started*
+
+A `library_layout` that cannot distinguish two items in the same
+collection renders them to the same staging path; when their filenames
+also match, the later items lose the collision and are skipped
+(§spec:library-staging). Today that surfaces as one buried per-file
+`WARNING` and an incremented `failed` count — easily read as a transient
+glitch rather than "recordings are missing from the library." A
+live-music collection with multiple recordings of one show (different
+tapers or sources, same date and venue) hits this whenever the layout
+keys on date/venue with no per-item-unique component.
+(§req:success-criteria #14, §req:quality-attributes: no silent library
+data loss)
+
+Two defenses, one proactive and one at runtime:
+
+- **Config-time guard.** A source plugin declares which of its
+  `template_fields` are **per-item-unique** — guaranteed to distinguish
+  any two items in a collection (for the IA and etree plugins,
+  `identifier`; §spec:source-plugins). At load time, a non-`passthrough`
+  `library_layout` that references no per-item-unique field is flagged
+  with a named warning naming the collection and suggesting a unique
+  component (e.g. `{identifier}` in the leaf). A non-passthrough template
+  that references **no plugin field at all** — one constant path for
+  every item, a guaranteed total collapse — is a hard config error,
+  consistent with the fail-fast config contract (§spec:configuration).
+- **Runtime summary.** When items are nonetheless dropped to same-run
+  template collisions, the run reports a single consolidated line — how
+  many recordings were dropped and to which colliding paths — and that
+  count is surfaced in `shakedown status`, distinct from ordinary fetch
+  failures. Colliding items are still skipped rather than aborting the
+  run: the rest of the collection stages normally, and the run's
+  non-zero exit still signals that something needs attention.
+
+**Why a warning, not a hard error, for the missing-unique-field case.**
+Uniqueness of an arbitrary *combination* of fields is undecidable from
+config alone — `{date} - {venue} - {title}` is unique in practice for
+most collections yet references no single guaranteed-unique field.
+Hard-failing it would reject legitimate layouts. The plugin can vouch
+only that `identifier` is always unique, so the load-time check warns (a
+proactive heads-up before the first sync) while the runtime summary is
+the correctness backstop — it fires only on *actual* loss and can never
+false-positive. The fully-constant template is the one case config *can*
+prove will collapse, so it errors. **Rejected:** silently trusting the
+template (the status quo, whose permitted data loss is the bug).
+**Rejected:** hard-erroring any layout lacking a guaranteed-unique field
+— it rejects unique-in-practice templates and would break existing
+working configs on upgrade.
+
+## Source metadata preservation §spec:metadata-preservation
+
+*Status: not started*
+
+For archival and live-music collections the listing context — lineage,
+source, taper notes, setlist, description — is often as valuable as the
+audio, but today it reaches only the state DB (as `source_metadata`,
+§spec:state) and never the library. Browse the library and you have the
+audio with none of the context. (§req:success-criteria #15)
+
+A collection may opt in with `preserve_source_metadata` (default off,
+§spec:configuration). When enabled:
+
+- At fetch time the system writes the item's full raw source metadata —
+  the same dict already recorded as `source_metadata` — as a
+  `metadata.json` sidecar inside the item's archive directory, and
+  hardlinks it into the library staging directory beside the media, so a
+  browsed library folder carries its own context. The sidecar is written
+  by the **core**, not the plugin: every plugin already surfaces this
+  metadata dict on its descriptor, so preservation is source-agnostic
+  with no plugin-contract change, and the seam invariant that plugins
+  never own durability holds (§spec:source-plugins).
+- The sidecar is written into the fetch's temp directory **before** the
+  atomic archive promotion (§spec:sync-workflow), so it appears in the
+  archive atomically with the media or not at all — never as a post-hoc
+  write that could half-succeed.
+- **The sidecar is excluded from the recorded manifest.** Change
+  detection stays manifest-vs-manifest over media only
+  (§spec:sync-identity): an upstream edit to a description or notes field
+  never, on its own, flips an item to `changed-upstream` or triggers a
+  media re-download. Preserved metadata is context, not media
+  (§req:constraints). Because staging links the manifest's files, the
+  sidecar is staged as an explicit additional link, not as a manifest
+  entry.
+- The metadata dict is already in the state DB, so the sidecar is
+  reconstructable without the network: `restage` and the archive walk in
+  `reconcile` (§spec:state) reproduce it from recorded state — metadata
+  preservation adds no network cost to restage and keeps the archive
+  self-describing.
+- **Refreshing preserved metadata is an explicit, operator-invoked
+  operation** (`sync --refresh-metadata`, §spec:cli). It re-resolves
+  source metadata for already-mirrored items in preserve-opted
+  collections under the shared politeness budget (§spec:source-budget),
+  rewrites each `metadata.json` and its recorded `source_metadata`, and
+  restages — without re-downloading media. A routine sync never does this
+  on its own; keeping refresh explicit is what lets change detection
+  ignore metadata drift (above) without the library's context going
+  permanently stale.
+
+**Why a manifest-excluded sidecar, refreshed on demand.** Putting the
+sidecar in the manifest was the simplest route to auto-propagation, but
+it would make every upstream notes edit churn a media re-fetch and force
+the sidecar through `verify` and existence checks — coupling the media
+mirror's change detection to volatile prose. Excluding it keeps the
+media identity guarantee (§spec:sync-identity) intact and makes metadata
+a separate, explicitly-refreshed concern. **Rejected:** manifest-included
+sidecars (churn, coupling). **Rejected (this increment):** granular
+per-field sidecars (`description.txt`, `notes.md`) — the full
+`metadata.json` carries every field losslessly and is source-agnostic,
+whereas splitting fields invites source-specific naming the plugin
+contract would then have to standardize; per-field extracts can be
+layered later without changing what is preserved.
+
 ## Source plugins §spec:source-plugins
 
 *Status: complete*
 
 Sources are pluggable so that new archives can be added without core
 changes (§req:constraints). A plugin implements `discover`, `fetch`, and
-`verify`, plus a capability declaration (`type_name` and the metadata
-`template_fields` it surfaces for library layout, §spec:library-staging).
+`verify`, plus a capability declaration (`type_name`, the metadata
+`template_fields` it surfaces for library layout, §spec:library-staging,
+and which of those fields are **per-item-unique** so the config layer can
+guard against lossy layouts, §spec:layout-collision-safety).
 The authoring contract — exact method signatures, the durability and
 backoff the core owns, and a worked example — is documented for third-party
 authors in [`docs/plugins.md`](docs/plugins.md).
@@ -421,7 +601,13 @@ filenames are then hardlinked into that directory unchanged.
   at a different inode — the system shall report the collision and
   skip, leaving the user to disambiguate the template. Silent
   overwrites would make the staging tree's contents depend on sync
-  order.
+  order. A layout that structurally cannot distinguish items is caught
+  earlier and any drops are surfaced in a per-run summary
+  (§spec:layout-collision-safety).
+- When a collection sets `preserve_source_metadata`, the item's
+  `metadata.json` sidecar is hardlinked into the staging directory
+  alongside the media, so the library folder is self-describing
+  (§spec:metadata-preservation).
 - **Missing template fields** render as a literal `unknown` segment
   rather than failing the item; collision detection catches any
   resulting conflicts. Archival metadata is patchy, and dropping an
@@ -470,8 +656,8 @@ exits (§req:constraints). The command surface:
 
 | Command | Behavior |
 | --- | --- |
-| `sync [--source S] [--collection C] [--dry-run]` | Run a sync now; defaults to all configured collections. What the scheduler invokes. |
-| `status [--json]` | Last run per collection, item counts by status, disk usage, restricted items with reasons, disappeared items, known drift. |
+| `sync [--source S] [--collection C] [--dry-run] [--refresh-metadata]` | Run a sync now; defaults to all configured collections. What the scheduler invokes. `--refresh-metadata` re-resolves and rewrites `metadata.json` sidecars for preserve-opted collections without re-downloading media (§spec:metadata-preservation). |
+| `status [--json]` | Last run per collection, item counts by status, disk usage, restricted items with reasons, disappeared items, known drift, and recordings dropped to layout collisions (§spec:layout-collision-safety). |
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
@@ -507,14 +693,19 @@ Structure: top-level roots (`archive_root`, `library_root`,
 `max_concurrent_collections`); a list of `sources` (name, plugin
 `type`, optional auth) each containing `collections` (name, `query`,
 `format_filters`, `exclude_filters`, `library_layout`,
-`prune_disappeared`, `on_complete`); and global `notifications`.
+`prune_disappeared`, `incremental_discovery`, `preserve_source_metadata`,
+`on_complete`); and global `notifications`.
 
-The discovery-performance increment adds a per-source politeness ceiling
+The discovery-performance increment added a per-source politeness ceiling
 (the shared concurrency budget of §spec:source-budget) and a
 per-collection `incremental_discovery` opt-in
-(§spec:incremental-discovery), both validated at load time like every
-other key (`extra="forbid"`, so an unknown or misspelled key fails the
-run rather than being ignored).
+(§spec:incremental-discovery). The mirror-integrity increment adds a
+per-collection `preserve_source_metadata` opt-in
+(§spec:metadata-preservation) and a load-time guard that flags a
+`library_layout` structurally unable to distinguish items
+(§spec:layout-collision-safety). All are validated at load time like
+every other key (`extra="forbid"`, so an unknown or misspelled key fails
+the run rather than being ignored).
 
 - The system shall validate the full configuration at startup and
   refuse to run on errors, naming the offending key — a scheduled
@@ -547,7 +738,9 @@ Sync state lives in a single-file embedded SQLite database at
   identifier — the composite key), archive path, the **recorded
   manifest** (§spec:sync-identity), lifecycle status and
   `restriction_reason` (§spec:item-lifecycle), source metadata for
-  layout templates, and discovery/download/verification timestamps.
+  layout templates (also the dict a `metadata.json` sidecar is
+  regenerated from without the network, §spec:metadata-preservation),
+  and discovery/download/verification timestamps.
   For collections using incremental discovery it also records the
   item's last-seen source change signal (§spec:incremental-discovery),
   the token a later sync matches against to skip a metadata fetch.
@@ -743,6 +936,8 @@ degrade a single item or a single run, never the archive.
 | Source rate-limits | Core honors the plugin-surfaced `Retry-After`, backs off, resumes |
 | Slow/timing-out metadata during discovery | Bounded per-item timeout + back-off; other items proceed in parallel — one slow endpoint never stalls the run (§spec:slow-metadata) |
 | Discovery fails partway (pipelined) | Collection marked stale; nothing pruned — a partial enumeration is never read as items disappearing (§spec:discovery-pipeline) |
+| Per-item metadata (describe) fails for an enumerated item | Item left as recorded — not pruned, not `disappeared`, not `failed` — and retried next run (§spec:prune-safety) |
+| Two items render the same library path (template collision) | Losing items skipped and counted in a per-run summary; the run continues and exits non-zero (§spec:layout-collision-safety) |
 | Library tool retags files in place | Invisible to sync (§spec:sync-identity); reported by `verify --deep` on request |
 | Library tool deletes staging links | Restored on next sync or `restage` |
 | User wipes library tree | Rebuilt by `restage` with zero downloads |
