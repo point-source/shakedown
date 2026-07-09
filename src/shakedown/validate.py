@@ -31,6 +31,7 @@ from shakedown.db import connect, transaction
 from shakedown.filesystem import FilesystemError, check_writable, ensure_same_filesystem
 from shakedown.models import OperationStatus, OperationType
 from shakedown.plugins import registry
+from shakedown.plugins.base import ProbeResult
 from shakedown.state import OperationOutcomeRepo
 from shakedown.utils.templates import fields_in
 
@@ -46,6 +47,17 @@ class Check:
     target: str | None = None
     consequence: str | None = None
     action: str | None = None
+
+    @classmethod
+    def from_probe(cls, name: str, target: str, probe: ProbeResult) -> Check:
+        """Lift a plugin :class:`ProbeResult` into a named readiness check."""
+        return cls(
+            name=name,
+            ok=probe.ok,
+            target=target,
+            consequence=probe.consequence,
+            action=probe.action,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -238,14 +250,9 @@ def validate_config(
             )
 
         if plugin is not None:
-            cred = plugin.check_credentials()
             src_checks.append(
-                Check(
-                    name="credentials present",
-                    ok=cred.ok,
-                    target=source.name,
-                    consequence=cred.consequence,
-                    action=cred.action,
+                Check.from_probe(
+                    "credentials present", source.name, plugin.check_credentials()
                 )
             )
         groups.append(Group(source=source.name, collection=None, checks=src_checks))
@@ -256,14 +263,11 @@ def validate_config(
             checks: list[Check] = []
 
             if plugin is not None:
-                reach = plugin.check_reachable(collection)
                 checks.append(
-                    Check(
-                        name="source reachable",
-                        ok=reach.ok,
-                        target=f"{source.name}/{collection.name}",
-                        consequence=reach.consequence,
-                        action=reach.action,
+                    Check.from_probe(
+                        "source reachable",
+                        f"{source.name}/{collection.name}",
+                        plugin.check_reachable(collection),
                     )
                 )
 
