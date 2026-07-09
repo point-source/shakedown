@@ -31,6 +31,7 @@ from shakedown.notify import (
 )
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
+from shakedown.recovery import clear_issue, record_issue
 from shakedown.staging import (
     METADATA_SIDECAR,
     StageResult,
@@ -246,6 +247,15 @@ def run_sync(
                 stats = fut.result()
             except Exception:
                 log.exception("sync failed for %s/%s", source.name, collection.name)
+                record_issue(
+                    config,
+                    source=source.name,
+                    collection=collection.name,
+                    operation="sync",
+                    phase="sync",
+                    message="collection sync failed before completion",
+                    next_action="retry is safe after fixing the reported error",
+                )
                 overall_failed += 1
                 continue
             if stats.stale:
@@ -272,8 +282,44 @@ def run_sync(
             # A same-run layout collision is a loud non-zero exit like any other loss —
             # the run still completes and the rest of the collection stages normally.
             if stats.failed > 0 or stats.stale or stats.collisions_dropped > 0:
+                _record_sync_issue(config, source, collection, stats)
                 overall_failed += 1
+            else:
+                clear_issue(
+                    config, source=source.name, collection=collection.name, operation="sync"
+                )
     return 0 if overall_failed == 0 else 1
+
+
+def _record_sync_issue(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    stats: CollectionSyncStats,
+) -> None:
+    if stats.stale:
+        phase = "source enumeration"
+        message = "source enumeration failed; existing recordings were retained"
+    elif stats.collisions_dropped:
+        phase = "stage"
+        message = (
+            f"{stats.collisions_dropped} recording(s) dropped from the library projection; "
+            "archive recordings remain intact"
+        )
+    else:
+        phase = "fetch"
+        message = f"{stats.failed} item(s) failed before the workflow completed"
+    if stats.errors:
+        message = f"{message}: {'; '.join(stats.errors)}"
+    record_issue(
+        config,
+        source=source.name,
+        collection=collection.name,
+        operation="sync",
+        phase=phase,
+        message=message,
+        next_action="retry is safe after fixing the reported error",
+    )
 
 
 def _run_refresh(

@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = [
     """
@@ -67,6 +67,21 @@ _SCHEMA = [
         expected_md5     TEXT,
         observed_at      TEXT NOT NULL,
         PRIMARY KEY (source_name, collection_name, identifier, file_name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS operation_outcomes (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        operation        TEXT NOT NULL,
+        status           TEXT NOT NULL,
+        phase            TEXT NOT NULL,
+        message          TEXT NOT NULL,
+        next_action      TEXT NOT NULL,
+        item_identifier  TEXT,
+        started_at       TEXT NOT NULL,
+        finished_at      TEXT,
+        PRIMARY KEY (source_name, collection_name, operation)
     )
     """,
 ]
@@ -136,11 +151,17 @@ def _migrate_to_4(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN collision_paths TEXT NOT NULL DEFAULT '[]'")
 
 
+def _migrate_to_5(conn: sqlite3.Connection) -> None:
+    """v4 -> v5: add latest user-visible operation outcomes for recovery reporting."""
+    conn.execute(_SCHEMA[-1])
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
     3: _migrate_to_3,
     4: _migrate_to_4,
+    5: _migrate_to_5,
 }
 
 

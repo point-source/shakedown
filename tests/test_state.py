@@ -138,12 +138,14 @@ def test_v1_db_migrates_to_current_schema(tmp_path: Path) -> None:
 
     conn = connect(db_path)  # triggers migration
     version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
-    assert version == 4
+    assert version == 5
     latest = RunRepo(conn).latest("s", "c")
     assert latest is not None and latest.stale is False
     # The collision columns added in later migrations default cleanly for old runs.
     assert latest.collisions_dropped == 0
     assert latest.collision_paths == []
+    tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master").fetchall()]
+    assert "operation_outcomes" in tables
 
 
 def test_v2_db_migrates_change_signal_column(tmp_path: Path) -> None:
@@ -180,12 +182,14 @@ def test_v2_db_migrates_change_signal_column(tmp_path: Path) -> None:
 
     conn = connect(db_path)  # triggers migration
     version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
-    assert version == 4
+    assert version == 5
     cols = [row["name"] for row in conn.execute("PRAGMA table_info(items)").fetchall()]
     assert "change_signal" in cols
     run_cols = [row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()]
     assert "collisions_dropped" in run_cols
     assert "collision_paths" in run_cols
+    tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master").fetchall()]
+    assert "operation_outcomes" in tables
 
     repo = ItemRepo(conn)
     item = repo.get("s", "c", "x")

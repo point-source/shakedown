@@ -96,3 +96,18 @@ class Run:
     # items_failed: the archive copy is intact, only the library link was dropped.
     collisions_dropped: int = 0
     collision_paths: list[str] = field(default_factory=list)
+
+
+@dataclass
+class OperationOutcome:
+    """Latest actionable outcome for a user-visible operation."""
+    source_name: str
+    collection_name: str
+    operation: str
+    status: str
+    phase: str
+    message: str
+    next_action: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    item_identifier: str | None = None

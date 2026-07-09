@@ -105,6 +105,35 @@ def status(ctx: click.Context, as_json: bool) -> None:
 
 
 @main.command()
+@click.option("--source", "source_filter", help="Restrict to a single source name.")
+@click.option("--collection", "collection_filter", help="Restrict to a single collection name.")
+@click.option(
+    "--live-handoff",
+    is_flag=True,
+    help="Permit explicit live handoff validation where supported.",
+)
+@click.pass_context
+def validate(
+    ctx: click.Context,
+    source_filter: str | None,
+    collection_filter: str | None,
+    live_handoff: bool,
+) -> None:
+    """Preflight a configured deployment before a large mirror begins."""
+    cfg = _load_config(ctx)
+    from shakedown.validate import run_validate
+
+    ctx.exit(
+        run_validate(
+            cfg,
+            source_filter=source_filter,
+            collection_filter=collection_filter,
+            live_handoff=live_handoff,
+        )
+    )
+
+
+@main.command()
 @click.option("--source", "source_filter")
 @click.option("--collection", "collection_filter")
 @click.option("--deep", is_flag=True, help="Hash on-disk files and compare to recorded manifests.")

@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 
-from shakedown.models import Item, ItemStatus, Manifest, Run
+from shakedown.models import Item, ItemStatus, Manifest, OperationOutcome, Run
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -235,3 +235,74 @@ class DriftRepo:
             (source, collection),
         )
         yield from cur
+
+
+def _row_to_operation_outcome(row: sqlite3.Row) -> OperationOutcome:
+    return OperationOutcome(
+        source_name=row["source_name"],
+        collection_name=row["collection_name"],
+        operation=row["operation"],
+        status=row["status"],
+        phase=row["phase"],
+        message=row["message"],
+        next_action=row["next_action"],
+        item_identifier=row["item_identifier"],
+        started_at=_parse_iso(row["started_at"]),  # type: ignore[arg-type]
+        finished_at=_parse_iso(row["finished_at"]),
+    )
+
+
+class OperationOutcomeRepo:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def record(self, outcome: OperationOutcome) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO operation_outcomes (
+                source_name, collection_name, operation, status, phase,
+                message, next_action, item_identifier, started_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_name, collection_name, operation) DO UPDATE SET
+                status=excluded.status,
+                phase=excluded.phase,
+                message=excluded.message,
+                next_action=excluded.next_action,
+                item_identifier=excluded.item_identifier,
+                started_at=excluded.started_at,
+                finished_at=excluded.finished_at
+            """,
+            (
+                outcome.source_name,
+                outcome.collection_name,
+                outcome.operation,
+                outcome.status,
+                outcome.phase,
+                outcome.message,
+                outcome.next_action,
+                outcome.item_identifier,
+                _iso(outcome.started_at),
+                _iso(outcome.finished_at),
+            ),
+        )
+
+    def clear(self, source: str, collection: str, operation: str) -> None:
+        self.conn.execute(
+            """
+            DELETE FROM operation_outcomes
+            WHERE source_name=? AND collection_name=? AND operation=?
+            """,
+            (source, collection, operation),
+        )
+
+    def latest_issue(self, source: str, collection: str) -> OperationOutcome | None:
+        cur = self.conn.execute(
+            """
+            SELECT * FROM operation_outcomes
+            WHERE source_name=? AND collection_name=?
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            (source, collection),
+        )
+        row = cur.fetchone()
+        return _row_to_operation_outcome(row) if row else None

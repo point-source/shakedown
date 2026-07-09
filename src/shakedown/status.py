@@ -10,7 +10,7 @@ from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.filesystem import disk_usage_bytes
 from shakedown.models import ItemStatus
-from shakedown.state import DriftRepo, ItemRepo, RunRepo
+from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 
 
 def _collection_summary(
@@ -20,6 +20,7 @@ def _collection_summary(
     items: ItemRepo,
     runs: RunRepo,
     drift: DriftRepo,
+    outcomes: OperationOutcomeRepo,
 ) -> dict[str, Any]:
     counts = items.count_by_status(source_name, collection_name)
     last = runs.latest(source_name, collection_name)
@@ -41,6 +42,7 @@ def _collection_summary(
         "bytes_on_disk": bytes_on_disk,
         "drift_files": drift.count(source_name, collection_name),
         "last_run": _summarize_run(last) if last else None,
+        "recovery": _summarize_outcome(outcomes.latest_issue(source_name, collection_name)),
         "restricted": restricted,
         # Stale = the most recent run failed to enumerate the source; existing
         # items are retained (§spec:failure-behavior).
@@ -65,17 +67,35 @@ def _summarize_run(run: Any) -> dict[str, Any]:
     }
 
 
+def _summarize_outcome(outcome: Any) -> dict[str, Any] | None:
+    if outcome is None:
+        return None
+    return {
+        "operation": outcome.operation,
+        "status": outcome.status,
+        "phase": outcome.phase,
+        "message": outcome.message,
+        "next_action": outcome.next_action,
+        "item_identifier": outcome.item_identifier,
+        "started_at": outcome.started_at.isoformat(),
+        "finished_at": outcome.finished_at.isoformat() if outcome.finished_at else None,
+    }
+
+
 def print_status(config: Config, *, as_json: bool) -> None:
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     runs = RunRepo(conn)
     drift = DriftRepo(conn)
+    outcomes = OperationOutcomeRepo(conn)
 
     summaries = []
     for source in config.sources:
         for collection in source.collections:
             summaries.append(
-                _collection_summary(config, source.name, collection.name, items, runs, drift)
+                _collection_summary(
+                    config, source.name, collection.name, items, runs, drift, outcomes
+                )
             )
 
     if as_json:
@@ -84,6 +104,12 @@ def print_status(config: Config, *, as_json: bool) -> None:
 
     for s in summaries:
         click.echo(f"=== {s['source']}/{s['collection']} ===")
+        if s["recovery"]:
+            r = s["recovery"]
+            click.echo(
+                f"  RECOVERY: {r['operation']} {r['status']} during {r['phase']}; "
+                f"{r['message']}; next: {r['next_action']}"
+            )
         if s["stale"]:
             click.echo("  STALE: source enumeration failed last run; existing items retained")
         last = s["last_run"]
