@@ -55,7 +55,9 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         # a malformed (non-ASCII) token yields a clean 401, not a 500. Starlette
         # decodes header bytes as latin-1, so send raw bytes to reach that path.
         assert (
-            await client.post("/sync", headers={"Authorization": b"Bearer \xff"})
+            await client.post(
+                "/sync", headers={"Authorization": b"Bearer \xff"}  # type: ignore[dict-item]
+            )
         ).status_code == 401
         r = await client.post("/sync", headers={"Authorization": "Bearer test-token"})
         assert r.status_code == 200
@@ -69,6 +71,38 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         )
         assert r.status_code == 200
         assert r.json()["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_serve_validate_endpoint(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"audio")]
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(config)),
+        base_url="http://testserver",
+    ) as client:
+        # default validation is read-only: no token, same posture as /status
+        r = await client.get("/validate")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ready"] is True
+        assert any(g["collection"] == "coll1" for g in body["groups"])
+
+        # a live handoff test is mutating: same bearer posture as sync/verify
+        assert (
+            await client.get("/validate", params={"live_handoff": True})
+        ).status_code == 401
+        r = await client.get(
+            "/validate",
+            params={"live_handoff": True},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert r.status_code == 200
+        assert r.json()["ready"] is True
 
 
 @pytest.mark.asyncio
@@ -89,9 +123,15 @@ async def test_serve_mutating_disabled_without_token(
         assert (await client.get("/healthz")).status_code == 200
         assert (await client.get("/status")).status_code == 200
         assert (await client.get("/metrics")).status_code == 200
+        # default (read-only) validation stays reachable
+        assert (await client.get("/validate")).status_code == 200
 
         # mutating endpoints are disabled, not open -- even with a bearer header
         assert (
             await client.post("/sync", headers={"Authorization": "Bearer anything"})
         ).status_code == 503
         assert (await client.post("/verify")).status_code == 503
+        # a live handoff test is mutating: disabled without a configured token
+        assert (
+            await client.get("/validate", params={"live_handoff": True})
+        ).status_code == 503

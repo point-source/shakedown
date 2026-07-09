@@ -632,7 +632,7 @@ It is never scheduled by default (§req:constraints).
 
 ## CLI surface §spec:cli
 
-*Status: implemented for the shipped commands; `validate` is not started
+*Status: implemented, including `validate`
 (§spec:setup-readiness-validation).*
 
 Shakedown is a one-shot CLI; every command runs to completion and
@@ -905,7 +905,7 @@ Container Station (compose edit), logs via Container Station.
 
 ## Setup readiness validation §spec:setup-readiness-validation
 
-*Status: not started*
+*Status: complete*
 
 A first-time operator can run a dedicated readiness validation before
 the first large mirror. The validation reports one pass/fail result per

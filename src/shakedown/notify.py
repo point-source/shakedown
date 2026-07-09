@@ -19,14 +19,17 @@ from __future__ import annotations
 import json
 import logging
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from shakedown.config import (
     CollectionConfig,
+    ExecHandoff,
     Handoff,
     NotificationsConfig,
     WebhookHandoff,
@@ -37,6 +40,11 @@ log = logging.getLogger(__name__)
 # Bumped only on a breaking change to the payload shape so downstream
 # integrations can rely on the contract (SPEC §spec:handoff).
 PAYLOAD_VERSION = 1
+
+# Event name and marker for the readiness handoff test (§spec:setup-readiness-validation).
+# A receiver keys on `event == VALIDATION_EVENT` / `test is True` to recognize a marked
+# validation probe and NOT trigger a production import or notification.
+VALIDATION_EVENT = "validate.handoff_test"
 
 
 def _envelope(
@@ -123,6 +131,94 @@ def fire_failure(
         return _post(_expand(url, body), body)
     except Exception as e:
         msg = f"failure notification delivery failed: {e}"
+        log.warning(msg)
+        return msg
+
+
+def _validation_body(source: str, collection: str, staging_root: str) -> dict[str, Any]:
+    """Marked readiness-test payload (§spec:setup-readiness-validation).
+
+    Same envelope as a real handoff so the receiver's parser exercises the true path,
+    but tagged with ``event=validate.handoff_test`` and ``test=True`` so a correct
+    receiver recognizes it as a probe and does not import music or notify anyone."""
+    body = _envelope(
+        VALIDATION_EVENT, source, collection, staging_root, run={}, staged=[]
+    )
+    body["test"] = True
+    return body
+
+
+def inspect_handoff(
+    handoff: Handoff, *, source: str, collection: str
+) -> tuple[bool, str | None, str | None]:
+    """Non-mutating default handoff readiness check (§spec:setup-readiness-validation).
+
+    Returns ``(ok, consequence, action)``. Does NOT send a webhook or run a command —
+    a normal readiness check must never trigger a duplicate import or arbitrary side
+    effect. Webhook URLs are parsed and required to be absolute http(s); exec commands
+    are parsed and their program is required to be present and executable on PATH.
+    """
+    if isinstance(handoff, WebhookHandoff):
+        url = _expand(
+            handoff.webhook,
+            {"source": source, "collection": collection, "staging_root": "<validation>"},
+        )
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return (
+                False,
+                f"handoff webhook URL {handoff.webhook!r} is not an absolute http(s) URL, "
+                f"so the completed-collection handoff cannot be delivered",
+                "set on_complete.webhook to a full http(s) URL",
+            )
+        return (True, None, None)
+
+    if isinstance(handoff, ExecHandoff):
+        cmd = _expand(
+            handoff.exec,
+            {"source": source, "collection": collection, "staging_root": "<validation>"},
+        )
+        try:
+            argv = shlex.split(cmd)
+        except ValueError as e:
+            return (
+                False,
+                f"handoff command {handoff.exec!r} could not be parsed: {e}",
+                "fix the quoting in on_complete.exec",
+            )
+        if not argv:
+            return (
+                False,
+                f"handoff command {handoff.exec!r} is empty",
+                "set on_complete.exec to a runnable command",
+            )
+        if shutil.which(argv[0]) is None:
+            return (
+                False,
+                f"handoff command program {argv[0]!r} was not found or is not executable, "
+                f"so the completed-collection handoff cannot run",
+                f"install {argv[0]!r} or correct the path in on_complete.exec",
+            )
+        return (True, None, None)
+
+    return (True, None, None)  # pragma: no cover - Handoff is a closed union
+
+
+def send_handoff_test(
+    handoff: Handoff, *, source: str, collection: str
+) -> str | None:
+    """Live (mutating) handoff readiness test for ``validate --live-handoff``.
+
+    Sends the marked validation webhook or runs the configured command with the marked
+    test payload on stdin, and returns a delivery-error string or ``None`` on success.
+    This is the explicit, auditable opt-in: it exercises the real handoff path, so it
+    is protected by the same bearer-token posture as ad-hoc sync when reached over the
+    control plane (§spec:serve)."""
+    body = _validation_body(source, collection, "<validation>")
+    try:
+        return _dispatch(handoff, body)
+    except Exception as e:  # mirror fire_complete's never-raise contract
+        msg = f"live handoff test failed: {e}"
         log.warning(msg)
         return msg
 
