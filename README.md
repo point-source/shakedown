@@ -77,6 +77,7 @@ Tag-driven releases (e.g. `git tag v0.2.0 && git push --tags` → `ghcr.io/.../s
 
 ```text
 shakedown sync       [--source S] [--collection C] [--dry-run]
+shakedown validate   [--source S] [--collection C] [--live-handoff] [--json]
 shakedown status     [--json]
 shakedown verify     [--source S] [--collection C] [--deep] [--reconform] [--list] [--yes]
 shakedown restage    [--source S] [--collection C]
@@ -86,6 +87,8 @@ shakedown item refetch <identifier>
 shakedown item forget <identifier>
 shakedown serve      [--host HOST] [--port PORT]    # optional HTTP control plane
 ```
+
+`shakedown validate` is the readiness preflight to run before the first large mirror: it checks config, path writability, the same-filesystem archive/library constraint, source/collection reachability, credentials, layout collision-risk, and handoff configuration, then reports one pass/fail per source and collection. It never downloads a collection and leaves nothing behind; a pass means "ready to attempt a sync," not "already mirrored." Handoff checks are non-mutating by default — pass `--live-handoff` to send a marked test webhook or run the configured command with a marked test payload.
 
 `shakedown verify --deep` is the **only** command that hashes on-disk bytes. It is operator-invoked, never scheduled. Drift (e.g. from Beets retagging in place) is informational, not an error. `--reconform` re-fetches drifted files from the source if you want byte-level fidelity to upstream.
 
@@ -113,6 +116,33 @@ uv pip install --python .venv/bin/python -e '.[dev,serve]'
 The default `pytest` run is fully offline (real archive.org HTTP is mocked), so
 it is safe to run anywhere and is the run CI executes.
 
+### Release validation gate
+
+Before publishing a release, run the opt-in gate:
+
+```bash
+.venv/bin/shakedown release-validate
+```
+
+The full gate runs deterministic fake-source workflows in throwaway archive,
+library, config, and state paths, then runs the pinned real Internet Archive
+seam. Its final summary names every user workflow it exercised: setup readiness,
+unsafe config rejection, handoff failure, partial-failure recovery,
+sync-to-library staging, and the real-source IA seam. A risky scenario that
+cannot run is a failure, not a silent skip.
+
+Narrower modes are explicit:
+
+```bash
+.venv/bin/shakedown release-validate --deterministic-only
+.venv/bin/shakedown release-validate --real-source-only
+```
+
+Use `--deterministic-only` when network access is intentionally unavailable.
+Use `--real-source-only` when rechecking archive.org behavior after deterministic
+coverage already passed. The release gate is not part of the default developer
+test run or routine pull-request CI.
+
 ### Real-source end-to-end check
 
 One opt-in test (`tests/test_e2e_real_source.py`, marked `network`) drives the
@@ -120,8 +150,8 @@ One opt-in test (`tests/test_e2e_real_source.py`, marked `network`) drives the
 sync → hardlink staging → no-op re-sync → restage after a layout change →
 disappeared retention → prune → forget. It exists to catch what the offline
 suite can't: archive.org's real API drifting from the fixtures, and integration
-seams that only misbehave with real files. Run it deliberately before tagging a
-release; it is **not** part of CI.
+seams that only misbehave with real files. The full release gate runs this check;
+it can also be reached directly when investigating the real-source seam.
 
 ```bash
 .venv/bin/pytest -m network        # runs only the network check

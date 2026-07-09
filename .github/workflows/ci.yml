@@ -17,14 +17,16 @@ jobs:
           python-version: "3.12"
       - name: Install uv
         run: pip install uv
+      - name: Create virtualenv
+        run: uv venv --allow-existing .venv
       - name: Install dependencies
-        run: uv pip install --system -e '.[dev,serve]'
+        run: uv pip install -e '.[dev,serve]'
       - name: Lint
-        run: ruff check .
+        run: .venv/bin/ruff check .
       - name: Typecheck
-        run: pyright src
+        run: .venv/bin/pyright src
       - name: Test
-        run: pytest -v
+        run: .venv/bin/pytest -v
 
   docker:
     runs-on: ubuntu-latest

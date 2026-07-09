@@ -24,9 +24,10 @@ from prometheus_client import (
 
 from shakedown.config import Config
 from shakedown.db import connect
-from shakedown.state import DriftRepo, ItemRepo, RunRepo
+from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
 from shakedown.sync import run_sync as do_sync
+from shakedown.validate import validate_config
 from shakedown.verify import run_verify as do_verify
 
 log = logging.getLogger(__name__)
@@ -86,11 +87,14 @@ def build_app(config: Config) -> FastAPI:
         items = ItemRepo(conn)
         runs = RunRepo(conn)
         drift = DriftRepo(conn)
+        outcomes = OperationOutcomeRepo(conn)
         summaries: list[dict[str, Any]] = []
         for source in config.sources:
             for collection in source.collections:
                 summaries.append(
-                    _collection_summary(config, source.name, collection.name, items, runs, drift)
+                    _collection_summary(
+                        config, source.name, collection.name, items, runs, drift, outcomes
+                    )
                 )
         return JSONResponse(json.loads(json.dumps(summaries, default=str)))
 
@@ -100,13 +104,15 @@ def build_app(config: Config) -> FastAPI:
         conn = connect(config.state_db)  # type: ignore[arg-type]
         items = ItemRepo(conn)
         drift = DriftRepo(conn)
+        runs = RunRepo(conn)
+        outcomes = OperationOutcomeRepo(conn)
         for source in config.sources:
             for collection in source.collections:
                 counts = items.count_by_status(source.name, collection.name)
                 for status_, n in counts.items():
                     g_items.labels(source.name, collection.name, status_.value).set(n)
                 summary = _collection_summary(
-                    config, source.name, collection.name, items, RunRepo(conn), drift
+                    config, source.name, collection.name, items, runs, drift, outcomes
                 )
                 g_bytes.labels(source.name, collection.name).set(summary["bytes_on_disk"])
                 g_drift.labels(source.name, collection.name).set(summary["drift_files"])
@@ -143,6 +149,27 @@ def build_app(config: Config) -> FastAPI:
             assume_yes=True,
         )
         return {"exit_code": rc}
+
+    @app.post("/validate")
+    def validate(
+        source: str | None = Query(default=None),
+        collection: str | None = Query(default=None),
+        live_handoff: bool = Query(default=False),
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        # Default validation is read-only and follows the /status posture (no token).
+        # A live handoff test sends a real webhook / runs the configured command, so it
+        # is a mutating operation and carries the same bearer-token posture as ad-hoc
+        # sync and verify (§spec:serve, §spec:setup-readiness-validation).
+        if live_handoff:
+            require_token(authorization)
+        report = validate_config(
+            config,
+            source_filter=source,
+            collection_filter=collection,
+            live_handoff=live_handoff,
+        )
+        return JSONResponse(json.loads(json.dumps(report.to_dict(), default=str)))
 
     return app
 

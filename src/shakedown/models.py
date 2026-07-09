@@ -18,6 +18,22 @@ class ItemStatus(StrEnum):
     PRUNED = "pruned"
 
 
+class OperationType(StrEnum):
+    SYNC = "sync"
+    RESTAGE = "restage"
+    RECONCILE = "reconcile"
+    VALIDATE = "validate"
+
+
+class OperationStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    COMPLETED_WITH_ITEM_ISSUES = "completed_with_item_issues"
+    FAILED_BEFORE_COMPLETION = "failed_before_completion"
+    STALE_ENUMERATION = "stale_enumeration"
+
+
 @dataclass(frozen=True)
 class ManifestFile:
     """One file in a source's manifest. Identity-bearing fields only."""
@@ -96,3 +112,25 @@ class Run:
     # items_failed: the archive copy is intact, only the library link was dropped.
     collisions_dropped: int = 0
     collision_paths: list[str] = field(default_factory=list)
+
+
+@dataclass
+class OperationOutcome:
+    """Durable user-facing recovery state for one operation scope."""
+    id: int | None
+    operation: OperationType
+    status: OperationStatus
+    source_name: str
+    collection_name: str
+    started_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+    phase: str | None = None
+    affected_item: str | None = None
+    affected_path: str | None = None
+    completed_work: dict[str, Any] = field(default_factory=dict)
+    preservation_context: str | None = None
+    deletion_context: str | None = None
+    safe_next_action: str | None = None
+    errors: list[str] = field(default_factory=list)
+    resolved_at: datetime | None = None

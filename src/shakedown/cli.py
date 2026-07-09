@@ -24,18 +24,19 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-def _load_config(ctx: click.Context) -> config_module.Config:
+def _load_config(ctx: click.Context, *, check_filesystem: bool = True) -> config_module.Config:
     cfg_path: Path = ctx.obj["config_path"]
     try:
         cfg = config_module.load(cfg_path)
     except config_module.ConfigError as e:
         click.echo(f"error: {e}", err=True)
         ctx.exit(2)
-    try:
-        ensure_same_filesystem(cfg.archive_root, cfg.library_root)
-    except FilesystemError as e:
-        click.echo(f"error: {e}", err=True)
-        ctx.exit(2)
+    if check_filesystem:
+        try:
+            ensure_same_filesystem(cfg.archive_root, cfg.library_root)
+        except FilesystemError as e:
+            click.echo(f"error: {e}", err=True)
+            ctx.exit(2)
     return cfg
 
 
@@ -104,6 +105,35 @@ def status(ctx: click.Context, as_json: bool) -> None:
     print_status(cfg, as_json=as_json)
 
 
+@main.command("release-validate")
+@click.option(
+    "--deterministic-only",
+    is_flag=True,
+    help="Run only fake-source release scenarios; explicitly skips the real IA seam.",
+)
+@click.option(
+    "--real-source-only",
+    is_flag=True,
+    help="Run only the pinned real Internet Archive seam.",
+)
+@click.pass_context
+def release_validate(
+    ctx: click.Context, deterministic_only: bool, real_source_only: bool
+) -> None:
+    """Run the opt-in bounded release validation gate."""
+    if deterministic_only and real_source_only:
+        click.echo("error: choose at most one narrower release validation mode", err=True)
+        ctx.exit(2)
+    from shakedown.release_validation import run_release_validation
+
+    ctx.exit(
+        run_release_validation(
+            deterministic=not real_source_only,
+            real_source=not deterministic_only,
+        )
+    )
+
+
 @main.command()
 @click.option("--source", "source_filter")
 @click.option("--collection", "collection_filter")
@@ -136,6 +166,42 @@ def verify(
         reconform=reconform,
         list_drift=list_drift,
         assume_yes=yes,
+    )
+    ctx.exit(exit_code)
+
+
+@main.command()
+@click.option("--source", "source_filter", help="Restrict to a single source name.")
+@click.option("--collection", "collection_filter", help="Restrict to a single collection name.")
+@click.option(
+    "--live-handoff",
+    is_flag=True,
+    help="Explicitly exercise configured handoff targets with a marked test payload "
+    "(sends a real webhook / runs the configured command). Off by default.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of text.")
+@click.pass_context
+def validate(
+    ctx: click.Context,
+    source_filter: str | None,
+    collection_filter: str | None,
+    live_handoff: bool,
+    as_json: bool,
+) -> None:
+    """Preflight a configured deployment before a large mirror (§spec:setup-readiness-validation).
+
+    Reports one pass/fail result per source and collection, naming the setting, path,
+    credential, source, or handoff target that needs action. Exits non-zero on any
+    failure. A pass means "ready to attempt a real sync," not "already mirrored."
+    """
+    from shakedown.validate import run_validate
+
+    exit_code = run_validate(
+        ctx.obj["config_path"],
+        source_filter=source_filter,
+        collection_filter=collection_filter,
+        live_handoff=live_handoff,
+        as_json=as_json,
     )
     ctx.exit(exit_code)
 

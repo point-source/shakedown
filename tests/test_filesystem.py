@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
-from shakedown.filesystem import FilesystemError, ensure_same_filesystem, hardlink, same_inode
+from shakedown.filesystem import (
+    FilesystemError,
+    check_writable,
+    ensure_same_filesystem,
+    hardlink,
+    same_inode,
+)
 
 
 def test_same_filesystem_passes_when_identical(tmp_path: Path) -> None:
@@ -41,6 +47,15 @@ def test_same_filesystem_raises_when_different(tmp_path: Path) -> None:
         FilesystemError, match="same filesystem"
     ):
         ensure_same_filesystem(a, b)
+
+
+def test_check_writable_preserves_existing_probe_name(tmp_path: Path) -> None:
+    existing = tmp_path / ".shakedown-write-probe"
+    existing.write_text("operator data")
+
+    check_writable(tmp_path)
+
+    assert existing.read_text() == "operator data"
 
 
 def test_hardlink_creates_link(tmp_path: Path) -> None:

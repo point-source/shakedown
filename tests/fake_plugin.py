@@ -39,12 +39,22 @@ class FakeItem:
 class FakePlugin(SourcePlugin):
     type_name = "fake"
 
+    # `identifier` is per-item-unique; `title` is a known-but-shared field, so a layout
+    # keyed only on `{title}` is collision-risky (the readiness layout probe fails it).
+    template_fields = ("identifier", "title")
+    per_item_unique_fields = ("identifier",)
+
     # Class-level state so tests can mutate the source between sync runs.
     items: ClassVar[dict[str, FakeItem]] = {}
     fetch_count: ClassVar[dict[str, int]] = {}
     describe_count: ClassVar[dict[str, int]] = {}
+    # Source names whose enumeration should raise, simulating an unreachable source —
+    # exactly as a real source fault would — to exercise the readiness reachability probe.
+    unreachable_sources: ClassVar[set[str]] = set()
 
     def enumerate_items(self, collection: CollectionConfig) -> Iterator[str]:
+        if self.source_config.name in self.unreachable_sources:
+            raise RuntimeError(f"source {self.source_config.name!r} is unreachable")
         yield from self.items
 
     def enumerate_with_signals(
@@ -99,6 +109,7 @@ def reset_fake() -> None:
     FakePlugin.items.clear()
     FakePlugin.fetch_count.clear()
     FakePlugin.describe_count.clear()
+    FakePlugin.unreachable_sources.clear()
 
 
 def install_fake() -> None:
