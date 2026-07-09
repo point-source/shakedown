@@ -115,7 +115,7 @@ def test_missing_credential_env_var_fails(tmp_path: Path, tmp_roots, monkeypatch
     src_group = next(g for g in report.groups if g.source == "fake-src" and g.collection is None)
     cred = next(c for c in src_group.checks if c.name == "credentials present")
     assert not cred.ok
-    assert "MISSING_EMAIL_X" in cred.consequence
+    assert cred.consequence and "MISSING_EMAIL_X" in cred.consequence
 
 
 def test_unreachable_source_fails(tmp_path: Path, tmp_roots) -> None:
@@ -133,7 +133,7 @@ def test_unreachable_source_fails(tmp_path: Path, tmp_roots) -> None:
     coll_group = next(g for g in report.groups if g.collection == "coll1")
     reach = next(c for c in coll_group.checks if c.name == "source reachable")
     assert not reach.ok
-    assert "unreachable" in reach.consequence
+    assert reach.consequence and "unreachable" in reach.consequence
 
 
 def test_unsafe_layout_template_fails(tmp_path: Path, tmp_roots) -> None:
@@ -150,7 +150,7 @@ def test_unsafe_layout_template_fails(tmp_path: Path, tmp_roots) -> None:
     coll_group = next(g for g in report.groups if g.collection == "coll1")
     layout = next(c for c in coll_group.checks if c.name == "library layout is collision-safe")
     assert not layout.ok
-    assert "collide" in layout.consequence
+    assert layout.consequence and "collide" in layout.consequence
 
 
 # -- combined acceptance scenario (matches the batch verify criteria) ------------
@@ -244,9 +244,11 @@ def test_live_handoff_sends_marked_payload(tmp_path: Path, tmp_roots) -> None:
 
 
 def test_json_mirrors_structure(tmp_path: Path, tmp_roots) -> None:
+    archive, library = tmp_roots
     cfg_path = _write_yaml(
         tmp_path,
-        *tmp_roots,
+        archive,
+        library,
         [SourceConfig(name="fake-src", type="fake", collections=[_collection()])],
     )
     FakePlugin.items["gd-x"] = FakeItem(

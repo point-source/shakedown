@@ -55,7 +55,9 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         # a malformed (non-ASCII) token yields a clean 401, not a 500. Starlette
         # decodes header bytes as latin-1, so send raw bytes to reach that path.
         assert (
-            await client.post("/sync", headers={"Authorization": b"Bearer \xff"})
+            await client.post(
+                "/sync", headers={"Authorization": b"Bearer \xff"}  # type: ignore[dict-item]
+            )
         ).status_code == 401
         r = await client.post("/sync", headers={"Authorization": "Bearer test-token"})
         assert r.status_code == 200
