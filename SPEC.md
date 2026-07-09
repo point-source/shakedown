@@ -632,8 +632,7 @@ It is never scheduled by default (§req:constraints).
 
 ## CLI surface §spec:cli
 
-*Status: implemented for the shipped commands; `validate` is not started
-(§spec:setup-readiness-validation).*
+*Status: complete*
 
 Shakedown is a one-shot CLI; every command runs to completion and
 exits (§req:constraints). The command surface:
@@ -646,6 +645,7 @@ exits (§req:constraints). The command surface:
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
 | `validate [--source S] [--collection C] [--live-handoff]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
+| `release-validate [--deterministic-only \| --real-source-only]` | Opt-in maintainer release gate that runs bounded fake-source workflow scenarios and, by default, the pinned real IA seam (§spec:release-validation-gate). |
 | `item show \| refetch \| forget <identifier>` | Single-item inspection and surgery. |
 | `serve [--host] [--port]` | Optional HTTP control plane (§spec:serve). |
 
@@ -905,7 +905,7 @@ Container Station (compose edit), logs via Container Station.
 
 ## Setup readiness validation §spec:setup-readiness-validation
 
-*Status: not started*
+*Status: complete*
 
 A first-time operator can run a dedicated readiness validation before
 the first large mirror. The validation reports one pass/fail result per
@@ -995,7 +995,7 @@ receiver.
 
 ## Recoverable operation reporting §spec:recoverable-operation-reporting
 
-*Status: not started*
+*Status: complete*
 
 When `sync`, `restage`, `reconcile`, or `validate` fails partway
 through, the next visible status tells the operator what completed, what
@@ -1066,7 +1066,7 @@ completed, and once it completes the stale warning is gone.
 
 ## Release validation gate §spec:release-validation-gate
 
-*Status: not started*
+*Status: complete*
 
 A maintainer can run one bounded, documented release validation before
 publishing. It exercises the user workflows most likely to regress:
