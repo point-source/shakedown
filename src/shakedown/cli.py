@@ -141,6 +141,42 @@ def verify(
 
 
 @main.command()
+@click.option("--source", "source_filter", help="Restrict to a single source name.")
+@click.option("--collection", "collection_filter", help="Restrict to a single collection name.")
+@click.option(
+    "--live-handoff",
+    is_flag=True,
+    help="Explicitly exercise configured handoff targets with a marked test payload "
+    "(sends a real webhook / runs the configured command). Off by default.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of text.")
+@click.pass_context
+def validate(
+    ctx: click.Context,
+    source_filter: str | None,
+    collection_filter: str | None,
+    live_handoff: bool,
+    as_json: bool,
+) -> None:
+    """Preflight a configured deployment before a large mirror (§spec:setup-readiness-validation).
+
+    Reports one pass/fail result per source and collection, naming the setting, path,
+    credential, source, or handoff target that needs action. Exits non-zero on any
+    failure. A pass means "ready to attempt a real sync," not "already mirrored."
+    """
+    from shakedown.validate import run_validate
+
+    exit_code = run_validate(
+        ctx.obj["config_path"],
+        source_filter=source_filter,
+        collection_filter=collection_filter,
+        live_handoff=live_handoff,
+        as_json=as_json,
+    )
+    ctx.exit(exit_code)
+
+
+@main.command()
 @click.option("--source", "source_filter")
 @click.option("--collection", "collection_filter")
 @click.pass_context

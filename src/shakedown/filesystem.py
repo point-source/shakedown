@@ -30,6 +30,26 @@ def ensure_same_filesystem(archive_root: Path, library_root: Path) -> None:
         )
 
 
+def check_writable(path: Path) -> None:
+    """Raise FilesystemError unless a probe file can be created and removed under ``path``.
+
+    Used by readiness validation (§spec:setup-readiness-validation) to prove archive,
+    library, and state directories are writable *before* a multi-hour mirror begins.
+    Creates ``path`` (and parents) if absent, since first use would anyway. The probe
+    file is always removed, so a passing check leaves nothing behind — a broken setup
+    can never masquerade as a clean no-op.
+    """
+    probe = path / ".shakedown-write-probe"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe.write_bytes(b"")
+    except OSError as e:
+        raise FilesystemError(f"{path} is not writable: {e}") from e
+    finally:
+        with contextlib.suppress(OSError):
+            probe.unlink()
+
+
 def same_inode(a: Path, b: Path) -> bool:
     """True if a and b refer to the same inode on the same device."""
     sa = a.stat()

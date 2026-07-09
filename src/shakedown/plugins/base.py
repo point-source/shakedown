@@ -1,9 +1,11 @@
 """Source plugin contract. PRD §7."""
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,19 @@ class VerifyResult:
     """
     ok: bool
     missing_files: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ProbeResult:
+    """Outcome of a non-mutating readiness probe (§spec:setup-readiness-validation).
+
+    ``ok`` is the only thing validation branches on. ``consequence`` and ``action``
+    are the plain-language "what breaks" and "what to do" strings surfaced verbatim in
+    ``shakedown validate`` output — populated only on failure.
+    """
+    ok: bool
+    consequence: str | None = None
+    action: str | None = None
 
 
 class SourcePlugin(ABC):
@@ -129,6 +144,67 @@ class SourcePlugin(ABC):
     @abstractmethod
     def verify(self, item: ItemDescriptor, archive_path: Path) -> VerifyResult:
         """Cheap re-check: every expected file present on disk."""
+
+    # -- readiness probes (§spec:setup-readiness-validation) ----------------
+    # Both are strictly non-mutating: they read from the source but never download a
+    # full item, write to the archive/library, or leave state behind. `shakedown
+    # validate` calls them once per configured source/collection before a real mirror.
+
+    def check_credentials(self) -> ProbeResult:
+        """Readiness probe for required credential environment variables.
+
+        Default: a source with no ``auth`` block needs no credentials (pass); otherwise
+        every configured credential env var must be present and non-empty. Acceptance —
+        whether the source *honors* the credentials — is exercised by
+        :meth:`check_reachable`, whose enumeration runs under the authenticated session,
+        so a rejected key surfaces there with the source's own error text. Plugins that
+        can cheaply confirm acceptance out-of-band may override.
+        """
+        auth = self.source_config.auth
+        if auth is None:
+            return ProbeResult(ok=True)
+        missing = [
+            name
+            for name in (auth.email_env, auth.password_env)
+            if name and not os.environ.get(name)
+        ]
+        if missing:
+            return ProbeResult(
+                ok=False,
+                consequence=(
+                    f"required credential environment variable(s) {missing} are not set, "
+                    f"so authenticated access to source {self.source_config.name!r} will fail"
+                ),
+                action="set the credential environment variables before syncing",
+            )
+        return ProbeResult(ok=True)
+
+    def check_reachable(self, collection: CollectionConfig) -> ProbeResult:
+        """Readiness probe that the source (and this collection's query) can be reached.
+
+        Default: pull only the first page of enumeration — a bounded, read-only touch
+        that never downloads item files. An empty-but-reachable collection passes; a
+        source that raises (network down, bad query, rejected credentials) fails with
+        the source's own error text. Reraising is caught here and turned into a
+        failing :class:`ProbeResult`, never propagated.
+        """
+        try:
+            ids = self.enumerate_items(collection)
+            if ids is None:
+                ids = (d.identifier for d in self.discover(collection))
+            # Touch at most the first identifier: enough to force a real request without
+            # draining the whole (possibly huge) enumeration.
+            list(islice(ids, 1))
+            return ProbeResult(ok=True)
+        except Exception as e:  # any source fault is a readiness failure, never a crash
+            return ProbeResult(
+                ok=False,
+                consequence=(
+                    f"source {self.source_config.name!r} could not be reached for "
+                    f"collection {collection.name!r}: {e}"
+                ),
+                action="check source connectivity, credentials, and the collection query, then rerun",
+            )
 
     # Optional: declared metadata fields available for library_layout templates.
     #: subclass may override to advertise template variables it surfaces.
