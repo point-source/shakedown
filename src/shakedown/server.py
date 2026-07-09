@@ -27,6 +27,7 @@ from shakedown.db import connect
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
 from shakedown.sync import run_sync as do_sync
+from shakedown.validate import validate_config
 from shakedown.verify import run_verify as do_verify
 
 log = logging.getLogger(__name__)
@@ -148,6 +149,27 @@ def build_app(config: Config) -> FastAPI:
             assume_yes=True,
         )
         return {"exit_code": rc}
+
+    @app.get("/validate")
+    async def validate(
+        source: str | None = Query(default=None),
+        collection: str | None = Query(default=None),
+        live_handoff: bool = Query(default=False),
+        authorization: str | None = Header(default=None),
+    ) -> JSONResponse:
+        # Default validation is read-only and follows the /status posture (no token).
+        # A live handoff test sends a real webhook / runs the configured command, so it
+        # is a mutating operation and carries the same bearer-token posture as ad-hoc
+        # sync and verify (§spec:serve, §spec:setup-readiness-validation).
+        if live_handoff:
+            require_token(authorization)
+        report = validate_config(
+            config,
+            source_filter=source,
+            collection_filter=collection,
+            live_handoff=live_handoff,
+        )
+        return JSONResponse(json.loads(json.dumps(report.to_dict(), default=str)))
 
     return app
 
