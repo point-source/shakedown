@@ -995,7 +995,7 @@ receiver.
 
 ## Recoverable operation reporting §spec:recoverable-operation-reporting
 
-*Status: not started*
+*Status: complete*
 
 When `sync`, `restage`, `reconcile`, or `validate` fails partway
 through, the next visible status tells the operator what completed, what
@@ -1133,7 +1133,7 @@ workflow exercised.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: implemented*
+*Status: complete*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.

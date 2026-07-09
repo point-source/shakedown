@@ -77,11 +77,11 @@ def build_app(config: Config) -> FastAPI:
             raise HTTPException(401, "invalid or missing bearer token")
 
     @app.get("/healthz")
-    def healthz() -> dict[str, str]:
+    async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
     @app.get("/status")
-    def status() -> JSONResponse:
+    async def status() -> JSONResponse:
         conn = connect(config.state_db)  # type: ignore[arg-type]
         items = ItemRepo(conn)
         runs = RunRepo(conn)
@@ -98,7 +98,7 @@ def build_app(config: Config) -> FastAPI:
         return JSONResponse(json.loads(json.dumps(summaries, default=str)))
 
     @app.get("/metrics")
-    def metrics() -> PlainTextResponse:
+    async def metrics() -> PlainTextResponse:
         # Refresh gauges from current DB state on each scrape.
         conn = connect(config.state_db)  # type: ignore[arg-type]
         items = ItemRepo(conn)
@@ -119,7 +119,7 @@ def build_app(config: Config) -> FastAPI:
         return PlainTextResponse(body.decode(), media_type=CONTENT_TYPE_LATEST)
 
     @app.post("/sync")
-    def trigger_sync(
+    async def trigger_sync(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
         authorization: str | None = Header(default=None),
@@ -130,7 +130,7 @@ def build_app(config: Config) -> FastAPI:
         return {"exit_code": rc}
 
     @app.post("/verify")
-    def trigger_verify(
+    async def trigger_verify(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
         deep: bool = Query(default=False),
