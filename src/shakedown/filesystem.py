@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -47,15 +48,18 @@ def check_writable(path: Path) -> None:
     file is always removed, so a passing check leaves nothing behind — a broken setup
     can never masquerade as a clean no-op.
     """
-    probe = path / ".shakedown-write-probe"
+    probe: Path | None = None
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe.write_bytes(b"")
+        fd, probe_name = tempfile.mkstemp(prefix=".shakedown-write-probe-", dir=path)
+        os.close(fd)
+        probe = Path(probe_name)
     except OSError as e:
         raise FilesystemError(f"{path} is not writable: {e}") from e
     finally:
-        with contextlib.suppress(OSError):
-            probe.unlink()
+        with contextlib.suppress(OSError, TypeError):
+            if probe is not None:
+                probe.unlink()
 
 
 def same_inode(a: Path, b: Path) -> bool:

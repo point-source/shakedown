@@ -136,6 +136,29 @@ def test_unreachable_source_fails(tmp_path: Path, tmp_roots) -> None:
     assert reach.consequence and "unreachable" in reach.consequence
 
 
+def test_unknown_source_plugin_reports_failure_without_crashing(
+    tmp_path: Path, tmp_roots
+) -> None:
+    archive, library = tmp_roots
+    src = SourceConfig(
+        name="missing-src",
+        type="missing-plugin",
+        collections=[_collection(library_layout="{title}")],
+    )
+
+    report = validate_config(_config(archive, library, tmp_path / "state.db", [src]))
+
+    assert not report.ok
+    src_group = next(
+        g for g in report.groups if g.source == "missing-src" and g.collection is None
+    )
+    plugin_check = next(c for c in src_group.checks if c.name == "source plugin loads")
+    assert not plugin_check.ok
+    assert plugin_check.consequence and "missing-plugin" in plugin_check.consequence
+    coll_group = next(g for g in report.groups if g.collection == "coll1")
+    assert not any(c.name == "library layout is collision-safe" for c in coll_group.checks)
+
+
 def test_unsafe_layout_template_fails(tmp_path: Path, tmp_roots) -> None:
     # `{title}` is a known fake field but not per-item-unique: two same-title items
     # would collide. The config layer only warns; validate fails.

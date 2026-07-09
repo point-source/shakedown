@@ -270,8 +270,7 @@ def validate_config(
                         plugin.check_reachable(collection),
                     )
                 )
-
-            checks.append(_layout_check(source.type, collection))
+                checks.append(_layout_check(source.type, collection))
 
             handoff_check = _handoff_check(
                 collection, source.name, live_handoff=live_handoff
