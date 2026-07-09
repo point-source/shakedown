@@ -9,8 +9,8 @@ import click
 from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.filesystem import disk_usage_bytes
-from shakedown.models import ItemStatus
-from shakedown.state import DriftRepo, ItemRepo, RunRepo
+from shakedown.models import ItemStatus, OperationOutcome
+from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 
 
 def _collection_summary(
@@ -20,9 +20,11 @@ def _collection_summary(
     items: ItemRepo,
     runs: RunRepo,
     drift: DriftRepo,
+    outcomes: OperationOutcomeRepo,
 ) -> dict[str, Any]:
     counts = items.count_by_status(source_name, collection_name)
     last = runs.latest(source_name, collection_name)
+    recovery = outcomes.latest_actionable(source_name, collection_name)
     archive_dir = config.archive_root / source_name / collection_name
     bytes_on_disk = disk_usage_bytes(archive_dir) if archive_dir.exists() else 0
 
@@ -41,6 +43,7 @@ def _collection_summary(
         "bytes_on_disk": bytes_on_disk,
         "drift_files": drift.count(source_name, collection_name),
         "last_run": _summarize_run(last) if last else None,
+        "recovery": _summarize_recovery(recovery) if recovery else None,
         "restricted": restricted,
         # Stale = the most recent run failed to enumerate the source; existing
         # items are retained (§spec:failure-behavior).
@@ -65,17 +68,38 @@ def _summarize_run(run: Any) -> dict[str, Any]:
     }
 
 
+def _summarize_recovery(outcome: OperationOutcome) -> dict[str, Any]:
+    return {
+        "operation": outcome.operation.value,
+        "status": outcome.status.value,
+        "started_at": outcome.started_at.isoformat(),
+        "updated_at": outcome.updated_at.isoformat(),
+        "finished_at": outcome.finished_at.isoformat() if outcome.finished_at else None,
+        "phase": outcome.phase,
+        "affected_item": outcome.affected_item,
+        "affected_path": outcome.affected_path,
+        "completed_work": outcome.completed_work,
+        "preservation_context": outcome.preservation_context,
+        "deletion_context": outcome.deletion_context,
+        "safe_next_action": outcome.safe_next_action,
+        "errors": outcome.errors,
+    }
+
+
 def print_status(config: Config, *, as_json: bool) -> None:
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     runs = RunRepo(conn)
     drift = DriftRepo(conn)
+    outcomes = OperationOutcomeRepo(conn)
 
     summaries = []
     for source in config.sources:
         for collection in source.collections:
             summaries.append(
-                _collection_summary(config, source.name, collection.name, items, runs, drift)
+                _collection_summary(
+                    config, source.name, collection.name, items, runs, drift, outcomes
+                )
             )
 
     if as_json:
@@ -84,6 +108,27 @@ def print_status(config: Config, *, as_json: bool) -> None:
 
     for s in summaries:
         click.echo(f"=== {s['source']}/{s['collection']} ===")
+        recovery = s["recovery"]
+        if recovery:
+            click.echo(
+                f"  RECOVERY: {recovery['operation']} {recovery['status']} "
+                f"during {recovery['phase'] or 'unknown phase'}"
+            )
+            if recovery["affected_item"]:
+                click.echo(f"    item: {recovery['affected_item']}")
+            if recovery["affected_path"]:
+                click.echo(f"    path: {recovery['affected_path']!r}")
+            if recovery["completed_work"]:
+                completed = ", ".join(
+                    f"{k}={v}" for k, v in recovery["completed_work"].items()
+                )
+                click.echo(f"    completed: {completed}")
+            if recovery["preservation_context"]:
+                click.echo(f"    preserved: {recovery['preservation_context']}")
+            if recovery["deletion_context"]:
+                click.echo(f"    deletion: {recovery['deletion_context']}")
+            if recovery["safe_next_action"]:
+                click.echo(f"    action: {recovery['safe_next_action']}")
         if s["stale"]:
             click.echo("  STALE: source enumeration failed last run; existing items retained")
         last = s["last_run"]

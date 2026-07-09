@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = [
     """
@@ -68,6 +68,33 @@ _SCHEMA = [
         observed_at      TEXT NOT NULL,
         PRIMARY KEY (source_name, collection_name, identifier, file_name)
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS operation_outcomes (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation            TEXT NOT NULL,
+        status               TEXT NOT NULL,
+        source_name          TEXT NOT NULL,
+        collection_name      TEXT NOT NULL,
+        started_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
+        finished_at          TEXT,
+        phase                TEXT,
+        affected_item        TEXT,
+        affected_path        TEXT,
+        completed_work       TEXT NOT NULL DEFAULT '{}',
+        preservation_context TEXT,
+        deletion_context     TEXT,
+        safe_next_action     TEXT,
+        errors               TEXT NOT NULL DEFAULT '[]',
+        resolved_at          TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS operation_outcomes_scope_idx
+        ON operation_outcomes (
+            source_name, collection_name, resolved_at, started_at DESC, id DESC
+        )
     """,
 ]
 
@@ -136,11 +163,47 @@ def _migrate_to_4(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN collision_paths TEXT NOT NULL DEFAULT '[]'")
 
 
+def _migrate_to_5(conn: sqlite3.Connection) -> None:
+    """v4 → v5: add operation_outcomes for durable recovery reporting."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS operation_outcomes (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation            TEXT NOT NULL,
+            status               TEXT NOT NULL,
+            source_name          TEXT NOT NULL,
+            collection_name      TEXT NOT NULL,
+            started_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL,
+            finished_at          TEXT,
+            phase                TEXT,
+            affected_item        TEXT,
+            affected_path        TEXT,
+            completed_work       TEXT NOT NULL DEFAULT '{}',
+            preservation_context TEXT,
+            deletion_context     TEXT,
+            safe_next_action     TEXT,
+            errors               TEXT NOT NULL DEFAULT '[]',
+            resolved_at          TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS operation_outcomes_scope_idx
+            ON operation_outcomes (
+                source_name, collection_name, resolved_at, started_at DESC, id DESC
+            )
+        """
+    )
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
     3: _migrate_to_3,
     4: _migrate_to_4,
+    5: _migrate_to_5,
 }
 
 

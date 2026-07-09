@@ -12,10 +12,10 @@ from datetime import datetime
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
-from shakedown.models import Item, ItemStatus
+from shakedown.models import Item, ItemStatus, OperationStatus, OperationType
 from shakedown.plugins import registry
 from shakedown.plugins.base import ItemDescriptor
-from shakedown.state import ItemRepo
+from shakedown.state import ItemRepo, OperationOutcomeRepo
 
 log = logging.getLogger(__name__)
 
@@ -24,12 +24,16 @@ def run_reconcile(config: Config) -> int:
     """For every (source, collection), walk the archive tree and rebuild item rows."""
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
+    outcomes = OperationOutcomeRepo(conn)
+    failed = 0
 
     for source in config.sources:
         plugin = registry.for_source(source)
         for collection in source.collections:
-            _reconcile_collection(config, source, collection, plugin, items, conn)
-    return 0
+            failed += _reconcile_collection(
+                config, source, collection, plugin, items, outcomes, conn
+            )
+    return 0 if failed == 0 else 1
 
 
 def _reconcile_collection(
@@ -38,8 +42,18 @@ def _reconcile_collection(
     collection: CollectionConfig,
     plugin,
     items: ItemRepo,
+    outcomes: OperationOutcomeRepo,
     conn,
-) -> None:
+) -> int:
+    started = datetime.now()
+    outcome = outcomes.start(
+        OperationType.RECONCILE,
+        source.name,
+        collection.name,
+        started,
+        phase="walk-archive",
+        safe_next_action="restore source access and rerun reconcile",
+    )
     archive_root = config.archive_root / source.name / collection.name
     on_disk_ids: set[str] = set()
     if archive_root.is_dir():
@@ -49,10 +63,12 @@ def _reconcile_collection(
         }
 
     descriptors_by_id: dict[str, ItemDescriptor] = {}
+    source_error: Exception | None = None
     try:
         for desc in plugin.discover(collection):
             descriptors_by_id[desc.identifier] = desc
-    except Exception:
+    except Exception as e:
+        source_error = e
         log.exception(
             "[%s/%s] source discover failed; reconciling on-disk items without manifests",
             source.name, collection.name,
@@ -118,3 +134,34 @@ def _reconcile_collection(
     log.info(
         "[%s/%s] reconcile recorded %d items", source.name, collection.name, len(on_disk_ids)
     )
+    finished = datetime.now()
+    completed_work = {
+        "items_on_disk": len(on_disk_ids),
+        "items_with_source_manifest": len(on_disk_ids & descriptors_by_id.keys()),
+    }
+    if source_error is not None:
+        outcomes.finish(
+            outcome,
+            OperationStatus.STALE_ENUMERATION,
+            finished,
+            phase="fetch-manifests",
+            completed_work=completed_work,
+            preservation_context="local recordings retained",
+            deletion_context="no deletion requested",
+            safe_next_action="restore source access and rerun reconcile",
+            errors=[str(source_error)],
+        )
+        return 1
+    outcomes.finish(
+        outcome,
+        OperationStatus.COMPLETED,
+        finished,
+        phase="write-state",
+        completed_work=completed_work,
+        preservation_context="local recordings retained",
+        deletion_context="no deletion requested",
+    )
+    outcomes.resolve_actionable(
+        OperationType.RECONCILE, source.name, collection.name, finished
+    )
+    return 0

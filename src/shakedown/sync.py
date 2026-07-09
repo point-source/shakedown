@@ -22,7 +22,7 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
-from shakedown.models import Item, ItemStatus, Run
+from shakedown.models import Item, ItemStatus, OperationStatus, OperationType, Run
 from shakedown.notify import (
     SyncCompletePayload,
     SyncFailedPayload,
@@ -39,7 +39,7 @@ from shakedown.staging import (
     unstage_item,
     write_sidecar,
 )
-from shakedown.state import ItemRepo, RunRepo
+from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
 
 log = logging.getLogger(__name__)
 
@@ -422,6 +422,30 @@ def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: d
     runs.finish(run)
 
 
+def _completed_work(stats: CollectionSyncStats) -> dict[str, int]:
+    return {
+        "items_discovered": stats.discovered,
+        "items_new": stats.new,
+        "items_updated": stats.updated,
+        "items_failed": stats.failed,
+        "bytes_downloaded": stats.bytes_downloaded,
+        "collisions_dropped": stats.collisions_dropped,
+    }
+
+
+def _deletion_context(collection: CollectionConfig) -> str:
+    if collection.prune_disappeared:
+        return "prune_disappeared enabled; deletion only after successful enumeration"
+    return "no deletion requested"
+
+
+def _affected_item_from_errors(errors: list[str]) -> str | None:
+    if not errors:
+        return None
+    identifier, sep, _detail = errors[0].partition(":")
+    return identifier if sep and identifier else None
+
+
 def _sync_collection(
     config: Config,
     source: SourceConfig,
@@ -444,8 +468,21 @@ def _sync_collection(
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     runs = RunRepo(conn)
+    outcomes = OperationOutcomeRepo(conn)
 
     run = runs.start(source.name, collection.name, started) if not dry_run else None
+    outcome = (
+        outcomes.start(
+            OperationType.SYNC,
+            source.name,
+            collection.name,
+            started,
+            phase="discover",
+            safe_next_action="restore source access and rerun sync",
+        )
+        if not dry_run
+        else None
+    )
 
     stats = CollectionSyncStats()
     staged_paths: set[Path] = set()
@@ -505,6 +542,18 @@ def _sync_collection(
         _fire_notifications(config, source, collection, stats, started, finished)
         if run is not None:
             _finish_run(runs, run, stats, finished)
+        if outcome is not None:
+            outcomes.finish(
+                outcome,
+                OperationStatus.STALE_ENUMERATION,
+                finished,
+                phase="discover",
+                completed_work=_completed_work(stats),
+                preservation_context="local recordings retained; no pruning performed",
+                deletion_context=_deletion_context(collection),
+                safe_next_action="restore source access and rerun sync",
+                errors=stats.errors,
+            )
         return stats
 
     # Post-enumeration barrier: the enumeration is complete and successful, so the
@@ -547,6 +596,38 @@ def _sync_collection(
     # Phase 6: record run
     if run is not None:
         _finish_run(runs, run, stats, finished)
+    if outcome is not None:
+        if stats.failed > 0 or stats.collisions_dropped > 0:
+            phase = "fetch" if stats.failed > 0 else "stage"
+            action = (
+                "fix failed item issues and rerun sync"
+                if stats.failed > 0
+                else "fix library layout and rerun sync"
+            )
+            outcomes.finish(
+                outcome,
+                OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
+                finished,
+                phase=phase,
+                affected_item=_affected_item_from_errors(stats.errors),
+                completed_work=_completed_work(stats),
+                preservation_context="completed archive work retained",
+                deletion_context=_deletion_context(collection),
+                safe_next_action=action,
+                errors=stats.errors,
+            )
+        else:
+            outcomes.finish(
+                outcome,
+                OperationStatus.COMPLETED,
+                finished,
+                phase="record",
+                completed_work=_completed_work(stats),
+                deletion_context=_deletion_context(collection),
+            )
+            outcomes.resolve_actionable(
+                OperationType.SYNC, source.name, collection.name, finished
+            )
 
     return stats
 
@@ -1332,8 +1413,18 @@ def forget_item(config: Config, identifier: str) -> None:
     """Drop an item from the DB (does not delete files)."""
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
+    outcomes = OperationOutcomeRepo(conn)
     for source in config.sources:
         for collection in source.collections:
             if items.get(source.name, collection.name, identifier):
                 items.delete(source.name, collection.name, identifier)
+                now = datetime.now()
+                for operation in OperationType:
+                    outcomes.resolve_actionable(
+                        operation,
+                        source.name,
+                        collection.name,
+                        now,
+                        affected_item=identifier,
+                    )
                 log.info("forgot %s/%s/%s", source.name, collection.name, identifier)
