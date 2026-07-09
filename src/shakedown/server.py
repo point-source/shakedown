@@ -24,7 +24,7 @@ from prometheus_client import (
 
 from shakedown.config import Config
 from shakedown.db import connect
-from shakedown.state import DriftRepo, ItemRepo, RunRepo
+from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
 from shakedown.sync import run_sync as do_sync
 from shakedown.verify import run_verify as do_verify
@@ -77,36 +77,41 @@ def build_app(config: Config) -> FastAPI:
             raise HTTPException(401, "invalid or missing bearer token")
 
     @app.get("/healthz")
-    def healthz() -> dict[str, str]:
+    async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
     @app.get("/status")
-    def status() -> JSONResponse:
+    async def status() -> JSONResponse:
         conn = connect(config.state_db)  # type: ignore[arg-type]
         items = ItemRepo(conn)
         runs = RunRepo(conn)
         drift = DriftRepo(conn)
+        outcomes = OperationOutcomeRepo(conn)
         summaries: list[dict[str, Any]] = []
         for source in config.sources:
             for collection in source.collections:
                 summaries.append(
-                    _collection_summary(config, source.name, collection.name, items, runs, drift)
+                    _collection_summary(
+                        config, source.name, collection.name, items, runs, drift, outcomes
+                    )
                 )
         return JSONResponse(json.loads(json.dumps(summaries, default=str)))
 
     @app.get("/metrics")
-    def metrics() -> PlainTextResponse:
+    async def metrics() -> PlainTextResponse:
         # Refresh gauges from current DB state on each scrape.
         conn = connect(config.state_db)  # type: ignore[arg-type]
         items = ItemRepo(conn)
         drift = DriftRepo(conn)
+        runs = RunRepo(conn)
+        outcomes = OperationOutcomeRepo(conn)
         for source in config.sources:
             for collection in source.collections:
                 counts = items.count_by_status(source.name, collection.name)
                 for status_, n in counts.items():
                     g_items.labels(source.name, collection.name, status_.value).set(n)
                 summary = _collection_summary(
-                    config, source.name, collection.name, items, RunRepo(conn), drift
+                    config, source.name, collection.name, items, runs, drift, outcomes
                 )
                 g_bytes.labels(source.name, collection.name).set(summary["bytes_on_disk"])
                 g_drift.labels(source.name, collection.name).set(summary["drift_files"])
@@ -114,7 +119,7 @@ def build_app(config: Config) -> FastAPI:
         return PlainTextResponse(body.decode(), media_type=CONTENT_TYPE_LATEST)
 
     @app.post("/sync")
-    def trigger_sync(
+    async def trigger_sync(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
         authorization: str | None = Header(default=None),
@@ -125,7 +130,7 @@ def build_app(config: Config) -> FastAPI:
         return {"exit_code": rc}
 
     @app.post("/verify")
-    def trigger_verify(
+    async def trigger_verify(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
         deep: bool = Query(default=False),

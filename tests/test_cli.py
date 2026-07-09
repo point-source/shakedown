@@ -183,11 +183,16 @@ def test_status_reports_stale_collection(tmp_path: Path, tmp_roots, monkeypatch)
 
     result = CliRunner().invoke(main, ["--config", str(cfg), "status"])
     assert result.exit_code == 0
+    assert "RECOVERY: sync stale_enumeration during discover" in result.output
+    assert "action: restore source access and rerun sync" in result.output
     assert "STALE" in result.output
     assert "complete=1" in result.output, "existing items remain reported"
 
     json_result = CliRunner().invoke(main, ["--config", str(cfg), "status", "--json"])
     assert '"stale": true' in json_result.output
+    assert '"operation": "sync"' in json_result.output
+    assert '"status": "stale_enumeration"' in json_result.output
+    assert '"safe_next_action": "restore source access and rerun sync"' in json_result.output
 
 
 def test_item_forget_removes_row(tmp_path: Path, tmp_roots) -> None:
