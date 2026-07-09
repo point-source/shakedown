@@ -645,7 +645,8 @@ exits (§req:constraints). The command surface:
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
-| `validate [--source S] [--collection C] [--live-handoff]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
+| `validate [--source S] [--collection C] [--live-handoff] [--json]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
+| `release-validate [--deterministic-only] [--real-source-only]` | Opt-in maintainer gate that exercises setup readiness, unsafe config rejection, partial-failure recovery, sync-to-library staging, and the real-source IA seam (§spec:release-validation-gate). |
 | `item show \| refetch \| forget <identifier>` | Single-item inspection and surgery. |
 | `serve [--host] [--port]` | Optional HTTP control plane (§spec:serve). |
 
@@ -798,6 +799,7 @@ scheduler (§req:constraints).
 | `GET /metrics` | Prometheus metrics |
 | `POST /sync?source=&collection=` | Trigger an ad-hoc sync (auth required) |
 | `POST /verify` | Trigger a verify run (auth required) |
+| `POST /validate` | Run setup readiness validation; live handoff validation is auth required |
 
 Security posture (this endpoint accepts requests that cause network
 fetches and disk writes): mutating endpoints shall require a bearer
@@ -1066,7 +1068,7 @@ completed, and once it completes the stale warning is gone.
 
 ## Release validation gate §spec:release-validation-gate
 
-*Status: not started*
+*Status: complete*
 
 A maintainer can run one bounded, documented release validation before
 publishing. It exercises the user workflows most likely to regress:
@@ -1078,9 +1080,10 @@ workflow, not to internal fixtures. (§req:success-criteria #18,
 
 Observable behavior:
 
-- The release check has one documented command. It is opt-in and
-  excluded from the default developer test run and routine CI unless a
-  maintainer explicitly enables it.
+- `shakedown release-validate` is opt-in and excluded from the default
+  developer test run and routine CI unless a maintainer explicitly runs
+  it. Narrower modes, `--deterministic-only` and `--real-source-only`,
+  are explicit.
 - The deterministic portion runs against fake sources and throwaway
   archive, library, config, and state paths. It proves that
   `validate` catches missing paths, bad credentials or source access,

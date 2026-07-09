@@ -152,6 +152,21 @@ def test_complete_exec_runs_command_with_payload_on_stdin() -> None:
     assert body["staged"][0]["identifier"] == "gd-x"
 
 
+def test_complete_exec_nonzero_exit_returns_error() -> None:
+    coll = _make_collection(ExecHandoff(exec="/usr/local/bin/import {staging_root}"))
+
+    def fake_run(args, **kwargs):
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(args, 2)
+
+    with patch("shakedown.notify.subprocess.run", side_effect=fake_run):
+        err = fire_complete(coll, _complete())
+
+    assert err is not None
+    assert "exited 2" in err
+
+
 def test_no_handoff_is_a_noop() -> None:
     coll = _make_collection(None)
     assert fire_complete(coll, _complete()) is None

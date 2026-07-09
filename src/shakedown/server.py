@@ -150,7 +150,7 @@ def build_app(config: Config) -> FastAPI:
         )
         return {"exit_code": rc}
 
-    @app.get("/validate")
+    @app.post("/validate")
     async def validate(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),

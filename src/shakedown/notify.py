@@ -228,7 +228,7 @@ def _dispatch(handoff: Handoff, body: dict[str, Any]) -> str | None:
         return _post(_expand(handoff.webhook, body), body)
     cmd = _expand(handoff.exec, body)
     try:
-        subprocess.run(
+        completed = subprocess.run(
             shlex.split(cmd),
             check=False,
             capture_output=True,
@@ -237,6 +237,10 @@ def _dispatch(handoff: Handoff, body: dict[str, Any]) -> str | None:
         )
     except (subprocess.SubprocessError, OSError) as e:
         msg = f"handoff exec {cmd} failed: {e}"
+        log.warning(msg)
+        return msg
+    if completed.returncode != 0:
+        msg = f"handoff exec {cmd} exited {completed.returncode}"
         log.warning(msg)
         return msg
     return None

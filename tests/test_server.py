@@ -86,7 +86,7 @@ async def test_serve_validate_endpoint(tmp_roots: tuple[Path, Path], monkeypatch
         base_url="http://testserver",
     ) as client:
         # default validation is read-only: no token, same posture as /status
-        r = await client.get("/validate")
+        r = await client.post("/validate")
         assert r.status_code == 200
         body = r.json()
         assert body["ready"] is True
@@ -94,9 +94,9 @@ async def test_serve_validate_endpoint(tmp_roots: tuple[Path, Path], monkeypatch
 
         # a live handoff test is mutating: same bearer posture as sync/verify
         assert (
-            await client.get("/validate", params={"live_handoff": True})
+            await client.post("/validate", params={"live_handoff": True})
         ).status_code == 401
-        r = await client.get(
+        r = await client.post(
             "/validate",
             params={"live_handoff": True},
             headers={"Authorization": "Bearer test-token"},
@@ -124,7 +124,7 @@ async def test_serve_mutating_disabled_without_token(
         assert (await client.get("/status")).status_code == 200
         assert (await client.get("/metrics")).status_code == 200
         # default (read-only) validation stays reachable
-        assert (await client.get("/validate")).status_code == 200
+        assert (await client.post("/validate")).status_code == 200
 
         # mutating endpoints are disabled, not open -- even with a bearer header
         assert (
@@ -133,5 +133,5 @@ async def test_serve_mutating_disabled_without_token(
         assert (await client.post("/verify")).status_code == 503
         # a live handoff test is mutating: disabled without a configured token
         assert (
-            await client.get("/validate", params={"live_handoff": True})
+            await client.post("/validate", params={"live_handoff": True})
         ).status_code == 503
