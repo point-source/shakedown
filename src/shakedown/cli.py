@@ -133,6 +133,35 @@ def validate(
     )
 
 
+@main.command("release-validate")
+@click.option(
+    "--deterministic-only",
+    is_flag=True,
+    help="Run only fake-source release scenarios; explicitly skips the real IA seam.",
+)
+@click.option(
+    "--real-source-only",
+    is_flag=True,
+    help="Run only the pinned real Internet Archive seam.",
+)
+@click.pass_context
+def release_validate(
+    ctx: click.Context, deterministic_only: bool, real_source_only: bool
+) -> None:
+    """Run the opt-in bounded release validation gate."""
+    if deterministic_only and real_source_only:
+        click.echo("error: choose at most one narrower release validation mode", err=True)
+        ctx.exit(2)
+    from shakedown.release_validation import run_release_validation
+
+    ctx.exit(
+        run_release_validation(
+            deterministic=not real_source_only,
+            real_source=not deterministic_only,
+        )
+    )
+
+
 @main.command()
 @click.option("--source", "source_filter")
 @click.option("--collection", "collection_filter")
