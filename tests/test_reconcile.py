@@ -6,7 +6,7 @@ from pathlib import Path
 from shakedown.db import connect
 from shakedown.models import ItemStatus
 from shakedown.reconcile import run_reconcile
-from shakedown.state import ItemRepo
+from shakedown.state import ItemRepo, OperationOutcomeRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -112,7 +112,7 @@ def test_reconcile_tolerates_source_unavailable(
         yield  # pragma: no cover  (keeps it a generator)
 
     monkeypatch.setattr(FakePlugin, "discover", discover_explodes)
-    assert run_reconcile(config) == 0
+    assert run_reconcile(config) == 1
 
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
@@ -122,3 +122,11 @@ def test_reconcile_tolerates_source_unavailable(
     # next sync (when source returns) will refresh the manifest.
     assert row.status == ItemStatus.COMPLETE
     assert row.recorded_manifest is None
+    issue = OperationOutcomeRepo(conn).latest_issue("fake-src", "coll1")
+    assert issue is not None
+    assert issue.operation == "reconcile"
+    assert issue.next_action.startswith("retry is safe")
+
+    monkeypatch.undo()
+    assert run_reconcile(config) == 0
+    assert OperationOutcomeRepo(conn).latest_issue("fake-src", "coll1") is None

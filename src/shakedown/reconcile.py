@@ -15,6 +15,7 @@ from shakedown.db import connect, transaction
 from shakedown.models import Item, ItemStatus
 from shakedown.plugins import registry
 from shakedown.plugins.base import ItemDescriptor
+from shakedown.recovery import clear_issue, record_issue
 from shakedown.state import ItemRepo
 
 log = logging.getLogger(__name__)
@@ -24,12 +25,28 @@ def run_reconcile(config: Config) -> int:
     """For every (source, collection), walk the archive tree and rebuild item rows."""
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
+    failed = 0
 
     for source in config.sources:
         plugin = registry.for_source(source)
         for collection in source.collections:
-            _reconcile_collection(config, source, collection, plugin, items, conn)
-    return 0
+            ok = _reconcile_collection(config, source, collection, plugin, items, conn)
+            if ok:
+                clear_issue(
+                    config, source=source.name, collection=collection.name, operation="reconcile"
+                )
+            else:
+                failed += 1
+                record_issue(
+                    config,
+                    source=source.name,
+                    collection=collection.name,
+                    operation="reconcile",
+                    phase="source discovery",
+                    message="source discovery failed; on-disk recordings were retained",
+                    next_action="retry is safe after fixing the reported error",
+                )
+    return 0 if failed == 0 else 1
 
 
 def _reconcile_collection(
@@ -39,7 +56,7 @@ def _reconcile_collection(
     plugin,
     items: ItemRepo,
     conn,
-) -> None:
+) -> bool:
     archive_root = config.archive_root / source.name / collection.name
     on_disk_ids: set[str] = set()
     if archive_root.is_dir():
@@ -49,10 +66,12 @@ def _reconcile_collection(
         }
 
     descriptors_by_id: dict[str, ItemDescriptor] = {}
+    source_ok = True
     try:
         for desc in plugin.discover(collection):
             descriptors_by_id[desc.identifier] = desc
     except Exception:
+        source_ok = False
         log.exception(
             "[%s/%s] source discover failed; reconciling on-disk items without manifests",
             source.name, collection.name,
@@ -118,3 +137,4 @@ def _reconcile_collection(
     log.info(
         "[%s/%s] reconcile recorded %d items", source.name, collection.name, len(on_disk_ids)
     )
+    return source_ok
