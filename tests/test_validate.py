@@ -56,3 +56,24 @@ sources:
     assert "FAIL fake-src/coll1 setup readiness" in result.output
     assert "handoff" in result.output
     assert "/definitely/missing/shakedown-import" in result.output
+
+
+def test_validate_reports_broken_setup_path_without_traceback(tmp_path: Path) -> None:
+    cfg = tmp_path / "shakedown.yaml"
+    cfg.write_text(f"""
+archive_root: /dev/null/archive
+library_root: {tmp_path / "library"}
+sources:
+  - name: ia-src
+    type: ia
+    collections:
+      - name: bad-path
+        query: "identifier:testmp3testfile"
+""")
+
+    result = CliRunner().invoke(main, ["--config", str(cfg), "validate"])
+
+    assert result.exit_code == 1
+    assert "FAIL ia-src/bad-path setup readiness" in result.output
+    assert "archive path" in result.output
+    assert "Traceback" not in result.output

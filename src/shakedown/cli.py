@@ -24,18 +24,19 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-def _load_config(ctx: click.Context) -> config_module.Config:
+def _load_config(ctx: click.Context, *, check_filesystem: bool = True) -> config_module.Config:
     cfg_path: Path = ctx.obj["config_path"]
     try:
         cfg = config_module.load(cfg_path)
     except config_module.ConfigError as e:
         click.echo(f"error: {e}", err=True)
         ctx.exit(2)
-    try:
-        ensure_same_filesystem(cfg.archive_root, cfg.library_root)
-    except FilesystemError as e:
-        click.echo(f"error: {e}", err=True)
-        ctx.exit(2)
+    if check_filesystem:
+        try:
+            ensure_same_filesystem(cfg.archive_root, cfg.library_root)
+        except FilesystemError as e:
+            click.echo(f"error: {e}", err=True)
+            ctx.exit(2)
     return cfg
 
 
@@ -120,7 +121,7 @@ def validate(
     live_handoff: bool,
 ) -> None:
     """Preflight a configured deployment before a large mirror begins."""
-    cfg = _load_config(ctx)
+    cfg = _load_config(ctx, check_filesystem=False)
     from shakedown.validate import run_validate
 
     ctx.exit(

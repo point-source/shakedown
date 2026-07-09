@@ -16,10 +16,18 @@ def ensure_same_filesystem(archive_root: Path, library_root: Path) -> None:
     Hardlinks require both ends on the same filesystem (PRD §4). Both directories
     are created if they don't exist, since we'd create them on first use anyway.
     """
-    archive_root.mkdir(parents=True, exist_ok=True)
-    library_root.mkdir(parents=True, exist_ok=True)
-    a_dev = os.stat(archive_root).st_dev
-    l_dev = os.stat(library_root).st_dev
+    try:
+        archive_root.mkdir(parents=True, exist_ok=True)
+        library_root.mkdir(parents=True, exist_ok=True)
+        a_dev = os.stat(archive_root).st_dev
+        l_dev = os.stat(library_root).st_dev
+    except OSError as e:
+        raise FilesystemError(
+            f"archive_root and library_root must be usable directories.\n"
+            f"  archive_root={archive_root}\n"
+            f"  library_root={library_root}\n"
+            f"Fix the configured path or volume mount and try again: {e}"
+        ) from e
     if a_dev != l_dev:
         raise FilesystemError(
             f"archive_root and library_root must live on the same filesystem "

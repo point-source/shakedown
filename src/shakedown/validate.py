@@ -1,6 +1,7 @@
 """Setup readiness validation before a large mirror begins."""
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import shutil
@@ -12,6 +13,8 @@ import click
 from shakedown.config import CollectionConfig, Config, ExecHandoff, SourceConfig, WebhookHandoff
 from shakedown.plugins import registry
 from shakedown.recovery import clear_issue, record_issue
+
+log = logging.getLogger(__name__)
 
 
 def run_validate(
@@ -36,15 +39,18 @@ def run_validate(
             else:
                 failures += 1
                 phase, message, next_action = result
-                record_issue(
-                    config,
-                    source=source.name,
-                    collection=collection.name,
-                    operation="validate",
-                    phase=phase,
-                    message=message,
-                    next_action=next_action,
-                )
+                try:
+                    record_issue(
+                        config,
+                        source=source.name,
+                        collection=collection.name,
+                        operation="validate",
+                        phase=phase,
+                        message=message,
+                        next_action=next_action,
+                    )
+                except Exception as e:
+                    log.debug("could not persist validate recovery outcome: %s", e)
                 click.echo(
                     f"FAIL {source.name}/{collection.name} setup readiness: "
                     f"{phase}: {message}; next: {next_action}"

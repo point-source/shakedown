@@ -291,7 +291,10 @@ def _scenario_sync_to_library_staging() -> ScenarioResult:
 
 def _run_real_source_scenario() -> ScenarioResult:
     cmd = [sys.executable, "-m", "pytest", "-q", "-m", "network", "tests/test_e2e_real_source.py"]
-    completed = subprocess.run(cmd, text=True, capture_output=True)
+    try:
+        completed = subprocess.run(cmd, text=True, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return ScenarioResult("real-source IA seam", False, "network check timed out")
     output = (completed.stdout + completed.stderr).strip().splitlines()
     detail = output[-1] if output else "network check exited without output"
     return ScenarioResult("real-source IA seam", completed.returncode == 0, detail)

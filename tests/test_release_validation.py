@@ -23,7 +23,7 @@ def test_release_validate_deterministic_summary_names_workflows() -> None:
 
 
 def test_release_validate_real_source_failure_is_loud(monkeypatch) -> None:
-    def fail_network(cmd, text, capture_output):
+    def fail_network(cmd, text, capture_output, timeout):
         return subprocess.CompletedProcess(
             cmd,
             1,
@@ -37,7 +37,7 @@ def test_release_validate_real_source_failure_is_loud(monkeypatch) -> None:
 
 
 def test_release_validate_default_includes_real_source_failure(monkeypatch) -> None:
-    def fail_network(cmd, text, capture_output):
+    def fail_network(cmd, text, capture_output, timeout):
         return subprocess.CompletedProcess(
             cmd,
             1,
