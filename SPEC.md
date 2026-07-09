@@ -905,7 +905,7 @@ Container Station (compose edit), logs via Container Station.
 
 ## Setup readiness validation §spec:setup-readiness-validation
 
-*Status: implemented*
+*Status: complete*
 
 A first-time operator can run a dedicated readiness validation before
 the first large mirror. The validation reports one pass/fail result per
