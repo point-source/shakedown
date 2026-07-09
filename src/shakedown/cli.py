@@ -24,18 +24,19 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-def _load_config(ctx: click.Context) -> config_module.Config:
+def _load_config(ctx: click.Context, *, check_filesystem: bool = True) -> config_module.Config:
     cfg_path: Path = ctx.obj["config_path"]
     try:
         cfg = config_module.load(cfg_path)
     except config_module.ConfigError as e:
         click.echo(f"error: {e}", err=True)
         ctx.exit(2)
-    try:
-        ensure_same_filesystem(cfg.archive_root, cfg.library_root)
-    except FilesystemError as e:
-        click.echo(f"error: {e}", err=True)
-        ctx.exit(2)
+    if check_filesystem:
+        try:
+            ensure_same_filesystem(cfg.archive_root, cfg.library_root)
+        except FilesystemError as e:
+            click.echo(f"error: {e}", err=True)
+            ctx.exit(2)
     return cfg
 
 
@@ -102,6 +103,35 @@ def status(ctx: click.Context, as_json: bool) -> None:
     from shakedown.status import print_status
 
     print_status(cfg, as_json=as_json)
+
+
+@main.command("release-validate")
+@click.option(
+    "--deterministic-only",
+    is_flag=True,
+    help="Run only fake-source release scenarios; explicitly skips the real IA seam.",
+)
+@click.option(
+    "--real-source-only",
+    is_flag=True,
+    help="Run only the pinned real Internet Archive seam.",
+)
+@click.pass_context
+def release_validate(
+    ctx: click.Context, deterministic_only: bool, real_source_only: bool
+) -> None:
+    """Run the opt-in bounded release validation gate."""
+    if deterministic_only and real_source_only:
+        click.echo("error: choose at most one narrower release validation mode", err=True)
+        ctx.exit(2)
+    from shakedown.release_validation import run_release_validation
+
+    ctx.exit(
+        run_release_validation(
+            deterministic=not real_source_only,
+            real_source=not deterministic_only,
+        )
+    )
 
 
 @main.command()
