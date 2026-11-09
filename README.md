@@ -18,10 +18,10 @@ Three layers, two on-disk trees, one process. The **archive layer** at `/data/ar
 
 ## Quick start (Docker)
 
-Set `IMAGE` to your fork's image and a released version (see [Container images & releases](#container-images--releases)).
+Set `IMAGE` to your fork's image (see [Container images & releases](#container-images--releases) for tags).
 
 ```bash
-IMAGE=ghcr.io/OWNER/shakedown:1.1.0   # OWNER = the GitHub user/org that hosts your fork
+IMAGE=ghcr.io/OWNER/shakedown:latest   # OWNER = the GitHub user/org that hosts your fork
 docker pull "$IMAGE"
 
 cp shakedown.example.yaml ./shakedown.yaml      # edit to taste
@@ -48,9 +48,9 @@ docker build -t shakedown:local .
 
 | Tag | Meaning |
 | --- | --- |
-| `1.2.0` | That release. Pin this in `SHAKEDOWN_IMAGE`. |
+| `1.2.0` | That release. Use it in `SHAKEDOWN_IMAGE` to hold a version. |
 | `1.2` | Newest `1.2.x` release. Moves. |
-| `latest` | Newest release. Moves — don't use it in compose, since ofelia pulls before every tick. |
+| `latest` | Newest release. Use it in `SHAKEDOWN_IMAGE` for automatic updates: ofelia pulls before every tick, so each release reaches the NAS at its next run. |
 | `sha-<short>` | The release commit. Immutable. |
 
 Builds are multi-arch (`linux/amd64` + `linux/arm64`), so the same tag works on Intel QNAPs (TS-x73/x83), Atom/Celeron NUCs, and ARM QNAPs (TS-x33/x53D).
@@ -69,7 +69,7 @@ The workflow runs on `GITHUB_TOKEN` and needs no extra secrets, but two manual s
 1. **File Station:** create `/share/data/{archive,library,music,shakedown-config}` — all under one share. The compose file mounts `/share/data` into the container once, as `/data`: hardlinks need archive and library on one filesystem *and* one mount (SPEC.md §spec:system-shape). Keep it that way if you edit the volumes.
 2. **Ownership (one time):** every Shakedown container runs as one user, `SHAKEDOWN_USER` (`uid:gid`, default `1000:1000`, the image's built-in user). That user must own the archive and library folders, or runs fail with permission errors. Over SSH: `chown -R 1000:1000 /share/data/archive /share/data/library`. Without SSH: in Container Station, run a one-off `busybox` container as root with `/share/data` mounted at `/data` and command `chown -R 1000:1000 /data/archive /data/library`. Use your own `uid:gid` instead if you set `SHAKEDOWN_USER`.
 3. **File Station:** upload an initial `shakedown.yaml` (start from [`shakedown.example.yaml`](shakedown.example.yaml)) to `/share/data/shakedown-config/`.
-4. **Container Station → Applications → Create:** paste [`docker-compose.example.yaml`](docker-compose.example.yaml) and set `SHAKEDOWN_IMAGE` to your fork's image at a released version, e.g. `ghcr.io/<owner>/shakedown:1.1.0` — Create fails until it is set. To upgrade, change the version; `latest` would install every new release unreviewed, because ofelia pulls before each tick. For a download-restricted collection, uncomment that job's `environment` label and set `IA_EMAIL` / `IA_PASSWORD`. Click Create.
+4. **Container Station → Applications → Create:** paste [`docker-compose.example.yaml`](docker-compose.example.yaml) and set `SHAKEDOWN_IMAGE` to your fork's image, e.g. `ghcr.io/<owner>/shakedown:latest` — Create fails until it is set. With `latest`, Shakedown updates itself: ofelia pulls before each tick, and CI publishes a release only after its tests pass. To hold a version instead, use a release tag such as `1.1.0`. For a download-restricted collection, uncomment that job's `environment` label and set `IA_EMAIL` / `IA_PASSWORD`. Click Create.
 5. **How syncs run:** ofelia is the only long-running service. On each scheduled tick it launches a *fresh* shakedown container that runs one `sync` and exits — matching shakedown's one-shot design, so there is no idle service to attach to. Nothing syncs on first `up`; each collection syncs only on its own schedule.
 6. **Sync now (without waiting for a tick):** either uncomment the `shakedown-serve` control plane and `POST /sync` — `curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" "http://host:8080/sync?collection=grateful-dead"` (no SSH) — or start a one-off container from Container Station → Create with command `sync --collection <name>`, the same mounts, and the same user as `SHAKEDOWN_USER`. Over SSH the equivalent is `docker run --rm` with the same mounts/env; SSH stays supported, it's just never required.
 7. **Confirm the schedule works:** open Container Station → `shakedown-ofelia` → *Logs*. Expect one `New job registered` line per collection. A missing job or a registration error means that job's labels are wrong: every label of a job must start with the same `ofelia.job-run.<name>.` prefix. To see a tick end to end, set one job's `schedule` a few minutes ahead (e.g. `0 30 14 * * *` runs daily at 14:30), wait for that job's `Started` line, its `StdOut:` output, and a `Finished in … failed: false` line. This runs a real sync. Then restore the schedule.
