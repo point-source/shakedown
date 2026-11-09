@@ -1,12 +1,18 @@
 FROM python:3.12-slim AS builder
 
+# Install from uv.lock so every build of a commit gets the same libraries.
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
 WORKDIR /build
-RUN pip install --no-cache-dir build
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-install-project --extra serve
 
-COPY pyproject.toml README.md ./
 COPY src ./src
-
-RUN python -m build --wheel --outdir /dist
+RUN uv sync --frozen --no-editable --extra serve
 
 
 FROM python:3.12-slim
@@ -17,8 +23,9 @@ LABEL org.opencontainers.image.description="Durable mirroring of public music ar
 RUN useradd -u 1000 -m shakedown
 WORKDIR /home/shakedown
 
-COPY --from=builder /dist/*.whl /tmp/
-RUN whl="$(ls /tmp/*.whl)" && pip install --no-cache-dir "${whl}[serve]" && rm -f /tmp/*.whl
+# Same path as in the builder, so the venv's scripts keep working.
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
 
 USER shakedown
 

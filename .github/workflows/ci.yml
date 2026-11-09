@@ -16,11 +16,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install uv
-        run: pip install uv
-      - name: Create virtualenv
-        run: uv venv --allow-existing .venv
-      - name: Install dependencies
-        run: uv pip install -e '.[dev,serve]'
+        run: pip install uv==0.13.7
+      - name: Install dependencies (from uv.lock)
+        run: uv sync --frozen --python 3.12 --extra dev --extra serve
       - name: Lint
         run: .venv/bin/ruff check .
       - name: Typecheck
