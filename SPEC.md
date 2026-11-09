@@ -549,10 +549,13 @@ cannot is unaffected and simply always resolves full manifests.
 Plugins shipped in v1:
 
 - **Internet Archive (`ia`).** Wraps the official `internetarchive`
-  Python package for search, download, and per-file checksum
-  verification — those problems are solved; the plugin does not
-  reimplement them. Optional credentials (for download-restricted
-  items) are read from environment variables only.
+  Python package for search and download — those problems are solved;
+  the plugin does not reimplement them. That package checksums only
+  files already on disk before a download, never the bytes it just
+  wrote, so the plugin checks each downloaded file's size and md5
+  against the manifest before reporting success. Optional credentials
+  (for download-restricted items) are read from environment variables
+  only.
 - **etree (`etree`).** A second, independently written plugin that
   proves the seam is real (§req:success-criteria #8): it drives
   archive.org's public HTTP/JSON API directly — a different integration

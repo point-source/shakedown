@@ -15,7 +15,13 @@ import internetarchive as ia
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import Manifest, ManifestFile
-from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin, VerifyResult
+from shakedown.plugins.base import (
+    FetchResult,
+    ItemDescriptor,
+    SourcePlugin,
+    VerifyResult,
+    downloaded_file_mismatch,
+)
 from shakedown.plugins.registry import register
 
 log = logging.getLogger(__name__)
@@ -231,9 +237,9 @@ class IAPlugin(SourcePlugin):
     ) -> FetchResult:
         """Download manifest files into dest_dir (a core-owned temp directory).
 
-        The plugin only writes bytes and verifies IA's per-file checksums; the
-        core owns the temp-dir lifecycle and the atomic rename into the archive
-        (SPEC.md §spec:sync-workflow).
+        The plugin only writes bytes and checks each file's size and md5 against the
+        manifest; the core owns the temp-dir lifecycle and the atomic rename into the
+        archive (SPEC.md §spec:sync-workflow).
         """
         if item.is_restricted:
             return FetchResult(
@@ -260,7 +266,6 @@ class IAPlugin(SourcePlugin):
                 # IA places files under <destdir>/<identifier>/...; strip that prefix below.
                 no_directory=False,
                 ignore_existing=False,
-                checksum=True,
                 # Core owns retries/backoff (SPEC §spec:failure-behavior); don't
                 # let the IA library retry underneath us.
                 retries=0,
@@ -301,6 +306,20 @@ class IAPlugin(SourcePlugin):
                 error=f"missing after fetch: {missing[:5]}",
                 retriable=True,
             )
+
+        # The internetarchive library checksums only files already on disk before a
+        # download, never what it just wrote, so check every file against the
+        # manifest here. A corrupt file is removed and the fetch retried.
+        for mf in item.manifest.files:
+            mismatch = downloaded_file_mismatch(dest_dir / mf.name, mf)
+            if mismatch is not None:
+                (dest_dir / mf.name).unlink()
+                return FetchResult(
+                    success=False,
+                    bytes_downloaded=bytes_downloaded,
+                    error=mismatch,
+                    retriable=True,
+                )
 
         return FetchResult(success=True, bytes_downloaded=bytes_downloaded)
 

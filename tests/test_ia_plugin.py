@@ -283,7 +283,10 @@ def test_fetch_flattens_ia_subdir_into_dest(tmp_path: Path) -> None:
 
     desc = ItemDescriptor(
         identifier="gd1977-05-08",
-        manifest=Manifest(files=(ManifestFile("d1t01.flac", 5, "abc"),)),
+        # md5 of b"audio": the plugin checks downloads against the manifest.
+        manifest=Manifest(
+            files=(ManifestFile("d1t01.flac", 5, "a5ca0b5894324f8bb54bb9fffad29d1e"),)
+        ),
         metadata={},
     )
 
@@ -453,3 +456,67 @@ def test_fetch_with_empty_manifest_fails_without_download(tmp_path: Path) -> Non
     assert result.success is False
     assert result.retriable is False
     mock_download.assert_not_called()
+
+
+def _desc_for(identifier: str, files: dict[str, bytes], *, md5s: dict[str, str] | None = None):
+    import hashlib
+
+    from shakedown.models import Manifest, ManifestFile
+    from shakedown.plugins.base import ItemDescriptor
+
+    md5s = md5s or {}
+    return ItemDescriptor(
+        identifier=identifier,
+        manifest=Manifest(files=tuple(
+            ManifestFile(name, len(content), md5s.get(name, hashlib.md5(content).hexdigest()))
+            for name, content in files.items()
+        )),
+        metadata={},
+    )
+
+
+def _writer(served: dict[str, bytes], calls: list[list[str]] | None = None):
+    def fake_download(identifier, files, destdir, **kwargs):
+        if calls is not None:
+            calls.append(list(files))
+        target = Path(destdir) / identifier
+        target.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            (target / name).write_bytes(served[name])
+
+    return fake_download
+
+
+def test_fetch_rejects_download_whose_md5_does_not_match(tmp_path: Path) -> None:
+    """The internetarchive library only checksums files already on disk; the plugin
+    must check what it just downloaded against the manifest before reporting success."""
+    plugin = _make_plugin()
+    dest = tmp_path / ".tmp-gd-x"
+    desc = _desc_for("gd-x", {"a.flac": b"audio"})
+
+    with patch(
+        "shakedown.plugins.ia.plugin.ia.download",
+        side_effect=_writer({"a.flac": b"AUDIO"}),  # same size, corrupted bytes
+    ):
+        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+
+    assert result.success is False
+    assert result.retriable is True
+    assert "checksum mismatch" in (result.error or "")
+    assert not (dest / "a.flac").exists(), "a corrupt file must not stay in the temp dir"
+
+
+def test_fetch_rejects_download_whose_size_does_not_match(tmp_path: Path) -> None:
+    plugin = _make_plugin()
+    dest = tmp_path / ".tmp-gd-x"
+    desc = _desc_for("gd-x", {"a.flac": b"audio"})
+
+    with patch(
+        "shakedown.plugins.ia.plugin.ia.download",
+        side_effect=_writer({"a.flac": b"aud"}),  # truncated
+    ):
+        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+
+    assert result.success is False
+    assert result.retriable is True
+    assert not (dest / "a.flac").exists()
