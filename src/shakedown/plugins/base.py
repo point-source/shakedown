@@ -163,8 +163,11 @@ class SourcePlugin(ABC):
         `dest_dir` into the archive on success and sweeps it on failure, so no
         plugin can commit partial state to the archive (SPEC.md §spec:sync-workflow).
 
-        Implementations must be idempotent: re-running on a populated dest_dir
-        should verify and skip matching files (the IA library does this natively).
+        `dest_dir` may hold files an earlier failed attempt left behind (the core
+        keeps them so one late error doesn't re-download a whole show). Keep such a
+        file only after `downloaded_file_mismatch` finds it matches the manifest's
+        size and md5; fetch anything else, including a file the manifest gives
+        nothing to check against.
         """
 
     @abstractmethod

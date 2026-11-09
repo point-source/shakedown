@@ -174,8 +174,10 @@ A sync run for a (source, collection) pair proceeds in six phases:
    files and the rename to disk, then atomically renames the temp
    directory to its final archive location and persists the manifest
    — so a power cut never leaves a short file recorded `complete`. A partial failure
-   leaves only the temp directory, cleaned up on the next run —
-   no partial state ever reaches the archive tree or the database.
+   leaves only the temp directory; the next attempt (or run) keeps
+   the files in it that match the manifest's size and checksum and
+   fetches only the rest — no partial state ever reaches the archive
+   tree or the database.
 4. **Stage.** For every item in the archive, the library layout
    template is rendered and hardlinks are created
    (§spec:library-staging).
@@ -1169,7 +1171,7 @@ degrade a single item or a single run, never the archive.
 
 | Failure | Behavior |
 | --- | --- |
-| Network drops mid-download | Partial temp dir cleaned up; resume on next run |
+| Network drops mid-download | Files in the temp dir that match the manifest are kept; the next attempt or run fetches only the rest |
 | Malformed source metadata | Item marked `failed`, error logged, run continues |
 | Checksum mismatch during download | Bounded retries, then item marked `failed` |
 | Cross-filesystem archive/library | Hard error at startup; refuse to run (§spec:system-shape) |

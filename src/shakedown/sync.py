@@ -1231,13 +1231,15 @@ def _fetch_with_retries(
     Retries are core-owned, not delegated to the plugin's library: a transient
     fault (checksum mismatch, truncated download, rate limit) is retried up to
     `max_attempts` times. When the source supplies a `Retry-After`, we honor it
-    in place of exponential backoff. The temp dir is wiped before each attempt so
-    a partial write from the previous try never contaminates the next.
+    in place of exponential backoff.
+
+    The temp dir is kept between attempts (and runs), so one late error does not
+    re-download a whole show: plugins keep a leftover file only once it matches the
+    manifest's size and md5, and fetch the rest. Anything in the temp dir that is not
+    a manifest file is removed before each attempt.
     """
     for attempt in range(1, max_attempts + 1):
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_tmp_dir(desc, tmp_dir)
 
         result = plugin.fetch(
             desc, tmp_dir, collection.format_filters, collection.exclude_filters
@@ -1271,6 +1273,27 @@ def _fetch_with_retries(
         )
         time.sleep(delay)
     raise AssertionError("unreachable: max_attempts must be >= 1")
+
+
+def _prepare_tmp_dir(desc: ItemDescriptor, tmp_dir: Path) -> None:
+    """Create the temp dir, keeping files a previous attempt left for the manifest's
+    names (the plugin re-checks them before reuse) and removing everything else."""
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    wanted = {os.path.normpath(mf.name) for mf in desc.manifest.files}
+    wanted_dirs = {os.path.dirname(name) for name in wanted}
+    for dirpath, dirnames, filenames in os.walk(tmp_dir, topdown=False):
+        rel_dir = os.path.relpath(dirpath, tmp_dir)
+        for name in filenames:
+            rel = os.path.normpath(os.path.join(rel_dir, name))
+            if rel not in wanted:
+                os.unlink(os.path.join(dirpath, name))
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            rel = os.path.normpath(os.path.join(rel_dir, name))
+            if os.path.islink(path):
+                os.unlink(path)
+            elif not any(d == rel or d.startswith(rel + os.sep) for d in wanted_dirs):
+                shutil.rmtree(path)
 
 
 def _size_mismatches(desc: ItemDescriptor, tmp_dir: Path) -> list[str]:

@@ -30,6 +30,7 @@ from shakedown.plugins.base import (
     ItemDescriptor,
     SourcePlugin,
     VerifyResult,
+    downloaded_file_mismatch,
 )
 from shakedown.plugins.registry import register
 
@@ -300,8 +301,13 @@ class EtreePlugin(SourcePlugin):
             out = dest_dir / mf.name
             out.parent.mkdir(parents=True, exist_ok=True)
 
-            # Idempotent: a file already present with the expected size is kept.
-            if out.is_file() and (mf.size is None or out.stat().st_size == mf.size):
+            # A file an earlier attempt left behind is kept only once it matches the
+            # manifest's size and md5; one we cannot check is fetched again.
+            if (
+                out.is_file()
+                and (mf.size is not None or mf.md5 is not None)
+                and downloaded_file_mismatch(out, mf) is None
+            ):
                 total += out.stat().st_size
                 continue
 

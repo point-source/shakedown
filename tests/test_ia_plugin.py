@@ -482,6 +482,7 @@ def _writer(served: dict[str, bytes], calls: list[list[str]] | None = None):
         target = Path(destdir) / identifier
         target.mkdir(parents=True, exist_ok=True)
         for name in files:
+            (target / name).parent.mkdir(parents=True, exist_ok=True)
             (target / name).write_bytes(served[name])
 
     return fake_download
@@ -520,3 +521,56 @@ def test_fetch_rejects_download_whose_size_does_not_match(tmp_path: Path) -> Non
     assert result.success is False
     assert result.retriable is True
     assert not (dest / "a.flac").exists()
+
+
+def test_fetch_downloads_only_files_not_already_verified(tmp_path: Path) -> None:
+    """Files a failed attempt left in the temp dir are kept when they match the
+    manifest; only the rest are downloaded."""
+    plugin = _make_plugin()
+    dest = tmp_path / ".tmp-gd-x"
+    dest.mkdir()
+    served = {"a.flac": b"first", "b.flac": b"second", "c.flac": b"third"}
+    desc = _desc_for("gd-x", served)
+    (dest / "a.flac").write_bytes(b"first")  # verified leftover
+    (dest / "b.flac").write_bytes(b"sec")  # partial leftover
+    calls: list[list[str]] = []
+
+    with patch(
+        "shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served, calls)
+    ):
+        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+
+    assert result.success is True
+    assert calls == [["b.flac", "c.flac"]]
+    assert {n: (dest / n).read_bytes() for n in served} == served
+
+
+def test_fetch_flattens_nested_names_over_leftovers(tmp_path: Path) -> None:
+    plugin = _make_plugin()
+    dest = tmp_path / ".tmp-gd-x"
+    (dest / "disc1").mkdir(parents=True)
+    served = {"disc1/a.flac": b"first", "disc1/b.flac": b"second"}
+    desc = _desc_for("gd-x", served)
+    (dest / "disc1" / "a.flac").write_bytes(b"first")
+
+    with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served)):
+        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+
+    assert result.success is True
+    assert {n: (dest / n).read_bytes() for n in served} == served
+    assert not (dest / "gd-x").exists()
+
+
+def test_fetch_skips_download_when_every_file_is_already_verified(tmp_path: Path) -> None:
+    """ia.download(files=[]) means "every file in the item"; never call it with none."""
+    plugin = _make_plugin()
+    dest = tmp_path / ".tmp-gd-x"
+    dest.mkdir()
+    desc = _desc_for("gd-x", {"a.flac": b"first"})
+    (dest / "a.flac").write_bytes(b"first")
+
+    with patch("shakedown.plugins.ia.plugin.ia.download") as mock_download:
+        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+
+    assert result.success is True
+    mock_download.assert_not_called()

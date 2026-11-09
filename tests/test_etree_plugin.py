@@ -396,3 +396,69 @@ def test_example_config_etree_layout_validates() -> None:
     config = load(root / "shakedown.example.yaml")
     etree_sources = [s for s in config.sources if s.type == "etree"]
     assert etree_sources, "example config should define an etree source"
+
+
+def test_retry_after_late_failure_fetches_only_the_missing_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One late error must not re-download a whole multi-gigabyte show: the next
+    attempt keeps files that match the manifest and fetches only the rest."""
+    import shakedown.sync as sync_module
+
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    contents = {f"t{i:02d}.flac": f"track {i}".encode() for i in range(1, 4)}
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = request.url.path.rsplit("/", 1)[-1]
+        requests.append(name)
+        if name == "t03.flac" and requests.count(name) == 1:
+            return httpx.Response(503, text="timeout")
+        return httpx.Response(200, content=contents[name])
+
+    plugin = _make_plugin(handler)
+    item = _item_with_files([
+        ManifestFile(n, len(c), hashlib.md5(c).hexdigest()) for n, c in contents.items()
+    ])
+    tmp_dir = tmp_path / ".tmp-gd77"
+
+    result = sync_module._fetch_with_retries(plugin, item, tmp_dir, _collection())
+
+    assert result.success is True
+    assert requests == ["t01.flac", "t02.flac", "t03.flac", "t03.flac"]
+    assert {p.name: p.read_bytes() for p in tmp_dir.iterdir()} == contents
+
+
+def test_fetch_refetches_leftover_file_that_does_not_match(tmp_path: Path) -> None:
+    content = b"flac-bytes"
+    (tmp_path / "show.flac").write_bytes(b"FLAC-BYTES")  # same size, wrong bytes
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, content=content)
+
+    plugin = _make_plugin(handler)
+    item = _item_with_files(
+        [ManifestFile("show.flac", len(content), hashlib.md5(content).hexdigest())]
+    )
+    result = plugin.fetch(item, tmp_path, [], [])
+
+    assert result.success is True
+    assert requests == ["/download/gd77/show.flac"]
+    assert (tmp_path / "show.flac").read_bytes() == content
+
+
+def test_fetch_refetches_leftover_file_it_cannot_check(tmp_path: Path) -> None:
+    (tmp_path / "show.flac").write_bytes(b"partial")
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, content=b"complete")
+
+    plugin = _make_plugin(handler)
+    item = _item_with_files([ManifestFile("show.flac", None, None)])
+    assert plugin.fetch(item, tmp_path, [], []).success is True
+    assert requests == ["/download/gd77/show.flac"]
+    assert (tmp_path / "show.flac").read_bytes() == b"complete"

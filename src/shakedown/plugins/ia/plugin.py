@@ -248,8 +248,7 @@ class IAPlugin(SourcePlugin):
                 error=f"restricted: {item.restriction_reason}",
             )
 
-        target_files = [f.name for f in item.manifest.files]
-        if not target_files:
+        if not item.manifest.files:
             # Zero files upstream (darked item, glitch, filter matches nothing) is not
             # an empty success: the core would promote an empty folder over the copy.
             return FetchResult(
@@ -257,20 +256,32 @@ class IAPlugin(SourcePlugin):
             )
 
         dest_dir.mkdir(parents=True, exist_ok=True)
+        # IA's download writes to <dest_dir>/<identifier>/<filename>; clear any copy of
+        # that subtree a crashed attempt left so it can't be resumed blindly.
+        ia_subdir = dest_dir / item.identifier
+        if ia_subdir.is_dir():
+            shutil.rmtree(ia_subdir)
+
+        # Files an earlier attempt left in dest_dir are kept once they match the
+        # manifest's size and md5; download only the rest.
+        target_files = [
+            mf.name for mf in item.manifest.files if not _already_fetched(dest_dir, mf)
+        ]
 
         try:
-            ia.download(
-                item.identifier,
-                files=target_files,  # type: ignore[arg-type]  # IA accepts filenames at runtime
-                destdir=str(dest_dir),
-                # IA places files under <destdir>/<identifier>/...; strip that prefix below.
-                no_directory=False,
-                ignore_existing=False,
-                # Core owns retries/backoff (SPEC §spec:failure-behavior); don't
-                # let the IA library retry underneath us.
-                retries=0,
-                archive_session=self._session,
-            )
+            if target_files:  # files=[] would mean "every file in the item"
+                ia.download(
+                    item.identifier,
+                    files=target_files,  # type: ignore[arg-type]  # IA accepts filenames at runtime
+                    destdir=str(dest_dir),
+                    # IA places files under <destdir>/<identifier>/...; strip that prefix below.
+                    no_directory=False,
+                    ignore_existing=False,
+                    # Core owns retries/backoff (SPEC §spec:failure-behavior); don't
+                    # let the IA library retry underneath us.
+                    retries=0,
+                    archive_session=self._session,
+                )
         except Exception as e:
             log.warning("IA download failed for %s: %s", item.identifier, e)
             return FetchResult(
@@ -281,13 +292,15 @@ class IAPlugin(SourcePlugin):
                 retry_after=_retry_after_seconds(e),
             )
 
-        # IA's download writes to <dest_dir>/<identifier>/<filename>. Flatten that
-        # subtree into dest_dir; the core promotes dest_dir into the archive.
-        ia_subdir = dest_dir / item.identifier
+        # Flatten IA's <dest_dir>/<identifier>/ subtree into dest_dir file by file,
+        # replacing any leftover; the core promotes dest_dir into the archive.
         if ia_subdir.is_dir():
-            for child in ia_subdir.iterdir():
-                shutil.move(str(child), str(dest_dir / child.name))
-            ia_subdir.rmdir()
+            for name in target_files:
+                downloaded = ia_subdir / name
+                if downloaded.is_file():
+                    (dest_dir / name).parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(downloaded, dest_dir / name)
+            shutil.rmtree(ia_subdir)
 
         bytes_downloaded = 0
         missing: list[str] = []
@@ -327,6 +340,15 @@ class IAPlugin(SourcePlugin):
         """Cheap existence-only verify. Hashing belongs in `verify --deep`."""
         missing = [f.name for f in item.manifest.files if not (archive_path / f.name).is_file()]
         return VerifyResult(ok=not missing, missing_files=missing)
+
+
+def _already_fetched(dest_dir: Path, mf: ManifestFile) -> bool:
+    path = dest_dir / mf.name
+    return (
+        path.is_file()
+        and (mf.size is not None or mf.md5 is not None)
+        and downloaded_file_mismatch(path, mf) is None
+    )
 
 
 _RETRIABLE_MARKERS = (
