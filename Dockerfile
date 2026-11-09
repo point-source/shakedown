@@ -9,10 +9,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /build
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-install-project --extra serve
+RUN uv sync --locked --no-install-project --extra serve
 
 COPY src ./src
-RUN uv sync --frozen --no-editable --extra serve
+RUN uv sync --locked --no-editable --extra serve
 
 
 FROM python:3.12-slim

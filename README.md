@@ -114,7 +114,7 @@ uv sync --python 3.12 --extra dev --extra serve
 .venv/bin/pytest -v
 ```
 
-Dependencies are pinned in `uv.lock`; CI and the Docker image install from it with `uv sync --frozen`. After changing dependencies in `pyproject.toml`, run `uv lock` and commit the updated lockfile. `uv lock --upgrade` moves every pin to the newest release.
+Dependencies are pinned in `uv.lock`; CI and the Docker image install from it with `uv sync --locked`, which fails if the lockfile is out of date. After changing dependencies in `pyproject.toml`, run `uv lock` and commit the updated lockfile. `uv lock --upgrade` moves every pin to the newest release.
 
 The default `pytest` run is fully offline (real archive.org HTTP is mocked), so
 it is safe to run anywhere and is the run CI executes.

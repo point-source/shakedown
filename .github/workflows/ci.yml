@@ -18,7 +18,7 @@ jobs:
       - name: Install uv
         run: pip install uv==0.13.7
       - name: Install dependencies (from uv.lock)
-        run: uv sync --frozen --python 3.12 --extra dev --extra serve
+        run: uv sync --locked --python 3.12 --extra dev --extra serve
       - name: Lint
         run: .venv/bin/ruff check .
       - name: Typecheck
