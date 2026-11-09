@@ -843,6 +843,9 @@ Long-running services in the stack:
   defined as Docker labels. Each job carries the same
   archive/library/config mounts and `IA_*` credentials as a manual
   run, mounts config read-only, and reaps its finished container.
+  Every Shakedown container — ofelia jobs, `serve`, manual runs — runs
+  as one configured user, so no path creates files another cannot
+  write (ofelia's own default is root).
 - **`shakedown-serve`** *(optional)* — the only long-lived Shakedown
   process, when present: the auth-protected control plane
   (§spec:serve) for status/metrics and ad-hoc triggers without SSH.

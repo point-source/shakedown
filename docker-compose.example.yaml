@@ -24,7 +24,8 @@
 # sync immediately without waiting for the next tick, either (a) uncomment the
 # serve control plane below and POST /sync (no SSH), or (b) start a one-off
 # container from Container Station → Create with command
-# `sync --collection <name>` — the manual equivalent of a tick.
+# `sync --collection <name>`, the same mounts, and user SHAKEDOWN_USER —
+# the manual equivalent of a tick.
 
 services:
   ofelia:
@@ -44,11 +45,17 @@ services:
       # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`
       # only carries the subcommand. Slice values (volume/environment) are
       # JSON arrays.
+      #
+      # `user` keeps every Shakedown container on ONE owner. Without it ofelia
+      # runs jobs as root, and root-owned files then lock out serve and manual
+      # runs. Set SHAKEDOWN_USER (uid:gid) to the owner of /share/data/archive
+      # and /share/data/library; it defaults to the image's user, 1000:1000.
       ofelia.job-run.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
       ofelia.job-run.dead-sync.image: "ghcr.io/OWNER/shakedown:latest"   # replace OWNER with your fork's GitHub user/org
       ofelia.job-run.dead-sync.command: "sync --collection grateful-dead"
       ofelia.job-run.dead-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.dead-sync.delete: "true"
+      ofelia.job-run.dead-sync.user: "${SHAKEDOWN_USER:-1000:1000}"
       # Download-restricted collections only: uncomment to pass IA credentials
       # to this job. NOTE: values embedded here are visible via
       # `docker inspect` on the ofelia container — omit unless the collection
@@ -60,6 +67,7 @@ services:
       ofelia.job-run.phish-sync.command: "sync --collection phish"
       ofelia.job-run.phish-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.phish-sync.delete: "true"
+      ofelia.job-run.phish-sync.user: "${SHAKEDOWN_USER:-1000:1000}"
 
   # Optional: HTTP control plane for ad-hoc triggers + Prometheus metrics.
   # This is the recommended no-SSH way to trigger a sync on demand. Uncomment
@@ -72,6 +80,7 @@ services:
   # shakedown-serve:
   #   image: ghcr.io/OWNER/shakedown:latest
   #   container_name: shakedown-serve
+  #   user: "${SHAKEDOWN_USER:-1000:1000}"
   #   restart: unless-stopped
   #   volumes:
   #     - /share/data:/data
