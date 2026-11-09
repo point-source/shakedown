@@ -21,6 +21,7 @@ from shakedown.plugins.base import (
     SourcePlugin,
     VerifyResult,
     downloaded_file_mismatch,
+    reusable_leftover,
 )
 from shakedown.plugins.registry import register
 
@@ -264,9 +265,10 @@ class IAPlugin(SourcePlugin):
 
         # Files an earlier attempt left in dest_dir are kept once they match the
         # manifest's size and md5; download only the rest.
-        target_files = [
-            mf.name for mf in item.manifest.files if not _already_fetched(dest_dir, mf)
+        to_fetch = [
+            mf for mf in item.manifest.files if not reusable_leftover(dest_dir / mf.name, mf)
         ]
+        target_files = [mf.name for mf in to_fetch]
 
         try:
             if target_files:  # files=[] would mean "every file in the item"
@@ -322,8 +324,9 @@ class IAPlugin(SourcePlugin):
 
         # The internetarchive library checksums only files already on disk before a
         # download, never what it just wrote, so check every file against the
-        # manifest here. A corrupt file is removed and the fetch retried.
-        for mf in item.manifest.files:
+        # manifest here (reused leftovers were checked above). A corrupt file is
+        # removed and the fetch retried.
+        for mf in to_fetch:
             mismatch = downloaded_file_mismatch(dest_dir / mf.name, mf)
             if mismatch is not None:
                 (dest_dir / mf.name).unlink()
@@ -340,15 +343,6 @@ class IAPlugin(SourcePlugin):
         """Cheap existence-only verify. Hashing belongs in `verify --deep`."""
         missing = [f.name for f in item.manifest.files if not (archive_path / f.name).is_file()]
         return VerifyResult(ok=not missing, missing_files=missing)
-
-
-def _already_fetched(dest_dir: Path, mf: ManifestFile) -> bool:
-    path = dest_dir / mf.name
-    return (
-        path.is_file()
-        and (mf.size is not None or mf.md5 is not None)
-        and downloaded_file_mismatch(path, mf) is None
-    )
 
 
 _RETRIABLE_MARKERS = (

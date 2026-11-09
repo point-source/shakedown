@@ -39,6 +39,17 @@ def downloaded_file_mismatch(path: Path, expected: ManifestFile) -> str | None:
     return None
 
 
+def reusable_leftover(path: Path, expected: ManifestFile) -> bool:
+    """True iff a file an earlier fetch attempt left in the temp dir can be kept: it
+    exists and matches the manifest's size and md5. A file the manifest gives nothing
+    to check against is never reused."""
+    return (
+        path.is_file()
+        and (expected.size is not None or expected.md5 is not None)
+        and downloaded_file_mismatch(path, expected) is None
+    )
+
+
 @dataclass(frozen=True)
 class ItemDescriptor:
     """Lightweight descriptor returned by discover().
@@ -165,9 +176,7 @@ class SourcePlugin(ABC):
 
         `dest_dir` may hold files an earlier failed attempt left behind (the core
         keeps them so one late error doesn't re-download a whole show). Keep such a
-        file only after `downloaded_file_mismatch` finds it matches the manifest's
-        size and md5; fetch anything else, including a file the manifest gives
-        nothing to check against.
+        file only when `reusable_leftover` accepts it; fetch anything else.
         """
 
     @abstractmethod

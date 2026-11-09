@@ -30,7 +30,7 @@ from shakedown.plugins.base import (
     ItemDescriptor,
     SourcePlugin,
     VerifyResult,
-    downloaded_file_mismatch,
+    reusable_leftover,
 )
 from shakedown.plugins.registry import register
 
@@ -307,11 +307,7 @@ class EtreePlugin(SourcePlugin):
 
             # A file an earlier attempt left behind is kept only once it matches the
             # manifest's size and md5; one we cannot check is fetched again.
-            if (
-                out.is_file()
-                and (mf.size is not None or mf.md5 is not None)
-                and downloaded_file_mismatch(out, mf) is None
-            ):
+            if reusable_leftover(out, mf):
                 total += out.stat().st_size
                 continue
 
