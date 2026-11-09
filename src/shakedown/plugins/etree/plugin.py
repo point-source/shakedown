@@ -224,7 +224,7 @@ class EtreePlugin(SourcePlugin):
         mark them disappeared or prune them.
         """
         page = 1
-        seen = 0
+        seen: set[str] = set()
         num_found = 0
         while True:
             resp = self._client.get(
@@ -232,6 +232,8 @@ class EtreePlugin(SourcePlugin):
                 params={
                     "q": query,
                     "fl[]": "identifier",
+                    # A stable order keeps paging from skipping or repeating items.
+                    "sort[]": "identifier asc",
                     "rows": _PAGE_SIZE,
                     "page": page,
                     "output": "json",
@@ -246,19 +248,21 @@ class EtreePlugin(SourcePlugin):
                 break
             for doc in docs:
                 identifier = doc.get("identifier")
-                if identifier:
+                # Count unique ids: a repeated row must not stand in for a skipped one.
+                if identifier and identifier not in seen:
+                    seen.add(identifier)
                     yield identifier
-                    seen += 1
-            if seen >= num_found:
+            if len(seen) >= num_found:
                 return
             page += 1
             if page > _MAX_PAGES:
                 # Bound a source that reports an inflated numFound while never
                 # returning an empty page.
                 break
-        if seen < num_found:
+        if len(seen) < num_found:
             raise RuntimeError(
-                f"etree search for {query!r} ended early: listed {seen} of {num_found} items"
+                f"etree search for {query!r} ended early: "
+                f"listed {len(seen)} of {num_found} items"
             )
 
     def _metadata(self, identifier: str) -> dict[str, Any]:
