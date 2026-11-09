@@ -177,7 +177,10 @@ A sync run for a (source, collection) pair proceeds in six phases:
    leaves only the temp directory; the next attempt (or run) keeps
    the files in it that match the manifest's size and checksum and
    fetches only the rest — no partial state ever reaches the archive
-   tree or the database.
+   tree or the database. After a complete enumeration, temp
+   directories nothing will resume (the item is unchanged,
+   unavailable, or gone upstream) are removed; those of items that
+   failed this run are kept for the next run.
 4. **Stage.** For every item in the archive, the library layout
    template is rendered and hardlinks are created
    (§spec:library-staging).

@@ -357,3 +357,49 @@ def test_finished_swap_discards_the_leftover_old_copy(tmp_roots: tuple[Path, Pat
 
     assert (coll / "gd-a" / "gd-a.flac").read_bytes() == b"hello world"
     assert not (coll / ".stale-gd-a").exists()
+
+
+def test_abandoned_temp_dirs_are_removed_but_failed_shows_keep_theirs(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    from shakedown.plugins.base import FetchResult
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a")
+    _seed("gd-b")
+    assert run_sync(config) == 0
+    _seed("gd-c")
+    coll = archive / "fake-src" / "coll1"
+    for leftover in (".tmp-gone-upstream", ".tmp-gd-a"):
+        (coll / leftover).mkdir()
+        (coll / leftover / "x.flac").write_bytes(b"partial")
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+
+    def fail_c(self, item, dest_dir, format_filters, exclude_filters):
+        (dest_dir / "gd-c.flac").write_bytes(b"hello")  # partial, kept for resume
+        return FetchResult(success=False, bytes_downloaded=5, error="timeout", retriable=True)
+
+    monkeypatch.setattr(FakePlugin, "fetch", fail_c)
+
+    assert run_sync(config) == 1
+
+    assert not (coll / ".tmp-gone-upstream").exists()
+    assert not (coll / ".tmp-gd-a").exists()
+    assert (coll / ".tmp-gd-c" / "gd-c.flac").read_bytes() == b"hello"
+
+
+def test_temp_dirs_kept_when_enumeration_fails(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a")
+    assert run_sync(config) == 0
+    coll = archive / "fake-src" / "coll1"
+    (coll / ".tmp-gd-z").mkdir()
+    FakePlugin.unreachable_sources.add("fake-src")
+
+    assert run_sync(config) == 1
+
+    assert (coll / ".tmp-gd-z").is_dir()
