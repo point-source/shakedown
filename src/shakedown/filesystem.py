@@ -34,9 +34,10 @@ def ensure_hardlinkable(archive_root: Path, library_root: Path) -> None:
         link = target
     except OSError as e:
         hint = (
-            "They sit on separate volume mounts, which block hardlinks even on the same "
-            "disk. Mount their shared parent folder once (e.g. /share/data:/data) and "
-            "try again."
+            "They are on different filesystems, or reach the container through separate "
+            "volume mounts; Linux refuses hardlinks across either, even on the same disk. "
+            "Put both on one filesystem, mount their shared parent folder once "
+            "(e.g. /share/data:/data), and try again."
             if e.errno == errno.EXDEV
             else "Fix the configured path, permissions, or volume mount and try again."
         )
