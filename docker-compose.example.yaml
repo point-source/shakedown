@@ -49,7 +49,7 @@ services:
       # mismatched job type or name fails only in that log. After Create,
       # check it shows one "New job registered" line per collection.
       # The mounts mirror a manual run: the whole data share as one volume
-      # (hardlinks need it), config read-only. The
+      # (hardlinks need it), plus config at /config (read-only there). The
       # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`
       # only carries the subcommand. Slice values (volume/environment) are
       # JSON arrays.
@@ -100,6 +100,9 @@ services:
   #   command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
 
   # Optional: library tool. Beets reads /data/library, manages /data/music.
+  # These separate mounts suit beets' default `copy` import. To have beets
+  # hardlink or move instead, mount /share/data once here too — separate
+  # mounts refuse hardlinks, as for Shakedown above.
   #
   # beets:
   #   image: lscr.io/linuxserver/beets:latest
