@@ -43,7 +43,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
       # One job per collection. Each tick starts a fresh shakedown container
-      # from the image, runs one sync, then is removed (job-run + delete).
+      # from the image, runs one sync, then is removed (job-run + delete), so
+      # the run's output lands in THIS container's (shakedown-ofelia) log.
       # The mounts mirror a manual run: the whole data share as one volume
       # (hardlinks need it), config read-only. The
       # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`

@@ -37,9 +37,10 @@ Streaming server (Navidrome, etc.)
   materialized entirely as hardlinks. It is disposable: it can be wiped
   and rebuilt from the archive at any time without network traffic.
 - Every file in the library tree shares an inode with its archive
-  counterpart. Renaming, retagging, or deleting the library-side link
-  never affects the archive-side file or Shakedown's record of it, and
-  vice versa.
+  counterpart. Renaming or deleting the library-side link never affects
+  the archive-side file or Shakedown's record of it, and vice versa. An
+  in-place retag through either path changes the shared bytes of both,
+  but never Shakedown's record of the item (§spec:sync-identity).
 - At startup, the system shall verify that a file in `archive_root` can
   be hardlinked into `library_root` — by making and removing a real test
   link — and refuse to run with a clear error if it cannot.
@@ -897,7 +898,9 @@ no scheduler code in Shakedown. Launching a fresh container per tick
 one-shot: there is no daemon to keep alive, and a tick can never
 silently no-op because a prior run has exited. Schedule changes are
 compose-file label edits; "did the Sunday sync run?" is answerable
-from the per-tick container logs. Missed schedules are harmless
+from the ofelia container's log, which records each tick's start, stop,
+output, and failure (the per-tick containers are deleted when they
+finish). Missed schedules are harmless
 because sync is idempotent at any cadence (§spec:sync-workflow).
 Accepted tradeoffs: per-tick job definitions repeat the mount/env
 wiring and live on the scheduler rather than on a worker service (more

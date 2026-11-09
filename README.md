@@ -14,7 +14,7 @@ See [`REQUIREMENTS.md`](REQUIREMENTS.md) for the problem space and [`SPEC.md`](S
 
 ## Architecture in one paragraph
 
-Three layers, two on-disk trees, one process. The **archive layer** at `/data/archive/` is Shakedown's domain — immutable from your perspective, source of truth for the state DB. The **library staging tree** at `/data/library/` is hardlink-only and points back at the archive's inodes; library tools read from here. Whatever happens in `/data/library/` (renames, retags, deletes) does not affect the archive copy. Sync compares the source's *current* manifest against the manifest Shakedown recorded at fetch time — never on-disk bytes — so library tools are free to mutate files in place.
+Three layers, two on-disk trees, one process. The **archive layer** at `/data/archive/` is Shakedown's domain — immutable from your perspective, source of truth for the state DB. The **library staging tree** at `/data/library/` is hardlink-only and points back at the archive's inodes; library tools read from here. Renaming or deleting files in `/data/library/` does not affect the archive copy. Retagging a file in place changes the archive copy too, because both paths are the same bytes — but sync never reads the bytes, so it never re-downloads because of a retag (`verify --deep` reports it as drift). Sync compares the source's *current* manifest against the manifest Shakedown recorded at fetch time — never on-disk bytes — so library tools are free to mutate files in place.
 
 ## Quick start (Docker)
 
@@ -44,26 +44,25 @@ docker build -t shakedown:local .
 
 ## Container images & releases
 
-Images are published to **`ghcr.io/<owner>/shakedown`** by `.github/workflows/ci.yml` on every push to `main`. Each push produces three tags:
+`.github/workflows/ci.yml` publishes images to **`ghcr.io/<owner>/shakedown`** when you push a release tag (`git tag v1.2.0 && git push origin v1.2.0`), and only after the test job passes. A release `v1.2.0` produces:
 
 | Tag | Meaning |
 | --- | --- |
-| `latest` | Most recent build of the default branch. Auto-updates. |
-| `main` | Same as `latest` today; pin here if you ever add release branches. |
-| `sha-<short>` | Immutable per-commit tag. Pin to this for reproducible deployments. |
+| `1.2.0` | That release. Pin this in `SHAKEDOWN_IMAGE`. |
+| `1.2` | Newest `1.2.x` release. Moves. |
+| `latest` | Newest release. Moves — don't use it in compose, since ofelia pulls before every tick. |
+| `sha-<short>` | The release commit. Immutable. |
 
 Builds are multi-arch (`linux/amd64` + `linux/arm64`), so the same tag works on Intel QNAPs (TS-x73/x83), Atom/Celeron NUCs, and ARM QNAPs (TS-x33/x53D).
 
-PRs build the image as a smoke test but do **not** push.
+Pull requests build the image as a smoke test but do **not** push. Pushes to `main` run the tests only. Running the workflow by hand (*Actions → CI → Run workflow*) publishes only a `sha-<short>` tag.
 
 ### One-time setup for a fresh fork
 
-The workflow runs on `GITHUB_TOKEN` and needs no extra secrets, but two manual steps are required after the first successful push:
+The workflow runs on `GITHUB_TOKEN` and needs no extra secrets, but two manual steps are required after the first release publishes:
 
 1. **Make the package public.** GHCR images default to private. Go to your repo → *Packages* → `shakedown` → *Package settings* → *Change visibility* → *Public*. Without this, `docker pull` requires login.
 2. **Confirm Actions has write access.** Same package settings page → *Manage Actions access* → ensure your repo is listed with the *Write* role. The workflow needs this to keep updating the package after the initial publish.
-
-Tag-driven releases (e.g. `git tag v0.2.0 && git push --tags` → `ghcr.io/.../shakedown:0.2.0`) are not enabled by default. To opt in later, add `tags: ['v*']` to the workflow's `on.push` trigger and add `type=semver,pattern={{version}}` to the `metadata-action` config.
 
 ## QNAP / Container Station setup (no SSH required)
 
@@ -73,7 +72,7 @@ Tag-driven releases (e.g. `git tag v0.2.0 && git push --tags` → `ghcr.io/.../s
 4. **Container Station → Applications → Create:** paste [`docker-compose.example.yaml`](docker-compose.example.yaml) and set `SHAKEDOWN_IMAGE` to your fork's image at a released version, e.g. `ghcr.io/<owner>/shakedown:1.1.0` — Create fails until it is set. To upgrade, change the version; `latest` would install every new release unreviewed, because ofelia pulls before each tick. For a download-restricted collection, uncomment that job's `environment` label and set `IA_EMAIL` / `IA_PASSWORD`. Click Create.
 5. **How syncs run:** ofelia is the only long-running service. On each scheduled tick it launches a *fresh* shakedown container that runs one `sync` and exits — matching shakedown's one-shot design, so there is no idle service to attach to. Nothing syncs on first `up`; each collection syncs only on its own schedule.
 6. **Sync now (without waiting for a tick):** either uncomment the `shakedown-serve` control plane and `POST /sync` — `curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" "http://host:8080/sync?collection=grateful-dead"` (no SSH) — or start a one-off container from Container Station → Create with command `sync --collection <name>`, the same mounts, and the same user as `SHAKEDOWN_USER`. Over SSH the equivalent is `docker run --rm` with the same mounts/env; SSH stays supported, it's just never required.
-7. **Day-to-day operation:** edit `shakedown.yaml` via File Station for source/collection changes; edit the ofelia labels in the compose YAML (Container Station) for schedule changes; check Container Station for logs — each tick's container logs show that run.
+7. **Day-to-day operation:** edit `shakedown.yaml` via File Station for source/collection changes; edit the ofelia labels in the compose YAML (Container Station) for schedule changes. For logs, read the `shakedown-ofelia` container's log: each tick's container is deleted when it finishes, so ofelia's log is the record of every run — start, stop, the run's output, and whether it failed.
 
 ## CLI
 
