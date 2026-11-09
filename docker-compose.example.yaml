@@ -11,7 +11,11 @@
 # Setup:
 #   1. File Station: create /share/data/{archive,library,music,shakedown-config}
 #   2. File Station: upload an initial shakedown.yaml to /share/data/shakedown-config/
-#   3. Container Station → Applications → Create: paste this YAML and your env vars
+#   3. Container Station → Applications → Create: paste this YAML and your env vars.
+#      SHAKEDOWN_IMAGE is required — Create fails until you set it to a released
+#      version, e.g. ghcr.io/<owner>/shakedown:1.1.0. Pin a version, not
+#      `latest`: ofelia pulls the image before every tick, so `latest` would
+#      put each new release on the NAS unreviewed. Upgrade by changing it.
 #
 # How scheduling works (SPEC.md §spec:deployment): ofelia is the only
 # long-running service. On each cron tick it launches a FRESH shakedown
@@ -51,7 +55,7 @@ services:
       # runs. Set SHAKEDOWN_USER (uid:gid) to the owner of /share/data/archive
       # and /share/data/library; it defaults to the image's user, 1000:1000.
       ofelia.job-run.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
-      ofelia.job-run.dead-sync.image: "ghcr.io/OWNER/shakedown:latest"   # replace OWNER with your fork's GitHub user/org
+      ofelia.job-run.dead-sync.image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:<version>}"
       ofelia.job-run.dead-sync.command: "sync --collection grateful-dead"
       ofelia.job-run.dead-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.dead-sync.delete: "true"
@@ -63,7 +67,7 @@ services:
       # ofelia.job-run.dead-sync.environment: '["IA_EMAIL=${IA_EMAIL:-}", "IA_PASSWORD=${IA_PASSWORD:-}"]'
 
       ofelia.job-run.phish-sync.schedule: "0 0 4 * * 0"  # Sunday 04:00
-      ofelia.job-run.phish-sync.image: "ghcr.io/OWNER/shakedown:latest"
+      ofelia.job-run.phish-sync.image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:<version>}"
       ofelia.job-run.phish-sync.command: "sync --collection phish"
       ofelia.job-run.phish-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.phish-sync.delete: "true"
@@ -78,7 +82,7 @@ services:
   #     "http://host:8080/sync?collection=grateful-dead"
   #
   # shakedown-serve:
-  #   image: ghcr.io/OWNER/shakedown:latest
+  #   image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:<version>}"
   #   container_name: shakedown-serve
   #   user: "${SHAKEDOWN_USER:-1000:1000}"
   #   restart: unless-stopped
