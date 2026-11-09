@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import shakedown.staging as staging_module
+import shakedown.sync as sync_module
 from shakedown.db import connect
-from shakedown.models import ItemStatus
-from shakedown.state import ItemRepo
+from shakedown.models import ItemStatus, OperationStatus
+from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.sync import refetch_item, run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -105,3 +107,89 @@ def test_refetch_with_empty_upstream_manifest_keeps_archive_copy(
     assert archived.read_bytes() == b"hello world"
     row = _row(config, "gd-show")
     assert row is not None and row.archive_path == archived.parent
+
+
+# --- H4: a disk error while linking fails one show, never the collection ---------
+
+
+def _flaky_hardlink(monkeypatch, bad_identifier: str, exc: OSError) -> None:
+    real = staging_module.hardlink
+
+    def hardlink(src, dst):
+        if bad_identifier in str(src):
+            raise exc
+        return real(src, dst)
+
+    monkeypatch.setattr(staging_module, "hardlink", hardlink)
+
+
+def test_link_oserror_fails_only_that_show(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    for ident in ("gd-a", "gd-b", "gd-c"):
+        _seed(ident)
+    _flaky_hardlink(monkeypatch, "gd-b", PermissionError(13, "Permission denied"))
+
+    assert run_sync(config) == 1
+
+    for ident in ("gd-a", "gd-c"):
+        assert (library / "fake-src" / "coll1" / ident / f"{ident}.flac").is_file()
+        assert _row(config, ident).status == ItemStatus.COMPLETE  # type: ignore[union-attr]
+    # gd-b's download is safe in the archive and recorded, so nothing re-downloads.
+    row_b = _row(config, "gd-b")
+    assert row_b is not None and row_b.status == ItemStatus.COMPLETE
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    run = RunRepo(conn).latest("fake-src", "coll1")
+    assert run is not None and run.finished_at is not None
+    assert run.items_failed == 1
+    assert any("gd-b" in e and "Permission denied" in e for e in run.errors)
+
+    # The disk error clears: the next run links gd-b without downloading again.
+    monkeypatch.undo()
+    assert run_sync(config) == 0
+    assert (library / "fake-src" / "coll1" / "gd-b" / "gd-b.flac").is_file()
+    assert FakePlugin.fetch_count == {"gd-a": 1, "gd-b": 1, "gd-c": 1}
+
+
+def test_link_oserror_on_unchanged_show_is_counted_and_run_continues(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a")
+    _seed("gd-b")
+    assert run_sync(config) == 0
+    # Library links wiped; relinking gd-a hits a disk-full error.
+    import shutil
+
+    shutil.rmtree(library / "fake-src")
+    _flaky_hardlink(monkeypatch, "gd-a", OSError(28, "No space left on device"))
+
+    assert run_sync(config) == 1
+
+    assert (library / "fake-src" / "coll1" / "gd-b" / "gd-b.flac").is_file()
+    run = RunRepo(connect(config.state_db)).latest("fake-src", "coll1")  # type: ignore[arg-type]
+    assert run is not None and run.finished_at is not None and run.items_failed == 1
+
+
+def test_unexpected_crash_still_closes_run_record(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("unexpected bug")
+
+    monkeypatch.setattr(sync_module, "_disappeared_plan", boom)
+
+    assert run_sync(config) == 1
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    run = RunRepo(conn).latest("fake-src", "coll1")
+    assert run is not None and run.finished_at is not None
+    assert any("unexpected bug" in e for e in run.errors)
+    outcome = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
+    assert outcome is not None
+    assert outcome.status == OperationStatus.FAILED_BEFORE_COMPLETION

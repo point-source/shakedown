@@ -22,7 +22,15 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
-from shakedown.models import Item, ItemStatus, OperationStatus, OperationType, Run
+from shakedown.models import (
+    Item,
+    ItemStatus,
+    Manifest,
+    OperationOutcome,
+    OperationStatus,
+    OperationType,
+    Run,
+)
 from shakedown.notify import (
     SyncCompletePayload,
     SyncFailedPayload,
@@ -489,6 +497,51 @@ def _sync_collection(
     )
 
     stats = CollectionSyncStats()
+    try:
+        return _sync_collection_phases(
+            config, source, collection, plugin, items, runs, outcomes, run, outcome,
+            stats, started, dry_run=dry_run, budget=budget,
+        )
+    except Exception as e:
+        # An unexpected crash must still close the run record and its outcome, so
+        # `status` never shows a run stuck in progress and the next run starts clean.
+        stats.errors.append(f"sync crashed: {e}")
+        finished = datetime.now()
+        if run is not None and run.finished_at is None:
+            _finish_run(runs, run, stats, finished)
+        if outcome is not None and outcome.finished_at is None:
+            outcomes.finish(
+                outcome,
+                OperationStatus.FAILED_BEFORE_COMPLETION,
+                finished,
+                phase=outcome.phase,
+                completed_work=_completed_work(stats),
+                preservation_context="completed archive work retained",
+                deletion_context=_deletion_context(collection),
+                safe_next_action="check the logged error and rerun sync",
+                errors=stats.errors,
+            )
+        raise
+
+
+def _sync_collection_phases(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    plugin: SourcePlugin,
+    items: ItemRepo,
+    runs: RunRepo,
+    outcomes: OperationOutcomeRepo,
+    run: Run | None,
+    outcome: OperationOutcome | None,
+    stats: CollectionSyncStats,
+    started: datetime,
+    *,
+    dry_run: bool,
+    budget: SourceBudget,
+) -> CollectionSyncStats:
+    """The phases of `_sync_collection`, run inside its crash guard."""
+    conn = items.conn
     staged_paths: set[Path] = set()
 
     log.info("[%s/%s] discovering...", source.name, collection.name)
@@ -581,11 +634,12 @@ def _sync_collection(
                 # Back upstream with the files we already hold (e.g. after an empty
                 # answer or a lifted restriction): the archive copy is complete again.
                 _record_back_to_complete(items, p.existing)
-            stage_result = stage_item(
+            stage_result = _stage_or_fail(
                 config, collection, source.name, p.existing, p.existing.recorded_manifest,
-                staged_paths=staged_paths,
+                stats, staged_paths,
             )
-            _record_collision(stats, source.name, collection.name, stage_result)
+            if stage_result is not None:
+                _record_collision(stats, source.name, collection.name, stage_result)
 
     # Persist new state for unavailable / disappeared in one shot.
     with transaction(conn):
@@ -1059,9 +1113,11 @@ def _process_fetch_result(
         stats.updated += 1
 
     new_item = _record_complete(items, source.name, collection, desc, outcome.archive_path)
-    stage_result = stage_item(
-        config, collection, source.name, new_item, desc.manifest, staged_paths=staged_paths,
+    stage_result = _stage_or_fail(
+        config, collection, source.name, new_item, desc.manifest, stats, staged_paths,
     )
+    if stage_result is None:
+        return  # archive copy recorded; the next sync or restage relinks it
     if stage_result.collisions:
         # Layout collision: this recording lost its staging path to another item this
         # run. The archive copy is intact; only the library link was dropped
@@ -1079,6 +1135,32 @@ def _process_fetch_result(
             "staging_path": str(stage_result.staging_dir),
         }
     )
+
+
+def _stage_or_fail(
+    config: Config,
+    collection: CollectionConfig,
+    source_name: str,
+    item: Item,
+    manifest: Manifest,
+    stats: CollectionSyncStats,
+    staged_paths: set[Path] | None,
+) -> StageResult | None:
+    """Stage one item, turning a disk error (permission denied, disk full, name too
+    long, EXDEV) into a per-item failure so the rest of the collection still links,
+    records, and notifies. Returns None when staging failed."""
+    try:
+        return stage_item(
+            config, collection, source_name, item, manifest, staged_paths=staged_paths,
+        )
+    except OSError as e:
+        log.warning(
+            "[%s/%s] %s: linking into the library failed: %s",
+            source_name, collection.name, item.identifier, e,
+        )
+        stats.failed += 1
+        stats.errors.append(f"{item.identifier}: linking into the library failed: {e}")
+        return None
 
 
 @dataclass
