@@ -20,14 +20,14 @@ FROM python:3.12-slim
 LABEL org.opencontainers.image.title="shakedown"
 LABEL org.opencontainers.image.description="Durable mirroring of public music archives onto a local NAS."
 
-RUN useradd -u 1000 -m shakedown
+RUN useradd -u 1000 -U -m shakedown
 WORKDIR /home/shakedown
 
 # Same path as in the builder, so the venv's scripts keep working.
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
-USER shakedown
+USER 1000:1000
 
 # /config holds shakedown.yaml; /data holds archive + library.
 VOLUME ["/config", "/data"]
