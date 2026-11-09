@@ -261,3 +261,65 @@ def test_writer_lock_released_when_holder_is_killed(tmp_roots: tuple[Path, Path]
     finally:
         if holder.poll() is None:
             holder.kill()
+
+
+# --- M4: nothing short or unsynced is recorded complete ----------------------------
+
+
+def test_short_file_is_retried_and_never_recorded_complete(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    from shakedown.plugins.base import FetchResult
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a", ("a.flac", b"full length audio"))
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    attempts = {"n": 0}
+
+    def short_fetch(self, item, dest_dir, format_filters, exclude_filters):
+        attempts["n"] += 1
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / "a.flac").write_bytes(b"full")  # truncated, but claims success
+        return FetchResult(success=True, bytes_downloaded=4)
+
+    monkeypatch.setattr(FakePlugin, "fetch", short_fetch)
+
+    assert run_sync(config) == 1
+
+    assert attempts["n"] == sync_module._MAX_FETCH_ATTEMPTS, "a short file is retried"
+    assert not (archive / "fake-src" / "coll1" / "gd-a").exists()
+    row = _row(config, "gd-a")
+    assert row is not None and row.status == ItemStatus.FAILED
+    assert "size" in (row.restriction_reason or "")
+
+
+def test_files_are_fsynced_before_the_show_is_recorded(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    import os
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a", ("a.flac", b"one"), ("b.flac", b"two"))
+    events: list[str] = []
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        events.append("fsync " + os.readlink(f"/proc/self/fd/{fd}"))
+        return real_fsync(fd)
+
+    real_record = sync_module._record_complete
+
+    def record(*args, **kwargs):
+        events.append("record")
+        return real_record(*args, **kwargs)
+
+    monkeypatch.setattr(sync_module.os, "fsync", fsync)
+    monkeypatch.setattr(sync_module, "_record_complete", record)
+
+    assert run_sync(config) == 0
+
+    before_record = events[: events.index("record")]
+    synced = {e.removeprefix("fsync ").rsplit("/", 1)[-1] for e in before_record}
+    assert {"a.flac", "b.flac", ".tmp-gd-a", "coll1"} <= synced

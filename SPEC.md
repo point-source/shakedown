@@ -169,8 +169,11 @@ A sync run for a (source, collection) pair proceeds in six phases:
 3. **Fetch.** For `new` and `changed-upstream` items, the plugin
    downloads into a temporary directory inside the archive tree,
    verifying source-provided checksums as bytes arrive. On full
-   success the temp directory is atomically renamed to its final
-   archive location and the manifest is persisted. A partial failure
+   success the core checks each file's size against the manifest
+   (retrying a short file like any truncated download), flushes the
+   files and the rename to disk, then atomically renames the temp
+   directory to its final archive location and persists the manifest
+   — so a power cut never leaves a short file recorded `complete`. A partial failure
    leaves only the temp directory, cleaned up on the next run —
    no partial state ever reaches the archive tree or the database.
 4. **Stage.** For every item in the archive, the library layout

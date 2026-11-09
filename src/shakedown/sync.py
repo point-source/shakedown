@@ -1238,6 +1238,18 @@ def _fetch_with_retries(
         result = plugin.fetch(
             desc, tmp_dir, collection.format_filters, collection.exclude_filters
         )
+        if result.success:
+            short = _size_mismatches(desc, tmp_dir)
+            if short:
+                # A plugin can report success over a short file (dropped connection,
+                # truncated write). Sizes are a stat, not a hash; retry like any
+                # truncated download.
+                result = FetchResult(
+                    success=False,
+                    bytes_downloaded=result.bytes_downloaded,
+                    error=f"size differs from the source after fetch: {short[:5]}",
+                    retriable=True,
+                )
         if result.success or not result.retriable or attempt == max_attempts:
             return result
 
@@ -1255,6 +1267,34 @@ def _fetch_with_retries(
         )
         time.sleep(delay)
     raise AssertionError("unreachable: max_attempts must be >= 1")
+
+
+def _size_mismatches(desc: ItemDescriptor, tmp_dir: Path) -> list[str]:
+    """Manifest files present in the temp dir whose size differs from the source's.
+    Missing files are left to the plugin's verify() guard."""
+    short: list[str] = []
+    for mf in desc.manifest.files:
+        path = tmp_dir / mf.name
+        if mf.size is not None and path.is_file() and path.stat().st_size != mf.size:
+            short.append(mf.name)
+    return short
+
+
+def _fsync_path(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Flush every file and directory under ``root`` to disk, so a power cut after the
+    show is recorded complete cannot leave a truncated or missing file behind."""
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            _fsync_path(Path(dirpath) / name)
+        _fsync_path(Path(dirpath))
 
 
 def _fetch_one_budgeted(
@@ -1379,7 +1419,11 @@ def _fetch_one(
         else:
             write_sidecar(tmp_dir / METADATA_SIDECAR, desc.metadata)
 
+    # Durable before recorded: the caller marks the show complete right after this,
+    # so flush the bytes, then the rename itself (the parent directory entry).
+    _fsync_tree(tmp_dir)
     _promote_atomically(tmp_dir, dest, stale_dir)
+    _fsync_path(archive_root)
     return _FetchOutcome(
         success=True,
         archive_path=dest,
