@@ -344,3 +344,27 @@ def _write_yaml(
     path = tmp_path / "shakedown.yaml"
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+def test_archive_and_library_on_separate_mounts_fails(tmp_path: Path, tmp_roots) -> None:
+    """Separate bind mounts of one disk share st_dev but refuse hardlinks (EXDEV);
+    validate must fail rather than pass and let every staging link fail later."""
+    import errno
+    import os
+    from unittest.mock import patch
+
+    archive, library = tmp_roots
+
+    def exdev(src, dst, *args, **kwargs):
+        raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), str(src), None, str(dst))
+
+    with patch("shakedown.filesystem.os.link", side_effect=exdev):
+        report = validate_config(_valid_config(tmp_path, tmp_roots))
+    assert not report.ok
+    cfg_group = next(g for g in report.groups if g.source is None)
+    check = next(c for c in cfg_group.checks if c.name == "archive and library can be hardlinked")
+    assert not check.ok
+    assert check.consequence and "separate volume mounts" in check.consequence
+    assert check.action
+    assert list(archive.iterdir()) == []
+    assert list(library.iterdir()) == []

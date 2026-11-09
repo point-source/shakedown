@@ -8,7 +8,7 @@ import click
 
 from shakedown import __version__
 from shakedown import config as config_module
-from shakedown.filesystem import FilesystemError, ensure_same_filesystem
+from shakedown.filesystem import FilesystemError, ensure_hardlinkable
 
 DEFAULT_CONFIG_PATH = Path("/config/shakedown.yaml")
 
@@ -33,7 +33,7 @@ def _load_config(ctx: click.Context, *, check_filesystem: bool = True) -> config
         ctx.exit(2)
     if check_filesystem:
         try:
-            ensure_same_filesystem(cfg.archive_root, cfg.library_root)
+            ensure_hardlinkable(cfg.archive_root, cfg.library_root)
         except FilesystemError as e:
             click.echo(f"error: {e}", err=True)
             ctx.exit(2)

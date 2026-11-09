@@ -2,7 +2,7 @@
 
 A dedicated preflight an operator runs *before* the first large mirror. It reuses the
 same startup configuration contract as every command, then continues into setup-specific
-probes — path writability, same-filesystem archive/library, source/collection
+probes — path writability, archive→library hardlink probe, source/collection
 reachability, credential presence/acceptance, layout collision-risk, and handoff
 readiness — and reports one grouped pass/fail result per source and collection. Each
 failing check names the affected setting/source/collection, the plain-language
@@ -28,7 +28,7 @@ from shakedown import config as config_module
 from shakedown import notify
 from shakedown.config import Config
 from shakedown.db import connect, transaction
-from shakedown.filesystem import FilesystemError, check_writable, ensure_same_filesystem
+from shakedown.filesystem import FilesystemError, check_writable, ensure_hardlinkable
 from shakedown.models import OperationStatus, OperationType
 from shakedown.plugins import registry
 from shakedown.plugins.base import ProbeResult
@@ -111,7 +111,7 @@ class Report:
 
 
 def _config_group(config: Config) -> Group:
-    """Deployment-level checks: archive/library/state writability + same filesystem."""
+    """Deployment-level checks: archive/library/state writability + archive→library hardlink."""
     checks: list[Check] = []
     state_dir = config.state_db.parent if config.state_db else config.archive_root
 
@@ -135,18 +135,18 @@ def _config_group(config: Config) -> Group:
             )
 
     try:
-        ensure_same_filesystem(config.archive_root, config.library_root)
+        ensure_hardlinkable(config.archive_root, config.library_root)
         checks.append(
-            Check(name="archive and library share a filesystem", ok=True)
+            Check(name="archive and library can be hardlinked", ok=True)
         )
     except (FilesystemError, OSError) as e:
         checks.append(
             Check(
-                name="archive and library share a filesystem",
+                name="archive and library can be hardlinked",
                 ok=False,
                 target=f"{config.archive_root} / {config.library_root}",
                 consequence=f"{e}",
-                action="move archive_root and library_root under the same volume",
+                action="mount archive_root and library_root through one volume on one filesystem",
             )
         )
 

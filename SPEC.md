@@ -40,9 +40,12 @@ Streaming server (Navidrome, etc.)
   counterpart. Renaming, retagging, or deleting the library-side link
   never affects the archive-side file or Shakedown's record of it, and
   vice versa.
-- At startup, the system shall verify that `archive_root` and
-  `library_root` reside on the same filesystem and refuse to run with a
-  clear error if they do not. (§req:constraints)
+- At startup, the system shall verify that a file in `archive_root` can
+  be hardlinked into `library_root` — by making and removing a real test
+  link — and refuse to run with a clear error if it cannot.
+  (§req:constraints) Comparing device IDs is not enough: Linux refuses
+  links across separate mounts of one filesystem, such as archive and
+  library bind-mounted into a container separately.
 
 **Why hardlinks, not symlinks or copies.** Symlinks dangle when a
 library tool moves the target into its own managed root — Beets does
@@ -923,7 +926,8 @@ Observable behavior:
 - `shakedown validate` checks the same startup configuration contract as
   every command, then continues into setup-specific probes: archive,
   library, and state paths are writable where writes are required;
-  archive and library share a filesystem; configured sources and
+  a test file in the archive can be hardlinked into the library;
+  configured sources and
   collections can be reached; required credential environment variables
   are present and accepted by the source when credentials are needed;
   layout templates are checked with the existing collision-risk guard;

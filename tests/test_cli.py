@@ -213,3 +213,22 @@ def test_item_forget_removes_row(tmp_path: Path, tmp_roots) -> None:
     from shakedown.state import ItemRepo
     conn = connect(config.state_db)
     assert ItemRepo(conn).get("fake-src", "coll1", "gd-x") is None
+
+
+def test_startup_refuses_when_archive_cannot_hardlink_into_library(
+    tmp_path: Path, tmp_roots
+) -> None:
+    import errno
+    import os
+    from unittest.mock import patch
+
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+
+    def exdev(src, dst, *args, **kwargs):
+        raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), str(src), None, str(dst))
+
+    with patch("shakedown.filesystem.os.link", side_effect=exdev):
+        result = CliRunner().invoke(main, ["--config", str(cfg), "sync", "--dry-run"])
+    assert result.exit_code == 2
+    assert "separate volume mounts" in result.output
