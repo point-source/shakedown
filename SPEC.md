@@ -657,6 +657,13 @@ exits (§req:constraints). The command surface:
 
 - Commands shall exit non-zero on failure so failures surface at the
   scheduler/container layer (§req:quality-attributes: operability).
+- Writing commands — `sync` (except `--dry-run`), `restage`,
+  `reconcile`, `item refetch`, and `verify --reconform`, whether run from
+  the CLI, the scheduler, or `serve` — hold one exclusive writer lock
+  (a kernel `flock` on `<state_db>.lock`). A second writer exits non-zero
+  at once, naming the lock, instead of racing the first over shared temp
+  folders. The kernel releases the lock when the holder exits, even on a
+  crash, so a stale lock file never blocks the next run.
 - `status --json` emits machine-readable output for dashboards
   (Homepage/Homarr) in lieu of a web UI (§req:constraints).
 
@@ -1176,6 +1183,7 @@ degrade a single item or a single run, never the archive.
 | Source lists zero files for an item (darked, glitch, filter matches nothing) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
 | Item disappears upstream | Files retained by default; flagged `disappeared` (§spec:item-lifecycle) |
 | Source permanently gone | Existing items retained; collection reported stale in `status` |
+| Two writing commands overlap (scheduler tick, API trigger, manual run) | The second exits non-zero naming the writer lock; the first continues untouched (§spec:cli) |
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
 | Handoff webhook receiver down | Logged in run errors, visible in `status`; sync still succeeds (§spec:handoff) |
 

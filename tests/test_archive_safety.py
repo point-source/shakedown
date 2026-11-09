@@ -193,3 +193,71 @@ def test_unexpected_crash_still_closes_run_record(
     outcome = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
     assert outcome is not None
     assert outcome.status == OperationStatus.FAILED_BEFORE_COMPLETION
+
+
+# --- H6: one writer at a time -----------------------------------------------------
+
+
+def test_second_writer_exits_with_clear_error(
+    tmp_roots: tuple[Path, Path], caplog
+) -> None:
+    from shakedown.lock import writer_lock
+    from shakedown.reconcile import run_reconcile
+    from shakedown.restage import run_restage
+    from shakedown.verify import run_verify
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a")
+    assert run_sync(config) == 0
+
+    with writer_lock(config):
+        caplog.clear()
+        assert run_sync(config) == 1
+        assert "another shakedown run" in caplog.text
+        assert run_restage(config) == 1
+        assert run_reconcile(config) == 1
+        assert refetch_item(config, "gd-a") == 1
+        assert run_verify(
+            config, source_filter=None, collection_filter=None, deep=True,
+            reconform=True, list_drift=False, assume_yes=True,
+        ) == 1
+        # A dry run writes nothing, so it does not need the lock.
+        assert run_sync(config, dry_run=True) == 0
+
+    assert FakePlugin.fetch_count["gd-a"] == 1
+    assert run_sync(config) == 0, "lock released when the holder finishes"
+
+
+def test_writer_lock_released_when_holder_is_killed(tmp_roots: tuple[Path, Path]) -> None:
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    from shakedown.lock import lock_path, writer_lock
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    path = lock_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", (
+            "import fcntl, os, sys, time\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "print('locked', flush=True)\n"
+            "time.sleep(60)\n"
+        ), str(path)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "locked"
+        assert run_sync(config) == 1
+        os.kill(holder.pid, signal.SIGKILL)
+        holder.wait(timeout=10)
+        with writer_lock(config):
+            pass
+    finally:
+        if holder.poll() is None:
+            holder.kill()

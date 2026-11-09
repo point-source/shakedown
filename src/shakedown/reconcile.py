@@ -12,6 +12,7 @@ from datetime import datetime
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
+from shakedown.lock import run_exclusive
 from shakedown.models import Item, ItemStatus, OperationStatus, OperationType
 from shakedown.plugins import registry
 from shakedown.plugins.base import ItemDescriptor
@@ -22,6 +23,10 @@ log = logging.getLogger(__name__)
 
 def run_reconcile(config: Config) -> int:
     """For every (source, collection), walk the archive tree and rebuild item rows."""
+    return run_exclusive(config, lambda: _run_reconcile(config))
+
+
+def _run_reconcile(config: Config) -> int:
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     outcomes = OperationOutcomeRepo(conn)

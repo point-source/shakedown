@@ -22,6 +22,7 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
+from shakedown.lock import run_exclusive
 from shakedown.models import (
     Item,
     ItemStatus,
@@ -210,7 +211,25 @@ def run_sync(
     With ``refresh_metadata`` the run instead re-resolves and rewrites the
     metadata.json sidecars for preserve-opted collections, without re-downloading
     media (§spec:metadata-preservation).
+
+    Every run except a dry run holds the writer lock (`shakedown.lock`): a second
+    concurrent writer exits non-zero instead of racing this one.
     """
+    if dry_run:
+        return _run_sync(config, source_filter, collection_filter, True, refresh_metadata)
+    return run_exclusive(
+        config,
+        lambda: _run_sync(config, source_filter, collection_filter, False, refresh_metadata),
+    )
+
+
+def _run_sync(
+    config: Config,
+    source_filter: str | None,
+    collection_filter: str | None,
+    dry_run: bool,
+    refresh_metadata: bool,
+) -> int:
     work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
     for source in config.sources:
         if source_filter and source.name != source_filter:
@@ -1501,6 +1520,10 @@ def _record_disappeared(
 
 def refetch_item(config: Config, identifier: str) -> int:
     """Force re-fetch of a single item by identifier across all configured collections."""
+    return run_exclusive(config, lambda: _refetch_item(config, identifier))
+
+
+def _refetch_item(config: Config, identifier: str) -> int:
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     for source in config.sources:
