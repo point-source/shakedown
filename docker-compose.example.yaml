@@ -45,6 +45,9 @@ services:
       # One job per collection. Each tick starts a fresh shakedown container
       # from the image, runs one sync, then is removed (job-run + delete), so
       # the run's output lands in THIS container's (shakedown-ofelia) log.
+      # Every label of a job must share one `ofelia.job-run.<name>.` prefix; a
+      # mismatched job type or name fails only in that log. After Create,
+      # check it shows one "New job registered" line per collection.
       # The mounts mirror a manual run: the whole data share as one volume
       # (hardlinks need it), config read-only. The
       # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`
