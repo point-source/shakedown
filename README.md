@@ -26,10 +26,10 @@ docker pull ghcr.io/OWNER/shakedown:latest
 cp shakedown.example.yaml ./shakedown.yaml      # edit to taste
 mkdir -p ./data/{archive,library}
 
+# Mount ./data once: separate archive and library mounts block hardlinks.
 docker run --rm \
   -v $PWD/shakedown.yaml:/config/shakedown.yaml:ro \
-  -v $PWD/data/archive:/data/archive \
-  -v $PWD/data/library:/data/library \
+  -v $PWD/data:/data \
   ghcr.io/OWNER/shakedown:latest sync --collection grateful-dead
 ```
 
@@ -66,7 +66,7 @@ Tag-driven releases (e.g. `git tag v0.2.0 && git push --tags` → `ghcr.io/.../s
 
 ## QNAP / Container Station setup (no SSH required)
 
-1. **File Station:** create `/share/data/{archive,library,music,shakedown-config}` — all under one share so they share a filesystem (hardlinks require this; SPEC.md §spec:system-shape).
+1. **File Station:** create `/share/data/{archive,library,music,shakedown-config}` — all under one share. The compose file mounts `/share/data` into the container once, as `/data`: hardlinks need archive and library on one filesystem *and* one mount (SPEC.md §spec:system-shape). Keep it that way if you edit the volumes.
 2. **File Station:** upload an initial `shakedown.yaml` (start from [`shakedown.example.yaml`](shakedown.example.yaml)) to `/share/data/shakedown-config/`.
 3. **Container Station → Applications → Create:** paste [`docker-compose.example.yaml`](docker-compose.example.yaml). For a download-restricted collection, uncomment that job's `environment` label and set `IA_EMAIL` / `IA_PASSWORD`. Click Create.
 4. **How syncs run:** ofelia is the only long-running service. On each scheduled tick it launches a *fresh* shakedown container that runs one `sync` and exits — matching shakedown's one-shot design, so there is no idle service to attach to. Nothing syncs on first `up`; each collection syncs only on its own schedule.

@@ -55,7 +55,8 @@ bytes: either can be deleted without affecting the other, storage cost
 is 1x (§req:quality-attributes), and the mechanism is
 filesystem-native with zero runtime overhead. The accepted tradeoff is
 the same-filesystem constraint, which the QNAP deployment satisfies by
-putting both trees under one share (§spec:deployment). This is the
+putting both trees under one share, mounted into the container as one
+volume (§spec:deployment). This is the
 same seam the *arr ecosystem uses for its download→library handoff.
 
 ## Sync identity §spec:sync-identity
@@ -857,8 +858,10 @@ the stack, referenced by ofelia's per-tick jobs and (optionally) by
 `serve`.
 
 All data paths live under a single share
-(`/share/data/{archive,library,music,shakedown-config}`) so archive
-and library share a filesystem (§spec:system-shape).
+(`/share/data/{archive,library,music,shakedown-config}`), and every
+Shakedown container mounts that share once as `/data`, so archive and
+library share a filesystem *and* a mount — Linux refuses hardlinks
+across separate mounts (§spec:system-shape).
 
 **First bring-up does no unscoped work.** A freshly deployed stack
 does not sync anything on `up`; each collection syncs on its own

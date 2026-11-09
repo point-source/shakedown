@@ -1,8 +1,12 @@
 # Shakedown — example deployment for QNAP / any Docker host.
 #
 # Paste this into Container Station → Applications → Create. Edit volumes to
-# match your share layout. ALL paths under /share/data must live on the same
-# physical volume so hardlinks work (SPEC.md §spec:system-shape).
+# match your share layout. Shakedown hardlinks archive files into the library,
+# so archive and library must sit on one filesystem AND reach the container
+# through ONE volume mount: mount the parent (/share/data:/data), never
+# archive and library separately — Linux refuses hardlinks across separate
+# mounts even on the same disk (SPEC.md §spec:system-shape). Run
+# `shakedown validate` to confirm.
 #
 # Setup:
 #   1. File Station: create /share/data/{archive,library,music,shakedown-config}
@@ -35,14 +39,15 @@ services:
     labels:
       # One job per collection. Each tick starts a fresh shakedown container
       # from the image, runs one sync, then is removed (job-run + delete).
-      # The mounts mirror a manual run; config is mounted read-only. The
+      # The mounts mirror a manual run: the whole data share as one volume
+      # (hardlinks need it), config read-only. The
       # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`
       # only carries the subcommand. Slice values (volume/environment) are
       # JSON arrays.
       ofelia.job-run.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
       ofelia.job-run.dead-sync.image: "ghcr.io/OWNER/shakedown:latest"   # replace OWNER with your fork's GitHub user/org
       ofelia.job-run.dead-sync.command: "sync --collection grateful-dead"
-      ofelia.job-run.dead-sync.volume: '["/share/data/archive:/data/archive", "/share/data/library:/data/library", "/share/data/shakedown-config:/config:ro"]'
+      ofelia.job-run.dead-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.dead-sync.delete: "true"
       # Download-restricted collections only: uncomment to pass IA credentials
       # to this job. NOTE: values embedded here are visible via
@@ -53,7 +58,7 @@ services:
       ofelia.job-run.phish-sync.schedule: "0 0 4 * * 0"  # Sunday 04:00
       ofelia.job-run.phish-sync.image: "ghcr.io/OWNER/shakedown:latest"
       ofelia.job-run.phish-sync.command: "sync --collection phish"
-      ofelia.job-run.phish-sync.volume: '["/share/data/archive:/data/archive", "/share/data/library:/data/library", "/share/data/shakedown-config:/config:ro"]'
+      ofelia.job-run.phish-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.phish-sync.delete: "true"
 
   # Optional: HTTP control plane for ad-hoc triggers + Prometheus metrics.
@@ -69,8 +74,7 @@ services:
   #   container_name: shakedown-serve
   #   restart: unless-stopped
   #   volumes:
-  #     - /share/data/archive:/data/archive
-  #     - /share/data/library:/data/library
+  #     - /share/data:/data
   #     - /share/data/shakedown-config:/config:ro
   #   environment:
   #     - SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN}
