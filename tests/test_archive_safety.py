@@ -403,3 +403,47 @@ def test_temp_dirs_kept_when_enumeration_fails(
     assert run_sync(config) == 1
 
     assert (coll / ".tmp-gd-z").is_dir()
+
+
+# --- M9: a finished download is recorded while the listing is still running --------
+
+
+def test_download_is_recorded_and_linked_before_enumeration_finishes(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    import threading
+    import time
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a")
+    _seed("gd-b")
+    fetched_a = threading.Event()
+    real_fetch_one = sync_module._fetch_one
+
+    def fetch_one(plugin, target, archive_root, collection):
+        outcome = real_fetch_one(plugin, target, archive_root, collection)
+        if target.descriptor.identifier == "gd-a":
+            fetched_a.set()
+        return outcome
+
+    observed: list[object] = []
+
+    def slow_listing(self, collection):
+        yield self.describe_item("gd-a", collection)
+        assert fetched_a.wait(5)
+        time.sleep(0.05)  # let the fetch future settle as done
+        yield self.describe_item("gd-b", collection)
+        # The listing is still running (hours, on a big etree collection).
+        row = _row(config, "gd-a")
+        observed.append(row.status if row else None)
+        observed.append((library / "fake-src" / "coll1" / "gd-a" / "gd-a.flac").is_file())
+        raise RuntimeError("container stopped")
+
+    monkeypatch.setattr(sync_module, "_fetch_one", fetch_one)
+    monkeypatch.setattr(FakePlugin, "enumerate_items", lambda self, collection: None)
+    monkeypatch.setattr(FakePlugin, "discover", slow_listing)
+
+    run_sync(config)
+
+    assert observed == [ItemStatus.COMPLETE, True]

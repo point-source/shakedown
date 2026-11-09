@@ -792,22 +792,36 @@ def _pipelined_discover_and_fetch(
             if collection.incremental_discovery
             else _stream_descriptors(plugin, collection, budget, enumerated)
         )
-        try:
-            # Descriptors stream in as each resolves; dispatch classifies and fetches
-            # each immediately, so downloads overlap the remaining enumeration.
-            for desc in descriptor_stream:
-                dispatch(desc)
-        except Exception as e:  # any enumeration fault marks the collection stale
-            enum_error = e
+        def process(fut: Future[_FetchOutcome]) -> None:
+            _process_fetch_result(
+                fut, fetch_futures.pop(fut), config, source, collection, items, stats,
+                staged_paths,
+            )
 
-        # Drain every fetch already in flight. Those downloads are valid whether or not
+        descriptors = iter(descriptor_stream)
+        while True:
+            try:
+                # Descriptors stream in as each resolves; dispatch classifies and
+                # fetches each immediately, so downloads overlap the enumeration.
+                desc = next(descriptors, None)
+                if desc is None:
+                    break
+                dispatch(desc)
+            except Exception as e:  # any enumeration fault marks the collection stale
+                enum_error = e
+                break
+            # Record and link every download that has finished so far, without waiting
+            # for the listing to end (hours on a big collection): if the run dies, the
+            # finished downloads are already in the DB and are not fetched again.
+            for fut in [f for f in fetch_futures if f.done()]:
+                process(fut)
+
+        # Drain every fetch still in flight. Those downloads are valid whether or not
         # the enumeration completed, and recording them keeps the archive and DB
         # consistent (SPEC §spec:discovery-pipeline: an item may be fetched and staged
         # before discovery completes).
-        for fut in as_completed(fetch_futures):
-            _process_fetch_result(
-                fut, fetch_futures[fut], config, source, collection, items, stats, staged_paths
-            )
+        for fut in as_completed(list(fetch_futures)):
+            process(fut)
 
     return enumerated, deferred, enum_error
 

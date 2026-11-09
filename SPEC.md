@@ -287,7 +287,10 @@ enumeration, so it is a **post-discovery barrier** that runs only after
 discovery finishes successfully, never against a partial set. The load-
 bearing invariants:
 
-- An item may be fetched and staged before discovery completes.
+- An item may be fetched and staged before discovery completes. Each
+  finished download is recorded and linked as soon as it completes,
+  not when discovery ends, so a run that dies mid-discovery never
+  leaves finished downloads unrecorded.
 - Pruning runs only after a complete, successful enumeration.
 - A partial or failed enumeration prunes nothing and marks the
   collection stale (§spec:failure-behavior) — a failed discovery is
