@@ -586,6 +586,10 @@ def _sync_collection_phases(
         _log_plan(source.name, collection.name, plan)
         return stats
 
+    # Finish any swap a crashed run left half done, before anything decides whether
+    # an item's archive copy exists.
+    _recover_interrupted_swaps(config.archive_root / source.name / collection.name)
+
     # Snapshot the pre-run DB state once. It drives per-item classification (is this
     # `new`/`changed-upstream`/`unchanged`?) and, after enumeration, the prune barrier
     # (which recorded items were not seen this run?). A fetch upserts rows during the
@@ -1374,12 +1378,12 @@ def _fetch_one(
         )
 
     tmp_dir = archive_root / f".tmp-{desc.identifier}"
-    stale_dir = archive_root / f".stale-{desc.identifier}"
+    stale_dir = archive_root / f"{_STALE_PREFIX}{desc.identifier}"
 
-    # Sweep any stale swap-aside dir from a prior crashed promotion; the temp dir
-    # is swept per-attempt inside _fetch_with_retries.
-    if stale_dir.exists():
-        shutil.rmtree(stale_dir)
+    # Finish a swap a prior crashed promotion left half done (the collection sweep
+    # covers sync; this covers `item refetch`). The temp dir is swept per-attempt
+    # inside _fetch_with_retries.
+    _recover_swap(stale_dir, dest)
 
     fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, collection)
     if not fetch_result.success:
@@ -1429,6 +1433,30 @@ def _fetch_one(
         archive_path=dest,
         bytes_downloaded=fetch_result.bytes_downloaded,
     )
+
+
+_STALE_PREFIX = ".stale-"
+
+
+def _recover_swap(stale_dir: Path, dest: Path) -> None:
+    """Finish a promotion a crash interrupted. With no live copy, the `.stale-` folder
+    holds the only archive copy: move it back. With a live copy, the new copy was
+    already installed: discard the old one."""
+    if not stale_dir.exists():
+        return
+    if dest.exists():
+        shutil.rmtree(stale_dir)
+    else:
+        log.warning("restoring %s from an interrupted swap", dest)
+        os.rename(stale_dir, dest)
+
+
+def _recover_interrupted_swaps(archive_root: Path) -> None:
+    if not archive_root.is_dir():
+        return
+    for stale_dir in archive_root.glob(f"{_STALE_PREFIX}*"):
+        if stale_dir.is_dir():
+            _recover_swap(stale_dir, archive_root / stale_dir.name[len(_STALE_PREFIX):])
 
 
 def _promote_atomically(tmp_dir: Path, dest: Path, stale_dir: Path) -> None:

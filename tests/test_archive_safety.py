@@ -323,3 +323,37 @@ def test_files_are_fsynced_before_the_show_is_recorded(
     before_record = events[: events.index("record")]
     synced = {e.removeprefix("fsync ").rsplit("/", 1)[-1] for e in before_record}
     assert {"a.flac", "b.flac", ".tmp-gd-a", "coll1"} <= synced
+
+
+def test_crash_mid_swap_restores_the_old_copy(tmp_roots: tuple[Path, Path]) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed("gd-a")
+    assert run_sync(config) == 0
+    coll = archive / "fake-src" / "coll1"
+    # Crash between "move the old copy aside" and "move the new copy in".
+    (coll / "gd-a").rename(coll / ".stale-gd-a")
+    # Even if upstream now answers with nothing, the old copy must come back.
+    item.files = []
+
+    run_sync(config)
+
+    assert (coll / "gd-a" / "gd-a.flac").read_bytes() == b"hello world"
+    assert not (coll / ".stale-gd-a").exists()
+    assert FakePlugin.fetch_count["gd-a"] == 1
+
+
+def test_finished_swap_discards_the_leftover_old_copy(tmp_roots: tuple[Path, Path]) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a")
+    assert run_sync(config) == 0
+    coll = archive / "fake-src" / "coll1"
+    # Crash after the new copy was moved in, before the old one was removed.
+    (coll / ".stale-gd-a").mkdir()
+    (coll / ".stale-gd-a" / "gd-a.flac").write_bytes(b"old bytes")
+
+    assert run_sync(config) == 0
+
+    assert (coll / "gd-a" / "gd-a.flac").read_bytes() == b"hello world"
+    assert not (coll / ".stale-gd-a").exists()

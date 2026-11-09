@@ -1174,6 +1174,7 @@ degrade a single item or a single run, never the archive.
 | Checksum mismatch during download | Bounded retries, then item marked `failed` |
 | Cross-filesystem archive/library | Hard error at startup; refuse to run (§spec:system-shape) |
 | State DB corrupted or lost | `reconcile` rebuilds it without re-downloading (§spec:state) |
+| Crash in the middle of swapping a re-fetched item into place | The next run finishes the swap: it moves the old copy back if the new one never landed, or discards the old copy if it did |
 | Disk full, or another disk error while linking into the library | That item counts as failed and the run continues; no partial commits reach the archive; the run record is always closed, even on a crash |
 | Source rate-limits | Core honors the plugin-surfaced `Retry-After`, backs off, resumes |
 | Slow/timing-out metadata during discovery | Bounded per-item timeout + back-off; other items proceed in parallel — one slow endpoint never stalls the run (§spec:slow-metadata) |
