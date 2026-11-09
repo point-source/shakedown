@@ -152,6 +152,48 @@ def test_discover_paginates_across_pages() -> None:
     assert [i.identifier for i in items] == ["a", "b", "c"]
 
 
+def test_discover_raises_when_listing_ends_short_of_num_found() -> None:
+    """An early empty page is a failed listing, not the whole collection: treating
+    it as complete would mark every unlisted show disappeared (or prune it)."""
+    pages: dict[str, list[str]] = {"1": ["a"], "2": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/advancedsearch.php":
+            page = request.url.params.get("page", "1")
+            return _search_response(pages.get(page, []), 3)
+        ident = request.url.path.rsplit("/", 1)[-1]
+        return _metadata_response({"identifier": ident}, [])
+
+    plugin = _make_plugin(handler)
+    with pytest.raises(RuntimeError, match="1 of 3"):
+        list(plugin.discover(_collection()))
+
+
+def test_discover_raises_when_page_ceiling_hit_short_of_num_found(monkeypatch) -> None:
+    import shakedown.plugins.etree.plugin as etree_module
+
+    monkeypatch.setattr(etree_module, "_MAX_PAGES", 2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/advancedsearch.php":
+            page = request.url.params.get("page", "1")
+            return _search_response([f"id{page}"], 1_000)
+        ident = request.url.path.rsplit("/", 1)[-1]
+        return _metadata_response({"identifier": ident}, [])
+
+    plugin = _make_plugin(handler)
+    with pytest.raises(RuntimeError, match="2 of 1000"):
+        list(plugin.discover(_collection()))
+
+
+def test_discover_empty_collection_is_complete() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _search_response([], 0)
+
+    plugin = _make_plugin(handler)
+    assert list(plugin.discover(_collection())) == []
+
+
 def test_discover_raises_on_enumeration_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/advancedsearch.php":

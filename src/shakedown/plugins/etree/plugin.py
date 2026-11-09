@@ -217,10 +217,14 @@ class EtreePlugin(SourcePlugin):
 
         Raises on any enumeration failure so the core flags the collection stale
         and retains existing items, rather than treating an error as "everything
-        disappeared".
+        disappeared". A listing that ends before the search's own ``numFound`` (an
+        early empty page, or the page ceiling) is such a failure: the unlisted
+        shows are still upstream, and reading the short list as complete would
+        mark them disappeared or prune them.
         """
         page = 1
         seen = 0
+        num_found = 0
         while True:
             resp = self._client.get(
                 "/advancedsearch.php",
@@ -245,12 +249,16 @@ class EtreePlugin(SourcePlugin):
                     yield identifier
                     seen += 1
             if seen >= num_found:
-                break
+                return
             page += 1
             if page > _MAX_PAGES:
                 # Bound a source that reports an inflated numFound while never
                 # returning an empty page.
                 break
+        if seen < num_found:
+            raise RuntimeError(
+                f"etree search for {query!r} ended early: listed {seen} of {num_found} items"
+            )
 
     def _metadata(self, identifier: str) -> dict[str, Any]:
         resp = self._client.get(f"/metadata/{identifier}")
