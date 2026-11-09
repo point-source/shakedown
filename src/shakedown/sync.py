@@ -144,6 +144,10 @@ def _discover_descriptors(
     return descriptors, enumerated
 
 
+# Recorded as an item's restriction_reason when the source lists no files for it.
+NO_FILES_REASON = "source lists no files matching this collection's filters"
+
+
 class PlanAction(StrEnum):
     NEW = "new"
     UNCHANGED = "unchanged"
@@ -573,6 +577,10 @@ def _sync_collection(
             and p.existing is not None
             and p.existing.recorded_manifest is not None
         ):
+            if p.existing.status != ItemStatus.COMPLETE:
+                # Back upstream with the files we already hold (e.g. after an empty
+                # answer or a lifted restriction): the archive copy is complete again.
+                _record_back_to_complete(items, p.existing)
             stage_result = stage_item(
                 config, collection, source.name, p.existing, p.existing.recorded_manifest,
                 staged_paths=staged_paths,
@@ -808,6 +816,13 @@ def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> Plann
     existing = by_identifier.get(desc.identifier)
     if desc.is_restricted:
         return PlannedItem(desc, existing, PlanAction.UNAVAILABLE)
+    if not desc.manifest.files:
+        # An empty file list (darked item, upstream glitch, or a filter that now matches
+        # nothing) is never "the item changed": fetching it would swap an empty folder in
+        # over the archive copy. Record it unavailable and keep the local copy.
+        return PlannedItem(
+            replace(desc, restriction_reason=NO_FILES_REASON), existing, PlanAction.UNAVAILABLE
+        )
     if existing is None or existing.recorded_manifest is None:
         return PlannedItem(desc, existing, PlanAction.NEW)
     if existing.recorded_manifest == desc.manifest:
@@ -1207,6 +1222,16 @@ def _fetch_one(
             error=f"unsafe file name(s) escape item directory: {unsafe_names[:5]}",
         )
 
+    # Never promote an empty fetch: it would replace the archive copy with an empty
+    # folder. Classification already routes an empty manifest to `unavailable`; this
+    # guards the paths that skip classification (`item refetch`).
+    if not desc.manifest.files:
+        return _FetchOutcome(
+            success=False,
+            archive_path=dest,
+            error=f"{NO_FILES_REASON}; archive copy left untouched",
+        )
+
     tmp_dir = archive_root / f".tmp-{desc.identifier}"
     stale_dir = archive_root / f".stale-{desc.identifier}"
 
@@ -1306,6 +1331,13 @@ def _record_complete(
     )
     items.upsert(item)
     return item
+
+
+def _record_back_to_complete(items: ItemRepo, existing: Item) -> None:
+    existing.status = ItemStatus.COMPLETE
+    existing.restriction_reason = None
+    existing.last_verified_at = datetime.now()
+    items.upsert(existing)
 
 
 def _record_unavailable(

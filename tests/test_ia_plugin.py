@@ -436,3 +436,20 @@ def test_verify_existence_only_does_not_hash(tmp_path: Path) -> None:
     assert result.missing_files == ["missing.flac"]
     # Note: present.flac's md5 is wrong but verify() must still consider it "present".
     # The point: verify() never hashes — that's verify --deep's job.
+
+
+def test_fetch_with_empty_manifest_fails_without_download(tmp_path: Path) -> None:
+    """Zero files upstream is never a successful (empty) fetch: promoting it would
+    replace the archive copy with an empty folder."""
+    plugin = _make_plugin()
+    from shakedown.models import Manifest
+    from shakedown.plugins.base import ItemDescriptor
+
+    desc = ItemDescriptor(identifier="gd-dark", manifest=Manifest(files=()), metadata={})
+
+    with patch("shakedown.plugins.ia.plugin.ia.download") as mock_download:
+        result = plugin.fetch(desc, tmp_path / "x", format_filters=[], exclude_filters=[])
+
+    assert result.success is False
+    assert result.retriable is False
+    mock_download.assert_not_called()

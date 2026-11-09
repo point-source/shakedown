@@ -244,7 +244,11 @@ class IAPlugin(SourcePlugin):
 
         target_files = [f.name for f in item.manifest.files]
         if not target_files:
-            return FetchResult(success=True, bytes_downloaded=0)
+            # Zero files upstream (darked item, glitch, filter matches nothing) is not
+            # an empty success: the core would promote an empty folder over the copy.
+            return FetchResult(
+                success=False, bytes_downloaded=0, error="source lists no files to download"
+            )
 
         dest_dir.mkdir(parents=True, exist_ok=True)
 
