@@ -232,3 +232,12 @@ def test_startup_refuses_when_archive_cannot_hardlink_into_library(
         result = CliRunner().invoke(main, ["--config", str(cfg), "sync", "--dry-run"])
     assert result.exit_code == 2
     assert "separate volume mounts" in result.output
+
+
+def test_version_matches_installed_package() -> None:
+    """--version reports the build's real version (derived from the git tag)."""
+    from importlib.metadata import version
+
+    result = CliRunner().invoke(main, ["--version"])
+    assert result.exit_code == 0
+    assert result.output.strip() == f"shakedown, version {version('shakedown')}"

@@ -135,3 +135,10 @@ async def test_serve_mutating_disabled_without_token(
         assert (
             await client.post("/validate", params={"live_handoff": True})
         ).status_code == 503
+
+
+def test_api_reports_installed_package_version(tmp_roots: tuple[Path, Path]) -> None:
+    from importlib.metadata import version
+
+    archive, library = tmp_roots
+    assert build_app(make_config(archive, library)).version == version("shakedown")

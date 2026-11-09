@@ -7,6 +7,11 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
+# The build context has no git history, so the version (normally read from the
+# git tag) is passed in. CI sets it; a local build reports 0.0.0+local.
+ARG SHAKEDOWN_VERSION=0.0.0+local
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SHAKEDOWN_VERSION}
+
 WORKDIR /build
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-install-project --extra serve

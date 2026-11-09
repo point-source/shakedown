@@ -611,7 +611,6 @@ wheels = [
 
 [[package]]
 name = "shakedown"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -649,7 +648,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.20" },
     { name = "uvicorn", marker = "extra == 'serve'", specifier = ">=0.51.0" },
 ]
-provides-extras = ["serve", "dev"]
+provides-extras = ["dev", "serve"]
 
 [[package]]
 name = "starlette"

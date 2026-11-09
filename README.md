@@ -53,6 +53,8 @@ docker build -t shakedown:local .
 | `latest` | Newest release. Use it in `SHAKEDOWN_IMAGE` for automatic updates: ofelia pulls before every tick, so each release reaches the NAS at its next run. |
 | `sha-<short>` | The release commit. Immutable. |
 
+The version comes from the git tag, so `shakedown --version` in the `1.2.0` image prints `1.2.0`. Check it to see which release your NAS runs.
+
 Builds are multi-arch (`linux/amd64` + `linux/arm64`), so the same tag works on Intel QNAPs (TS-x73/x83), Atom/Celeron NUCs, and ARM QNAPs (TS-x33/x53D).
 
 Pull requests build the image as a smoke test but do **not** push. Pushes to `main` run the tests only. Running the workflow by hand (*Actions → CI → Run workflow*) publishes only a `sha-<short>` tag.

@@ -22,6 +22,7 @@ from prometheus_client import (
     generate_latest,
 )
 
+from shakedown import __version__
 from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
@@ -36,7 +37,7 @@ TOKEN_ENV = "SHAKEDOWN_API_TOKEN"
 
 
 def build_app(config: Config) -> FastAPI:
-    app = FastAPI(title="shakedown", version="0.1.0")
+    app = FastAPI(title="shakedown", version=__version__)
     registry = CollectorRegistry()
     g_items = Gauge(
         "shakedown_items_total",
