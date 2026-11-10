@@ -99,7 +99,7 @@ def sync(
 @click.pass_context
 def status(ctx: click.Context, as_json: bool) -> None:
     """Show last run per collection, item counts, disk usage, drift."""
-    cfg = _load_config(ctx)
+    cfg = _load_config(ctx, check_filesystem=False)  # read-only
     from shakedown.status import print_status
 
     print_status(cfg, as_json=as_json)
@@ -241,7 +241,7 @@ def item() -> None:
 @click.argument("identifier")
 @click.pass_context
 def item_show(ctx: click.Context, identifier: str) -> None:
-    cfg = _load_config(ctx)
+    cfg = _load_config(ctx, check_filesystem=False)  # read-only
     from shakedown import status as status_module
 
     status_module.show_item(cfg, identifier)

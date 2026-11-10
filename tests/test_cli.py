@@ -241,3 +241,23 @@ def test_version_matches_installed_package() -> None:
     result = CliRunner().invoke(main, ["--version"])
     assert result.exit_code == 0
     assert result.output.strip() == f"shakedown, version {version('shakedown')}"
+
+
+def test_read_only_commands_skip_the_hardlink_probe(tmp_path: Path, tmp_roots) -> None:
+    """`status` and `item show` diagnose a broken setup, so a library that cannot
+    take links (e.g. root-owned after a permission mix-up) must not block them."""
+    import errno
+    import os
+    from unittest.mock import patch
+
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+
+    def eacces(src, dst, *args, **kwargs):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(dst))
+
+    with patch("shakedown.filesystem.os.link", side_effect=eacces):
+        status = CliRunner().invoke(main, ["--config", str(cfg), "status"])
+        show = CliRunner().invoke(main, ["--config", str(cfg), "item", "show", "nope"])
+    assert status.exit_code == 0, status.output
+    assert show.exit_code == 0, show.output
