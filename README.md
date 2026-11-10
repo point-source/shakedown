@@ -88,7 +88,6 @@ shakedown restage    [--source S] [--collection C]
 shakedown reconcile
 shakedown item show <identifier>
 shakedown item refetch <identifier>
-shakedown item forget <identifier>
 shakedown serve      [--host HOST] [--port PORT]    # optional HTTP control plane
 ```
 
@@ -155,7 +154,7 @@ it.
 One opt-in test (`tests/test_e2e_real_source.py`, marked `network`) drives the
 `ia` plugin against the real Internet Archive through the whole lifecycle —
 sync → hardlink staging → no-op re-sync → restage after a layout change →
-disappeared retention → prune → forget. It exists to catch what the offline
+disappeared retention → prune. It exists to catch what the offline
 suite can't: archive.org's real API drifting from the fixtures, and integration
 seams that only misbehave with real files. Run it before tagging a release; CI
 never runs it.

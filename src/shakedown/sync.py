@@ -1770,26 +1770,3 @@ def _refetch_item(config: Config, identifier: str) -> int:
                 return 0 if ok else 1
     log.warning("identifier %s not found in any configured collection", identifier)
     return 1
-
-
-def forget_item(config: Config, identifier: str) -> None:
-    """Drop an item from the DB and remove its library placement; its archive copy
-    stays (§spec:library-cleanup)."""
-    conn = connect(config.state_db)  # type: ignore[arg-type]
-    items = ItemRepo(conn)
-    outcomes = OperationOutcomeRepo(conn)
-    for source in config.sources:
-        for collection in source.collections:
-            if items.get(source.name, collection.name, identifier):
-                LibraryPlacement(config, collection, source.name, items).forget(identifier)
-                items.delete(source.name, collection.name, identifier)
-                now = datetime.now()
-                for operation in OperationType:
-                    outcomes.resolve_actionable(
-                        operation,
-                        source.name,
-                        collection.name,
-                        now,
-                        affected_item=identifier,
-                    )
-                log.info("forgot %s/%s/%s", source.name, collection.name, identifier)

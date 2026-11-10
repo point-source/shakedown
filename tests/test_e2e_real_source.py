@@ -8,7 +8,7 @@ instructions and the pinned-item replacement procedure.
 The check drives the `ia` plugin against exactly one pinned, small, public,
 unrestricted Internet Archive item — no credentials required — through the whole
 lifecycle in order: sync → hardlink staging → no-op re-sync → restage after a
-layout change → disappeared retention → prune → forget. Everything runs in a
+layout change → disappeared retention → prune. Everything runs in a
 throwaway ``tmp_path`` tree (archive, library, and state DB on one filesystem),
 so it can never touch a real deployment. A network or upstream failure fails the
 check loudly; it never skips itself into a false pass.
@@ -41,7 +41,7 @@ from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Run
 from shakedown.restage import run_restage
 from shakedown.state import ItemRepo, RunRepo
-from shakedown.sync import forget_item, run_sync
+from shakedown.sync import run_sync
 
 pytestmark = pytest.mark.network
 
@@ -180,7 +180,3 @@ def test_ia_plugin_full_lifecycle_against_pinned_item(tmp_path: Path) -> None:
     record = _record(prune)
     assert record is not None and record.status == ItemStatus.PRUNED
     assert record.archive_path is None
-
-    # 7. `item forget` drops the database record entirely.
-    forget_item(prune, PINNED_IDENTIFIER)
-    assert _record(prune) is None, "forget must drop the DB record"

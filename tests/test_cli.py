@@ -229,26 +229,6 @@ def test_status_reports_stale_collection(tmp_path: Path, tmp_roots, monkeypatch)
     assert '"safe_next_action": "restore source access and rerun sync"' in json_result.output
 
 
-def test_item_forget_removes_row(tmp_path: Path, tmp_roots) -> None:
-    archive, library = tmp_roots
-    cfg = _write_config(tmp_path, archive, library)
-    FakePlugin.items["gd-x"] = FakeItem(
-        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"a")]
-    )
-    # Seed via library function (CliRunner needs a writable config-derived state)
-    from shakedown.config import load
-    config = load(cfg)
-    assert run_sync(config) == 0
-
-    result = CliRunner().invoke(main, ["--config", str(cfg), "item", "forget", "gd-x"])
-    assert result.exit_code == 0
-
-    from shakedown.db import connect
-    from shakedown.state import ItemRepo
-    conn = connect(config.state_db)
-    assert ItemRepo(conn).get("fake-src", "coll1", "gd-x") is None
-
-
 def test_startup_refuses_when_archive_cannot_hardlink_into_library(
     tmp_path: Path, tmp_roots
 ) -> None:

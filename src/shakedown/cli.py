@@ -247,16 +247,6 @@ def item_refetch(ctx: click.Context, identifier: str) -> None:
     ctx.exit(refetch_item(cfg, identifier))
 
 
-@item.command("forget")
-@click.argument("identifier")
-@click.pass_context
-def item_forget(ctx: click.Context, identifier: str) -> None:
-    cfg = _load_config(ctx)
-    from shakedown.sync import forget_item
-
-    forget_item(cfg, identifier)
-
-
 @main.command()
 @click.option("--host", default="0.0.0.0", show_default=True)
 @click.option("--port", default=8080, show_default=True, type=int)

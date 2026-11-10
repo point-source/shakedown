@@ -176,21 +176,6 @@ class LibraryPlacement:
         )
         return report
 
-    def forget(self, identifier: str) -> list[str]:
-        """Remove one show's library placement (its archive copy stays). Returns the
-        per-show issues; a file that could not be removed stays recorded and is
-        removed by the next staging operation."""
-        self._ensure_adopted()
-        self._report = PlacementReport()
-        touched: set[Path] = set()
-        placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
-        with transaction(self.items.conn):
-            for rel in sorted(placed):
-                self._remove(identifier, rel, placed[rel], touched)
-            self.repo.delete_folder(self.source, self.collection.name, identifier)
-        self._prune_dirs(touched)
-        return self._report.issues.get(identifier, [])
-
     # --- folder index --------------------------------------------------------------
 
     def _build_index(self) -> None:

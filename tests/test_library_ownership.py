@@ -9,7 +9,7 @@ from pathlib import Path
 from shakedown.db import connect
 from shakedown.restage import run_restage
 from shakedown.state import PlacementRepo, RunRepo
-from shakedown.sync import forget_item, run_sync
+from shakedown.sync import run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 
@@ -91,27 +91,6 @@ def test_second_recording_arriving_later_moves_the_first_once(
         "1977-05-08 - Barton Hall [gd-b]/t1.flac",
     ]
     assert FakePlugin.fetch_count == {"gd-a": 1, "gd-b": 1}
-
-
-def test_forgetting_one_recording_returns_the_survivor_to_the_bare_name(
-    tmp_roots: tuple[Path, Path],
-) -> None:
-    archive, library = tmp_roots
-    config = make_config(archive, library, library_layout=LAYOUT)
-    _two_tapes()
-    assert run_sync(config) == 0
-
-    forget_item(config, "gd77-05-08.aud")
-    # The forgotten show's links go at once; its archive copy stays.
-    assert not (_base(library) / "1977-05-08 - Barton Hall [gd77-05-08.aud]").exists()
-    assert (archive / "fake-src" / "coll1" / "gd77-05-08.aud" / "t1.flac").is_file()
-
-    del FakePlugin.items["gd77-05-08.aud"]
-    assert run_sync(config) == 0
-    assert _names(library) == [
-        "1977-05-08 - Barton Hall/t1.flac",
-        "1977-05-09 - Buffalo/t1.flac",
-    ]
 
 
 def test_own_file_under_a_shows_name_is_untouched_and_reported(

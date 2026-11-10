@@ -443,20 +443,6 @@ def test_failed_removal_stays_recorded_and_is_retried(
     assert lib.tree() == ["New/a.flac"]
 
 
-def test_forget_removes_the_shows_placement(tmp_path: Path) -> None:
-    lib = Lib(tmp_path)
-    item = lib.show("gd-a", {"a.flac": b"a"}, title="X")
-    lib.show("gd-b", {"b.flac": b"b"}, title="X")
-    lib.finish()
-
-    issues = lib.engine().forget("gd-b")
-
-    assert issues == []
-    assert lib.tree() == ["X [gd-a]/a.flac"]
-    assert lib.repo.placements_for(SRC, COLL, "gd-b") == set()
-    assert item.archive_path is not None and (item.archive_path / "a.flac").exists()
-
-
 # --- WS5: upgrade / rebuild adoption -----------------------------------------------
 
 
