@@ -37,7 +37,7 @@ Filter = Callable[[str], str]
 _FILTERS: dict[str, Filter] = {
     "sanitize": sanitize,
     # `short`: keep first segment (word, abbreviation) — useful for {lineage_short}
-    "short": lambda v: v.split()[0] if v else v,
+    "short": lambda v: (v.split() or [""])[0],
     "lower": str.lower,
     "upper": str.upper,
 }

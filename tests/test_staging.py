@@ -247,6 +247,11 @@ def test_template_render_joins_list_values() -> None:
     assert render("{venue}", {"venue": ["Barton Hall", "Cornell"]}) == "Barton Hall, Cornell"
 
 
+def test_template_short_filter_on_blank_value_renders_placeholder() -> None:
+    # A whitespace-only metadata value must not crash the render (and with it the sync).
+    assert render("{venue|short}", {"venue": "   "}) == "_"
+
+
 def test_crafted_metadata_cannot_stage_outside_the_library(tmp_path: Path) -> None:
     """A title that walks out of the library must not replace a file outside it."""
     archive = tmp_path / "archive"
