@@ -48,6 +48,9 @@ def _collection_summary(
 
 def _summarize_run(run: Any) -> dict[str, Any]:
     return {
+        # The id a `serve` trigger answers with, so a caller can find its run here
+        # (§spec:api-sync-runs).
+        "run_id": run.id,
         "started_at": run.started_at.isoformat(),
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "items_discovered": run.items_discovered,
