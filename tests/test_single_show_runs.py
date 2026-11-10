@@ -11,10 +11,15 @@ import httpx
 import pytest
 
 from shakedown import discovery
-from shakedown.config import Config, WebhookHandoff
+from shakedown.config import (
+    Config,
+    FailureNotification,
+    NotificationsConfig,
+    WebhookHandoff,
+)
 from shakedown.db import connect
 from shakedown.models import ItemStatus, RunKind
-from shakedown.plugins.base import ItemLookup
+from shakedown.plugins.base import FetchResult, ItemLookup
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, PendingHandoffRepo, RunRepo
 from shakedown.status import _collection_summary
 from shakedown.sync import NO_FILES_REASON, refetch_item, run_sync
@@ -219,6 +224,9 @@ def test_a_crashed_refetch_closes_its_run_and_outcome(
     assert any("disk on fire" in e for e in summary["last_run"]["errors"])
     assert summary["recovery"]["operation"] == "refetch"
     assert summary["recovery"]["status"] == "failed_before_completion"
+    assert summary["recovery"]["safe_next_action"] == (
+        "check the logged error and rerun item refetch"
+    )
 
 
 def test_a_refetch_clears_its_own_warning_but_never_a_syncs(
@@ -310,6 +318,65 @@ def test_reconform_fails_a_drifted_show_the_source_no_longer_holds(
         deep=True, reconform=True, list_drift=False, assume_yes=True,
     ) == 1
 
-    last = _summary(config)["last_run"]
-    assert (last["kind"], last["items_failed"]) == ("reconform", 1)
+    summary = _summary(config)
+    assert (summary["last_run"]["kind"], summary["last_run"]["items_failed"]) == ("reconform", 1)
+    assert summary["recovery"]["safe_next_action"] == (
+        "fix failed item issues and rerun verify --deep --reconform"
+    )
     assert archived.read_bytes() == b"retagged"
+
+
+FAILURE_HOOK = "http://alerts.example/hook"
+
+
+def _refuse_download(monkeypatch: pytest.MonkeyPatch, identifier: str) -> None:
+    """The source refuses the download outright (archive.org's 403 on a stream-only
+    show whose metadata carries no restriction flag)."""
+    real_fetch = FakePlugin.fetch
+
+    def fetch(self, ident, files, dest_dir):
+        if ident == identifier:
+            return FetchResult(success=False, bytes_downloaded=0, error="refused",
+                               unavailable=True)
+        return real_fetch(self, ident, files, dest_dir)
+
+    monkeypatch.setattr(FakePlugin, "fetch", fetch)
+
+
+def _restrict(monkeypatch: pytest.MonkeyPatch, identifier: str) -> None:
+    FakePlugin.items[identifier].is_restricted = True
+    FakePlugin.items[identifier].restriction_reason = "stream-only"
+
+
+@pytest.mark.parametrize(
+    ("refuse", "reason"),
+    [(_restrict, "stream-only"), (_refuse_download, "refused")],
+    ids=["restricted-at-lookup", "download-refused"],
+)
+def test_refetch_of_a_show_the_source_refuses_fails_the_run(
+    tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, refuse: Any, reason: str
+) -> None:
+    """The show is recorded unavailable, as a sync would, and the run counts it failed:
+    the operator asked for it and got nothing (operator decision Q-7-1, 2026-11-10)."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    config.notifications = NotificationsConfig(
+        on_failure=FailureNotification(webhook=FAILURE_HOOK)
+    )
+    _add_show("gd-a")
+    hooks = _Webhooks()
+    with patch("shakedown.notify.httpx.post", side_effect=hooks):
+        assert run_sync(config) == 0
+        refuse(monkeypatch, "gd-a")
+
+        assert refetch_item(config, "gd-a") == 1
+
+    last = _summary(config)["last_run"]
+    assert last["items_failed"] == 1
+    assert f"gd-a: unavailable: {reason}" in last["errors"]
+    assert [body["event"] for _, body in hooks.calls] == ["sync.failed"]
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-a")
+    assert row is not None and row.status == ItemStatus.UNAVAILABLE
+    assert _show_paths(config, "gd-a")[0].read_bytes() == b"audio"
+

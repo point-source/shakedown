@@ -1200,9 +1200,12 @@ def _process_fetch_result(
     items: ItemRepo,
     stats: CollectionSyncStats,
     placement: LibraryPlacement,
+    *,
+    refused_fails: bool = False,
 ) -> None:
     """Apply one completed fetch: record the row, link it into the library, accumulate
-    stats.
+    stats. With ``refused_fails`` (a single-show run) a download the source refuses
+    also fails the show in the run.
 
     Called only on the orchestrating thread (never a fetch worker), so the DB writes
     and the per-run counters it mutates are serialized and exact even though the
@@ -1228,6 +1231,8 @@ def _process_fetch_result(
         _record_unavailable(
             items, source.name, collection.name, replace(desc, restriction_reason=outcome.error)
         )
+        if refused_fails:
+            _fail_refused(stats, desc.identifier, outcome.error)
         return
 
     if not outcome.success:
@@ -1821,11 +1826,17 @@ def run_single_shows(
             stats.failed, stats.unavailable, stats.bytes_downloaded,
         )
         log_separations(source.name, collection.name, stats.separated)
-        # A show the source refused was not fetched either: the command did not do
-        # what was asked.
-        if stats.failed > 0 or stats.unavailable > 0:
+        if stats.failed > 0:
             failed += 1
     return 0 if failed == 0 else 1
+
+
+def _fail_refused(stats: CollectionSyncStats, identifier: str, reason: str | None) -> None:
+    """A show the source refuses in a single-show run: recorded unavailable, as a sync
+    would, and failed in the run — it was asked for and nothing was fetched
+    (operator decision, 2026-11-10)."""
+    stats.failed += 1
+    stats.errors.append(f"{identifier}: unavailable: {reason}")
 
 
 def _single_show_collection(
@@ -1909,6 +1920,7 @@ def _single_show_phases(
                 )
                 _record_unavailable(items, source.name, collection.name, found)
                 stats.unavailable += 1
+                _fail_refused(stats, found.identifier, found.restriction_reason)
                 continue
             if not found.manifest.files:
                 _note_lookup_failure(
@@ -1936,7 +1948,8 @@ def _single_show_phases(
         for fut in as_completed(fetches):
             # The sync's own fetch handling: record, link into the library, count.
             _process_fetch_result(
-                fut, fetches[fut], source, collection, items, stats, placement
+                fut, fetches[fut], source, collection, items, stats, placement,
+                refused_fails=True,
             )
 
     # Each show fetched here went through the sync's fetch, record, and link path
