@@ -15,6 +15,7 @@ from shakedown.lock import run_exclusive
 from shakedown.models import OperationStatus, OperationType
 from shakedown.placement import LibraryPlacement, log_separations
 from shakedown.state import ItemRepo, OperationOutcomeRepo
+from shakedown.tagging import recover_interrupted_tagging
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ def _run_restage(
                 safe_next_action="fix storage/path/layout and rerun restage",
             )
             try:
+                # A tag write a crash cut short is undone before anything is linked
+                # (§spec:tag-filling).
+                recover_interrupted_tagging(config.archive_root / source.name / collection.name)
                 report = LibraryPlacement(config, collection, source.name, items).finish()
             except OSError as e:
                 failed += 1

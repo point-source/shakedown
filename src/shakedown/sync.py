@@ -77,8 +77,10 @@ from shakedown.tagging import (
     Desired,
     TagPlanner,
     TagWriteError,
+    fill_collection_tags,
     fill_file,
     fingerprint,
+    recover_interrupted_tagging,
     tag_failure,
 )
 from shakedown.trigger import announce_started
@@ -174,7 +176,8 @@ class CollectionSyncStats:
     # Fetches the source refused (recorded unavailable, not failed).
     unavailable: int = 0
     # Shows counted in `failed` because staging them left an issue (a foreign file at a
-    # target, a failed removal, a refused path, a disk error), not because of a fetch.
+    # target, a failed removal, a refused path, a disk error, a tag write that failed),
+    # not because of a fetch.
     staging_issues: int = 0
     # Why the run's failure alert was not delivered, shown with this run only.
     failure_notice_error: str | None = None
@@ -373,6 +376,7 @@ def _refresh_collection(
     """
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
+    _recover(config, source.name, collection)
     mirrored = [
         it
         for it in items.list_for_collection(source.name, collection.name)
@@ -418,6 +422,11 @@ def _refresh_collection(
             write_sidecar(item.archive_path / METADATA_SIDECAR, desc.metadata)
         items.upsert(item)
         refreshed += 1
+    # A changed venue or date changes the tags shakedown filled (§spec:tag-filling).
+    tag_issues = _fill_tags(config, source.name, collection, items)
+    for lines in tag_issues.values():
+        for line in lines:
+            log.warning("[%s/%s] %s", source.name, collection.name, line)
     report = LibraryPlacement(config, collection, source.name, items).finish()
     log.info(
         "[%s/%s] metadata refresh: refreshed=%d of %d mirrored",
@@ -427,23 +436,29 @@ def _refresh_collection(
     if report.render_error is not None:
         log.warning("[%s/%s] %s: %s", source.name, collection.name, *report.render_error)
         return 1
-    return 1 if report.issues or failed else 0
+    return 1 if report.issues or tag_issues or failed else 0
 
 
-def _apply_placement_report(stats: CollectionSyncStats, report: PlacementReport) -> None:
-    """Fold a staging pass into the run: each show with an issue counts once as failed
-    (a disk error while linking already did, §spec:failure-behavior), separations are
-    counted for the summary, and shows fetched this run join the handoff payload with
-    the folder they ended up in."""
+def _apply_placement_report(
+    stats: CollectionSyncStats,
+    report: PlacementReport,
+    tag_issues: dict[str, list[str]] | None = None,
+) -> None:
+    """Fold a staging pass, and the tag filling before it, into the run: each show
+    with an issue counts once as failed (a disk error while linking already did,
+    §spec:failure-behavior), separations are counted for the summary, and shows
+    fetched this run join the handoff payload with the folder they ended up in."""
     if report.render_error is not None:
         identifier, message = report.render_error
         stats.failed += 1
         stats.staging_issues += 1
         stats.errors.append(f"{identifier}: {message}")
-    for lines in report.issues.values():
+    tag_issues = tag_issues or {}
+    for identifier in sorted(tag_issues.keys() | report.issues.keys()):
         stats.failed += 1
         stats.staging_issues += 1
-        stats.errors.extend(lines)
+        stats.errors.extend(tag_issues.get(identifier, []))
+        stats.errors.extend(report.issues.get(identifier, []))
     stats.separated = report.separations
     for identifier, archive_path in stats.fetched.items():
         folder = report.folder_of.get(identifier)
@@ -456,6 +471,28 @@ def _apply_placement_report(stats: CollectionSyncStats, report: PlacementReport)
                 "staging_path": str(folder),
             }
         )
+
+
+def _fill_tags(
+    config: Config, source_name: str, collection: CollectionConfig, items: ItemRepo
+) -> dict[str, list[str]]:
+    """The run's tag filling over mirrored shows, before its staging pass, on a
+    `fill_tags` collection (§spec:tag-filling)."""
+    if not collection.fill_tags:
+        return {}
+    return fill_collection_tags(
+        config.archive_root / source_name / collection.name, items,
+        source_name, collection.name,
+    )
+
+
+def _recover(config: Config, source_name: str, collection: CollectionConfig) -> None:
+    """Finish what a crashed run left half done, before anything else reads the
+    archive: an interrupted swap of a show's folder, and an interrupted tag write
+    (whether or not the collection still fills tags)."""
+    root = config.archive_root / source_name / collection.name
+    _recover_interrupted_swaps(root)
+    recover_interrupted_tagging(root)
 
 
 def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: datetime) -> None:
@@ -658,9 +695,9 @@ def _sync_collection_phases(
         _log_plan(source.name, collection.name, plan)
         return stats
 
-    # Finish any swap a crashed run left half done, before anything decides whether
-    # an item's archive copy exists.
-    _recover_interrupted_swaps(config.archive_root / source.name / collection.name)
+    # Finish any swap or tag write a crashed run left half done, before anything
+    # decides whether an item's archive copy exists.
+    _recover(config, source.name, collection)
 
     # Snapshot the pre-run DB state once. It drives per-item classification (is this
     # `new`/`changed-upstream`/`unchanged`?) and, after enumeration, the prune barrier
@@ -701,8 +738,9 @@ def _sync_collection_phases(
         stats.stale = True
         stats.errors.append(f"source enumeration failed: {enum_error}")
         # Shows fetched before the failure are valid; stage them. Nothing is pruned.
+        tag_issues = _fill_tags(config, source.name, collection, items)
         report = placement.finish()
-        _apply_placement_report(stats, report)
+        _apply_placement_report(stats, report, tag_issues)
         finished = datetime.now()
         _fire_notifications(
             config, items, source, collection, stats, started, finished, report.folder_of
@@ -782,9 +820,11 @@ def _sync_collection_phases(
 
     # Stage: every show with an archive copy at its current folder, and every file
     # no longer placed (a pruned show, an old layout or name) removed
-    # (§spec:library-ownership, §spec:library-cleanup).
+    # (§spec:library-ownership, §spec:library-cleanup). Tags are filled first, so the
+    # library sees each show's files once, already tagged (§spec:tag-filling).
+    tag_issues = _fill_tags(config, source.name, collection, items)
     report = placement.finish()
-    _apply_placement_report(stats, report)
+    _apply_placement_report(stats, report, tag_issues)
 
     # Phase 5: notify. Fire before recording so an undelivered notice is captured
     # in the run's errors but never aborts the sync (§spec:durable-handoff).
@@ -2039,9 +2079,9 @@ def _single_show_phases(
     or that the source's answer does not hold, is failed with the reason and left
     exactly as it was — record, archive copy, and library placement."""
     archive_root = config.archive_root / source.name / collection.name
-    # Finish any swap a crashed run left half done, so each show's archive copy is
-    # back in place even when this run does not fetch it.
-    _recover_interrupted_swaps(archive_root)
+    # Finish any swap or tag write a crashed run left half done, so each show's
+    # archive copy is back in place even when this run does not fetch it.
+    _recover(config, source.name, collection)
     stats.discovered = len(shows)
     placement = LibraryPlacement(config, collection, source.name, items)
     placement.begin()
@@ -2119,11 +2159,13 @@ def _single_show_phases(
 
     # Each show fetched here went through the sync's fetch, record, and link path
     # above, and is staged with the same ownership and cleanup pass below
-    # (§spec:library-ownership, §spec:library-cleanup). Tag filling after a fetch on a
-    # `fill_tags` collection — including refilling after a reconform — belongs on that
-    # shared path; `stats.fetched` lists the shows this run fetched (§spec:tag-filling).
+    # (§spec:library-ownership, §spec:library-cleanup). On a `fill_tags` collection the
+    # downloads were tagged before entering the archive (a reconform refills the gaps
+    # of the source bytes it restored), and the pass below follows any clash change
+    # the fetched shows brought (§spec:tag-filling).
+    tag_issues = _fill_tags(config, source.name, collection, items)
     report = placement.finish()
-    _apply_placement_report(stats, report)
+    _apply_placement_report(stats, report, tag_issues)
 
     # The collection's handoff, exactly as a sync sends it, including shows still
     # pending from earlier runs (§spec:durable-handoff).

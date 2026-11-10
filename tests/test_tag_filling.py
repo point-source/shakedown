@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import signal
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +20,7 @@ from shakedown.config import CollectionConfig
 from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
 from shakedown.reconcile import run_reconcile
+from shakedown.restage import run_restage
 from shakedown.state import DriftRepo, ItemRepo, RunRepo, TagRecord, TagRepo
 from shakedown.sync import _record_disappeared, run_sync
 from shakedown.tagging import (
@@ -28,8 +33,9 @@ from shakedown.tagging import (
 )
 from shakedown.verify import run_verify
 from tests.audio_fixtures import make_audio, read_tags
-from tests.conftest import make_config
+from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
+from tests.serve_child import SPEC_ENV
 
 
 def test_pruning_a_show_drops_its_tag_records(tmp_path: Path) -> None:
@@ -618,3 +624,220 @@ def test_after_a_rebuilt_database_tagged_files_report_drift(tmp_roots) -> None:
         leftover.unlink()
     assert run_reconcile(config) == 0
     assert _verify(config) == [("gd77", "d1t01.flac"), ("gd77", "d1t02.flac")]
+
+
+# --- sync: shows already mirrored are tagged once, then revisited only on change -----
+
+def _mirror_untagged(tmp_roots, *shows: tuple[str, dict]) -> None:
+    """Shows mirrored before the collection opted in."""
+    root = tmp_roots[0].parent
+    for identifier, meta in shows:
+        _fake_show(identifier, root, meta)
+    assert run_sync(make_config(*tmp_roots)) == 0
+
+
+def _album(config, identifier: str, name: str = "d1t01.flac") -> list[str]:
+    return read_tags(_archive_file(config, identifier, name))["album"]
+
+
+ALBUM = "1977-05-08 \N{EN DASH} Barton Hall"
+
+
+def test_opting_in_tags_mirrored_shows_and_labels_both_recordings(tmp_roots) -> None:
+    _mirror_untagged(tmp_roots, ("gd77.sbd", GD_META), ("gd77.aud", GD_META),
+                     ("gd77-05-09", {**GD_META, "date": "1977-05-09"}))
+    # One file already carries its uploader's tags.
+    mine = _archive_file(make_config(*tmp_roots), "gd77-05-09", "d1t02.flac")
+    f = FLAC(mine)
+    f.add_tags()
+    assert f.tags is not None
+    f.tags["ALBUM"], f.tags["ARTIST"] = ["Uploader's album"], ["The Dead"]
+    f.save()
+    inode = mine.stat().st_ino
+    downloads = dict(FakePlugin.fetch_count)
+
+    config = make_config(*tmp_roots, fill_tags=True)
+    assert run_sync(config) == 0
+
+    assert FakePlugin.fetch_count == downloads  # tagging never re-downloads
+    assert _album(config, "gd77.sbd") == [f"{ALBUM} [gd77.sbd]"]
+    assert _album(config, "gd77.aud") == [f"{ALBUM} [gd77.aud]"]
+    assert _album(config, "gd77-05-09") == ["1977-05-09 \N{EN DASH} Barton Hall"]
+    tags = read_tags(mine)
+    assert (tags["album"], tags["artist"]) == (["Uploader's album"], ["The Dead"])
+    assert tags["venue"] == ["Barton Hall"]
+    # Written through the shared inode: the library link carries the tags, no copies.
+    assert mine.stat().st_ino == inode and mine.stat().st_nlink == 2
+    for path in config.library_root.rglob("*.flac"):
+        assert path.stat().st_nlink == 2
+    assert not (config.archive_root / "fake-src" / "coll1" / ".tagging").exists()
+    assert _verify(config) == []
+
+
+def test_a_second_sync_reads_no_file_of_a_tagged_show(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mirror_untagged(tmp_roots, ("gd77.sbd", GD_META), ("gd77.aud", GD_META))
+    config = make_config(*tmp_roots, fill_tags=True)
+    assert run_sync(config) == 0
+    downloads = dict(FakePlugin.fetch_count)
+
+    opened: list[Path] = []
+    real_init = tagging._Tags.__init__
+
+    def counting_init(self: tagging._Tags, path: Path) -> None:
+        opened.append(path)
+        real_init(self, path)
+
+    monkeypatch.setattr(tagging._Tags, "__init__", counting_init)
+    assert run_sync(config) == 0
+    assert opened == [] and FakePlugin.fetch_count == downloads
+    assert _verify(config) == []
+
+
+def test_a_clash_ending_takes_the_label_off_the_survivor(tmp_roots) -> None:
+    _mirror_untagged(tmp_roots, ("gd77.sbd", GD_META), ("gd77.aud", GD_META))
+    config = make_config(*tmp_roots, fill_tags=True, prune_disappeared=True)
+    assert run_sync(config) == 0
+    assert _album(config, "gd77.sbd") == [f"{ALBUM} [gd77.sbd]"]
+
+    del FakePlugin.items["gd77.aud"]
+    assert run_sync(config) == 0
+    assert _album(config, "gd77.sbd") == [ALBUM]
+    assert _verify(config) == []
+
+
+def test_an_album_someone_else_changed_is_left_alone(tmp_roots) -> None:
+    _mirror_untagged(tmp_roots, ("gd77.sbd", GD_META))
+    config = make_config(*tmp_roots, fill_tags=True)
+    assert run_sync(config) == 0
+    mine = _library_file(config, "d1t01.flac")
+    f = FLAC(mine)
+    assert f.tags is not None
+    f.tags["ALBUM"] = ["Cornell '77 (my edit)"]
+    f.save()
+
+    _fake_show("gd77.aud", tmp_roots[0].parent)  # a clash appears
+    assert run_sync(config) == 0
+    assert _album(config, "gd77.sbd") == ["Cornell '77 (my edit)"]
+    assert _album(config, "gd77.sbd", "d1t02.flac") == [f"{ALBUM} [gd77.sbd]"]
+    assert _album(config, "gd77.aud") == [f"{ALBUM} [gd77.aud]"]
+    assert _verify(config) == [("gd77.sbd", "d1t01.flac")]  # still reported as drift
+
+
+def test_a_metadata_refresh_rewrites_the_venue_and_album(tmp_roots) -> None:
+    """`sync --refresh-metadata` re-resolves a preserve-opted collection's metadata
+    (§spec:metadata-preservation); the tags shakedown filled follow it."""
+    _mirror_untagged(tmp_roots, ("gd77", GD_META))
+    config = make_config(*tmp_roots, fill_tags=True, preserve_source_metadata=True)
+    assert run_sync(config) == 0
+    FakePlugin.items["gd77"].metadata["venue"] = "Barton Hall, Cornell University"
+    assert run_sync(config, refresh_metadata=True) == 0
+    tags = read_tags(_archive_file(config, "gd77", "d1t01.flac"))
+    assert tags["venue"] == ["Barton Hall, Cornell University"]
+    assert tags["album"] == ["1977-05-08 \N{EN DASH} Barton Hall, Cornell University"]
+    assert _verify(config) == []
+
+
+def test_a_disk_error_tagging_a_mirrored_show_is_an_issue_retried_next_run(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mirror_untagged(tmp_roots, ("gd77", GD_META))
+    config = make_config(*tmp_roots, fill_tags=True)
+    original = _archive_file(config, "gd77", "d1t01.flac").read_bytes()
+
+    def full(*_args: object, **_kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tagging.shutil, "copyfile", full)
+    assert run_sync(config) == 1
+    assert _archive_file(config, "gd77", "d1t01.flac").read_bytes() == original
+    latest = RunRepo(connect(config.state_db)).latest("fake-src", "coll1")
+    assert latest is not None and latest.items_failed == 1
+    assert latest.errors == [
+        "gd77: could not fill tags in d1t01.flac ([Errno 28] No space left on device);"
+        " will retry on the next run",
+        "gd77: could not fill tags in d1t02.flac ([Errno 28] No space left on device);"
+        " will retry on the next run",
+    ]
+
+    monkeypatch.undo()
+    assert run_sync(config) == 0
+    assert _album(config, "gd77") == [ALBUM]
+
+
+def test_a_backup_left_by_a_crash_is_restored_before_the_run_goes_on(tmp_roots) -> None:
+    """The next run puts the original back before anything else, then tags again."""
+    _mirror_untagged(tmp_roots, ("gd77", GD_META))
+    config = make_config(*tmp_roots, fill_tags=True)
+    archive_file = _archive_file(config, "gd77", "d1t01.flac")
+    original = archive_file.read_bytes()
+    backup = config.archive_root / "fake-src" / "coll1" / ".tagging" / "gd77" / "d1t01.flac"
+    backup.parent.mkdir(parents=True)
+    backup.write_bytes(original)
+    with archive_file.open("r+b") as torn:
+        torn.write(b"\x00" * 64)  # a write the crash cut short
+
+    assert run_sync(config) == 0
+    assert _album(config, "gd77") == [ALBUM]
+    assert not backup.parent.parent.exists()
+    assert _verify(config) == []
+
+
+def test_restage_restores_a_backup_left_by_a_crash(tmp_roots) -> None:
+    _mirror_untagged(tmp_roots, ("gd77", GD_META))
+    config = make_config(*tmp_roots)
+    archive_file = _archive_file(config, "gd77", "d1t01.flac")
+    original = archive_file.read_bytes()
+    backup = config.archive_root / "fake-src" / "coll1" / ".tagging" / "gd77" / "d1t01.flac"
+    backup.parent.mkdir(parents=True)
+    backup.write_bytes(original)
+    with archive_file.open("r+b") as torn:
+        torn.write(b"\x00" * 64)
+    assert run_restage(config, source_filter=None, collection_filter=None) == 0
+    assert archive_file.read_bytes() == original
+    assert _library_file(config, "d1t01.flac").read_bytes() == original
+
+
+# --- a real kill mid-tagging (fault injection in a child process) --------------------
+
+@pytest.mark.parametrize("stage", ["backed_up", "torn", "saved"])
+def test_killing_sync_mid_tagging_leaves_no_half_written_file(
+    tmp_roots, tmp_path: Path, stage: str
+) -> None:
+    """SIGKILL during a tag write: every archive file and its library link stay one
+    file; the original survives in the backup; the next run restores it before
+    anything else and then tags it (§spec:tag-filling, Q-8-1)."""
+    _mirror_untagged(tmp_roots, ("gd77", GD_META))
+    config = make_config(*tmp_roots, fill_tags=True)
+    write_config(tmp_path / "cfg.yaml", config)
+    originals = {
+        name: _archive_file(config, "gd77", name).read_bytes()
+        for name in ("d1t01.flac", "d1t02.flac")
+    }
+    spec = tmp_path / "fake-spec.json"
+    spec.write_text(json.dumps({
+        "audio_items": {"gd77": {"metadata": GD_META, "files": sorted(originals)}},
+        "kill_at": stage,
+    }))
+    child = subprocess.run(
+        [sys.executable, "-m", "tests.serve_child", "--config", str(tmp_path / "cfg.yaml"),
+         "sync"],
+        env={**os.environ, SPEC_ENV: str(spec)}, cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True, timeout=120,
+    )
+    assert child.returncode == -signal.SIGKILL, child.stderr.decode()
+
+    backup = config.archive_root / "fake-src" / "coll1" / ".tagging" / "gd77" / "d1t01.flac"
+    assert backup.read_bytes() == originals["d1t01.flac"]  # the whole original is kept
+    first = _archive_file(config, "gd77", "d1t01.flac")
+    assert first.stat().st_ino == _library_file(config, "d1t01.flac").stat().st_ino
+
+    assert run_sync(config) == 0
+    assert not backup.parent.parent.exists()
+    for name in originals:
+        archive_file = _archive_file(config, "gd77", name)
+        assert read_tags(archive_file)["album"] == [ALBUM]
+        assert archive_file.stat().st_ino == _library_file(config, name).stat().st_ino
+        assert archive_file.stat().st_nlink == 2
+    assert _verify(config) == []

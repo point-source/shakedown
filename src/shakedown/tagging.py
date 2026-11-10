@@ -27,9 +27,10 @@ from mutagen.id3 import ID3NoHeaderError
 from mutagen.mp3 import MP3
 from mutagen.oggvorbis import OggVorbis
 
+from shakedown.db import transaction
 from shakedown.models import Manifest
 from shakedown.placement import has_archive_copy
-from shakedown.state import ItemRepo, TagRecord
+from shakedown.state import ItemRepo, TagRecord, TagRepo
 
 log = logging.getLogger(__name__)
 
@@ -397,3 +398,55 @@ def recover_interrupted_tagging(collection_root: Path) -> list[Path]:
         backup.unlink()
     shutil.rmtree(root)
     return restored
+
+
+# --- a collection's shows ------------------------------------------------------------
+
+
+def fill_collection_tags(
+    collection_root: Path, items: ItemRepo, source: str, collection: str
+) -> dict[str, list[str]]:
+    """Fill the tags of every show with an archive copy whose computed tags changed
+    since it was last filled: once after the collection opts in, then on a clash change
+    or a metadata refresh (§spec:tag-filling). A show whose fingerprint still matches
+    is skipped without opening any of its files. Each file's record is stored as soon
+    as it is written, and the show's fingerprint once all its files are done, so a
+    run that stops partway picks the show up again. Returns, per show, the issues of
+    tag writes that failed on the disk; such a show is retried on the next run."""
+    repo = TagRepo(items.conn)
+    shows = [item for item in items.list_for_collection(source, collection)
+             if has_archive_copy(item)]
+    index = TagIndex()
+    for item in shows:
+        assert item.recorded_manifest is not None
+        index.add(item.identifier, item.source_metadata, item.recorded_manifest)
+    done = repo.fingerprints(source, collection)
+    issues: dict[str, list[str]] = {}
+    for item in shows:
+        assert item.recorded_manifest is not None and item.archive_path is not None
+        identifier = item.identifier
+        desired = desired_tags(identifier, item.source_metadata, item.recorded_manifest,
+                               labelled=index.labelled(identifier))
+        show_fingerprint = fingerprint(desired)
+        if done.get(identifier) == show_fingerprint:
+            continue
+        records = repo.file_records(source, collection, identifier)
+        for name, wanted in sorted(desired.items()):
+            path = item.archive_path / name
+            if not path.is_file():
+                continue  # nothing to tag; a refetch brings it back, tagged
+            try:
+                result = fill_file(path, wanted, records.get(name),
+                                   backup_path(collection_root, identifier, name))
+            except TagWriteError as e:
+                issues.setdefault(identifier, []).append(
+                    f"{identifier}: {tag_failure(name, e)}"
+                )
+                continue
+            if result.record is not None and result.record != records.get(name):
+                with transaction(items.conn):
+                    repo.put_file(source, collection, identifier, name, result.record)
+        if identifier not in issues:
+            with transaction(items.conn):
+                repo.set_fingerprint(source, collection, identifier, show_fingerprint)
+    return issues
