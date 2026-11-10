@@ -45,6 +45,7 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         if row["recorded_manifest"]
         else None,
         change_signal=row["change_signal"],
+        not_playable_reason=row["not_playable_reason"],
     )
 
 
@@ -89,8 +90,8 @@ class ItemRepo:
                 source_name, collection_name, identifier, status,
                 archive_path, discovered_at, downloaded_at, last_verified_at,
                 restriction_reason, source_metadata, recorded_manifest,
-                change_signal
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                change_signal, not_playable_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_name, collection_name, identifier) DO UPDATE SET
                 status=excluded.status,
                 archive_path=excluded.archive_path,
@@ -100,7 +101,8 @@ class ItemRepo:
                 restriction_reason=excluded.restriction_reason,
                 source_metadata=excluded.source_metadata,
                 recorded_manifest=COALESCE(excluded.recorded_manifest, items.recorded_manifest),
-                change_signal=COALESCE(excluded.change_signal, items.change_signal)
+                change_signal=COALESCE(excluded.change_signal, items.change_signal),
+                not_playable_reason=excluded.not_playable_reason
             """,
             (
                 item.source_name,
@@ -115,6 +117,7 @@ class ItemRepo:
                 json.dumps(item.source_metadata),
                 json.dumps(item.recorded_manifest.to_json()) if item.recorded_manifest else None,
                 item.change_signal,
+                item.not_playable_reason,
             ),
         )
 
@@ -134,7 +137,8 @@ class ItemRepo:
             """
             SELECT source_name, collection_name, identifier, status, archive_path,
                    discovered_at, downloaded_at, last_verified_at, restriction_reason,
-                   NULL AS source_metadata, recorded_manifest, change_signal
+                   NULL AS source_metadata, recorded_manifest, change_signal,
+                   not_playable_reason
             FROM items WHERE source_name=? AND collection_name=? ORDER BY identifier
             """,
             (source, collection),
@@ -144,7 +148,7 @@ class ItemRepo:
 
     def list_restricted(self, source: str, collection: str) -> list[tuple[str, str | None]]:
         """(identifier, restriction_reason) of the collection's unavailable items and of
-        complete items mirrored from a fallback (they carry a reason)."""
+        complete items whose lossless files are refused (they carry a reason)."""
         cur = self.conn.execute(
             """
             SELECT identifier, restriction_reason FROM items

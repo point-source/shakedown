@@ -115,6 +115,8 @@ class Item:
     recorded_manifest: Manifest | None = None
     # last-seen source change signal for incremental discovery (§spec:incremental-discovery)
     change_signal: str | None = None
+    # set when the show has no copy a common player reads (§spec:quality-selection)
+    not_playable_reason: str | None = None
 
 
 @dataclass

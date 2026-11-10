@@ -28,6 +28,8 @@ _SCHEMA = [
         source_metadata    TEXT NOT NULL DEFAULT '{}',
         recorded_manifest  TEXT,
         change_signal      TEXT,
+        -- why the show has no copy a common player reads (§spec:quality-selection)
+        not_playable_reason TEXT,
         PRIMARY KEY (source_name, collection_name, identifier)
     )
     """,
@@ -272,7 +274,12 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
     (§spec:state): add the library placement record, the pending-handoff record and
     each run's undelivered failure alert (§spec:durable-handoff), and drop the
     skip-the-loser collision columns, superseded by clash separation
-    (§spec:library-ownership)."""
+    (§spec:library-ownership).
+
+    The quality rule (§spec:quality-selection) adds each show's not-playable reason,
+    and clears every stored change signal once: the first sync after the upgrade then
+    looks every show up and applies the new rule, even on an incremental collection
+    (§spec:incremental-discovery)."""
     for stmt in _PLACEMENT_SCHEMA + _HANDOFF_SCHEMA:
         conn.execute(stmt)
     if not _has_column(conn, "runs", "failure_notice_error"):
@@ -280,6 +287,9 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
     for column in ("collisions_dropped", "collision_paths"):
         if _has_column(conn, "runs", column):
             conn.execute(f"ALTER TABLE runs DROP COLUMN {column}")
+    if not _has_column(conn, "items", "not_playable_reason"):
+        conn.execute("ALTER TABLE items ADD COLUMN not_playable_reason TEXT")
+    conn.execute("UPDATE items SET change_signal = NULL")
 
 
 # Version-gated, forward-only upgrade steps keyed by the version they produce.

@@ -367,6 +367,25 @@ _V5_RUNS = """
 """
 
 
+_V5_ITEMS = """
+        CREATE TABLE items (
+            source_name TEXT NOT NULL,
+            collection_name TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            status TEXT NOT NULL,
+            archive_path TEXT,
+            discovered_at TEXT,
+            downloaded_at TEXT,
+            last_verified_at TEXT,
+            restriction_reason TEXT,
+            source_metadata TEXT NOT NULL DEFAULT '{}',
+            recorded_manifest TEXT,
+            change_signal TEXT,
+            PRIMARY KEY (source_name, collection_name, identifier)
+        );
+"""
+
+
 def _tables(conn) -> set[str]:
     return {
         row["name"]
@@ -414,13 +433,53 @@ def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
     assert RunRepo(conn).latest("s", "c") is not None
 
 
+def test_v5_db_gains_the_not_playable_reason_and_reselects_every_show(tmp_path: Path) -> None:
+    """The quality rule (§spec:quality-selection) adds a show's not-playable reason
+    to the increment's one migration, and clears every stored change signal once so
+    the first sync after the upgrade looks each show up and applies the new rule,
+    even on an incremental collection (§spec:incremental-discovery)."""
+    db_path = tmp_path / "legacy_v5.db"
+    _legacy_v5(
+        db_path,
+        _V5_ITEMS
+        + "INSERT INTO items (source_name, collection_name, identifier, status,"
+        " recorded_manifest, change_signal) VALUES ('s', 'c', 'x', 'complete',"
+        " '[{\"name\": \"a.shn\", \"size\": 1, \"md5\": null}]', 'sig-1');",
+    )
+
+    conn = connect(db_path)
+    assert "not_playable_reason" in _columns(conn, "items")
+    item = ItemRepo(conn).get("s", "c", "x")
+    assert item is not None
+    assert item.change_signal is None
+    assert item.not_playable_reason is None
+    assert item.recorded_manifest is not None
+    assert [f.library for f in item.recorded_manifest.files] == [True]
+
+
+def test_not_playable_reason_round_trips(tmp_path: Path) -> None:
+    repo = ItemRepo(connect(tmp_path / "s.db"))
+    item = _make_item()
+    item.not_playable_reason = "only in SHN; archive.org offers no playable copy"
+    repo.upsert(item)
+    got = repo.get("s", "c", "x")
+    assert got is not None
+    assert got.not_playable_reason == item.not_playable_reason
+    planned = next(repo.list_for_planning("s", "c"))
+    assert planned.not_playable_reason == item.not_playable_reason
+    item.not_playable_reason = None
+    repo.upsert(item)
+    got = repo.get("s", "c", "x")
+    assert got is not None and got.not_playable_reason is None
+
+
 def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
     fresh = connect(tmp_path / "fresh.db")
     db_path = tmp_path / "legacy_v5.db"
-    _legacy_v5(db_path)
+    _legacy_v5(db_path, _V5_ITEMS)
     migrated = connect(db_path)
-    for table in ("runs", "library_placements", "library_folders", "library_unplaced",
-                  "library_adoption", "handoff_pending"):
+    for table in ("items", "runs", "library_placements", "library_folders",
+                  "library_unplaced", "library_adoption", "handoff_pending"):
         assert _columns(fresh, table) == _columns(migrated, table), table
 
 
