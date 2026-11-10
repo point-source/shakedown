@@ -48,7 +48,8 @@ _SCHEMA = [
         items_failed       INTEGER NOT NULL DEFAULT 0,
         bytes_downloaded   INTEGER NOT NULL DEFAULT 0,
         errors             TEXT NOT NULL DEFAULT '[]',
-        stale              INTEGER NOT NULL DEFAULT 0
+        stale              INTEGER NOT NULL DEFAULT 0,
+        failure_notice_error TEXT
     )
     """,
     """
@@ -268,11 +269,14 @@ def _migrate_to_5(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_6(conn: sqlite3.Connection) -> None:
     """v5 → v6, the one migration of the ownership, handoff, and discovery increment
-    (§spec:state): add the library placement record and the pending-handoff record
-    (§spec:durable-handoff), and drop the skip-the-loser collision columns, superseded
-    by clash separation (§spec:library-ownership)."""
+    (§spec:state): add the library placement record, the pending-handoff record and
+    each run's undelivered failure alert (§spec:durable-handoff), and drop the
+    skip-the-loser collision columns, superseded by clash separation
+    (§spec:library-ownership)."""
     for stmt in _PLACEMENT_SCHEMA + _HANDOFF_SCHEMA:
         conn.execute(stmt)
+    if not _has_column(conn, "runs", "failure_notice_error"):
+        conn.execute("ALTER TABLE runs ADD COLUMN failure_notice_error TEXT")
     for column in ("collisions_dropped", "collision_paths"):
         if _has_column(conn, "runs", column):
             conn.execute(f"ALTER TABLE runs DROP COLUMN {column}")

@@ -120,6 +120,8 @@ class Run:
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items retained
+    # Why this run's failure alert was not delivered; not resent (§spec:durable-handoff).
+    failure_notice_error: str | None = None
 
 
 @dataclass

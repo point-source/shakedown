@@ -270,6 +270,7 @@ def test_v2_db_migrates_change_signal_column(tmp_path: Path) -> None:
     # Added in v4 for skip-the-loser, dropped in v6 with clash separation.
     assert "collisions_dropped" not in run_cols
     assert "collision_paths" not in run_cols
+    assert "failure_notice_error" in run_cols
     tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master").fetchall()]
     assert "operation_outcomes" in tables
 
@@ -409,6 +410,7 @@ def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
     run_cols = _columns(conn, "runs")
     assert "collisions_dropped" not in run_cols
     assert "collision_paths" not in run_cols
+    assert "failure_notice_error" in run_cols
     assert RunRepo(conn).latest("s", "c") is not None
 
 
@@ -512,3 +514,15 @@ def test_pending_handoff_repo_clear_and_drop(tmp_path: Path) -> None:
     repo.drop("s", "c")
     assert repo.list("s", "c") == []
     assert [p.identifier for p in repo.list("s", "other")] == ["show-a"]
+
+
+def test_run_failure_notice_error_round_trips(tmp_path: Path) -> None:
+    """§spec:durable-handoff: an undelivered failure alert is shown in that run's
+    status, so the run keeps its reason."""
+    repo = RunRepo(connect(tmp_path / "s.db"))
+    run = repo.start("s", "c", datetime(2026, 11, 10, 3, 0))
+    assert repo.latest("s", "c").failure_notice_error is None  # type: ignore[union-attr]
+    run.failure_notice_error = "webhook answered 502"
+    run.finished_at = datetime(2026, 11, 10, 3, 5)
+    repo.finish(run)
+    assert repo.latest("s", "c").failure_notice_error == "webhook answered 502"  # type: ignore[union-attr]

@@ -254,10 +254,13 @@ def test_undelivered_failure_notice_is_not_queued(tmp_roots: tuple[Path, Path]) 
     run = RunRepo(conn).latest("fake-src", "coll1")
     assert run is not None
     assert "failure notice not delivered: webhook unreachable: connection refused" in run.errors
+    assert run.failure_notice_error == "webhook unreachable: connection refused"
 
-    # The next run does not resend the failure alert.
+    # The next run does not resend the failure alert, and its status carries none.
     assert _sync(config, hooks) == 0
     assert len(hooks.bodies("sync.failed")) == 1
+    run = RunRepo(conn).latest("fake-src", "coll1")
+    assert run is not None and run.failure_notice_error is None
 
 
 def test_pending_show_missing_from_the_library_stays_pending(
@@ -401,3 +404,34 @@ def test_status_hides_pending_shows_once_the_handoff_is_removed(
     cfg = write_config(tmp_path / "shakedown.yaml", _config(archive, library, None))
     assert "handoff not delivered" not in _status(cfg)
     assert jsonlib.loads(_status(cfg, "--json"))[0]["handoff_pending"] is None
+
+
+def test_status_shows_an_undelivered_failure_notice_for_that_run(
+    tmp_path: Path, tmp_roots: tuple[Path, Path],
+) -> None:
+    import json as jsonlib
+
+    from tests.conftest import write_config
+
+    archive, library = tmp_roots
+    config = _config(archive, library, None)
+    config.notifications = NotificationsConfig(on_failure=FailureNotification(webhook=DOWN))
+    cfg = write_config(tmp_path / "shakedown.yaml", config)
+    _add_show("gd-a")
+    with patch.object(FakePlugin, "enumerate_items", side_effect=RuntimeError("down")):
+        assert _sync(config, _Webhooks()) == 1
+
+    lines = _status(cfg).splitlines()
+    last_run = next(i for i, line in enumerate(lines) if line.startswith("  last run: "))
+    assert lines[last_run + 1] == (
+        "  failure notice not delivered: webhook unreachable: connection refused"
+    )
+    summary = jsonlib.loads(_status(cfg, "--json"))[0]
+    assert summary["last_run"]["failure_notice_error"] == (
+        "webhook unreachable: connection refused"
+    )
+
+    # A later run whose alert is not needed shows none.
+    assert _sync(config, _Webhooks()) == 0
+    assert "failure notice not delivered" not in _status(cfg)
+    assert jsonlib.loads(_status(cfg, "--json"))[0]["last_run"]["failure_notice_error"] is None

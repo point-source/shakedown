@@ -102,6 +102,8 @@ def _summarize_run(run: Any) -> dict[str, Any]:
         "items_failed": run.items_failed,
         "bytes_downloaded": run.bytes_downloaded,
         "errors": run.errors,
+        # Why this run's failure alert was not delivered (§spec:durable-handoff).
+        "failure_notice_error": run.failure_notice_error,
     }
 
 
@@ -175,6 +177,8 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 f"new={last['items_new']} updated={last['items_updated']} "
                 f"failed={last['items_failed']} bytes={last['bytes_downloaded']}"
             )
+            if last["failure_notice_error"]:
+                click.echo(f"  failure notice not delivered: {last['failure_notice_error']}")
         else:
             click.echo("  last run: never")
         handoff = s["handoff_pending"]

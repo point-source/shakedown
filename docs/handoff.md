@@ -99,5 +99,6 @@ notifications:
 ```
 
 It receives the same envelope with `"event": "sync.failed"` and an `errors`
-array instead of `staged`. A failure alert that is not delivered is not sent
-again: it describes that run, and `status` already shows that run's state.
+array instead of `staged`. A failure alert that is not delivered shows in
+`status` under that run as `failure notice not delivered: <reason>`. It is not
+sent again: it describes that run, and `status` already shows that run's state.

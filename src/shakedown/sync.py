@@ -98,6 +98,8 @@ class CollectionSyncStats:
     # Shows counted in `failed` because staging them left an issue (a foreign file at a
     # target, a failed removal, a refused path, a disk error), not because of a fetch.
     staging_issues: int = 0
+    # Why the run's failure alert was not delivered, shown with this run only.
+    failure_notice_error: str | None = None
     # Separations in effect after the run's staging pass (§spec:library-ownership):
     # reported, never a failure.
     separated: int = 0
@@ -387,6 +389,7 @@ def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: d
     run.bytes_downloaded = stats.bytes_downloaded
     run.stale = stats.stale
     run.errors = stats.errors
+    run.failure_notice_error = stats.failure_notice_error
     run.finished_at = finished
     runs.finish(run)
 
@@ -873,6 +876,7 @@ def _fire_notifications(
                 "[%s/%s] failure notice not delivered: %s", source.name, collection.name, err
             )
             stats.errors.append(f"failure notice not delivered: {err}")
+            stats.failure_notice_error = err
 
 
 def _staging_root(config: Config, source_name: str, collection: CollectionConfig) -> str:
