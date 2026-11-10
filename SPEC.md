@@ -758,7 +758,8 @@ Observable behavior:
   archive that the new rule would not select (e.g. a show mirrored with
   both FLAC and SHN under the old filters) is kept in the archive and
   left out of the library; the rule governs what is downloaded from now
-  on. *(Pending operator confirmation, 2026-11-10.)*
+  on, and no archive audio is deleted by a selection change. (Operator
+  decision, 2026-11-10.)
 
 **Decision and constraint.** Selection follows the two product goals
 directly instead of per-collection format lists, because hand-written

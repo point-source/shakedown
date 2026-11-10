@@ -45,6 +45,14 @@ but not the seam between them:
 - Beets + Navidrome is the canonical library/streaming pair, but has no
   opinion about *where music comes from* or how to keep it fresh.
 
+**The two goals.** Shakedown keeps, for every configured collection,
+(1) a local *playable* copy of all the publicly available music, and
+(2) an *archival-quality* copy of the music and its associated data
+(notes, checksums, artwork, source metadata), in case the remote source
+is ever permanently lost. When the best version a source offers is also
+playable, one copy serves both goals; when it isn't (e.g. SHN), both
+copies are kept.
+
 Shakedown is the missing middle: it owns the archive layer and the seam
 between archive and library, and hands off cleanly to whatever library
 tool the user prefers — without that tool needing to know Shakedown
@@ -224,16 +232,18 @@ handoff, and discovery increment.
     finding no library file that is no longer linked to the archive and
     no show present at two paths.
 21. **Handoff notices are delivered or visibly pending.** A handoff
-    command (such as a library import) may run as long as it needs; a
-    long-running import completes rather than being cut off. A notice
+    triggers the library tool's work rather than waiting for it: the
+    receiver acknowledges within minutes, and what the tool does
+    afterwards (its import or scan) is outside shakedown. A notice
     that fails is shown in `status` (text and JSON) as undelivered, with
     the shows it covered, and is resent on later runs until it is
     delivered. A failed notice does not, by itself, make the run fail.
     Any handoff recipe the documentation ships works when followed
     literally against the stock target tool and the example compose
     stack; a recipe that cannot work is not shipped. Verifiable by
-    configuring a handoff that takes several minutes and seeing it
-    finish, and by configuring an unreachable target, syncing, seeing
+    configuring a receiver that never answers and seeing the notice
+    marked undelivered within minutes, and by configuring an
+    unreachable target, syncing, seeing
     the undelivered notice in `status`, fixing the target, and seeing
     the next run deliver it.
 22. **One bad item fails alone, on every source.** A server error,
@@ -278,15 +288,21 @@ handoff, and discovery increment.
     collection with untagged files, syncing, seeing the shows grouped by
     artist and date in Navidrome, then running sync and `verify --deep`
     again and seeing no re-download and no drift.
-26. **Shows in unplayable formats still play.** When a show's media
-    exists only in a format common players cannot read (e.g. SHN), the
-    original is still mirrored to the archive, and the source's own
-    playable alternative (when it offers one) is also mirrored and is
-    what appears in the library. Shows with no playable alternative are
-    listed in `status` as not playable. Shakedown never converts audio
-    itself. Verifiable by syncing a SHN-only Grateful Dead show and
-    finding the SHN files in the archive and a playable version in the
-    library, playable in Navidrome.
+26. **Best copy kept, best playable copy in the library.** For every
+    show, shakedown keeps the highest-quality version the source offers
+    and the highest-quality version common players can play — one copy
+    when they are the same, both when they differ (e.g. an SHN-only
+    show keeps its SHN and the source's best playable copy). The
+    playable copy is what appears in the library; every non-audio file
+    the source lists (notes, checksums, metadata, artwork) is kept in
+    both. The operator does not pick formats per collection. Shows with
+    no playable copy are listed in `status` as not playable. Shakedown
+    never converts audio itself, and changing what is selected never
+    re-downloads files already in the archive. Verifiable by syncing a
+    FLAC show (FLAC only, plus its notes), an SHN-only Grateful Dead
+    show (SHN in the archive, the best playable copy in the archive and
+    library, playable in Navidrome), and a show whose lossless files
+    archive.org refuses (best lossy copy kept, reason in `status`).
 
 ## User stories §req:user-stories
 
@@ -340,9 +356,8 @@ criterion and implies a testable path through the product's surface.
   shows flow into my library without me watching. *(→ criteria 1, 2, 21)*
 - **Never miss a show because a notice failed.** As a homelab operator,
   I want a handoff that failed or was unreachable to show up in
-  `status` and be resent on the next run, and a long import to be
-  allowed to finish, so that my library tool never silently misses
-  shows. *(→ criterion 21)*
+  `status` and be resent on the next run, so that my library tool never
+  silently misses shows. *(→ criterion 21)*
 - **Copy the docs and it works.** As a homelab operator, I want any
   handoff example in the docs to work against the stock tool when I
   follow it literally, so that I don't discover weeks later that it
@@ -450,6 +465,11 @@ criterion and implies a testable path through the product's surface.
   SHN-only shows to come with a playable version in my library while
   the original SHN stays in the archive, so that those shows are not
   dead weight in my player. *(→ criterion 26)*
+- **Always the best copy, without picking formats.** As a homelab
+  operator, I want shakedown to keep the best version of every show and
+  the best version I can play, with all its notes and files, so that I
+  have both a listening library and a preservation copy without
+  writing format rules per collection. *(→ criterion 26)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -496,8 +516,9 @@ constraints that drive architecture.
   unplayable (criterion 26). Tag filling changes files in place and
   adds no copies.
 - **Durable handoff.** A handoff notice is either delivered or visibly
-  pending and resent; it is never lost silently, and a slow but working
-  target is given the time it needs.
+  pending and resent; it is never lost silently. A handoff triggers the
+  library tool and waits only for its acknowledgement, never for the
+  tool's own work.
 - **Restage speed.** Rebuilding the full library tree for a ~14k-item
   collection completes in under five minutes and never re-downloads.
 - **Sync speed.** A recurring sync's wall-clock scales with what
@@ -762,9 +783,10 @@ library folders directly:
     of sampled Grateful Dead / Aquarium Rescue Unit files are tagged)
     but moderate confidence and effort: it is the first time shakedown
     changes archive bytes, so the recorded-state rules must hold.
-27. Playable alternatives for SHN-only shows (→ criterion 26). 891
-    Grateful Dead files are SHN; meaningful for that collection, narrow
-    elsewhere.
+27. Best available and best playable copy, with every non-audio file
+    (→ criterion 26). 891 Grateful Dead files are SHN and unplayable
+    today; the same rule replaces per-collection format settings and
+    makes the refused-lossless fallback automatic on every source.
 28. API "sync now" as a fresh, non-overlapping run (→ criterion 24).
     The writer lock already prevents overlap damage; this closes the
     stale-config gap and gives a clean refusal.
