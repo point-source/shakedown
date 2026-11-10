@@ -37,8 +37,8 @@ log = logging.getLogger(__name__)
 # The venue goes in the format's custom field: Vorbis comment VENUE, ID3 TXXX:VENUE.
 EasyID3.RegisterTXXXKey("venue", "VENUE")
 
-# Format-neutral tag names; the writer maps each to the format's own field.
-TAG_KEYS = ("artist", "albumartist", "album", "date", "venue", "title", "tracknumber")
+# Tags go by format-neutral names (artist, albumartist, album, date, venue, title,
+# tracknumber); _Tags maps each to the format's own field.
 
 # The formats shakedown can tag (§spec:tag-filling): FLAC, MP3, Ogg Vorbis. Every other
 # file, SHN included, is left untouched.
@@ -248,7 +248,7 @@ class _Tags:
             self._vorbis.save(path)
 
 
-def md5_file(path: Path) -> str:
+def _md5(path: Path) -> str:
     h = hashlib.md5()
     with path.open("rb") as f:
         while chunk := f.read(1024 * 1024):
@@ -369,7 +369,7 @@ def fill_file(
             except OSError:
                 log.exception("could not restore %s; the next run restores it", path)
         raise TagWriteError(str(e)) from e
-    post_tag_md5 = md5_file(path)
+    post_tag_md5 = _md5(path)
     _fault_point("saved")
     if backup is not None:
         _discard(backup)
