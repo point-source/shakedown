@@ -632,7 +632,9 @@ filenames are then hardlinked into that directory unchanged.
 - `shakedown restage` rebuilds the staging tree from the archive
   without any network traffic — used after changing a template or
   wiping the library tree — and completes in under five minutes for a
-  ~14k-item collection (§req:success-criteria #3). It renders every
+  ~14k-item collection (§req:success-criteria #3). It links every item
+  whose archive copy is on disk, whatever its status (a `disappeared`
+  show keeps its files, so it keeps its library folder). It renders every
   item's library folder before clearing anything, so a layout that
   cannot render leaves the existing tree in place. Staging is also
   self-healing: links deleted by a library tool are restored on the

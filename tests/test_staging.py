@@ -131,6 +131,27 @@ def test_restage_rebuilds_after_library_wipe(tmp_roots: tuple[Path, Path]) -> No
     assert FakePlugin.fetch_count == {f"gd-{n}": 1 for n in range(5)}
 
 
+def test_restage_links_every_show_on_disk(tmp_roots: tuple[Path, Path]) -> None:
+    """Restage links shows whose archive copy is on disk, not only `complete` ones:
+    a disappeared show keeps its files, so it keeps its library folder."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    for name in ("gd-here", "gd-gone"):
+        FakePlugin.items[name] = FakeItem(
+            identifier=name, files=[FakeFile(name=f"{name}.flac", content=name.encode())]
+        )
+    assert run_sync(config) == 0
+    del FakePlugin.items["gd-gone"]
+    assert run_sync(config) == 0  # gd-gone is now `disappeared`; its files stay
+
+    import shutil
+    shutil.rmtree(library / "fake-src")
+    assert run_restage(config) == 0
+
+    for name in ("gd-here", "gd-gone"):
+        assert (library / "fake-src" / "coll1" / name / f"{name}.flac").is_file()
+
+
 def test_restage_records_recovery_on_storage_failure(
     tmp_roots: tuple[Path, Path], monkeypatch, capsys
 ) -> None:

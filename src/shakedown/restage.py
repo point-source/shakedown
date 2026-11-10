@@ -12,7 +12,7 @@ from datetime import datetime
 from shakedown.config import CollectionConfig, Config
 from shakedown.db import connect
 from shakedown.lock import run_exclusive
-from shakedown.models import Item, ItemStatus, OperationStatus, OperationType
+from shakedown.models import Item, OperationStatus, OperationType
 from shakedown.staging import UnsafeLibraryPathError, stage_item, staging_dir_for
 from shakedown.state import ItemRepo, OperationOutcomeRepo
 from shakedown.utils.templates import TemplateError
@@ -56,11 +56,14 @@ def _run_restage(
                 phase="plan",
                 safe_next_action="fix storage/path/layout and rerun restage",
             )
+            # Every show whose archive copy is on disk, whatever its status: a show
+            # marked disappeared or unavailable keeps its files, so it keeps its
+            # library folder, exactly as sync leaves it.
             to_stage = [
                 item for item in items.list_for_collection(source.name, collection.name)
-                if item.status == ItemStatus.COMPLETE
-                and item.recorded_manifest is not None
+                if item.recorded_manifest is not None
                 and item.archive_path is not None
+                and item.archive_path.is_dir()
             ]
             render_error = _first_render_error(config, collection, source.name, to_stage)
             if render_error is not None:
