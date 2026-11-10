@@ -1230,6 +1230,11 @@ def _fsync_tree(root: Path) -> None:
         _fsync_path(Path(dirpath))
 
 
+def _is_single_folder_name(name: str) -> bool:
+    separators = {"/", os.sep} | ({os.altsep} if os.altsep else set())
+    return name not in ("", ".", "..") and not any(sep in name for sep in separators)
+
+
 def _fetch_one_budgeted(
     budget: SourceBudget | None,
     plugin: SourcePlugin,
@@ -1269,15 +1274,15 @@ def _fetch_one(
     dest = archive_root / desc.identifier
 
     # Trust boundary: the identifier comes from a remote source and drives
-    # os.rename / shutil.rmtree / plugin downloads below. Reject anything that
-    # would escape the archive tree (traversal via `..`, an absolute path, or a
-    # separator) before it touches the filesystem.
-    if not is_within(archive_root, dest):
+    # os.rename / shutil.rmtree / plugin downloads below. It must be one folder name:
+    # a separator or `..` could escape the archive tree, or (`x/..`) name the
+    # collection folder itself, whose other shows the temp-dir sweep would delete.
+    if not _is_single_folder_name(desc.identifier):
         log.warning("[%s] rejecting unsafe identifier: %r", desc.identifier, desc.identifier)
         return _FetchOutcome(
             success=False,
             archive_path=dest,
-            error=f"unsafe identifier escapes archive tree: {desc.identifier!r}",
+            error=f"unsafe identifier is not a single folder name: {desc.identifier!r}",
         )
 
     # Trust boundary: manifest file names also come from the remote source and

@@ -1124,6 +1124,28 @@ def test_archive_org_plugins_declare_their_host() -> None:
     assert IAPlugin.upstream_host == EtreePlugin.upstream_host == "archive.org"
 
 
+@pytest.mark.parametrize("identifier", ["x/..", "a/b", ".."])
+def test_identifier_that_is_not_one_folder_name_is_rejected(
+    tmp_roots: tuple[Path, Path], identifier: str
+) -> None:
+    """`x/..` stays inside the archive tree yet names the collection folder itself;
+    fetching into it would sweep every other show's files. Only a single folder name
+    is an identifier (docs/plugins.md)."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-keep", content=b"keep me")
+    assert run_sync(config) == 0
+    FakePlugin.items[identifier] = FakeItem(
+        identifier=identifier, files=[FakeFile(name="evil.flac", content=b"pwned")]
+    )
+
+    assert run_sync(config) == 1
+
+    assert FakePlugin.fetch_count.get(identifier, 0) == 0
+    kept = archive / "fake-src" / "coll1" / "gd-keep" / "gd-keep.flac"
+    assert kept.read_bytes() == b"keep me"
+
+
 def test_traversal_identifier_is_rejected(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
     """A remote source must not escape the archive tree via a `..`/absolute identifier.
     The core rejects it before any download, rename, or rmtree runs."""
