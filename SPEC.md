@@ -1976,12 +1976,7 @@ listed.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: complete, including the library ownership and cleanup rows
-(§spec:library-ownership, §spec:library-cleanup), the per-item lookup
-row (§spec:per-item-isolation), the handoff row (§spec:durable-handoff),
-and the restricted-upstream and unplayable-copy rows
-(§spec:quality-selection); the other rows citing sections of the
-ownership, handoff, and discovery increment — not started.*
+*Status: complete*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
