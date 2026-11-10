@@ -108,6 +108,8 @@ ItemLookup(
   | `refused` | `True` when the source will not serve this file (e.g. archive.org's per-file `private` flag). |
   | `derived_from` | The original file's name, when this file is a derivative of another. |
   | `bitrate` | Bitrate in kbps, when the source lists one. |
+  | `title` | The file's track title, when the source lists one. Used to fill tags on collections with `fill_tags`. |
+  | `track` | The file's track number as the source writes it (e.g. `"03"`), when it lists one. |
 
   Pass the source's values through as they are. Do not filter the list and do
   not coerce values: the core checks them and decides which files to mirror.

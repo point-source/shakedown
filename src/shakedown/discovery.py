@@ -135,6 +135,16 @@ def _optional_str(raw: Any, field: str, name: str) -> str | None:
     raise MalformedLookup(f"source sent a malformed file list: {field} of {name!r} is not text")
 
 
+def _track_value(raw: Any) -> str | None:
+    """Informational only (a tag value, never identity): text or a number is kept as
+    text; anything else is dropped, never a failure."""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, int | float | str):
+        return str(raw).strip() or None
+    return None
+
+
 def _bitrate(raw: Any) -> int | None:
     """Informational only: an unreadable bitrate is dropped, never a failure."""
     try:
@@ -177,6 +187,8 @@ def validate_lookup(raw: object) -> ItemDetails:
                 refused=bool(entry.get("refused", False)),
                 derived_from=_optional_str(entry.get("derived_from"), "original", name),
                 bitrate=_bitrate(entry.get("bitrate")),
+                title=_track_value(entry.get("title")),
+                track=_track_value(entry.get("track")),
             )
         )
     reason = raw.restriction_reason

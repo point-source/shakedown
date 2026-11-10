@@ -25,6 +25,8 @@ def file_records(identifier: str, files: Iterable[Mapping[str, Any]]) -> list[di
             "refused": str(f.get("private")).lower() == "true",
             "derived_from": f.get("original"),
             "bitrate": f.get("bitrate"),
+            "title": f.get("title"),
+            "track": f.get("track"),
         }
         for f in files
     ]

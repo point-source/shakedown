@@ -1885,7 +1885,10 @@ def _plan_repair(
             if (folder / mf.name).is_file():
                 files.append(mf)
             continue
-        current = replace(mf, size=source_file.size, md5=source_file.md5)
+        current = replace(
+            mf, size=source_file.size, md5=source_file.md5,
+            title=source_file.title, track=source_file.track,
+        )
         files.append(current)
         fetch.append(current)
     manifest = Manifest(files=tuple(files))

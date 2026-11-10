@@ -649,3 +649,24 @@ def test_deleting_an_item_drops_its_tag_records(tmp_path: Path) -> None:
     items.delete("s", "c", "x")
     assert tags.file_records("s", "c", "x") == {}
     assert tags.fingerprints("s", "c") == {}
+
+
+def test_manifest_keeps_track_title_and_number_outside_its_identity(tmp_path: Path) -> None:
+    """Per-file title and track are recorded as the source listed them, but a change
+    to them is not a change to the show's files (§spec:sync-identity)."""
+    titled = Manifest(files=(ManifestFile("a.flac", 1, "m", title="Intro", track="1"),))
+    plain = Manifest(files=(ManifestFile("a.flac", 1, "m"),))
+    assert titled == plain
+    assert titled.to_json() == [
+        {"name": "a.flac", "size": 1, "md5": "m", "title": "Intro", "track": "1"}
+    ]
+    assert plain.to_json() == [{"name": "a.flac", "size": 1, "md5": "m"}]
+    assert Manifest.from_json(titled.to_json()).files == titled.files
+
+    repo = ItemRepo(connect(tmp_path / "s.db"))
+    item = _make_item()
+    item.recorded_manifest = titled
+    repo.upsert(item)
+    got = repo.get("s", "c", "x")
+    assert got is not None and got.recorded_manifest is not None
+    assert got.recorded_manifest.files[0].title == "Intro"

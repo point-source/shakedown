@@ -13,6 +13,7 @@ from shakedown.discovery import (
     ItemDetails,
     LookupFailure,
     SourceBudget,
+    describe,
     lookup,
 )
 from shakedown.plugins.base import ItemLookup
@@ -230,6 +231,28 @@ def test_raw_fields_quality_selection_needs_are_carried() -> None:
     mp3, shn = result.files
     assert (mp3.format, mp3.derived_from, mp3.bitrate, mp3.refused) == ("VBR MP3", "a.shn", 192, False)
     assert (shn.refused, shn.derived_from, shn.bitrate) == (True, None, None)
+
+
+def test_per_file_title_and_track_are_carried_to_the_manifest() -> None:
+    """Track title and number reach the recorded manifest for tag filling
+    (§spec:tag-filling). They are the source's word, not identity: a non-text value
+    is dropped rather than failing the show."""
+    FakePlugin.lookup_faults["a"] = [
+        _answer(
+            {"name": "a1.flac", "format": "Flac", "title": "Scarlet Begonias", "track": "03"},
+            {"name": "a2.flac", "format": "Flac", "title": ["odd"], "track": 4},
+            {"name": "a3.flac", "format": "Flac"},
+        )
+    ]
+    result, _ = _run(_plugin())
+    assert isinstance(result, ItemDetails)
+    assert [(f.title, f.track) for f in result.files] == [
+        ("Scarlet Begonias", "03"), (None, "4"), (None, None),
+    ]
+    manifest = describe("a", result).manifest
+    assert [(f.title, f.track) for f in manifest.files] == [
+        ("Scarlet Begonias", "03"), (None, "4"), (None, None),
+    ]
 
 
 def test_item_restriction_is_carried() -> None:

@@ -100,6 +100,25 @@ def test_lookup_item_passes_every_raw_file_through(archive) -> None:
     assert answer.restriction_reason is None
 
 
+def test_lookup_passes_per_file_title_and_track_through(archive) -> None:
+    """archive.org's per-file track titles and numbers feed tag filling
+    (§spec:tag-filling); a file without them has none."""
+    plugin = _make_plugin()
+    archive.item(
+        "gd-t",
+        [
+            {"name": "d1t01.flac", "size": "9", "md5": MD5_A, "format": "Flac",
+             "title": "Promised Land", "track": "01"},
+            {"name": "d1t02.flac", "size": "9", "md5": MD5_B, "format": "Flac"},
+        ],
+        SHOW,
+    )
+
+    first, second = plugin.lookup_item("gd-t", LOOKUP_TIMEOUT).files
+    assert (first["title"], first["track"]) == ("Promised Land", "01")
+    assert (second["title"], second["track"]) == (None, None)
+
+
 def test_listing_surfaces_combined_change_signal(archive) -> None:
     plugin = _make_plugin()
     archive.search_results(

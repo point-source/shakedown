@@ -148,7 +148,9 @@ class Selection:
 
 
 def _entry(f: SourceFile, library: bool) -> ManifestFile:
-    return ManifestFile(name=f.name, size=f.size, md5=f.md5, library=library)
+    return ManifestFile(
+        name=f.name, size=f.size, md5=f.md5, library=library, title=f.title, track=f.track
+    )
 
 
 def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selection:

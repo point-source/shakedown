@@ -53,11 +53,19 @@ class ManifestFile:
     size: int | None
     md5: str | None
     library: bool = True
+    # The track title and number the source lists for this file, when it lists them:
+    # the source's word, used to fill tags (§spec:tag-filling), never identity.
+    title: str | None = None
+    track: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         raw: dict[str, Any] = {"name": self.name, "size": self.size, "md5": self.md5}
         if not self.library:
             raw["library"] = False
+        if self.title is not None:
+            raw["title"] = self.title
+        if self.track is not None:
+            raw["track"] = self.track
         return raw
 
     @classmethod
@@ -68,6 +76,8 @@ class ManifestFile:
             size=raw.get("size"),
             md5=raw.get("md5"),
             library=raw.get("library", True),
+            title=raw.get("title"),
+            track=raw.get("track"),
         )
 
 
@@ -82,6 +92,8 @@ class SourceFile:
     refused: bool = False  # the source will not serve this file
     derived_from: str | None = None  # the original file, for a derivative
     bitrate: int | None = None  # kbps, when the source lists it
+    title: str | None = None  # the file's track title, when the source lists it
+    track: str | None = None  # the file's track number, as the source writes it
 
 
 @dataclass(frozen=True)
