@@ -46,6 +46,11 @@ sources:
         # excluded from change detection — an upstream notes edit never re-fetches media;
         # run `shakedown sync --refresh-metadata` to explicitly re-pull and rewrite it.
         preserve_source_metadata: false
+        # Opt-in tag filling (SPEC.md §spec:tag-filling): fill in missing artist, album,
+        # date, venue, and track title tags from archive.org's metadata, so shows group
+        # and display correctly in Navidrome. Tags already present are never changed.
+        # Off by default; when on, the archive copy carries the filled tags too.
+        fill_tags: false
         # No handoff is needed to listen: Navidrome in the example compose stack
         # watches the library tree and picks up new shows on its own. To tell
         # your own receiver about new shows instead, set one of these (both are

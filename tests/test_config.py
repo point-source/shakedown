@@ -31,6 +31,33 @@ sources:
     assert cfg.sources[0].collections[0].library_layout == "passthrough"
     # preserve_source_metadata is opt-in and defaults off (§spec:metadata-preservation).
     assert cfg.sources[0].collections[0].preserve_source_metadata is False
+    # fill_tags is opt-in and defaults off (§spec:tag-filling).
+    assert cfg.sources[0].collections[0].fill_tags is False
+
+
+def test_fill_tags_opt_in(tmp_path: Path) -> None:
+    p = _write(tmp_path, """
+archive_root: /data/archive
+library_root: /data/library
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'collection:GratefulDead'
+        fill_tags: true
+""")
+    cfg = load(p)
+    assert cfg.sources[0].collections[0].fill_tags is True
+
+
+def test_example_config_documents_fill_tags_off() -> None:
+    """The annotated example shows the opt-in, switched off (§spec:configuration)."""
+    example = Path(__file__).resolve().parent.parent / "shakedown.example.yaml"
+    cfg = load(example)
+    collections = [c for s in cfg.sources for c in s.collections]
+    assert "fill_tags" in example.read_text()
+    assert all(c.fill_tags is False for c in collections)
 
 
 def test_preserve_source_metadata_opt_in(tmp_path: Path) -> None:

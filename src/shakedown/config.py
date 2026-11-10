@@ -49,6 +49,10 @@ class CollectionConfig(BaseModel):
     # archive item directory and hardlinks it into the library beside the media. Off by
     # default — preservation is context, never coupled to media change detection.
     preserve_source_metadata: bool = False
+    # Opt-in per-collection tag filling (§spec:tag-filling): fill in missing basic tags
+    # (artist, album, date, venue, title) from the source metadata shakedown holds. Only
+    # absent tags are filled. Off by default: the archive keeps the source's bytes.
+    fill_tags: bool = False
     on_complete: Handoff | None = None
 
 

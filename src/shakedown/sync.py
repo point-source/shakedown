@@ -65,7 +65,13 @@ from shakedown.staging import (
     manifest_reserves_sidecar_name,
     write_sidecar,
 )
-from shakedown.state import ItemRepo, OperationOutcomeRepo, PendingHandoffRepo, RunRepo
+from shakedown.state import (
+    ItemRepo,
+    OperationOutcomeRepo,
+    PendingHandoffRepo,
+    RunRepo,
+    TagRepo,
+)
 from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
@@ -1763,6 +1769,8 @@ def _record_disappeared(
         existing.archive_path = None
         existing.last_verified_at = datetime.now()
         items.upsert(existing)
+        # The tagged bytes are gone with the archive copy (§spec:tag-filling).
+        TagRepo(items.conn).delete_show(source_name, collection.name, existing.identifier)
         return
     existing.status = ItemStatus.DISAPPEARED
     existing.last_verified_at = datetime.now()

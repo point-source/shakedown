@@ -1,4 +1,5 @@
-"""DB-backed repositories for items, runs, drift, library placement, and pending handoffs."""
+"""DB-backed repositories for items, runs, drift, library placement, pending handoffs, and
+tag-filling records."""
 from __future__ import annotations
 
 import json
@@ -204,6 +205,8 @@ class ItemRepo:
             "DELETE FROM items WHERE source_name=? AND collection_name=? AND identifier=?",
             (source, collection, identifier),
         )
+        # The show's tag records describe bytes shakedown no longer tracks.
+        TagRepo(self.conn).delete_show(source, collection, identifier)
 
 
 class RunRepo:
@@ -798,4 +801,92 @@ class PendingHandoffRepo:
         self.conn.execute(
             "DELETE FROM handoff_pending WHERE source_name=? AND collection_name=?",
             (source, collection),
+        )
+
+
+@dataclass(frozen=True)
+class TagRecord:
+    """What shakedown recorded for one file it tagged (§spec:tag-filling): the file's
+    checksum after tagging and the tag values it wrote that are still its own."""
+    post_tag_md5: str
+    written: dict[str, str]
+
+
+class TagRepo:
+    """The tag-filling records (§spec:tag-filling, §spec:state): per file shakedown
+    changed, its post-tag checksum and written values; per show, the fingerprint of
+    the tag values it was last filled with."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def file_records(self, source: str, collection: str, identifier: str) -> dict[str, TagRecord]:
+        cur = self.conn.execute(
+            "SELECT file_name, post_tag_md5, written FROM tag_files"
+            " WHERE source_name=? AND collection_name=? AND identifier=?",
+            (source, collection, identifier),
+        )
+        return {
+            row["file_name"]: TagRecord(row["post_tag_md5"], json.loads(row["written"]))
+            for row in cur.fetchall()
+        }
+
+    def put_file(
+        self, source: str, collection: str, identifier: str, file_name: str, record: TagRecord
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO tag_files
+                (source_name, collection_name, identifier, file_name, post_tag_md5, written)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source_name, collection_name, identifier, file_name)
+            DO UPDATE SET post_tag_md5=excluded.post_tag_md5, written=excluded.written
+            """,
+            (
+                source, collection, identifier, file_name,
+                record.post_tag_md5, json.dumps(record.written, sort_keys=True),
+            ),
+        )
+
+    def drop_files(
+        self, source: str, collection: str, identifier: str, file_names: Iterable[str]
+    ) -> None:
+        self.conn.executemany(
+            "DELETE FROM tag_files WHERE source_name=? AND collection_name=?"
+            " AND identifier=? AND file_name=?",
+            [(source, collection, identifier, name) for name in file_names],
+        )
+
+    def fingerprints(self, source: str, collection: str) -> dict[str, str]:
+        cur = self.conn.execute(
+            "SELECT identifier, fingerprint FROM tag_shows"
+            " WHERE source_name=? AND collection_name=?",
+            (source, collection),
+        )
+        return {row["identifier"]: row["fingerprint"] for row in cur.fetchall()}
+
+    def set_fingerprint(
+        self, source: str, collection: str, identifier: str, fingerprint: str
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO tag_shows (source_name, collection_name, identifier, fingerprint)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (source_name, collection_name, identifier)
+            DO UPDATE SET fingerprint=excluded.fingerprint
+            """,
+            (source, collection, identifier, fingerprint),
+        )
+
+    def clear_fingerprint(self, source: str, collection: str, identifier: str) -> None:
+        self.conn.execute(
+            "DELETE FROM tag_shows WHERE source_name=? AND collection_name=? AND identifier=?",
+            (source, collection, identifier),
+        )
+
+    def delete_show(self, source: str, collection: str, identifier: str) -> None:
+        self.clear_fingerprint(source, collection, identifier)
+        self.conn.execute(
+            "DELETE FROM tag_files WHERE source_name=? AND collection_name=? AND identifier=?",
+            (source, collection, identifier),
         )

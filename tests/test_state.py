@@ -21,6 +21,8 @@ from shakedown.state import (
     PendingHandoffRepo,
     PlacementRepo,
     RunRepo,
+    TagRecord,
+    TagRepo,
 )
 
 
@@ -442,7 +444,7 @@ def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
     assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 6
     assert {
         "library_placements", "library_folders", "library_unplaced", "library_adoption",
-        "handoff_pending",
+        "handoff_pending", "tag_files", "tag_shows",
     } <= _tables(conn)
     run_cols = _columns(conn, "runs")
     assert "collisions_dropped" not in run_cols
@@ -499,7 +501,8 @@ def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
     _legacy_v5(db_path, _V5_ITEMS)
     migrated = connect(db_path)
     for table in ("items", "runs", "library_placements", "library_folders",
-                  "library_unplaced", "library_adoption", "handoff_pending"):
+                  "library_unplaced", "library_adoption", "handoff_pending",
+                  "tag_files", "tag_shows"):
         assert _columns(fresh, table) == _columns(migrated, table), table
 
 
@@ -605,3 +608,44 @@ def test_run_failure_notice_error_round_trips(tmp_path: Path) -> None:
     run.finished_at = datetime(2026, 11, 10, 3, 5)
     repo.finish(run)
     assert repo.latest("s", "c").failure_notice_error == "webhook answered 502"  # type: ignore[union-attr]
+
+
+def test_tag_repo_round_trip(tmp_path: Path) -> None:
+    """Per file shakedown tagged: the post-tag checksum and the values it wrote; per
+    show: the fingerprint of its computed tags (§spec:tag-filling, §spec:state)."""
+    repo = TagRepo(connect(tmp_path / "s.db"))
+    repo.put_file("s", "c", "show-a", "a.flac", TagRecord("md5-a", {"album": "X"}))
+    repo.put_file("s", "c", "show-a", "b.flac", TagRecord("md5-b", {"artist": "Y"}))
+    repo.put_file("s", "c", "show-a", "a.flac", TagRecord("md5-a2", {"album": "Z"}))
+    repo.put_file("s", "other", "show-a", "a.flac", TagRecord("md5-o", {}))
+    assert repo.file_records("s", "c", "show-a") == {
+        "a.flac": TagRecord("md5-a2", {"album": "Z"}),
+        "b.flac": TagRecord("md5-b", {"artist": "Y"}),
+    }
+    repo.drop_files("s", "c", "show-a", ["b.flac"])
+    assert set(repo.file_records("s", "c", "show-a")) == {"a.flac"}
+
+    repo.set_fingerprint("s", "c", "show-a", "fp-1")
+    repo.set_fingerprint("s", "c", "show-a", "fp-2")
+    repo.set_fingerprint("s", "c", "show-b", "fp-b")
+    assert repo.fingerprints("s", "c") == {"show-a": "fp-2", "show-b": "fp-b"}
+    repo.clear_fingerprint("s", "c", "show-b")
+    assert repo.fingerprints("s", "c") == {"show-a": "fp-2"}
+
+    repo.delete_show("s", "c", "show-a")
+    assert repo.file_records("s", "c", "show-a") == {}
+    assert repo.fingerprints("s", "c") == {}
+    assert set(repo.file_records("s", "other", "show-a")) == {"a.flac"}
+
+
+def test_deleting_an_item_drops_its_tag_records(tmp_path: Path) -> None:
+    """A show's tag records go with its row (reconcile drops rows for shows gone from
+    disk); nothing else loses them (§spec:state)."""
+    conn = connect(tmp_path / "s.db")
+    items, tags = ItemRepo(conn), TagRepo(conn)
+    items.upsert(_make_item())
+    tags.put_file("s", "c", "x", "a.flac", TagRecord("md5", {"album": "A"}))
+    tags.set_fingerprint("s", "c", "x", "fp")
+    items.delete("s", "c", "x")
+    assert tags.file_records("s", "c", "x") == {}
+    assert tags.fingerprints("s", "c") == {}

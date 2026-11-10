@@ -173,6 +173,38 @@ _HANDOFF_SCHEMA = [
 ]
 _SCHEMA += _HANDOFF_SCHEMA
 
+# Tag filling (§spec:tag-filling), kept beside — never inside — the recorded manifest,
+# which stays the source's word and the change-detection key (§spec:sync-identity).
+_TAG_SCHEMA = [
+    # One row per file shakedown changed: its checksum after tagging (what `verify
+    # --deep` compares against) and the tag values shakedown wrote that are still its
+    # own (JSON object), the only values it may later rewrite.
+    """
+    CREATE TABLE IF NOT EXISTS tag_files (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        file_name        TEXT NOT NULL,
+        post_tag_md5     TEXT NOT NULL,
+        written          TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (source_name, collection_name, identifier, file_name)
+    )
+    """,
+    # Fingerprint of the tag values a show was last filled with: a sync revisits a
+    # show only when its computed values no longer match, so a tagged show's files are
+    # never re-read.
+    """
+    CREATE TABLE IF NOT EXISTS tag_shows (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        fingerprint      TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name, identifier)
+    )
+    """,
+]
+_SCHEMA += _TAG_SCHEMA
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and lazily create) the state DB at db_path."""
@@ -274,15 +306,15 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
     """v5 → v6, the one migration of the ownership, handoff, and discovery increment
     (§spec:state): add the library placement record, the pending-handoff record,
     each run's undelivered failure alert (§spec:durable-handoff) and its kind
-    (§spec:single-show-runs), and drop the
-    skip-the-loser collision columns, superseded by clash separation
+    (§spec:single-show-runs), the tag-filling records (§spec:tag-filling), and drop
+    the skip-the-loser collision columns, superseded by clash separation
     (§spec:library-ownership).
 
     The quality rule (§spec:quality-selection) adds each show's not-playable reason,
     and clears every stored change signal once: the first sync after the upgrade then
     looks every show up and applies the new rule, even on an incremental collection
     (§spec:incremental-discovery)."""
-    for stmt in _PLACEMENT_SCHEMA + _HANDOFF_SCHEMA:
+    for stmt in _PLACEMENT_SCHEMA + _HANDOFF_SCHEMA + _TAG_SCHEMA:
         conn.execute(stmt)
     if not _has_column(conn, "runs", "failure_notice_error"):
         conn.execute("ALTER TABLE runs ADD COLUMN failure_notice_error TEXT")
