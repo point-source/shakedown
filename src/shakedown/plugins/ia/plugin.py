@@ -122,13 +122,15 @@ def _detect_restriction(item_meta: dict[str, Any]) -> tuple[bool, str | None]:
     """Heuristic for "this item is stream-only / download-disabled" (PRD §6, §13)."""
     if item_meta.get("access-restricted") in (True, "true", "1"):
         return True, item_meta.get("access-restricted-item-reason") or "access-restricted"
-    # archive.org's flag on stream-only shows (they also sit in its `stream_only`
-    # collection); their lossless files answer 403.
-    if item_meta.get("access-restricted-item") in (True, "true", "1"):
-        return True, DOWNLOAD_REFUSED_REASON
     if str(item_meta.get("noindex")).lower() == "true":
         return True, "noindex (item hidden by uploader)"
     return False, None
+
+
+def _is_private(file_meta: dict[str, Any]) -> bool:
+    """archive.org's per-file verdict: a `private` file answers 403 (e.g. the lossless
+    originals of a stream-only show, whose MP3s stay public)."""
+    return str(file_meta.get("private")).lower() == "true"
 
 
 def _build_manifest(
@@ -136,10 +138,11 @@ def _build_manifest(
     format_filters: list[str],
     exclude_filters: list[str],
 ) -> Manifest:
-    """Manifest holds only the files we care to fetch — that's what 'do I have it?' compares."""
+    """Manifest holds only the files we care to fetch and archive.org will serve —
+    that's what 'do I have it?' compares."""
     entries: list[ManifestFile] = []
     for f in files:
-        if not _file_matches_filters(f, format_filters, exclude_filters):
+        if _is_private(f) or not _file_matches_filters(f, format_filters, exclude_filters):
             continue
         size_raw = f.get("size")
         size = int(size_raw) if size_raw is not None else None
@@ -231,6 +234,13 @@ class IAPlugin(SourcePlugin):
         metadata: dict[str, Any] = dict(item.get("metadata") or {})
         manifest = _build_manifest(files, collection.format_filters, collection.exclude_filters)
         restricted, reason = _detect_restriction(metadata)
+        if not restricted and not manifest.files and any(
+            _is_private(f)
+            and _file_matches_filters(f, collection.format_filters, collection.exclude_filters)
+            for f in files
+        ):
+            # Every wanted file is one archive.org refuses to serve.
+            restricted, reason = True, DOWNLOAD_REFUSED_REASON
         metadata = _normalize_template_fields(identifier, metadata)
         return ItemDescriptor(
             identifier=identifier,

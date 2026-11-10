@@ -549,25 +549,63 @@ def test_files_finished_before_the_process_died_are_reused(archive, tmp_path: Pa
     assert _served_calls(archive, "gd-x") == ["a.flac", "b.flac", "b.flac"]
 
 
-def test_discover_marks_stream_only_items_from_their_metadata_flag(archive) -> None:
-    """archive.org flags stream-only shows (e.g. gd69-12-26.sbd.murphy.1821.sbeok.shnf)
-    with `access-restricted-item` and a `stream_only` collection, and answers 403 for
-    their lossless files. The flag marks them unavailable before any download."""
-    from shakedown.plugins.ia.plugin import DOWNLOAD_REFUSED_REASON
-
-    plugin = _make_plugin()
+def _stream_only_show(archive: FakeArchive) -> None:
+    """Shaped like gd69-12-26.sbd.murphy.1821.sbeok.shnf: archive.org marks the
+    lossless originals `private` (downloads answer 403); the MP3s stay public."""
     archive.search_results({"identifier": "gd69-12-26.sbd"})
-    _flac_item(
-        archive,
+    archive.item(
         "gd69-12-26.sbd",
-        metadata={
+        [
+            {"name": "d1t01.shn", "size": "9", "md5": "s1", "format": "Shorten", "private": "true"},
+            {"name": "d1t01.mp3", "size": "3", "md5": "m1", "format": "VBR MP3"},
+            {"name": "info.txt", "size": "2", "md5": "t1", "format": "Text"},
+        ],
+        {
             "date": "1969-12-26",
             "collection": ["GratefulDead", "etree", "stream_only"],
             "access-restricted-item": "true",
         },
     )
 
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+
+def test_stream_only_show_is_unavailable_when_only_refused_files_are_wanted(archive) -> None:
+    from shakedown.plugins.ia.plugin import DOWNLOAD_REFUSED_REASON
+
+    plugin = _make_plugin()
+    _stream_only_show(archive)
+
+    coll = CollectionConfig(name="dead", query="x", format_filters=["shn"])
     desc = next(plugin.discover(coll))
     assert desc.is_restricted is True
     assert desc.restriction_reason == DOWNLOAD_REFUSED_REASON
+
+
+def test_stream_only_show_still_mirrors_the_files_archive_org_serves(archive) -> None:
+    """The restriction never hides a file that downloads: an MP3 collection gets the
+    show's public MP3s."""
+    plugin = _make_plugin()
+    _stream_only_show(archive)
+
+    coll = CollectionConfig(name="dead", query="x", format_filters=["mp3"])
+    desc = next(plugin.discover(coll))
+    assert desc.is_restricted is False
+    assert [f.name for f in desc.manifest.files] == ["d1t01.mp3"]
+
+
+def test_refused_files_are_left_out_of_a_mixed_format_manifest(archive) -> None:
+    """With several accepted formats, the refused ones drop out and the rest mirror."""
+    plugin = _make_plugin()
+    archive.search_results({"identifier": "gd-x"})
+    archive.item(
+        "gd-x",
+        [
+            {"name": "d1t01.shn", "size": "9", "md5": "s1", "format": "Shorten", "private": "true"},
+            {"name": "d1t01.flac", "size": "8", "md5": "f1", "format": "Flac"},
+        ],
+        SHOW,
+    )
+
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac", "shn"])
+    desc = next(plugin.discover(coll))
+    assert desc.is_restricted is False
+    assert [f.name for f in desc.manifest.files] == ["d1t01.flac"]

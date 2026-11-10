@@ -1242,7 +1242,7 @@ degrade a single item or a single run, never the archive.
 | Library tool deletes staging links | Restored on next sync or `restage` |
 | User wipes library tree | Rebuilt by `restage` with zero downloads |
 | User wipes archive tree | DB and library invalidated; full re-download — working as intended (§spec:state) |
-| Item restricted upstream | Local copy retained; status flips to `unavailable` with reason |
+| Item restricted upstream | Only the files the source refuses are left out (archive.org marks each one `private`); a file it serves is always mirrored. When every file the collection wants is refused: local copy retained; status flips to `unavailable` with reason |
 | Source refuses a download (archive.org's 403 on a stream-only show with no restriction flag in its metadata) | Not a failure and not retried within the run: the item flips to `unavailable` with reason, the local copy (if any) is retained, and its temp directory is removed |
 | Restriction lifted upstream | Detected on next discover; fetched as new |
 | Source lists zero files for an item (darked, glitch, filter matches nothing) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
