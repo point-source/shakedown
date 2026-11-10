@@ -189,3 +189,30 @@ def test_reconcile_keeps_a_fallback_shows_reason(tmp_roots: tuple[Path, Path]) -
     assert row is not None
     assert row.status == ItemStatus.COMPLETE
     assert row.restriction_reason == FALLBACK_REASON
+
+
+def test_reconcile_keeps_the_reason_of_a_show_whose_lookup_fails(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A show that keeps its prior status keeps everything it had, its reason too."""
+    from shakedown.selection import FALLBACK_REASON
+
+    archive, library = tmp_roots
+    config = make_config(archive, library, format_filters=["shn"], fallback_format_filters=["mp3"])
+    FakePlugin.items["sbd"] = FakeItem(
+        identifier="sbd",
+        files=[
+            FakeFile(name="t.shn", content=b"lossless", refused=True),
+            FakeFile(name="t.mp3", content=b"mp3"),
+        ],
+        change_signal="v1",
+    )
+    assert run_sync(config) == 0
+    FakePlugin.lookup_faults["sbd"] = [ConnectionResetError("connection reset")]
+
+    assert run_reconcile(config) == 1
+
+    row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "sbd")  # type: ignore[arg-type]
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE
+    assert row.restriction_reason == FALLBACK_REASON

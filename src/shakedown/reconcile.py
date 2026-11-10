@@ -162,8 +162,10 @@ def _reconcile_collection(
                     discovered_at=existing.discovered_at if existing else now,
                     downloaded_at=existing.downloaded_at if existing else now,
                     last_verified_at=now,
+                    restriction_reason=existing.restriction_reason if existing else None,
                     source_metadata=existing.source_metadata if existing else {},
                     recorded_manifest=existing.recorded_manifest if existing else None,
+                    change_signal=existing.change_signal if existing else None,
                 )
             items.upsert(item)
 
