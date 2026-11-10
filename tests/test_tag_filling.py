@@ -841,3 +841,15 @@ def test_killing_sync_mid_tagging_leaves_no_half_written_file(
         assert archive_file.stat().st_ino == _library_file(config, name).stat().st_ino
         assert archive_file.stat().st_nlink == 2
     assert _verify(config) == []
+
+
+def test_two_recordings_fetched_in_one_run_are_both_labelled(tmp_roots) -> None:
+    """The first download is tagged before the second is known; the run's pass over
+    mirrored shows labels it once the clash appears."""
+    config = make_config(*tmp_roots, fill_tags=True)
+    _fake_show("gd77.aud", tmp_roots[0].parent)
+    _fake_show("gd77.sbd", tmp_roots[0].parent)
+    assert run_sync(config) == 0
+    assert _album(config, "gd77.aud") == [f"{ALBUM} [gd77.aud]"]
+    assert _album(config, "gd77.sbd") == [f"{ALBUM} [gd77.sbd]"]
+    assert _verify(config) == []
