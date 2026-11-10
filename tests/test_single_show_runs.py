@@ -413,3 +413,22 @@ def test_status_text_after_a_sync_names_no_kind(
 
     started = _summary(config)["last_run"]["started_at"]
     assert f"  last run: {started} → new=1 " in capsys.readouterr().out
+
+
+def test_a_clean_refetch_of_another_show_keeps_a_failed_refetchs_warning(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A single-show run only clears warnings about the shows it acted on."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _add_show("gd-a")
+    _add_show("gd-b")
+    assert run_sync(config) == 0
+    FakePlugin.lookup_faults["gd-a"] = [ConnectionResetError("connection reset")]
+    assert refetch_item(config, "gd-a") == 1
+
+    assert refetch_item(config, "gd-b") == 0
+
+    recovery = _summary(config)["recovery"]
+    assert recovery is not None
+    assert (recovery["operation"], recovery["affected_item"]) == ("refetch", "gd-a")

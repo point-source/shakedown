@@ -12,7 +12,7 @@ import os
 import queue
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import closing
 from dataclasses import dataclass, field, replace
@@ -559,10 +559,12 @@ def _finish_outcome(
     collection: CollectionConfig,
     finished: datetime,
     kind: RunKind,
+    shows: Collection[str] | None = None,
 ) -> None:
     """Close a run's outcome once its work is done (§spec:recoverable-operation-reporting).
     A clean run clears earlier warnings of its own kind only: a single-show run did
-    not redo a sync's work, and a sync does not refetch an unchanged show."""
+    not redo a sync's work, and a sync does not refetch an unchanged show. A clean
+    single-show run (``shows``) clears only warnings about the shows it acted on."""
     if stats.failed > 0:
         phase = "stage" if stats.failed == stats.staging_issues else "fetch"
         outcomes.finish(
@@ -587,7 +589,8 @@ def _finish_outcome(
         deletion_context=_deletion_context(collection),
     )
     outcomes.resolve_actionable(
-        OperationType(kind.value), outcome.source_name, outcome.collection_name, finished
+        OperationType(kind.value), outcome.source_name, outcome.collection_name, finished,
+        affected_items=shows,
     )
 
 
@@ -2028,4 +2031,4 @@ def _single_show_phases(
         config, items, source, collection, stats, started, finished, report.folder_of
     )
     _finish_run(runs, run, stats, finished)
-    _finish_outcome(outcomes, outcome, stats, collection, finished, kind)
+    _finish_outcome(outcomes, outcome, stats, collection, finished, kind, shows)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -444,7 +444,11 @@ class OperationOutcomeRepo:
         source: str,
         collection: str,
         resolved_at: datetime,
+        *,
+        affected_items: Collection[str] | None = None,
     ) -> None:
+        """Mark open warnings of ``operation`` for the collection resolved — with
+        ``affected_items``, only those about one of these shows."""
         statuses = tuple(s.value for s in self.ACTIONABLE_STATUSES)
         placeholders = ", ".join("?" for _ in statuses)
         params: list[object] = [
@@ -454,6 +458,10 @@ class OperationOutcomeRepo:
             collection,
             *statuses,
         ]
+        only_items = ""
+        if affected_items is not None:
+            only_items = f"AND affected_item IN ({', '.join('?' for _ in affected_items)})"
+            params.extend(affected_items)
         self.conn.execute(
             f"""
             UPDATE operation_outcomes
@@ -463,6 +471,7 @@ class OperationOutcomeRepo:
               AND collection_name=?
               AND resolved_at IS NULL
               AND status IN ({placeholders})
+              {only_items}
             """,
             params,
         )
