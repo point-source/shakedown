@@ -9,7 +9,14 @@ import click
 from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.models import ItemStatus, OperationOutcome
-from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, PlacementRepo, RunRepo
+from shakedown.state import (
+    DriftRepo,
+    ItemRepo,
+    OperationOutcomeRepo,
+    PendingHandoffRepo,
+    PlacementRepo,
+    RunRepo,
+)
 
 
 def _collection_summary(
@@ -53,9 +60,32 @@ def _collection_summary(
             str(library_dir / path)
             for path in placements.list_unplaced(source_name, collection_name)
         ],
+        # Shows whose handoff notice was not delivered yet (§spec:durable-handoff).
+        "handoff_pending": _handoff_pending(config, source_name, collection_name, items),
         # Stale = the most recent run failed to enumerate the source; existing
         # items are retained (§spec:failure-behavior).
         "stale": bool(last.stale) if last else False,
+    }
+
+
+def _handoff_pending(
+    config: Config, source_name: str, collection_name: str, items: ItemRepo
+) -> dict[str, Any] | None:
+    """The collection's pending handoff, or None. A collection whose `on_complete` was
+    removed has dropped its list, even before the next run deletes the rows."""
+    has_handoff = any(
+        c.name == collection_name and c.on_complete is not None
+        for s in config.sources if s.name == source_name
+        for c in s.collections
+    )
+    pending = PendingHandoffRepo(items.conn).list(source_name, collection_name)
+    if not has_handoff or not pending:
+        return None
+    return {
+        "shows": len(pending),
+        "since": min(p.since for p in pending).isoformat(),
+        "last_reason": pending[0].last_reason,
+        "identifiers": [p.identifier for p in pending],
     }
 
 
@@ -147,6 +177,11 @@ def print_status(config: Config, *, as_json: bool) -> None:
             )
         else:
             click.echo("  last run: never")
+        handoff = s["handoff_pending"]
+        if handoff:
+            shows = "1 show" if handoff["shows"] == 1 else f"{handoff['shows']} shows"
+            click.echo(f"  handoff not delivered: {shows} since {handoff['since']}")
+            click.echo(f"    last reason: {handoff['last_reason']}")
         click.echo("  items: " + ", ".join(f"{k}={v}" for k, v in s["counts"].items() if v))
         click.echo(f"  disk:  {s['bytes_on_disk'] / 1e9:.2f} GiB")
         separations = s["separations"]

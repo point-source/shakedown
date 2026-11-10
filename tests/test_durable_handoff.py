@@ -307,3 +307,97 @@ def test_example_compose_runs_navidrome_on_the_library_tree() -> None:
     navidrome = compose["services"]["navidrome"]
     assert "/share/data/library:/music:ro" in navidrome["volumes"]
     assert "beets" not in compose["services"]
+
+
+# --- status: text, --json, GET /status ---------------------------------------
+
+
+def _status(cfg: Path, *args: str) -> str:
+    from click.testing import CliRunner
+
+    from shakedown.cli import main
+
+    result = CliRunner().invoke(main, ["--config", str(cfg), "status", *args])
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+def test_status_shows_an_undelivered_handoff_until_a_later_run_delivers_it(
+    tmp_path: Path, tmp_roots: tuple[Path, Path],
+) -> None:
+    """§spec:durable-handoff user-level path, against a real receiver: an unreachable
+    target leaves the notice pending in status with its reason and exit 0; fixing the
+    target and syncing with nothing new delivers one notice and clears status."""
+    import json as jsonlib
+
+    from tests.conftest import write_config
+    from tests.test_notify import _Receiver
+
+    archive, library = tmp_roots
+    closed = _Receiver()
+    unreachable = closed.url
+    closed.close()  # nothing listens there any more
+    _add_show("gd-a")
+    _add_show("gd-b")
+    config = _config(archive, library, unreachable)
+    cfg = write_config(tmp_path / "shakedown.yaml", config)
+    assert run_sync(config) == 0
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    since = min(p.since for p in PendingHandoffRepo(conn).list("fake-src", "coll1"))
+    text = _status(cfg)
+    assert f"  handoff not delivered: 2 shows since {since.isoformat()}\n" in text
+    assert "    last reason: webhook unreachable: " in text
+    assert unreachable not in text  # the target is in the config, not in status
+
+    summary = jsonlib.loads(_status(cfg, "--json"))[0]
+    pending = summary["handoff_pending"]
+    assert pending["shows"] == 2
+    assert pending["since"] == since.isoformat()
+    assert pending["last_reason"].startswith("webhook unreachable: ")
+    assert pending["identifiers"] == ["gd-a", "gd-b"]
+
+    receiver = _Receiver()
+    try:
+        config = _config(archive, library, receiver.url)
+        cfg = write_config(tmp_path / "shakedown.yaml", config)
+        assert run_sync(config) == 0
+        assert len(receiver.bodies) == 1
+        assert receiver.bodies[0]["payload_version"] == 2
+        assert _staged_ids(receiver.bodies[0]) == ["gd-a", "gd-b"]
+    finally:
+        receiver.close()
+
+    assert "handoff not delivered" not in _status(cfg)
+    assert jsonlib.loads(_status(cfg, "--json"))[0]["handoff_pending"] is None
+
+
+def test_status_counts_one_show_in_the_singular(
+    tmp_path: Path, tmp_roots: tuple[Path, Path],
+) -> None:
+    from tests.conftest import write_config
+
+    archive, library = tmp_roots
+    _add_show("gd-a")
+    config = _config(archive, library, DOWN)
+    assert _sync(config, _Webhooks()) == 0
+
+    text = _status(write_config(tmp_path / "shakedown.yaml", config))
+    assert "  handoff not delivered: 1 show since " in text
+
+
+def test_status_hides_pending_shows_once_the_handoff_is_removed(
+    tmp_path: Path, tmp_roots: tuple[Path, Path],
+) -> None:
+    """Removing on_complete drops the list: status says so before the next run."""
+    import json as jsonlib
+
+    from tests.conftest import write_config
+
+    archive, library = tmp_roots
+    _add_show("gd-a")
+    assert _sync(_config(archive, library, DOWN), _Webhooks()) == 0
+
+    cfg = write_config(tmp_path / "shakedown.yaml", _config(archive, library, None))
+    assert "handoff not delivered" not in _status(cfg)
+    assert jsonlib.loads(_status(cfg, "--json"))[0]["handoff_pending"] is None

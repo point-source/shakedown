@@ -483,3 +483,35 @@ async def test_reconform_without_deep_is_a_bad_request(
         r = await client.post("/verify", params={"reconform": True}, headers=AUTH)
         assert r.status_code == 400
         assert "deep" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_status_carries_the_pending_handoff(tmp_roots: tuple[Path, Path]) -> None:
+    """GET /status carries the same pending handoff as `status --json`
+    (§spec:durable-handoff), pending identifiers included."""
+    from unittest.mock import patch
+
+    from shakedown.config import WebhookHandoff
+
+    archive, library = tmp_roots
+    config = make_config(
+        archive, library, on_complete=WebhookHandoff(webhook="http://down.example/hook")
+    )
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"audio")]
+    )
+
+    def refused(*_args, **_kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    with patch("shakedown.notify.httpx.post", side_effect=refused):
+        assert run_sync(config) == 0
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(config)), base_url="http://testserver"
+    ) as client:
+        pending = (await client.get("/status")).json()[0]["handoff_pending"]
+
+    assert pending["shows"] == 1
+    assert pending["identifiers"] == ["gd-x"]
+    assert pending["last_reason"] == "webhook unreachable: connection refused"
