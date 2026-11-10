@@ -461,8 +461,8 @@ discovery-performance increment bought (§spec:discovery-pipeline).
 
 ## Layout collision safety §spec:layout-collision-safety
 
-*Status: complete for the config-time guard; the runtime behavior below
-is superseded by separation (§spec:library-ownership) — not started.*
+*Status: complete — the config-time guard, and runtime separation
+(§spec:library-ownership).*
 
 A `library_layout` that cannot distinguish two items in the same
 collection renders them to the same staging path; when their filenames
@@ -808,9 +808,8 @@ first sync downloads only the added non-audio files and playable copies.
 
 ## Library staging §spec:library-staging
 
-*Status: complete, except path ownership, clash separation, and
-stale-copy cleanup (§spec:library-ownership, §spec:library-cleanup) —
-not started.*
+*Status: complete, including path ownership, clash separation, and
+stale-copy cleanup (§spec:library-ownership, §spec:library-cleanup).*
 
 Per collection, the user provides a `library_layout` template that
 renders each item's **staging directory** under the library tree, from
@@ -875,7 +874,7 @@ filenames are then hardlinked into that directory unchanged.
 
 ## Library path ownership §spec:library-ownership
 
-*Status: not started*
+*Status: complete*
 
 Every library folder and file has exactly one owning show, and two
 distinct recordings never share, replace, or merge into one another's
@@ -964,7 +963,7 @@ untouched and the conflict is reported.
 
 ## Stale library copy cleanup §spec:library-cleanup
 
-*Status: not started*
+*Status: complete*
 
 The library holds each show only at its current path. Whenever a show's
 library folder or file set changes, the system removes what it placed
@@ -1328,8 +1327,9 @@ the run rather than being ignored).
 
 ## State persistence and recovery §spec:state
 
-*Status: implemented, except the records added by the ownership,
-handoff, and discovery increment (below) — not started.*
+*Status: implemented, including the library placement record of the
+ownership, handoff, and discovery increment (below); its tag-filling and
+durable-handoff records — not started.*
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -1946,8 +1946,10 @@ listed.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: complete, except rows citing sections of the ownership,
-handoff, and discovery increment — not started.*
+*Status: complete, including the library ownership and cleanup rows
+(§spec:library-ownership, §spec:library-cleanup); the other rows citing
+sections of the ownership, handoff, and discovery increment — not
+started.*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
