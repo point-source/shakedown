@@ -110,7 +110,7 @@ The serve container starts runs itself, so it needs the same image, mounts, user
 
 ### Library handoff (optional)
 
-A collection's `on_complete` can call a webhook or run a command after each sync that stages new shows, for a tool of your own that should hear about them. Listening needs none: Navidrome's folder watcher finds new shows by itself. A handoff that is not delivered never fails the sync; its shows show in `status` and go out again with the next sync. See [docs/handoff.md](docs/handoff.md) for the delivery rules and the payload.
+A collection's `on_complete` can call a webhook or run a command after a sync that stages new shows, for a tool of your own that should hear about them. Listening needs none: Navidrome's folder watcher finds new shows by itself. A handoff that is not delivered never fails the sync; its shows show in `status` and go out again with the next sync. See [docs/handoff.md](docs/handoff.md) for the delivery rules and the payload.
 
 ### Upgrading
 

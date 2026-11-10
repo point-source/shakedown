@@ -1388,8 +1388,7 @@ pretending otherwise would be false durability.
 
 ## Library handoff and notifications §spec:handoff
 
-*Status: implemented, including delivery guarantees, resend, status
-visibility, and the shipped recipe (§spec:durable-handoff).*
+*Status: complete*
 
 After a sync that staged at least one item for a collection (or that
 has undelivered shows to resend, §spec:durable-handoff), the system
@@ -1401,9 +1400,8 @@ the `{source}`/`{collection}`/`{staging_root}` template fields available
 in the URL or command:
 
 - **Webhook** (`on_complete.webhook: <url>`): HTTP POST of a versioned
-  JSON body (`payload_version`, `event: sync.complete`, a `run` counts/
-  timing object, and a `staged` array of per-item identifier + archive/
-  staging paths). See `notify.py` for the exact shape.
+  JSON body listing the staged shows with their archive and library
+  paths. The payload contract is documented in `docs/handoff.md`.
 - **Exec** (`on_complete.exec: <command>`): a configured command run
   inside the shakedown container with the same JSON on stdin. Exists
   because many library tools have a CLI but no HTTP listener; the
