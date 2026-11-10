@@ -283,7 +283,7 @@ def _refresh_collection(
     upstream, the fresh metadata is written to `metadata.json` (in place, so the library
     hardlink tracks it) and to the recorded `source_metadata`, then the collection is
     restaged, so a show whose folder renders differently moves — media is never
-    re-downloaded. Returns 1 if staging left a per-show issue, else 0.
+    re-downloaded. Returns 1 if a lookup failed or staging left a per-show issue, else 0.
     """
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
@@ -341,7 +341,7 @@ def _refresh_collection(
     if report.render_error is not None:
         log.warning("[%s/%s] %s: %s", source.name, collection.name, *report.render_error)
         return 1
-    return 1 if report.issues else 0
+    return 1 if report.issues or failed else 0
 
 
 def _apply_placement_report(stats: CollectionSyncStats, report: PlacementReport) -> None:
