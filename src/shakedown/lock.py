@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from shakedown.config import Config
+from shakedown.trigger import announce_busy
 
 log = logging.getLogger(__name__)
 
@@ -58,4 +59,5 @@ def run_exclusive(config: Config, command: Callable[[], int]) -> int:
             return command()
     except LockHeld as e:
         log.error("%s", e)
+        announce_busy()
         return 1

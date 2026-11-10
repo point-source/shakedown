@@ -21,6 +21,7 @@ from shakedown.plugins import registry
 from shakedown.plugins.base import ItemDescriptor
 from shakedown.state import DriftRepo, ItemRepo
 from shakedown.sync import CollectionSyncStats, PlanAction, PlannedItem, _execute_fetch_and_stage
+from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +111,9 @@ def _run_verify(
     list_drift: bool,
     assume_yes: bool,
 ) -> int:
+    # A verify opens no run record; serve learns only that it started (and, for a
+    # reconform, that it holds the writer lock) (§spec:api-sync-runs).
+    announce_started([])
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     drift_repo = DriftRepo(conn)

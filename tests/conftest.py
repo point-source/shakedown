@@ -60,4 +60,12 @@ def make_config(
     )
 
 
-__all__ = ["FakePlugin", "make_config"]
+def write_config(path: Path, config: Config) -> Path:
+    """Write a Config as the YAML file a `shakedown` process (or serve) loads."""
+    import yaml
+
+    path.write_text(yaml.safe_dump(config.model_dump(mode="json", exclude_none=True)))
+    return path
+
+
+__all__ = ["FakePlugin", "make_config", "write_config"]

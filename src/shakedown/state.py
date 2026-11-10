@@ -201,6 +201,13 @@ class RunRepo:
             started_at=started_at,
         )
 
+    def mark_started(self, run: Run, started_at: datetime) -> None:
+        """Move a run opened ahead of time to when its work actually began."""
+        run.started_at = started_at
+        self.conn.execute(
+            "UPDATE runs SET started_at=? WHERE id=?", (_iso(started_at), run.id)
+        )
+
     def finish(self, run: Run) -> None:
         self.conn.execute(
             """
@@ -304,6 +311,15 @@ class OperationOutcomeRepo:
             updated_at=started_at,
             phase=phase,
             safe_next_action=safe_next_action,
+        )
+
+    def mark_started(self, outcome: OperationOutcome, started_at: datetime) -> None:
+        """Move an outcome opened ahead of time to when its work actually began."""
+        outcome.started_at = started_at
+        outcome.updated_at = started_at
+        self.conn.execute(
+            "UPDATE operation_outcomes SET started_at=?, updated_at=? WHERE id=?",
+            (_iso(started_at), _iso(started_at), outcome.id),
         )
 
     def finish(

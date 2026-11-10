@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
@@ -52,6 +52,7 @@ from shakedown.staging import (
     write_sidecar,
 )
 from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
+from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
 
@@ -305,6 +306,8 @@ def _run_sync(
             work.append((source, collection, plugin))
 
     if not work:
+        if not dry_run:
+            announce_started([])
         return 0
 
     # Initialize the state DB once, up front. The one-time WAL switch and schema
@@ -316,7 +319,12 @@ def _run_sync(
     budgets = _source_budgets(config, work)
 
     if refresh_metadata:
+        announce_started([])
         return _run_refresh(config, work, budgets)
+
+    opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = (
+        {} if dry_run else _open_runs(config, work)
+    )
 
     overall_failed = 0
     max_workers = min(config.max_concurrent_collections, len(work))
@@ -325,6 +333,7 @@ def _run_sync(
             pool.submit(
                 _sync_collection, config, source, collection, plugin,
                 dry_run=dry_run, budget=budgets[source.name],
+                opened=opened.get((source.name, collection.name)),
             ): (source, collection)
             for source, collection, plugin in work
         }
@@ -362,6 +371,41 @@ def _run_sync(
             if stats.failed > 0 or stats.stale or stats.collisions_dropped > 0:
                 overall_failed += 1
     return 0 if overall_failed == 0 else 1
+
+
+def _open_runs(
+    config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
+) -> dict[tuple[str, str], tuple[Run, OperationOutcome]]:
+    """Open every collection's run record and outcome before any collection starts,
+    then announce them to `serve` if it started this run (§spec:api-sync-runs): serve
+    answers a trigger with the run ids, so they must exist before the first collection
+    begins. Each collection resets its start time when it actually begins."""
+    started = datetime.now()
+    opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = {}
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        runs = RunRepo(conn)
+        outcomes = OperationOutcomeRepo(conn)
+        for source, collection, _plugin in work:
+            run = runs.start(source.name, collection.name, started)
+            outcome = outcomes.start(
+                OperationType.SYNC,
+                source.name,
+                collection.name,
+                started,
+                phase="discover",
+                safe_next_action="restore source access and rerun sync",
+            )
+            opened[(source.name, collection.name)] = (run, outcome)
+    announce_started([
+        {
+            "run_id": run.id,
+            "outcome_id": outcome.id,
+            "source": run.source_name,
+            "collection": run.collection_name,
+        }
+        for run, outcome in opened.values()
+    ])
+    return opened
 
 
 def _run_refresh(
@@ -547,6 +591,7 @@ def _sync_collection(
     *,
     dry_run: bool,
     budget: SourceBudget,
+    opened: tuple[Run, OperationOutcome] | None = None,
 ) -> CollectionSyncStats:
     """Sync one (source, collection) end-to-end.
 
@@ -563,19 +608,14 @@ def _sync_collection(
     runs = RunRepo(conn)
     outcomes = OperationOutcomeRepo(conn)
 
-    run = runs.start(source.name, collection.name, started) if not dry_run else None
-    outcome = (
-        outcomes.start(
-            OperationType.SYNC,
-            source.name,
-            collection.name,
-            started,
-            phase="discover",
-            safe_next_action="restore source access and rerun sync",
-        )
-        if not dry_run
-        else None
-    )
+    run: Run | None = None
+    outcome: OperationOutcome | None = None
+    if opened is not None:
+        # Opened up front by `_open_runs`; time the run from when this collection
+        # actually begins, not from when it was queued behind the others.
+        run, outcome = opened
+        runs.mark_started(run, started)
+        outcomes.mark_started(outcome, started)
 
     stats = CollectionSyncStats()
     try:
