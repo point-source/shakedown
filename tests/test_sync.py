@@ -4,6 +4,8 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import pytest
+
 import shakedown.sync as sync_module
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect
@@ -153,6 +155,231 @@ def test_restricted_item_recorded_as_unavailable(tmp_roots: tuple[Path, Path]) -
     assert row is not None
     assert row.status == ItemStatus.UNAVAILABLE
     assert "soundboard" in (row.restriction_reason or "")
+
+
+def _refuse_downloads_of(monkeypatch, *identifiers: str) -> None:
+    """The source refuses these downloads outright (archive.org's 403 on a
+    stream-only show whose metadata carries no restriction flag)."""
+    real_fetch = FakePlugin.fetch
+
+    def fetch(self, item, dest_dir, format_filters, exclude_filters):
+        if item.identifier in identifiers:
+            FakePlugin.fetch_count[item.identifier] = FakePlugin.fetch_count.get(item.identifier, 0) + 1
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            return FetchResult(
+                success=False, bytes_downloaded=0, error="refused", unavailable=True
+            )
+        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+
+    monkeypatch.setattr(FakePlugin, "fetch", fetch)
+
+
+def test_refused_download_records_the_show_unavailable(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-sbd")
+    _seed_item("gd-aud")
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+
+    assert run_sync(config) == 0, "a show the source won't serve is not a run failure"
+
+    assert FakePlugin.fetch_count["gd-sbd"] == 1, "a refusal is not retried within the run"
+    assert not (archive / "fake-src" / "coll1" / ".tmp-gd-sbd").exists()
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None
+    assert row.status == ItemStatus.UNAVAILABLE
+    assert row.restriction_reason == "refused"
+    run = RunRepo(conn).latest("fake-src", "coll1")
+    assert run is not None and run.items_failed == 0
+    assert ItemRepo(conn).get("fake-src", "coll1", "gd-aud").status == ItemStatus.COMPLETE  # type: ignore[union-attr]
+
+
+def test_refused_show_is_rechecked_next_run_without_failing(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Restricted shows are re-checked on each discover (SPEC §spec:item-lifecycle):
+    one attempt per run, never counted as a failure."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-sbd")
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+    assert run_sync(config) == 0
+
+    assert run_sync(config) == 0
+
+    assert FakePlugin.fetch_count["gd-sbd"] == 2
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None and row.status == ItemStatus.UNAVAILABLE
+
+
+def test_refetch_of_a_refused_show_exits_nonzero(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Nothing was downloaded, so `item refetch` must not report success."""
+    from shakedown.sync import refetch_item
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-sbd")
+    assert run_sync(config) == 0
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+
+    assert refetch_item(config, "gd-sbd") == 1
+
+
+def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
+    tmp_roots: tuple[Path, Path]
+) -> None:
+    """A show mirrored as its fallback (e.g. MP3 when archive.org refuses the lossless
+    files) is complete, and `status` lists it with the reason. When the lossless files
+    are served again, the next sync fetches them and the show leaves the list."""
+    from shakedown.state import DriftRepo
+    from shakedown.status import _collection_summary
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed_item("gd-sbd")
+    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
+    item.restriction_reason = "fallback copy"
+    assert run_sync(config) == 0
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    items, runs = ItemRepo(conn), RunRepo(conn)
+
+    def restricted() -> list[dict]:
+        return _collection_summary(
+            config, "fake-src", "coll1", items, runs, DriftRepo(conn), OperationOutcomeRepo(conn)
+        )["restricted"]
+
+    row = items.get("fake-src", "coll1", "gd-sbd")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+    assert restricted() == [{"identifier": "gd-sbd", "reason": "fallback copy"}]
+
+    item.files = [FakeFile(name="d1t01.shn", content=b"lossless")]
+    item.restriction_reason = None
+    assert run_sync(config) == 0
+
+    assert (archive / "fake-src" / "coll1" / "gd-sbd" / "d1t01.shn").read_bytes() == b"lossless"
+    assert restricted() == []
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
+    tmp_roots: tuple[Path, Path], incremental: bool
+) -> None:
+    """A fallback show that drops out of one listing and returns unchanged is complete
+    again and still listed in `status` with its reason."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=incremental)
+    item = _seed_item("gd-sbd")
+    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
+    item.restriction_reason = "fallback copy"
+    item.change_signal = "v1"
+    assert run_sync(config) == 0
+    del FakePlugin.items["gd-sbd"]
+    assert run_sync(config) == 0
+    FakePlugin.items["gd-sbd"] = item
+
+    assert run_sync(config) == 0
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", "fallback copy")]
+
+
+def test_complete_show_takes_the_current_reason_when_its_files_are_unchanged(
+    tmp_roots: tuple[Path, Path]
+) -> None:
+    """Switching a collection between wanting MP3s and falling back to them keeps the
+    same files, so only the listed reason changes; `status` must follow it."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed_item("gd-sbd")
+    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
+    assert run_sync(config) == 0
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+
+    item.restriction_reason = "fallback copy"
+    assert run_sync(config) == 0
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", "fallback copy")]
+
+    item.restriction_reason = None
+    assert run_sync(config) == 0
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == []
+
+
+def test_incremental_sync_rechecks_a_show_left_unavailable_by_a_refused_refetch(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A refused refetch keeps the archive copy and its change signal; the next
+    incremental sync must still look the show up rather than skip it on the signal."""
+    from shakedown.sync import refetch_item
+
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=True)
+    item = _seed_item("gd-sbd")
+    item.change_signal = "v1"
+    assert run_sync(config) == 0
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+    assert refetch_item(config, "gd-sbd") == 1
+    described = FakePlugin.describe_count.get("gd-sbd", 0)
+
+    assert run_sync(config) == 0
+
+    assert FakePlugin.describe_count["gd-sbd"] == described + 1, "looked up, not skipped"
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE  # the archive copy matches the manifest
+    assert row.restriction_reason is None
+
+
+def test_refetch_of_a_show_flagged_restricted_keeps_it_unavailable(
+    tmp_roots: tuple[Path, Path]
+) -> None:
+    from shakedown.sync import refetch_item
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed_item("gd-sbd")
+    item.is_restricted = True
+    item.restriction_reason = "stream-only"
+    item.files = []
+    assert run_sync(config) == 0
+
+    assert refetch_item(config, "gd-sbd") == 1
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None
+    assert row.status == ItemStatus.UNAVAILABLE
+    assert row.restriction_reason == "stream-only"
+    assert not (archive / "fake-src" / "coll1" / ".tmp-gd-sbd").exists()
+
+
+def test_refused_redownload_keeps_the_archive_copy(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed_item("gd-sbd", content=b"v1")
+    assert run_sync(config) == 0
+    item.files = [FakeFile(name="gd-sbd.flac", content=b"v2-remastered")]
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+
+    assert run_sync(config) == 0
+
+    assert (archive / "fake-src" / "coll1" / "gd-sbd" / "gd-sbd.flac").read_bytes() == b"v1"
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None
+    assert row.status == ItemStatus.UNAVAILABLE
+    assert row.archive_path == archive / "fake-src" / "coll1" / "gd-sbd"
 
 
 def test_disappeared_items_retained_by_default(tmp_roots: tuple[Path, Path]) -> None:
@@ -880,6 +1107,67 @@ def test_source_budget_bounds_fetches_across_collections(
     for coll in ("c1", "c2"):
         for i in range(6):
             assert (archive / "fake-src" / coll / f"gd-show-{i}" / f"gd-show-{i}.flac").is_file()
+
+
+def test_sources_on_one_host_share_one_budget(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """SPEC §spec:source-budget: two configured sources that talk to the same host
+    (e.g. an `ia` and an `etree` source, both archive.org) draw on one budget, sized
+    to the smallest ceiling either sets."""
+    import time as _time
+
+    archive, library = tmp_roots
+    monkeypatch.setattr(FakePlugin, "upstream_host", "archive.example", raising=False)
+    config = Config(
+        archive_root=archive,
+        library_root=library,
+        max_concurrent_downloads=4,
+        max_concurrent_collections=2,
+        sources=[
+            SourceConfig(
+                name="fake-a", type="fake", max_concurrent_requests=3,
+                collections=[CollectionConfig(name="c1", query="*")],
+            ),
+            SourceConfig(
+                name="fake-b", type="fake", max_concurrent_requests=2,
+                collections=[CollectionConfig(name="c2", query="*")],
+            ),
+        ],
+    )
+    for i in range(6):
+        _seed_item(f"gd-show-{i}")
+
+    lock = threading.Lock()
+    state = {"in_flight": 0, "max": 0}
+    real_fetch = FakePlugin.fetch
+
+    def instrumented_fetch(self, item, dest_dir, format_filters, exclude_filters):
+        with lock:
+            state["in_flight"] += 1
+            state["max"] = max(state["max"], state["in_flight"])
+        try:
+            _time.sleep(0.02)  # hold the slot so overlap is real
+            return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+        finally:
+            with lock:
+                state["in_flight"] -= 1
+
+    monkeypatch.setattr(FakePlugin, "fetch", instrumented_fetch)
+
+    assert run_sync(config) == 0
+    assert state["max"] <= 2, (
+        f"per-host budget breached: observed {state['max']} simultaneous fetches (cap 2)"
+    )
+    assert (archive / "fake-a" / "c1" / "gd-show-0" / "gd-show-0.flac").is_file()
+    assert (archive / "fake-b" / "c2" / "gd-show-0" / "gd-show-0.flac").is_file()
+
+
+def test_archive_org_plugins_declare_their_host() -> None:
+    from shakedown.plugins.etree.plugin import EtreePlugin
+    from shakedown.plugins.ia.plugin import IAPlugin
+
+    assert IAPlugin.upstream_host == EtreePlugin.upstream_host == "archive.org"
 
 
 def test_traversal_identifier_is_rejected(tmp_roots: tuple[Path, Path], monkeypatch) -> None:

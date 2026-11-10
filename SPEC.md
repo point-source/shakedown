@@ -120,7 +120,7 @@ Every discovered item carries a persistent status:
 | `downloading` | Fetch in progress |
 | `complete` | Fetched successfully; manifest recorded |
 | `failed` | Fetch attempted and failed; retried on the next run |
-| `unavailable` | Source explicitly disallows download (e.g. stream-only) or lists no files matching the collection's filters; a human-readable `restriction_reason` is recorded and shown in `status` |
+| `unavailable` | Source explicitly disallows download (e.g. stream-only, flagged in its metadata or refused when downloading) or lists no files matching the collection's filters; a human-readable `restriction_reason` is recorded and shown in `status` |
 | `disappeared` | Previously `complete`, no longer in the source's enumeration; local files retained |
 | `pruned` | Vanished from a `prune_disappeared`-opted collection: archive files and staging links removed, DB record retained so `status` still reports the takedown |
 
@@ -258,6 +258,14 @@ risking throttling or a blacklist — the exact failure
 per-source budget spanning discovery and fetch is the only bound that
 holds regardless of internal parallelism.
 
+**Shared across sources on one host.** Two configured sources can reach
+the same host — an `ia` source and an `etree` source both talk to
+archive.org. A plugin names its upstream host; every source whose plugin
+names the same host draws from one budget, sized to the smallest
+`max_concurrent_requests` among them, so configuring a second source never
+doubles the connections a host sees. A plugin that names no host gets a
+budget per source.
+
 **Tradeoff accepted.** Collections of the same source no longer get
 independent throughput — one collection's downloads and another's
 discovery compete for the same slots. This is correct: the protected
@@ -300,6 +308,15 @@ bearing invariants:
   is never pruned — enumeration, not description, is the prune signal
   (§spec:prune-safety).
 
+**Memory stays flat as a collection grows.** A show's details (metadata,
+manifest) are held only while that show is handled, never for the whole
+listing: per-item lookups run only a few ahead of the consumer, the
+listing pauses while a few shows already wait for a download, and the
+pre-run snapshot of recorded items leaves out their source metadata.
+Overlap is kept — downloads still begin while discovery is in progress —
+but discovery never races ahead of downloads, so a first sync of a large
+collection fits a small NAS.
+
 **Tradeoff.** Run counters accumulate from concurrent producers
 (discovery) and consumers (fetch), so per-run counts must be exact under
 concurrency. The invariant is what matters (counts are exact), not the
@@ -314,8 +331,8 @@ Opt-in per collection (`incremental_discovery`, default off,
 **change signal in the search response itself** — a source-provided
 token that moves whenever the item's contents change (for IA, the
 item's update timestamp together with its total size) — and persists it
-alongside the recorded manifest (§spec:state). On a later sync, an item
-whose current signal matches the stored one is classified `unchanged`
+alongside the recorded manifest (§spec:state). On a later sync, a `complete`
+item whose current signal matches the stored one is classified `unchanged`
 **without** the per-item metadata round-trip. An item whose signal
 differs, or that has no stored signal, falls through to the full
 manifest comparison (§spec:sync-identity) exactly as today. This
@@ -680,7 +697,7 @@ exits (§req:constraints). The command surface:
 | Command | Behavior |
 | --- | --- |
 | `sync [--source S] [--collection C] [--dry-run] [--refresh-metadata]` | Run a sync now; defaults to all configured collections. What the scheduler invokes. `--refresh-metadata` re-resolves and rewrites `metadata.json` sidecars for preserve-opted collections without re-downloading media (§spec:metadata-preservation). |
-| `status [--json]` | Last run per collection, item counts by status, disk usage, restricted items with reasons, disappeared items, known drift, and recordings dropped to layout collisions (§spec:layout-collision-safety). |
+| `status [--json]` | Last run per collection, item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, disappeared items, known drift, and recordings dropped to layout collisions (§spec:layout-collision-safety). |
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
@@ -728,12 +745,13 @@ Structure: top-level roots (`archive_root`, `library_root`,
 `state_db`) and global concurrency caps (`max_concurrent_downloads`,
 `max_concurrent_collections`); a list of `sources` (name, plugin
 `type`, optional auth) each containing `collections` (name, `query`,
-`format_filters`, `exclude_filters`, `library_layout`,
+`format_filters`, `exclude_filters`, `fallback_format_filters`, `library_layout`,
 `prune_disappeared`, `incremental_discovery`, `preserve_source_metadata`,
 `on_complete`); and global `notifications`.
 
 The discovery-performance increment added a per-source politeness ceiling
-(the shared concurrency budget of §spec:source-budget) and a
+(`max_concurrent_requests`; sources on one host share the smallest — the
+shared concurrency budget of §spec:source-budget) and a
 per-collection `incremental_discovery` opt-in
 (§spec:incremental-discovery). The mirror-integrity increment adds a
 per-collection `preserve_source_metadata` opt-in
@@ -1215,7 +1233,7 @@ degrade a single item or a single run, never the archive.
 | State DB corrupted or lost | `reconcile` rebuilds it without re-downloading (§spec:state) |
 | Crash in the middle of swapping a re-fetched item into place | The next run finishes the swap: it moves the old copy back if the new one never landed, or discards the old copy if it did |
 | Disk full, or another disk error while linking into the library | That item counts as failed and the run continues; no partial commits reach the archive; the run record is always closed, even on a crash |
-| Source rate-limits | Core honors the plugin-surfaced `Retry-After`, backs off, resumes |
+| Source rate-limits | Core honors the plugin-surfaced `Retry-After` up to its back-off cap, backs off, resumes. Nothing retries underneath: each metadata or file request goes out once per core attempt; only the collection search, which has no core retry, keeps a bounded retry of its own under the same cap |
 | Slow/timing-out metadata during discovery | Bounded per-item timeout + back-off; other items proceed in parallel — one slow endpoint never stalls the run (§spec:slow-metadata) |
 | Discovery fails partway (pipelined) | Collection marked stale; nothing pruned — a partial enumeration is never read as items disappearing (§spec:discovery-pipeline) |
 | Per-item metadata (describe) fails for an enumerated item | Item left as recorded — not pruned, not `disappeared`, not `failed` — and retried next run (§spec:prune-safety) |
@@ -1224,7 +1242,8 @@ degrade a single item or a single run, never the archive.
 | Library tool deletes staging links | Restored on next sync or `restage` |
 | User wipes library tree | Rebuilt by `restage` with zero downloads |
 | User wipes archive tree | DB and library invalidated; full re-download — working as intended (§spec:state) |
-| Item restricted upstream | Local copy retained; status flips to `unavailable` with reason |
+| Item restricted upstream | Only the files the source refuses are left out (archive.org marks each one `private`); a file it serves is always mirrored. When every file the collection wants is refused: if the collection opted into `fallback_format_filters` and the source serves those, the fallback copy is mirrored as `complete` and listed in `status` with its reason (a later sync replaces it once the wanted files are served); otherwise the local copy is retained and the status flips to `unavailable` with reason |
+| Source refuses a download (archive.org's 403 on a stream-only show with no restriction flag in its metadata) | Not a failure and not retried within the run: the item flips to `unavailable` with reason, the local copy (if any) is retained, and its temp directory is removed |
 | Restriction lifted upstream | Detected on next discover; fetched as new |
 | Source lists zero files for an item (darked, glitch, filter matches nothing) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
 | Item disappears upstream | Files retained by default; flagged `disappeared` (§spec:item-lifecycle) |

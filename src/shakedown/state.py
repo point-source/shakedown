@@ -124,6 +124,36 @@ class ItemRepo:
         for row in cur:
             yield _row_to_item(row)
 
+    def list_for_planning(self, source: str, collection: str) -> Iterator[Item]:
+        """The collection's items without their source metadata, which planning never
+        reads and which dominates memory on a large collection. Never upsert one of
+        these: `get()` the full item first."""
+        cur = self.conn.execute(
+            """
+            SELECT source_name, collection_name, identifier, status, archive_path,
+                   discovered_at, downloaded_at, last_verified_at, restriction_reason,
+                   NULL AS source_metadata, recorded_manifest, change_signal
+            FROM items WHERE source_name=? AND collection_name=? ORDER BY identifier
+            """,
+            (source, collection),
+        )
+        for row in cur:
+            yield _row_to_item(row)
+
+    def list_restricted(self, source: str, collection: str) -> list[tuple[str, str | None]]:
+        """(identifier, restriction_reason) of the collection's unavailable items and of
+        complete items mirrored from a fallback (they carry a reason)."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier, restriction_reason FROM items
+            WHERE source_name=? AND collection_name=?
+              AND (status=? OR (status=? AND restriction_reason IS NOT NULL))
+            ORDER BY identifier
+            """,
+            (source, collection, ItemStatus.UNAVAILABLE.value, ItemStatus.COMPLETE.value),
+        )
+        return [(row["identifier"], row["restriction_reason"]) for row in cur]
+
     def count_by_status(self, source: str, collection: str) -> dict[ItemStatus, int]:
         cur = self.conn.execute(
             """
@@ -134,6 +164,19 @@ class ItemRepo:
             (source, collection),
         )
         return {ItemStatus(row["status"]): row["n"] for row in cur}
+
+    def archived_bytes(self, source: str, collection: str) -> int:
+        """Total size of the archive copies on record, from their manifests: a cheap
+        stand-in for walking the archive tree, which on a NAS takes tens of seconds."""
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(json_extract(f.value, '$.size')), 0) AS total
+            FROM items, json_each(items.recorded_manifest) AS f
+            WHERE source_name=? AND collection_name=? AND archive_path IS NOT NULL
+            """,
+            (source, collection),
+        ).fetchone()
+        return int(row["total"])
 
     def delete(self, source: str, collection: str, identifier: str) -> None:
         self.conn.execute(

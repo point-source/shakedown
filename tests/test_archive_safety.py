@@ -261,6 +261,9 @@ def test_writer_lock_released_when_holder_is_killed(tmp_roots: tuple[Path, Path]
     finally:
         if holder.poll() is None:
             holder.kill()
+            holder.wait(timeout=10)
+        if holder.stdout is not None:
+            holder.stdout.close()
 
 
 # --- M4: nothing short or unsynced is recorded complete ----------------------------

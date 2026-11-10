@@ -347,6 +347,13 @@ Two class attributes declare what your plugin is and what it exposes:
   `discover` actually populates them in `metadata`. Defaults to `()` (only the
   `passthrough` layout, which uses no fields, would then be allowed).
 
+One optional attribute ties your plugin to the politeness budget:
+
+- **`upstream_host: str | None`** — the host your plugin's requests go to (e.g.
+  `"archive.org"`). Every configured source whose plugin names the same host
+  shares one concurrency budget, so two sources never add up past what one host
+  should see. Defaults to `None`: each source of your plugin gets its own budget.
+
 ## Registration
 
 Two steps wire your plugin into the registry:

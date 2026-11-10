@@ -166,3 +166,67 @@ def test_api_reports_installed_package_version(tmp_roots: tuple[Path, Path]) -> 
 
     archive, library = tmp_roots
     assert build_app(make_config(archive, library)).version == version("shakedown")
+
+
+@pytest.mark.asyncio
+async def test_status_and_metrics_read_sizes_from_the_db(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A scrape never walks the archive (hundreds of thousands of files on a NAS):
+    sizes come from the recorded manifests, and every request closes its DB
+    connection."""
+    import os
+    import sqlite3
+
+    import shakedown.server as server_module
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x",
+        files=[FakeFile(name="x.flac", content=b"audio"), FakeFile(name="y.flac", content=b"ab")],
+    )
+    FakePlugin.items["gd-sbd"] = FakeItem(
+        identifier="gd-sbd", files=[FakeFile(name="s.flac", content=b"s")],
+        is_restricted=True, restriction_reason="stream-only",
+    )
+    assert run_sync(config) == 0
+
+    def no_walk(*_args, **_kwargs):
+        raise AssertionError("the archive must not be walked per request")
+
+    monkeypatch.setattr(Path, "rglob", no_walk)
+    monkeypatch.setattr(os, "walk", no_walk)
+    monkeypatch.setattr(os, "scandir", no_walk)
+    from shakedown.state import ItemRepo
+
+    def no_full_rows(*_args, **_kwargs):
+        raise AssertionError("a scrape must not load every item's metadata")
+
+    monkeypatch.setattr(ItemRepo, "list_for_collection", no_full_rows)
+    opened: list[sqlite3.Connection] = []
+    real_connect = server_module.connect
+
+    def tracking_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(server_module, "connect", tracking_connect)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(config)),
+        base_url="http://testserver",
+    ) as client:
+        r = await client.get("/status")
+        assert r.status_code == 200
+        assert r.json()[0]["bytes_on_disk"] == 7
+        assert r.json()[0]["restricted"] == [{"identifier": "gd-sbd", "reason": "stream-only"}]
+        r = await client.get("/metrics")
+        assert r.status_code == 200
+        assert 'shakedown_bytes_on_disk{collection="coll1",source="fake-src"} 7.0' in r.text
+
+    assert len(opened) == 2
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")

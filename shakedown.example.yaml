@@ -18,8 +18,9 @@ sources:
     # Shakedown opens to this source's upstream host, shared across ALL of the
     # source's collections and spanning discovery metadata calls + file downloads
     # (SPEC.md §spec:source-budget). Bounds total upstream concurrency even when
-    # several of this source's collections sync at once. Falls back to
-    # max_concurrent_downloads when unset.
+    # several of this source's collections sync at once. Sources on the same host
+    # (this one and etree-lma below both reach archive.org) share one cap: the
+    # smallest either sets. Falls back to max_concurrent_downloads when unset.
     max_concurrent_requests: 4
     auth:
       # Only needed for download-restricted items. Leave unset to skip auth.
@@ -30,6 +31,12 @@ sources:
         query: 'collection:GratefulDead'
         format_filters: [flac, shn]
         exclude_filters: ['*_64kb.mp3', '*_vbr.mp3']
+        # Opt-in: when archive.org refuses every lossless file of a show (stream-only
+        # soundboards), mirror its MP3 copy instead of skipping the show. `shakedown
+        # status` lists these shows; if the lossless files are served again later, the
+        # next sync fetches them in place of the MP3s. Read by `ia` sources only; an
+        # etree collection accepts the setting and ignores it.
+        fallback_format_filters: [mp3]
         # Template renders the staging *directory*; original filenames are appended
         # automatically (SPEC.md §spec:library-staging). Available IA fields: identifier, title, creator,
         # date, year, venue, coverage. Filters: sanitize, short, lower, upper. Every field
@@ -50,6 +57,7 @@ sources:
       - name: phish
         query: 'collection:Phish'
         format_filters: [flac]
+        fallback_format_filters: [mp3]
         # Default library_layout is `passthrough`: mirrors the archive layout 1:1.
         # Opt-in fast-path for recurring no-op syncs (SPEC.md §spec:incremental-discovery):
         # when the source's cheap change signal is unchanged, skip the per-item metadata
@@ -65,7 +73,9 @@ sources:
     type: etree
     collections:
       - name: etree-lma
-        query: 'collection:etree'
+        # Leave out collections the internetarchive source already mirrors, so
+        # no show is downloaded and linked twice.
+        query: 'collection:etree AND NOT collection:GratefulDead AND NOT collection:Phish'
         format_filters: [flac, shn]
         exclude_filters: ['*_64kb.mp3', '*_vbr.mp3']
         # Available etree fields: identifier, title, creator, date, year,

@@ -82,12 +82,17 @@ class FetchResult:
       malformed metadata) leave it False so the core fails fast.
     - `retry_after` — seconds the source asked us to wait (e.g. an HTTP
       `Retry-After` on a 429). The core honors it in place of its own backoff.
+    - `unavailable` — the source refuses to serve the item (e.g. an HTTP 403 on a
+      stream-only item whose metadata carries no restriction flag). The core records
+      the item `unavailable` with `error` as the reason, keeps any archive copy, and
+      does not count it as a failure.
     """
     success: bool
     bytes_downloaded: int
     error: str | None = None
     retriable: bool = False
     retry_after: float | None = None
+    unavailable: bool = False
 
 
 @dataclass
@@ -119,6 +124,11 @@ class SourcePlugin(ABC):
 
     #: Identifier used in `type:` config keys (e.g., "ia").
     type_name: str
+
+    #: The host this plugin's requests go to. Sources whose plugins name the same
+    #: host share one concurrency budget (SPEC §spec:source-budget). None: the
+    #: source gets a budget of its own.
+    upstream_host: str | None = None
 
     def __init__(self, source_config: SourceConfig) -> None:
         self.source_config = source_config

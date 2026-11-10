@@ -111,13 +111,3 @@ def hardlink(src: Path, dst: Path) -> None:
             f"hardlink collision: {dst} already exists and points to a different inode"
         )
     os.link(src, dst)
-
-
-def disk_usage_bytes(path: Path) -> int:
-    """Sum of file sizes under path. O(n) walk; do not call in hot loops."""
-    total = 0
-    for entry in path.rglob("*"):
-        if entry.is_file():
-            with contextlib.suppress(FileNotFoundError):
-                total += entry.stat().st_size
-    return total

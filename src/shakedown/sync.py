@@ -13,8 +13,8 @@ import queue
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -59,10 +59,10 @@ log = logging.getLogger(__name__)
 class SourceBudget:
     """Shared per-source concurrency ceiling (SPEC §spec:source-budget).
 
-    One instance per source, shared across all of that source's collections and
-    both its discovery and download workers, so the number of simultaneous
-    connections Shakedown opens to the upstream host never exceeds the configured
-    budget — no matter how many collections run concurrently.
+    One instance per upstream host, shared across every collection of the sources
+    on that host and both their discovery and download workers, so the number of
+    simultaneous connections Shakedown opens to the host never exceeds the
+    configured budget — no matter how many collections run concurrently.
     """
 
     def __init__(self, size: int) -> None:
@@ -82,6 +82,32 @@ def _source_budget_size(config: Config, source: SourceConfig) -> int:
     return source.max_concurrent_requests or config.max_concurrent_downloads
 
 
+def _source_budgets(
+    config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
+) -> dict[str, SourceBudget]:
+    """One shared concurrency budget per upstream host, keyed by source name.
+
+    All collections of a source — and every source whose plugin names the same host
+    (an `ia` and an `etree` source both reach archive.org) — draw on one bounded
+    pool, so the ceiling on simultaneous connections to a host holds even with
+    max_concurrent_collections > 1. A shared budget takes the smallest ceiling its
+    sources set (SPEC §spec:source-budget).
+    """
+    groups: dict[str, list[SourceConfig]] = {}
+    group_of: dict[str, str] = {}
+    for source, _collection, plugin in work:
+        if source.name in group_of:
+            continue
+        key = f"host:{plugin.upstream_host}" if plugin.upstream_host else f"source:{source.name}"
+        groups.setdefault(key, []).append(source)
+        group_of[source.name] = key
+    shared = {
+        key: SourceBudget(min(_source_budget_size(config, s) for s in sources))
+        for key, sources in groups.items()
+    }
+    return {name: shared[key] for name, key in group_of.items()}
+
+
 def _describe_one(
     plugin: SourcePlugin,
     identifier: str,
@@ -90,6 +116,43 @@ def _describe_one(
 ) -> ItemDescriptor | None:
     with budget.slot():
         return plugin.describe_item(identifier, collection)
+
+
+def _describe_paced[K](
+    plugin: SourcePlugin,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+    keyed_ids: Iterable[tuple[str, K]],
+    workers: int,
+) -> Iterator[tuple[ItemDescriptor | None, K]]:
+    """Resolve each (identifier, key) to its descriptor across the shared budget,
+    yielding (descriptor, key) as each resolves.
+
+    Lookups are submitted only as the consumer takes results, a few ahead of it, so a
+    show's details live from its lookup until the consumer has handled them — never
+    for the whole listing. Memory stays flat however large the collection.
+    """
+    window = 2 * workers
+    todo = iter(keyed_ids)
+    pending: dict[Future[ItemDescriptor | None], K] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def top_up() -> None:
+            while len(pending) < window:
+                nxt = next(todo, None)
+                if nxt is None:
+                    return
+                identifier, key = nxt
+                fut = pool.submit(_describe_one, plugin, identifier, collection, budget)
+                pending[fut] = key
+
+        top_up()
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in done:
+                key = pending.pop(fut)
+                yield fut.result(), key
+                top_up()
 
 
 def _stream_descriptors(
@@ -102,7 +165,7 @@ def _stream_descriptors(
     across the shared per-source budget (SPEC §spec:discovery-pipeline).
 
     Sources exposing `enumerate_items()` get concurrent `describe_item()` resolution
-    bounded by the source budget, yielded via `as_completed` so a consumer can act on
+    bounded by the source budget, yielded by `_describe_paced` so a consumer can act on
     each item the moment it resolves (the overlap lever). Sources without the
     enumerate/describe split fall back to the serial `discover()` stream. A transient
     per-item fault yields None from `describe_item` and is dropped, exactly as the serial
@@ -126,15 +189,11 @@ def _stream_descriptors(
     enumerated.update(ids)
     if not ids:
         return
-    with ThreadPoolExecutor(max_workers=min(budget.size, len(ids))) as pool:
-        futures = [
-            pool.submit(_describe_one, plugin, identifier, collection, budget)
-            for identifier in ids
-        ]
-        for fut in as_completed(futures):
-            desc = fut.result()
-            if desc is not None:
-                yield desc
+    for desc, _ in _describe_paced(
+        plugin, collection, budget, ((i, None) for i in ids), min(budget.size, len(ids))
+    ):
+        if desc is not None:
+            yield desc
 
 
 def _discover_descriptors(
@@ -191,6 +250,8 @@ class CollectionSyncStats:
     # staging directories for the consolidated run/status summary.
     collisions_dropped: int = 0
     collision_paths: list[str] = field(default_factory=list)
+    # Fetches the source refused (recorded unavailable, not failed).
+    unavailable: int = 0
     # Items fetched and staged this run, for the sync.complete batch payload
     # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
     staged: list[dict[str, str]] = field(default_factory=list)
@@ -252,14 +313,7 @@ def _run_sync(
     # already-migrated DB). SPEC §spec:sync-workflow.
     connect(config.state_db).close()  # type: ignore[arg-type]
 
-    # One shared concurrency budget per distinct source, so all of that source's
-    # collections (and their discovery + download workers) draw on a single
-    # bounded pool — the hard ceiling on simultaneous upstream connections holds
-    # even with max_concurrent_collections > 1 (SPEC §spec:source-budget).
-    budgets: dict[str, SourceBudget] = {}
-    for source, _collection, _plugin in work:
-        if source.name not in budgets:
-            budgets[source.name] = SourceBudget(_source_budget_size(config, source))
+    budgets = _source_budgets(config, work)
 
     if refresh_metadata:
         return _run_refresh(config, work, budgets)
@@ -603,9 +657,11 @@ def _sync_collection_phases(
     # (which recorded items were not seen this run?). A fetch upserts rows during the
     # run, but the disappeared decision is computed against this pre-run snapshot, so a
     # freshly fetched item is never mistaken for a vanished one.
+    # The snapshot leaves out each item's source metadata (planning never reads it);
+    # anything that writes or stages an item loads the full row first.
     by_identifier = {
         item.identifier: item
-        for item in items.list_for_collection(source.name, collection.name)
+        for item in items.list_for_planning(source.name, collection.name)
     }
 
     # Phases 1-4, pipelined: discover -> classify -> fetch + stage, overlapping downloads
@@ -666,25 +722,37 @@ def _sync_collection_phases(
             and p.existing is not None
             and p.existing.recorded_manifest is not None
         ):
-            if p.existing.status != ItemStatus.COMPLETE:
+            existing = items.get(source.name, collection.name, p.existing.identifier)
+            if existing is None or existing.recorded_manifest is None:
+                continue
+            # A looked-up show brings its current reason (set for a fallback copy); a
+            # show skipped on an unchanged signal is complete and keeps its own.
+            reason = (
+                p.descriptor.restriction_reason
+                if p.descriptor is not None
+                else existing.restriction_reason
+            )
+            if existing.status != ItemStatus.COMPLETE:
                 # Back upstream with the files we already hold (e.g. after an empty
                 # answer or a lifted restriction): the archive copy is complete again.
-                _record_back_to_complete(items, p.existing)
+                _record_back_to_complete(items, existing, reason)
+            elif reason != existing.restriction_reason:
+                existing.restriction_reason = reason
+                items.upsert(existing)
             stage_result = _stage_or_fail(
-                config, collection, source.name, p.existing, p.existing.recorded_manifest,
+                config, collection, source.name, existing, existing.recorded_manifest,
                 stats, staged_paths,
             )
             if stage_result is not None:
                 _record_collision(stats, source.name, collection.name, stage_result)
 
-    # Persist new state for unavailable / disappeared in one shot.
+    # Persist the disappeared set in one shot (unavailable shows were recorded as listed).
     with transaction(conn):
-        for p in deferred:
-            if p.action == PlanAction.UNAVAILABLE and p.descriptor is not None:
-                _record_unavailable(items, source.name, collection.name, p.descriptor)
         for p in disappeared:
             assert p.existing is not None
-            _record_disappeared(items, config, source.name, collection, p.existing)
+            existing = items.get(source.name, collection.name, p.existing.identifier)
+            if existing is not None:
+                _record_disappeared(items, config, source.name, collection, existing)
 
     # Phase 5: notify. Fire before recording so any delivery failure is captured
     # in the run's errors (visible in `status`) but never aborts the sync.
@@ -787,8 +855,28 @@ def _pipelined_discover_and_fetch(
                 )
                 fetch_futures[fut] = planned
                 fut.add_done_callback(finished.put)
+            elif planned.action == PlanAction.UNCHANGED:
+                # Re-staging needs only the record and the current reason (set for a
+                # fallback copy): drop the rest of the listed details now.
+                deferred.append(
+                    PlannedItem(
+                        replace(desc, manifest=Manifest(files=()), metadata={}),
+                        planned.existing,
+                        PlanAction.UNCHANGED,
+                    )
+                )
             else:
-                deferred.append(planned)
+                # Unavailable is this show's own fact, safe to record the moment it is
+                # listed (SPEC §spec:discovery-pipeline); keep only its identifier.
+                assert planned.descriptor is not None
+                _record_unavailable(items, source.name, collection.name, planned.descriptor)
+                deferred.append(
+                    PlannedItem(
+                        replace(planned.descriptor, manifest=Manifest(files=()), metadata={}),
+                        planned.existing,
+                        PlanAction.UNAVAILABLE,
+                    )
+                )
 
         def on_skip(identifier: str, existing: Item) -> None:
             # Signal-unchanged: classify UNCHANGED without a metadata fetch. The identifier
@@ -811,7 +899,12 @@ def _pipelined_discover_and_fetch(
             )
 
         descriptors = iter(descriptor_stream)
+        # Downloads take far longer than listing: take the next show only while few
+        # wait for a download, so listed shows never pile up in memory.
+        backlog = 2 * config.max_concurrent_downloads
         while True:
+            while len(fetch_futures) >= backlog:
+                process(finished.get())
             try:
                 # Descriptors stream in as each resolves; dispatch classifies and
                 # fetches each immediately, so downloads overlap the enumeration.
@@ -950,6 +1043,9 @@ def _signal_unchanged(signal: str | None, existing: Item | None) -> bool:
     return (
         signal is not None
         and existing is not None
+        # Only a complete show may skip the lookup: any other status (a refusal, a
+        # failure, a gap in the listing) is re-checked against the source.
+        and existing.status == ItemStatus.COMPLETE
         and existing.change_signal is not None
         and existing.change_signal == signal
         and not _files_missing(existing)
@@ -991,15 +1087,11 @@ def _stream_descriptors_incremental(
             to_describe.append((identifier, signal))
     if not to_describe:
         return
-    with ThreadPoolExecutor(max_workers=min(budget.size, len(to_describe))) as pool:
-        futures = {
-            pool.submit(_describe_one, plugin, identifier, collection, budget): signal
-            for identifier, signal in to_describe
-        }
-        for fut in as_completed(futures):
-            desc = fut.result()
-            if desc is not None:
-                yield replace(desc, change_signal=futures[fut])
+    for desc, signal in _describe_paced(
+        plugin, collection, budget, to_describe, min(budget.size, len(to_describe))
+    ):
+        if desc is not None:
+            yield replace(desc, change_signal=signal)
 
 
 def _disappeared_plan(
@@ -1154,6 +1246,17 @@ def _process_fetch_result(
     assert target.descriptor is not None  # NEW/CHANGED_UPSTREAM always have a descriptor
     desc = target.descriptor
 
+    if outcome.unavailable:
+        stats.unavailable += 1
+        log.info(
+            "[%s/%s] %s: unavailable: %s",
+            source.name, collection.name, desc.identifier, outcome.error,
+        )
+        _record_unavailable(
+            items, source.name, collection.name, replace(desc, restriction_reason=outcome.error)
+        )
+        return
+
     if not outcome.success:
         stats.failed += 1
         stats.errors.append(f"{desc.identifier}: {outcome.error}")
@@ -1224,6 +1327,7 @@ class _FetchOutcome:
     archive_path: Path
     bytes_downloaded: int = 0
     error: str | None = None
+    unavailable: bool = False  # the source refuses to serve the item
 
 
 # Bounded core-owned retries for transient fetch faults (checksum mismatch,
@@ -1419,6 +1523,15 @@ def _fetch_one(
     # inside _fetch_with_retries.
     _recover_swap(stale_dir, dest)
 
+    # A show the source refuses (flagged at lookup) stays unavailable with its reason;
+    # only `item refetch` reaches here with one, since classification routes it away.
+    if desc.is_restricted:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        return _FetchOutcome(
+            success=False, archive_path=dest, error=desc.restriction_reason, unavailable=True
+        )
+
     # Never promote an empty fetch: it would replace the archive copy with an empty
     # folder. Classification already routes an empty manifest to `unavailable`; this
     # guards the paths that skip classification (`item refetch`).
@@ -1430,6 +1543,14 @@ def _fetch_one(
         )
 
     fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, collection)
+    if fetch_result.unavailable:
+        # Nothing will resume a download the source refuses; the archive copy (if
+        # any) is untouched.
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        return _FetchOutcome(
+            success=False, archive_path=dest, error=fetch_result.error, unavailable=True
+        )
     if not fetch_result.success:
         # Leave tmp_dir for next-run cleanup; the archive copy (if any) is untouched.
         return _FetchOutcome(
@@ -1569,6 +1690,8 @@ def _record_complete(
         discovered_at=now,
         downloaded_at=now,
         last_verified_at=now,
+        # Set when the copy is a fallback (e.g. MP3 for refused lossless files).
+        restriction_reason=desc.restriction_reason,
         source_metadata=desc.metadata,
         recorded_manifest=desc.manifest,
         change_signal=desc.change_signal,
@@ -1577,9 +1700,9 @@ def _record_complete(
     return item
 
 
-def _record_back_to_complete(items: ItemRepo, existing: Item) -> None:
+def _record_back_to_complete(items: ItemRepo, existing: Item, reason: str | None) -> None:
     existing.status = ItemStatus.COMPLETE
-    existing.restriction_reason = None
+    existing.restriction_reason = reason
     existing.last_verified_at = datetime.now()
     items.upsert(existing)
 
@@ -1684,7 +1807,8 @@ def _refetch_item(config: Config, identifier: str) -> int:
                 _execute_fetch_and_stage(
                     config, source, collection, plugin, items, [target], stats
                 )
-                return 0 if stats.failed == 0 and stats.collisions_dropped == 0 else 1
+                ok = stats.failed == 0 and stats.collisions_dropped == 0 and stats.unavailable == 0
+                return 0 if ok else 1
     log.warning("identifier %s not found in any configured collection", identifier)
     return 1
 

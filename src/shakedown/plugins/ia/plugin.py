@@ -7,10 +7,14 @@ import os
 import time
 from collections.abc import Iterator
 from dataclasses import replace
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import internetarchive as ia
+from internetarchive.auth import S3Auth
+from urllib3 import Retry
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import Manifest, ManifestFile
@@ -38,6 +42,36 @@ _MAX_METADATA_ATTEMPTS = 3
 _METADATA_BACKOFF_BASE_SECONDS = 1.0
 _METADATA_MAX_BACKOFF_SECONDS = 30.0
 
+# File downloads: one request per file per attempt; the core retries the fetch
+# (SPEC §spec:failure-behavior). The read timeout bounds a stalled transfer.
+_DOWNLOAD_TIMEOUT = (_METADATA_CONNECT_TIMEOUT, _METADATA_READ_TIMEOUT)
+_DOWNLOAD_CHUNK = 1024 * 1024
+
+# The search has no shakedown retry loop around it, so the session's own retry is
+# its one layer: bounded, and honoring a Retry-After only up to the metadata cap.
+_SEARCH_RETRIES = 3
+
+
+def _search_retry() -> Retry:
+    return Retry(
+        total=_SEARCH_RETRIES,
+        connect=_SEARCH_RETRIES,
+        read=_SEARCH_RETRIES,
+        redirect=False,
+        allowed_methods=["GET", "POST"],
+        status_forcelist=[429, 500, 502, 503, 504],
+        backoff_factor=_METADATA_BACKOFF_BASE_SECONDS,
+        backoff_max=_METADATA_MAX_BACKOFF_SECONDS,
+        respect_retry_after_header=True,
+        retry_after_max=int(_METADATA_MAX_BACKOFF_SECONDS),
+    )
+
+
+# Recorded as the item's restriction_reason when archive.org refuses a download.
+DOWNLOAD_REFUSED_REASON = "download refused by archive.org (stream-only or restricted)"
+# Recorded on a show mirrored from the collection's fallback formats instead.
+FALLBACK_REASON = "lossless refused by archive.org; MP3 copy mirrored instead"
+
 
 def _metadata_backoff_seconds(attempt: int) -> float:
     """Exponential backoff (seconds) for the Nth (1-based) metadata retry, capped."""
@@ -45,7 +79,8 @@ def _metadata_backoff_seconds(attempt: int) -> float:
 
 
 def _get_ia_session(source_config: SourceConfig) -> ia.ArchiveSession:
-    """Build an ArchiveSession honoring optional auth from env vars (PRD §11)."""
+    """Build an ArchiveSession honoring optional auth from env vars (PRD §11), with the
+    urllib3 retries on its archive.org adapter turned off."""
     config: dict[str, Any] = {}
     if source_config.auth:
         email = (
@@ -61,8 +96,6 @@ def _get_ia_session(source_config: SourceConfig) -> ia.ArchiveSession:
         if email and password:
             config["s3"] = {"access": email, "secret": password}
             config["cookies"] = {"logged-in-user": email}
-    # Disable the internetarchive library's own internal retries so they don't stack
-    # under our bounded discovery/fetch retry loops (SPEC §spec:slow-metadata).
     http_adapter_kwargs = {"max_retries": 0}
     return (
         ia.get_session(config=config, http_adapter_kwargs=http_adapter_kwargs)
@@ -96,15 +129,22 @@ def _detect_restriction(item_meta: dict[str, Any]) -> tuple[bool, str | None]:
     return False, None
 
 
+def _is_private(file_meta: dict[str, Any]) -> bool:
+    """archive.org's per-file verdict: a `private` file answers 403 (e.g. the lossless
+    originals of a stream-only show, whose MP3s stay public)."""
+    return str(file_meta.get("private")).lower() == "true"
+
+
 def _build_manifest(
     files: list[dict[str, Any]],
     format_filters: list[str],
     exclude_filters: list[str],
 ) -> Manifest:
-    """Manifest holds only the files we care to fetch — that's what 'do I have it?' compares."""
+    """Manifest holds only the files we care to fetch and archive.org will serve —
+    that's what 'do I have it?' compares."""
     entries: list[ManifestFile] = []
     for f in files:
-        if not _file_matches_filters(f, format_filters, exclude_filters):
+        if _is_private(f) or not _file_matches_filters(f, format_filters, exclude_filters):
             continue
         size_raw = f.get("size")
         size = int(size_raw) if size_raw is not None else None
@@ -139,6 +179,7 @@ def _combine_change_signal(hit: dict[str, Any]) -> str | None:
 @register
 class IAPlugin(SourcePlugin):
     type_name = "ia"
+    upstream_host = "archive.org"
     template_fields = ("identifier", "title", "creator", "date", "year", "venue", "coverage")
     # `identifier` is the item's IA identifier — globally unique, the composite key
     # (§spec:layout-collision-safety); no other surfaced field is guaranteed distinct.
@@ -146,14 +187,21 @@ class IAPlugin(SourcePlugin):
 
     def __init__(self, source_config: SourceConfig) -> None:
         super().__init__(source_config)
+        # Exactly one retry layer per request (SPEC §spec:failure-behavior). The
+        # library remounts its own retries on the session every search, so searches
+        # get a session of their own. Metadata lookups and downloads go through
+        # `_session` as plain requests, retried only by shakedown.
         self._session = _get_ia_session(source_config)
+        self._search_session = _get_ia_session(source_config)
 
     def enumerate_with_signals(
         self, collection: CollectionConfig
     ) -> Iterator[tuple[str, str | None]]:
         log.info("IA discover: query=%r", collection.query)
-        search = self._session.search_items(
-            collection.query, fields=["identifier", "oai_updatedate", "item_size"]
+        search = self._search_session.search_items(
+            collection.query,
+            fields=["identifier", "oai_updatedate", "item_size"],
+            max_retries=_search_retry(),
         )
         for hit in search:
             yield hit["identifier"], _combine_change_signal(hit)
@@ -181,13 +229,31 @@ class IAPlugin(SourcePlugin):
         this run — identical to the pre-change behavior of a failed get_item), so one
         bad item never fails the whole enumeration.
         """
-        item = self._get_item_with_retries(identifier)
+        item = self._get_metadata_with_retries(identifier)
         if item is None:
             return None
-        files: list[dict[str, Any]] = list(item.files)
-        metadata: dict[str, Any] = dict(item.metadata)
+        files: list[dict[str, Any]] = list(item.get("files") or [])
+        metadata: dict[str, Any] = dict(item.get("metadata") or {})
         manifest = _build_manifest(files, collection.format_filters, collection.exclude_filters)
         restricted, reason = _detect_restriction(metadata)
+        if not restricted and not manifest.files and any(
+            _is_private(f)
+            and _file_matches_filters(f, collection.format_filters, collection.exclude_filters)
+            for f in files
+        ):
+            # Every wanted file is one archive.org refuses to serve: mirror the
+            # collection's fallback formats if it opted in and they are served.
+            fallback = (
+                _build_manifest(
+                    files, collection.fallback_format_filters, collection.exclude_filters
+                )
+                if collection.fallback_format_filters
+                else manifest
+            )
+            if fallback.files:
+                manifest, reason = fallback, FALLBACK_REASON
+            else:
+                restricted, reason = True, DOWNLOAD_REFUSED_REASON
         metadata = _normalize_template_fields(identifier, metadata)
         return ItemDescriptor(
             identifier=identifier,
@@ -197,19 +263,37 @@ class IAPlugin(SourcePlugin):
             restriction_reason=reason,
         )
 
-    def _get_item_with_retries(self, identifier: str):
-        """get_item with a bounded timeout and the fetch path's retry/back-off.
+    def _auth(self) -> S3Auth | None:
+        if self._session.access_key and self._session.secret_key:
+            return S3Auth(self._session.access_key, self._session.secret_key)
+        return None
 
-        Returns the IA item, or None if it can't be resolved within the envelope.
+    def _url(self, path: str) -> str:
+        return f"{self._session.protocol}//{self._session.host}/{path}"
+
+    def _get_metadata(self, identifier: str) -> dict[str, Any]:
+        """One Metadata API request. Unlike the library's get_item, an HTTP error keeps
+        its response, so the retry below sees the status and any Retry-After."""
+        response = self._session.get(
+            self._url(f"metadata/{quote(identifier)}"),
+            timeout=_METADATA_TIMEOUT,
+            auth=self._auth(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _get_metadata_with_retries(self, identifier: str) -> dict[str, Any] | None:
+        """The item's metadata with a bounded timeout and the fetch path's retry/back-off.
+
+        Returns the Metadata API response, or None if it can't be resolved within the
+        envelope.
         """
         for attempt in range(1, _MAX_METADATA_ATTEMPTS + 1):
             try:
-                return self._session.get_item(
-                    identifier, request_kwargs={"timeout": _METADATA_TIMEOUT}
-                )
+                return self._get_metadata(identifier)
             except Exception as e:
                 if not _is_retriable(e) or attempt == _MAX_METADATA_ATTEMPTS:
-                    log.warning("IA get_item failed for %s: %s", identifier, e)
+                    log.warning("IA metadata lookup failed for %s: %s", identifier, e)
                     return None
                 # Honor a source-supplied Retry-After, but clamp it to the backoff
                 # cap: the header is upstream-controlled, and a describe worker holds
@@ -222,7 +306,7 @@ class IAPlugin(SourcePlugin):
                     else min(retry_after, _METADATA_MAX_BACKOFF_SECONDS)
                 )
                 log.warning(
-                    "IA get_item attempt %d/%d for %s failed (%s); retrying in %.1fs",
+                    "IA metadata attempt %d/%d for %s failed (%s); retrying in %.1fs",
                     attempt, _MAX_METADATA_ATTEMPTS, identifier, e, delay,
                 )
                 time.sleep(delay)
@@ -264,24 +348,21 @@ class IAPlugin(SourcePlugin):
         ]
         for mf in to_fetch:
             (dest_dir / mf.name).unlink(missing_ok=True)
-        target_files = [mf.name for mf in to_fetch]
 
         try:
-            if target_files:  # files=[] would mean "every file in the item"
-                ia.download(
-                    item.identifier,
-                    files=target_files,  # type: ignore[arg-type]  # IA accepts filenames at runtime
-                    destdir=str(dest_dir),
-                    # Write straight to <destdir>/<name>, so every finished file sits
-                    # where the next attempt looks for it, even if the run is killed.
-                    no_directory=True,
-                    ignore_existing=False,
-                    # Core owns retries/backoff (SPEC §spec:failure-behavior); don't
-                    # let the IA library retry underneath us.
-                    retries=0,
-                    archive_session=self._session,
-                )
+            for mf in to_fetch:
+                self._download_file(item.identifier, mf.name, dest_dir / mf.name)
         except Exception as e:
+            if _http_status(e) == 403:
+                # archive.org serves some shows stream-only (often soundboards) with no
+                # restriction flag in their metadata; the refusal is the only signal.
+                log.info("IA download refused for %s: %s", item.identifier, e)
+                return FetchResult(
+                    success=False,
+                    bytes_downloaded=0,
+                    error=DOWNLOAD_REFUSED_REASON,
+                    unavailable=True,
+                )
             log.warning("IA download failed for %s: %s", item.identifier, e)
             return FetchResult(
                 success=False,
@@ -291,29 +372,11 @@ class IAPlugin(SourcePlugin):
                 retry_after=_retry_after_seconds(e),
             )
 
+        # Every manifest file is now on disk: reused above or just written.
+        bytes_downloaded = sum((dest_dir / mf.name).stat().st_size for mf in item.manifest.files)
 
-        bytes_downloaded = 0
-        missing: list[str] = []
-        for mf in item.manifest.files:
-            written = dest_dir / mf.name
-            if not written.is_file():
-                missing.append(mf.name)
-                continue
-            bytes_downloaded += written.stat().st_size
-
-        if missing:
-            # A truncated/partial download is a transient fault worth another attempt.
-            return FetchResult(
-                success=False,
-                bytes_downloaded=bytes_downloaded,
-                error=f"missing after fetch: {missing[:5]}",
-                retriable=True,
-            )
-
-        # The internetarchive library checksums only files already on disk before a
-        # download, never what it just wrote, so check every file against the
-        # manifest here (reused leftovers were checked above). A corrupt file is
-        # removed and the fetch retried.
+        # Check every downloaded file against the manifest (reused leftovers were
+        # checked above). A corrupt file is removed and the fetch retried.
         for mf in to_fetch:
             mismatch = downloaded_file_mismatch(dest_dir / mf.name, mf)
             if mismatch is not None:
@@ -326,6 +389,34 @@ class IAPlugin(SourcePlugin):
                 )
 
         return FetchResult(success=True, bytes_downloaded=bytes_downloaded)
+
+    def _download_file(self, identifier: str, name: str, path: Path) -> None:
+        """Stream one file straight to its place in the temp dir, so every finished
+        file sits where the next attempt looks for it, even if the run is killed.
+
+        One plain request: the library's own download retries at least twice under
+        any setting and remounts retries on the session, so it is not used here.
+        """
+        with self._session.get(
+            self._url(f"download/{quote(identifier)}/{quote(name)}"),
+            params={"cnt": "0"},  # don't count mirroring as views, like the library
+            stream=True,
+            timeout=_DOWNLOAD_TIMEOUT,
+            auth=self._auth(),
+        ) as response:
+            response.raise_for_status()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("wb") as fh:
+                for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK):
+                    fh.write(chunk)
+            last_modified = response.headers.get("Last-Modified")
+        if last_modified:
+            # Keep the upstream timestamp, as the library did.
+            try:
+                mtime = parsedate_to_datetime(last_modified).timestamp()
+            except (TypeError, ValueError):
+                return
+            os.utime(path, (mtime, mtime))
 
     def verify(self, item: ItemDescriptor, archive_path: Path) -> VerifyResult:
         """Cheap existence-only verify. Hashing belongs in `verify --deep`."""
@@ -341,6 +432,10 @@ _RETRIABLE_MARKERS = (
     "timeout",
     "connection reset",
     "connection aborted",
+    # A file cut off mid-stream ("Connection broken: IncompleteRead(...)",
+    # "Response ended prematurely").
+    "connection broken",
+    "ended prematurely",
     "temporarily unavailable",
     "429",
     "502",
