@@ -10,10 +10,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import shutil
+import uuid
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Literal
+
+from mutagen import MutagenError
+from mutagen.easyid3 import EasyID3
+from mutagen.flac import FLAC
+from mutagen.id3 import ID3NoHeaderError
+from mutagen.mp3 import MP3
+from mutagen.oggvorbis import OggVorbis
 
 from shakedown.models import Manifest
+from shakedown.state import TagRecord
+
+log = logging.getLogger(__name__)
+
+# The venue goes in the format's custom field: Vorbis comment VENUE, ID3 TXXX:VENUE.
+EasyID3.RegisterTXXXKey("venue", "VENUE")
 
 # Format-neutral tag names; the writer maps each to the format's own field.
 TAG_KEYS = ("artist", "albumartist", "album", "date", "venue", "title", "tracknumber")
@@ -117,3 +136,151 @@ class TagIndex:
     def labelled(self, identifier: str) -> bool:
         key = self._key.get(identifier)
         return key is not None and len(self._members[key]) > 1
+
+
+# --- writing one file ---------------------------------------------------------------
+
+
+class TagWriteError(Exception):
+    """Writing a file's tags failed on the disk (no space, permission). The file is
+    left exactly as it was."""
+
+
+@dataclass(frozen=True)
+class FillResult:
+    """What one visit did to a file. `record` is what shakedown now holds for it:
+    the post-tag checksum and the values still its own, or None when it has written
+    nothing to this file."""
+    status: Literal["written", "unchanged", "untaggable"]
+    record: TagRecord | None
+
+
+def _fault_point(stage: str) -> None:
+    """Test seam for crash injection: called after the tagged copy is saved
+    ("saved") and after it replaced the file ("replaced")."""
+
+
+def _absent(values: list[str] | None) -> bool:
+    return not values
+
+
+class _Tags:
+    """One file's tags behind format-neutral names, through mutagen. MP3 goes through
+    EasyID3 and is saved in the ID3 version it already had, so nobody else's frames
+    are converted; FLAC and Ogg Vorbis use Vorbis comments."""
+
+    def __init__(self, path: Path) -> None:
+        suffix = path.suffix.lower()
+        self._id3: EasyID3 | None = None
+        self._vorbis: FLAC | OggVorbis | None = None
+        if suffix == ".mp3":
+            MP3(path)  # raises unless the file really is MPEG audio
+            with path.open("rb") as f:
+                header = f.read(4)
+            # Save in the ID3v2 version the file has (its header's major version byte);
+            # an untagged file gets v2.4, mutagen's default.
+            self._v2 = 3 if header[:3] == b"ID3" and header[3] == 3 else 4
+            try:
+                self._id3 = EasyID3(path)
+            except ID3NoHeaderError:
+                self._id3 = EasyID3()
+        else:
+            self._vorbis = FLAC(path) if suffix == ".flac" else OggVorbis(path)
+            if self._vorbis.tags is None:
+                self._vorbis.add_tags()
+
+    def get(self, key: str) -> list[str] | None:
+        if self._id3 is not None:
+            return list(self._id3[key]) if key in self._id3 else None
+        assert self._vorbis is not None
+        return list(self._vorbis[key]) if key in self._vorbis else None
+
+    def set(self, key: str, value: str) -> None:
+        if self._id3 is not None:
+            self._id3[key] = [value]
+        else:
+            assert self._vorbis is not None
+            self._vorbis[key.upper()] = [value]
+
+    def save(self, path: Path) -> None:
+        if self._id3 is not None:
+            self._id3.save(path, v2_version=self._v2)
+        else:
+            assert self._vorbis is not None
+            self._vorbis.save(path)
+
+
+def _md5(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fsync(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fill_file(
+    path: Path, desired: Mapping[str, str], record: TagRecord | None, temp_dir: Path
+) -> FillResult:
+    """Fill the file's absent tags with the desired values (§spec:tag-filling).
+
+    A tag already present is never changed — except a value shakedown wrote itself
+    (in `record`) whose computed value changed, and only while the file still holds
+    exactly that value; one anything else changed is no longer shakedown's. A file
+    with nothing to change is not written. A change is made on a copy in `temp_dir`
+    (same filesystem) that then replaces the file in one rename, so a crash leaves
+    either the old bytes or the new ones, never a half-written file.
+    """
+    try:
+        tags = _Tags(path)
+    except MutagenError as e:
+        log.warning("not filling tags in %s: the file cannot be read as %s: %s",
+                    path, path.suffix.lstrip(".").upper(), e)
+        return FillResult("untaggable", record)
+
+    ours = dict(record.written) if record is not None else {}
+    changes: dict[str, str] = {}
+    for key, value in desired.items():
+        current = tags.get(key)
+        if _absent(current):
+            changes[key] = value
+        elif key in ours:
+            if current != [ours[key]]:
+                del ours[key]  # someone else's value now
+            elif ours[key] != value:
+                changes[key] = value
+    for key in list(ours):
+        if key not in desired and tags.get(key) != [ours[key]]:
+            del ours[key]
+
+    if not changes:
+        if record is None:
+            return FillResult("unchanged", None)
+        return FillResult("unchanged", replace(record, written=ours))
+
+    for key, value in changes.items():
+        tags.set(key, value)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp = temp_dir / f"{uuid.uuid4().hex}{path.suffix}"
+    try:
+        shutil.copyfile(path, temp)
+        shutil.copymode(path, temp)
+        tags.save(temp)
+        _fsync(temp)
+        post_tag_md5 = _md5(temp)
+        _fault_point("saved")
+        os.replace(temp, path)
+    except (OSError, MutagenError) as e:
+        raise TagWriteError(str(e)) from e
+    finally:
+        temp.unlink(missing_ok=True)
+    _fsync(path.parent)
+    _fault_point("replaced")
+    return FillResult("written", TagRecord(post_tag_md5, {**ours, **changes}))
