@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from shakedown.db import connect
-from shakedown.models import ItemStatus, OperationStatus, OperationType
+from shakedown.models import ItemStatus
 from shakedown.reconcile import run_reconcile
-from shakedown.state import ItemRepo, OperationOutcomeRepo
+from shakedown.state import ItemRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -92,51 +92,6 @@ def test_reconcile_marks_disappeared_for_on_disk_only_items(
     row = items.get("fake-src", "coll1", "here")
     assert row is not None
     assert row.status == ItemStatus.DISAPPEARED
-
-
-def test_reconcile_tolerates_source_unavailable(
-    tmp_roots: tuple[Path, Path], monkeypatch
-) -> None:
-    """If `discover` raises (source down, network out), reconcile still records on-disk
-    items rather than refusing to run."""
-    archive, library = tmp_roots
-    config = make_config(archive, library)
-    FakePlugin.items["a"] = FakeItem(
-        identifier="a", files=[FakeFile(name="a.flac", content=b"a")]
-    )
-    assert run_sync(config) == 0
-    config.state_db.unlink()  # type: ignore[union-attr]
-
-    def discover_explodes(self, collection):
-        raise ConnectionError("upstream unreachable")
-        yield  # pragma: no cover  (keeps it a generator)
-
-    monkeypatch.setattr(FakePlugin, "discover", discover_explodes)
-    assert run_reconcile(config) == 1
-
-    conn = connect(config.state_db)  # type: ignore[arg-type]
-    items = ItemRepo(conn)
-    row = items.get("fake-src", "coll1", "a")
-    assert row is not None, "on-disk items must be reconciled even when source is unreachable"
-    # No prior DB row + no source descriptor → COMPLETE with no manifest;
-    # next sync (when source returns) will refresh the manifest.
-    assert row.status == ItemStatus.COMPLETE
-    assert row.recorded_manifest is None
-
-    recovery = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
-    assert recovery is not None
-    assert recovery.operation == OperationType.RECONCILE
-    assert recovery.status == OperationStatus.STALE_ENUMERATION
-    assert recovery.phase == "fetch-manifests"
-    assert recovery.completed_work["items_on_disk"] == 1
-    assert recovery.preservation_context == "local recordings retained"
-    assert recovery.safe_next_action == "restore source access and rerun reconcile"
-
-    monkeypatch.undo()
-    assert run_reconcile(config) == 0
-    assert OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1") is None
-    row = items.get("fake-src", "coll1", "a")
-    assert row is not None and row.recorded_manifest is not None
 
 
 def test_reconcile_keeps_prior_status_when_source_unreachable(

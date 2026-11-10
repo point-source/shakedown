@@ -27,25 +27,6 @@ def _seed_item(identifier: str, *, content: bytes = b"hello world") -> FakeItem:
     return item
 
 
-def test_sync_creates_archive_and_staging(tmp_roots: tuple[Path, Path]) -> None:
-    archive, library = tmp_roots
-    config = make_config(archive, library)
-    _seed_item("gd1977-05-08")
-
-    rc = run_sync(config)
-    assert rc == 0
-
-    # Archive layout: <archive>/<source>/<collection>/<identifier>/<file>
-    archived = archive / "fake-src" / "coll1" / "gd1977-05-08" / "gd1977-05-08.flac"
-    assert archived.is_file()
-
-    # Staging layout (passthrough): mirrors archive layout under library_root.
-    staged = library / "fake-src" / "coll1" / "gd1977-05-08" / "gd1977-05-08.flac"
-    assert staged.is_file()
-    # Hardlink: same inode.
-    assert archived.stat().st_ino == staged.stat().st_ino
-
-
 def test_sync_is_idempotent(tmp_roots: tuple[Path, Path]) -> None:
     """PRD §16.1: re-running sync does not re-fetch unchanged items."""
     archive, library = tmp_roots

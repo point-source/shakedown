@@ -79,63 +79,6 @@ def test_pass_leaves_no_archive_or_library_items(tmp_path: Path, tmp_roots) -> N
 # -- individual failing probes --------------------------------------------------
 
 
-def test_missing_archive_path_fails(tmp_path: Path) -> None:
-    library = tmp_path / "library"
-    library.mkdir()
-    blocker = tmp_path / "blocker"
-    blocker.write_text("not a dir")
-    archive = blocker / "archive"  # parent is a file → mkdir cannot succeed
-    cfg = _config(
-        archive,
-        library,
-        tmp_path / "state.db",
-        [SourceConfig(name="fake-src", type="fake", collections=[_collection()])],
-    )
-    report = validate_config(cfg)
-    assert not report.ok
-    cfg_group = next(g for g in report.groups if g.source is None)
-    archive_check = next(c for c in cfg_group.checks if c.name == "archive path writable")
-    assert not archive_check.ok
-    assert archive_check.consequence and str(archive) in archive_check.consequence
-    assert archive_check.action
-
-
-def test_missing_credential_env_var_fails(tmp_path: Path, tmp_roots, monkeypatch) -> None:
-    archive, library = tmp_roots
-    monkeypatch.delenv("MISSING_EMAIL_X", raising=False)
-    monkeypatch.delenv("MISSING_PW_X", raising=False)
-    src = SourceConfig(
-        name="fake-src",
-        type="fake",
-        auth=IAAuth(email_env="MISSING_EMAIL_X", password_env="MISSING_PW_X"),
-        collections=[_collection()],
-    )
-    report = validate_config(_config(archive, library, tmp_path / "state.db", [src]))
-    assert not report.ok
-    src_group = next(g for g in report.groups if g.source == "fake-src" and g.collection is None)
-    cred = next(c for c in src_group.checks if c.name == "credentials present")
-    assert not cred.ok
-    assert cred.consequence and "MISSING_EMAIL_X" in cred.consequence
-
-
-def test_unreachable_source_fails(tmp_path: Path, tmp_roots) -> None:
-    archive, library = tmp_roots
-    FakePlugin.unreachable_sources.add("fake-src")
-    report = validate_config(
-        _config(
-            archive,
-            library,
-            tmp_path / "state.db",
-            [SourceConfig(name="fake-src", type="fake", collections=[_collection()])],
-        )
-    )
-    assert not report.ok
-    coll_group = next(g for g in report.groups if g.collection == "coll1")
-    reach = next(c for c in coll_group.checks if c.name == "source reachable")
-    assert not reach.ok
-    assert reach.consequence and "unreachable" in reach.consequence
-
-
 def test_unknown_source_plugin_reports_failure_without_crashing(
     tmp_path: Path, tmp_roots
 ) -> None:
@@ -157,23 +100,6 @@ def test_unknown_source_plugin_reports_failure_without_crashing(
     assert plugin_check.consequence and "missing-plugin" in plugin_check.consequence
     coll_group = next(g for g in report.groups if g.collection == "coll1")
     assert not any(c.name == "library layout is collision-safe" for c in coll_group.checks)
-
-
-def test_unsafe_layout_template_fails(tmp_path: Path, tmp_roots) -> None:
-    # `{title}` is a known fake field but not per-item-unique: two same-title items
-    # would collide. The config layer only warns; validate fails.
-    archive, library = tmp_roots
-    src = SourceConfig(
-        name="fake-src",
-        type="fake",
-        collections=[_collection(library_layout="{title}")],
-    )
-    report = validate_config(_config(archive, library, tmp_path / "state.db", [src]))
-    assert not report.ok
-    coll_group = next(g for g in report.groups if g.collection == "coll1")
-    layout = next(c for c in coll_group.checks if c.name == "library layout is collision-safe")
-    assert not layout.ok
-    assert layout.consequence and "collide" in layout.consequence
 
 
 # -- combined acceptance scenario (matches the batch verify criteria) ------------

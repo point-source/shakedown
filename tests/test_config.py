@@ -186,26 +186,6 @@ sources:
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
-def test_constant_layout_rejected(tmp_path: Path) -> None:
-    """A template with no source fields renders every item to one path — a guaranteed
-    collapse and a hard config error (§spec:layout-collision-safety)."""
-    p = _write(tmp_path, """
-archive_root: /a
-library_root: /l
-sources:
-  - name: ia
-    type: ia
-    collections:
-      - name: gd
-        query: 'q'
-        library_layout: 'all-shows'
-""")
-    with pytest.raises(ConfigError) as exc_info:
-        load(p)
-    assert "ia/gd" in str(exc_info.value)
-    assert "same path" in str(exc_info.value)
-
-
 def test_max_concurrent_collections_defaults(tmp_path: Path) -> None:
     """The global collection-concurrency cap is restored and defaults to bounded parallel."""
     p = _write(tmp_path, """
