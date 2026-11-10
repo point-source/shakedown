@@ -377,7 +377,8 @@ def run_validate(
 ) -> int:
     """CLI entry point. Loads config (surfacing a startup-contract failure as the first
     failed check, not a traceback), runs validation, prints the report, and returns a
-    non-zero exit code on any failure."""
+    non-zero exit code on any failure. Raises UnknownScopeError when a filter names
+    nothing configured."""
     try:
         config = config_module.load(config_path)
     except config_module.ConfigError as e:
@@ -401,6 +402,7 @@ def run_validate(
         _emit(report, as_json=as_json)
         return 1
 
+    config_module.check_scope(config, source_filter, collection_filter)
     report = validate_config(
         config,
         source_filter=source_filter,

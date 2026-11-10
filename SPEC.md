@@ -688,6 +688,10 @@ exits (§req:constraints). The command surface:
 
 - Commands shall exit non-zero on failure so failures surface at the
   scheduler/container layer (§req:quality-attributes: operability).
+- A `--source` or `--collection` that names nothing configured is a
+  usage error (exit 2) listing the configured names — never a run that
+  does nothing and exits 0 (§req:quality-attributes: scheduled runs are
+  observable).
 - Writing commands — `sync` (except `--dry-run`), `restage`,
   `reconcile`, `item refetch`, and `verify --reconform`, whether run from
   the CLI, the scheduler, or `serve` — hold one exclusive writer lock
@@ -846,6 +850,10 @@ scheduler (§req:constraints).
 | `POST /sync?source=&collection=` | Trigger an ad-hoc sync (auth required) |
 | `POST /verify` | Trigger a verify run (auth required) |
 | `POST /validate` | Run setup readiness validation; live handoff validation is auth required |
+
+`POST /sync`, `/verify`, and `/validate` answer `404`, naming the
+configured sources or collections, when `source` or `collection` names
+nothing configured.
 
 Security posture (this endpoint accepts requests that cause network
 fetches and disk writes): mutating endpoints shall require a bearer

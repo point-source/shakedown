@@ -115,6 +115,35 @@ class ConfigError(Exception):
     pass
 
 
+class UnknownScopeError(ConfigError):
+    """A --source or --collection filter names nothing in the config."""
+
+
+def check_scope(
+    config: Config, source_filter: str | None, collection_filter: str | None
+) -> None:
+    """Raise UnknownScopeError, listing the configured names, when a filter selects
+    nothing. A misspelled name must fail visibly, never sync nothing and report
+    success (REQUIREMENTS: scheduled runs are observable)."""
+    if source_filter and source_filter not in {s.name for s in config.sources}:
+        names = ", ".join(sorted({s.name for s in config.sources}))
+        raise UnknownScopeError(
+            f"unknown source {source_filter!r}; configured sources: {names}"
+        )
+    collections = {
+        c.name
+        for s in config.sources
+        if not source_filter or s.name == source_filter
+        for c in s.collections
+    }
+    if collection_filter and collection_filter not in collections:
+        where = f" in source {source_filter!r}" if source_filter else ""
+        raise UnknownScopeError(
+            f"unknown collection {collection_filter!r}{where}; configured collections: "
+            f"{', '.join(sorted(collections))}"
+        )
+
+
 def load(path: Path) -> Config:
     if not path.exists():
         raise ConfigError(f"config file not found: {path}")
