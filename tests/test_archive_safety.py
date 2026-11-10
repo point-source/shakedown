@@ -489,3 +489,32 @@ def test_refetch_restores_interrupted_swap_even_when_upstream_is_empty(
 
     assert (coll / "gd-a" / "gd-a.flac").read_bytes() == b"hello world"
     assert not (coll / ".stale-gd-a").exists()
+
+
+def test_new_copy_is_durable_before_the_old_copy_is_deleted(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    import os
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed("gd-a")
+    assert run_sync(config) == 0
+    item.files = [FakeFile(name="gd-a.flac", content=b"re-derived upstream")]
+    events: list[str] = []
+    real_fsync, real_rmtree = os.fsync, sync_module.shutil.rmtree
+
+    def fsync(fd):
+        events.append("fsync " + os.readlink(f"/proc/self/fd/{fd}").rsplit("/", 1)[-1])
+        return real_fsync(fd)
+
+    def rmtree(path, *args, **kwargs):
+        events.append("rmtree " + str(path).rsplit("/", 1)[-1])
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(sync_module.os, "fsync", fsync)
+    monkeypatch.setattr(sync_module.shutil, "rmtree", rmtree)
+
+    assert run_sync(config) == 0
+
+    assert events.index("fsync coll1") < events.index("rmtree .stale-gd-a")

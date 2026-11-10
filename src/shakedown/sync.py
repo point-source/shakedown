@@ -1470,7 +1470,6 @@ def _fetch_one(
     # so flush the bytes, then the rename itself (the parent directory entry).
     _fsync_tree(tmp_dir)
     _promote_atomically(tmp_dir, dest, stale_dir)
-    _fsync_path(archive_root)
     return _FetchOutcome(
         success=True,
         archive_path=dest,
@@ -1545,6 +1544,9 @@ def _promote_atomically(tmp_dir: Path, dest: Path, stale_dir: Path) -> None:
         if had_prior and stale_dir.exists() and not dest.exists():
             os.rename(stale_dir, dest)
         raise
+    # Make the new name durable before the old copy is deleted, so a power cut
+    # leaves either the new copy in place or the old one to restore.
+    _fsync_path(dest.parent)
     if stale_dir.exists():
         shutil.rmtree(stale_dir)
 
