@@ -849,7 +849,8 @@ def _fire_notifications(
             ),
         )
         if err:
-            stats.errors.append(err)
+            log.warning("[%s/%s] handoff not delivered: %s", source.name, collection.name, err)
+            stats.errors.append(f"handoff not delivered: {err}")
 
     if stats.stale or stats.failed > 0:
         err = fire_failure(
@@ -863,7 +864,10 @@ def _fire_notifications(
             ),
         )
         if err:
-            stats.errors.append(err)
+            log.warning(
+                "[%s/%s] failure notice not delivered: %s", source.name, collection.name, err
+            )
+            stats.errors.append(f"failure notice not delivered: {err}")
 
 
 def _files_missing(item: Item) -> bool:

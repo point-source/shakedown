@@ -1,25 +1,30 @@
-"""Library handoff and failure notifications (SPEC §spec:handoff).
+"""Library handoff and failure notifications (SPEC §spec:handoff, §spec:durable-handoff).
 
 Two versioned, once-per-(collection, run) payloads over the same envelope:
 
-- ``sync.complete`` fires a collection's ``on_complete`` webhook/exec after a
-  run staged at least one item — the batch handoff that flows new shows into the
-  library tool.
+- ``sync.complete`` fires a collection's ``on_complete`` webhook/exec with the shows
+  staged and not yet delivered — the batch handoff that tells the library tool new
+  shows are ready.
 - ``sync.failed`` fires the global ``notifications.on_failure`` webhook when a
   run fails, carrying the run's ``errors`` array.
 
-Delivery is best-effort: a failure is logged and returned to the caller (which
-records it in the run's errors, visible in ``status``) but never aborts the sync
-— the mirror's integrity does not depend on a listener being up. The URL/command
-may embed the ``{source}``, ``{collection}``, and ``{staging_root}`` template
-fields. Payloads carry paths and counts only, never credentials.
+A handoff is a trigger with a bounded wait: a webhook answered 2xx, or a command
+that exits 0, within five minutes delivers the notice. Anything else leaves it
+undelivered, and the reason is returned to the caller (which keeps the shows
+pending and shows them in ``status``). Delivery never raises and never aborts the
+sync — the mirror's integrity does not depend on a listener being up. The
+URL/command may embed the ``{source}``, ``{collection}``, and ``{staging_root}``
+template fields. Payloads carry paths and counts only, never credentials.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import shlex
 import shutil
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
@@ -39,7 +44,17 @@ log = logging.getLogger(__name__)
 
 # Bumped only on a breaking change to the payload shape so downstream
 # integrations can rely on the contract (SPEC §spec:handoff).
-PAYLOAD_VERSION = 1
+# v2 (§spec:durable-handoff): `staged` means "staged and not yet delivered", so it can
+# hold shows from earlier runs.
+PAYLOAD_VERSION = 2
+
+# A handoff is a trigger with a bounded wait (§spec:durable-handoff): shakedown waits up
+# to five minutes for a webhook's answer or a command's exit. Fixed, not configurable;
+# tests shrink it by patching this module attribute.
+HANDOFF_WAIT_SECONDS = 300.0
+NO_ANSWER = "no answer within 5 minutes"
+_ERROR_TAIL_LINES = 3
+_ERROR_TAIL_CHARS = 300
 
 # Event name and marker for the readiness handoff test (§spec:setup-readiness-validation).
 # A receiver keys on `event == VALIDATION_EVENT` / `test is True` to recognize a marked
@@ -97,12 +112,12 @@ class SyncFailedPayload:
 
 
 def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) -> str | None:
-    """Fire a collection's ``on_complete`` handoff. Returns a delivery-error string
-    (for the caller to record in run errors) or ``None`` on success/no-op.
+    """Fire a collection's ``on_complete`` handoff. Returns why the notice was not
+    delivered, or ``None`` when it was (or there is no handoff).
 
-    Best-effort: any delivery fault — a malformed URL, an unparseable/empty exec
-    command, a down listener — is turned into a returned error string and never
-    raised, so a handoff can never abort the sync (SPEC §spec:handoff)."""
+    Never raises: any delivery fault — a malformed URL, an unparseable/empty exec
+    command, a down or silent listener — comes back as the reason, so a handoff can
+    never abort the sync (SPEC §spec:durable-handoff)."""
     handoff = collection.on_complete
     if handoff is None:
         return None
@@ -117,8 +132,9 @@ def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) ->
 def fire_failure(
     notifications: NotificationsConfig | None, payload: SyncFailedPayload
 ) -> str | None:
-    """Fire the global ``notifications.on_failure`` webhook. Returns a
-    delivery-error string (for the caller to record) or ``None`` on success/no-op.
+    """Fire the global ``notifications.on_failure`` webhook. Returns why it was not
+    delivered, or ``None`` when it was (or none is configured). Not queued: a late
+    alert about a superseded run is noise (SPEC §spec:durable-handoff).
 
     Best-effort with the same never-raise contract as :func:`fire_complete`."""
     if notifications is None or notifications.on_failure is None:
@@ -226,38 +242,63 @@ def send_handoff_test(
 def _dispatch(handoff: Handoff, body: dict[str, Any]) -> str | None:
     if isinstance(handoff, WebhookHandoff):
         return _post(_expand(handoff.webhook, body), body)
-    cmd = _expand(handoff.exec, body)
-    try:
-        completed = subprocess.run(
-            shlex.split(cmd),
-            check=False,
-            capture_output=True,
-            timeout=30,
-            input=json.dumps(body).encode(),
-        )
-    except (subprocess.SubprocessError, OSError) as e:
-        msg = f"handoff exec {cmd} failed: {e}"
-        log.warning(msg)
-        return msg
-    if completed.returncode != 0:
-        msg = f"handoff exec {cmd} exited {completed.returncode}"
-        log.warning(msg)
-        return msg
-    return None
+    return _run(_expand(handoff.exec, body), body)
 
 
 def _post(url: str, body: dict[str, Any]) -> str | None:
+    """POST the body; delivered only on a 2xx answer within the wait. The reason
+    never names the URL: `GET /status` is open, and a URL can carry a token."""
     try:
-        r = httpx.post(url, json=body, timeout=10.0)
+        r = httpx.post(url, json=body, timeout=HANDOFF_WAIT_SECONDS)
+    except httpx.TimeoutException:
+        return NO_ANSWER
     except httpx.HTTPError as e:
-        msg = f"handoff webhook {url} failed: {e}"
-        log.warning(msg)
-        return msg
-    if r.status_code >= 400:
-        msg = f"handoff webhook {url} returned {r.status_code}"
-        log.warning(msg)
-        return msg
+        return f"webhook unreachable: {e}"
+    if not r.is_success:
+        return f"webhook answered {r.status_code}"
     return None
+
+
+def _run(cmd: str, body: dict[str, Any]) -> str | None:
+    """Run the command with the body on stdin; delivered only when it exits 0 within
+    the wait. Past the wait the command and everything it started are stopped."""
+    try:
+        argv = shlex.split(cmd)
+        if not argv:
+            return "command could not start: the command is empty"
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,  # its own process group, so a stop reaches children
+        )
+    except (ValueError, OSError) as e:
+        return f"command could not start: {e}"
+    try:
+        _, stderr = proc.communicate(json.dumps(body).encode(), timeout=HANDOFF_WAIT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _stop(proc)
+        return NO_ANSWER
+    if proc.returncode != 0:
+        return f"command exited with status {proc.returncode}: {_error_tail(stderr)}"
+    return None
+
+
+def _stop(proc: subprocess.Popen[bytes]) -> None:
+    with contextlib.suppress(ProcessLookupError):  # already gone
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.communicate()
+
+
+def _error_tail(stderr: bytes) -> str:
+    """The last lines of a command's error output, on one line and readable length."""
+    lines = [
+        line.strip()
+        for line in stderr.decode("utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+    return " / ".join(lines[-_ERROR_TAIL_LINES:])[:_ERROR_TAIL_CHARS]
 
 
 def _expand(template: str, body: dict[str, Any]) -> str:
