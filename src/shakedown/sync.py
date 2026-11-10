@@ -11,11 +11,10 @@ import logging
 import os
 import queue
 import shutil
-import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
-from contextlib import closing, contextmanager
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
@@ -23,6 +22,7 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
+from shakedown.discovery import SourceBudget, source_budgets
 from shakedown.filesystem import is_within
 from shakedown.lock import run_exclusive
 from shakedown.models import (
@@ -52,58 +52,6 @@ from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
-
-
-class SourceBudget:
-    """Shared per-source concurrency ceiling (SPEC §spec:source-budget).
-
-    One instance per upstream host, shared across every collection of the sources
-    on that host and both their discovery and download workers, so the number of
-    simultaneous connections Shakedown opens to the host never exceeds the
-    configured budget — no matter how many collections run concurrently.
-    """
-
-    def __init__(self, size: int) -> None:
-        self.size = size
-        self._sem = threading.BoundedSemaphore(size)
-
-    @contextmanager
-    def slot(self) -> Iterator[None]:
-        self._sem.acquire()
-        try:
-            yield
-        finally:
-            self._sem.release()
-
-
-def _source_budget_size(config: Config, source: SourceConfig) -> int:
-    return source.max_concurrent_requests or config.max_concurrent_downloads
-
-
-def _source_budgets(
-    config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
-) -> dict[str, SourceBudget]:
-    """One shared concurrency budget per upstream host, keyed by source name.
-
-    All collections of a source — and every source whose plugin names the same host
-    (an `ia` and an `etree` source both reach archive.org) — draw on one bounded
-    pool, so the ceiling on simultaneous connections to a host holds even with
-    max_concurrent_collections > 1. A shared budget takes the smallest ceiling its
-    sources set (SPEC §spec:source-budget).
-    """
-    groups: dict[str, list[SourceConfig]] = {}
-    group_of: dict[str, str] = {}
-    for source, _collection, plugin in work:
-        if source.name in group_of:
-            continue
-        key = f"host:{plugin.upstream_host}" if plugin.upstream_host else f"source:{source.name}"
-        groups.setdefault(key, []).append(source)
-        group_of[source.name] = key
-    shared = {
-        key: SourceBudget(min(_source_budget_size(config, s) for s in sources))
-        for key, sources in groups.items()
-    }
-    return {name: shared[key] for name, key in group_of.items()}
 
 
 def _describe_one(
@@ -314,7 +262,7 @@ def _run_sync(
     # already-migrated DB). SPEC §spec:sync-workflow.
     connect(config.state_db).close()  # type: ignore[arg-type]
 
-    budgets = _source_budgets(config, work)
+    budgets = source_budgets(config, [(s, p) for s, _, p in work])
 
     if refresh_metadata:
         announce_started([])

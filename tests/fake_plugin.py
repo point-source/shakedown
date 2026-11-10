@@ -9,13 +9,23 @@ from typing import ClassVar
 
 from shakedown.config import CollectionConfig
 from shakedown.models import Manifest, ManifestFile
-from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin, VerifyResult
+from shakedown.plugins.base import (
+    FetchResult,
+    ItemDescriptor,
+    ItemLookup,
+    ListedItem,
+    SourcePlugin,
+    VerifyResult,
+)
 
 
 @dataclass
 class FakeFile:
     name: str
     content: bytes
+    format: str | None = None
+    refused: bool = False
+    derived_from: str | None = None
 
     @property
     def size(self) -> int:
@@ -51,6 +61,42 @@ class FakePlugin(SourcePlugin):
     # Source names whose enumeration should raise, simulating an unreachable source —
     # exactly as a real source fault would — to exercise the readiness reachability probe.
     unreachable_sources: ClassVar[set[str]] = set()
+    # Every lookup_item call as (identifier, timeout).
+    lookup_calls: ClassVar[list[tuple[str, float]]] = []
+    # Per-identifier lookup replies, in order; the last one repeats. An exception is
+    # raised, an ItemLookup returned. Identifiers without an entry answer from `items`.
+    lookup_faults: ClassVar[dict[str, list[BaseException | ItemLookup]]] = {}
+
+    def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:
+        if self.source_config.name in self.unreachable_sources:
+            raise RuntimeError(f"source {self.source_config.name!r} is unreachable")
+        for identifier, it in self.items.items():
+            yield ListedItem(identifier, it.change_signal)
+
+    def lookup_item(self, identifier: str, timeout: float) -> ItemLookup:
+        self.lookup_calls.append((identifier, timeout))
+        replies = self.lookup_faults.get(identifier)
+        if replies:
+            reply = replies.pop(0) if len(replies) > 1 else replies[0]
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+        it = self.items[identifier]
+        return ItemLookup(
+            metadata={**it.metadata, "identifier": it.identifier},
+            files=[
+                {
+                    "name": f.name,
+                    "size": f.size,
+                    "md5": f.md5,
+                    "format": f.format,
+                    "refused": f.refused,
+                    "derived_from": f.derived_from,
+                }
+                for f in it.files
+            ],
+            restriction_reason=it.restriction_reason if it.is_restricted else None,
+        )
 
     def enumerate_items(self, collection: CollectionConfig) -> Iterator[str]:
         if self.source_config.name in self.unreachable_sources:
@@ -110,6 +156,8 @@ def reset_fake() -> None:
     FakePlugin.fetch_count.clear()
     FakePlugin.describe_count.clear()
     FakePlugin.unreachable_sources.clear()
+    FakePlugin.lookup_calls.clear()
+    FakePlugin.lookup_faults.clear()
 
 
 def install_fake() -> None:

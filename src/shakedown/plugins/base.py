@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -48,6 +48,35 @@ def reusable_leftover(path: Path, expected: ManifestFile) -> bool:
         and (expected.size is not None or expected.md5 is not None)
         and downloaded_file_mismatch(path, expected) is None
     )
+
+
+@dataclass(frozen=True)
+class ListedItem:
+    """One row of a collection listing (list_items).
+
+    ``change_signal`` is the source's cheap token that moves whenever the item's
+    contents change (§spec:incremental-discovery); None when the source has none.
+    """
+    identifier: str
+    change_signal: str | None = None
+
+
+@dataclass(frozen=True)
+class ItemLookup:
+    """A plugin's raw answer for one item (lookup_item). The core validates it.
+
+    - ``metadata`` — the item's metadata, with the plugin's ``template_fields`` filled.
+    - ``files`` — every file the source lists, each a mapping with these keys:
+      ``name`` (str, required), ``size`` (bytes, int or digit string), ``md5`` (hex
+      checksum), ``format`` (the source's format name), ``refused`` (True when the
+      source will not serve the file), ``derived_from`` (the original file's name when
+      this file is a derivative), ``bitrate`` (kbps, when the source lists it). Only
+      ``name`` is required; pass the source's values through without checking them.
+    - ``restriction_reason`` — set when the source restricts the whole item.
+    """
+    metadata: Mapping[str, Any]
+    files: Sequence[Mapping[str, Any]]
+    restriction_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +161,15 @@ class SourcePlugin(ABC):
 
     def __init__(self, source_config: SourceConfig) -> None:
         self.source_config = source_config
+
+    def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:
+        """List the collection: every item currently matching its query."""
+        raise NotImplementedError
+
+    def lookup_item(self, identifier: str, timeout: float) -> ItemLookup:
+        """Look up one item with a single request that times out after ``timeout``
+        seconds."""
+        raise NotImplementedError
 
     @abstractmethod
     def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
