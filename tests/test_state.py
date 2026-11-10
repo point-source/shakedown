@@ -17,6 +17,7 @@ from shakedown.state import (
     DriftRepo,
     ItemRepo,
     OperationOutcomeRepo,
+    PendingHandoffRepo,
     PlacementRepo,
     RunRepo,
 )
@@ -402,7 +403,8 @@ def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
     conn = connect(db_path)
     assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 6
     assert {
-        "library_placements", "library_folders", "library_unplaced", "library_adoption"
+        "library_placements", "library_folders", "library_unplaced", "library_adoption",
+        "handoff_pending",
     } <= _tables(conn)
     run_cols = _columns(conn, "runs")
     assert "collisions_dropped" not in run_cols
@@ -416,7 +418,7 @@ def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
     _legacy_v5(db_path)
     migrated = connect(db_path)
     for table in ("runs", "library_placements", "library_folders", "library_unplaced",
-                  "library_adoption"):
+                  "library_adoption", "handoff_pending"):
         assert _columns(fresh, table) == _columns(migrated, table), table
 
 
@@ -476,3 +478,37 @@ def test_placement_repo_folders_unplaced_adoption(tmp_path: Path) -> None:
     repo.mark_adopted("s", "c", datetime(2026, 11, 10))
     assert repo.is_adopted("s", "c") is True
     assert repo.is_adopted("s", "other") is False
+
+
+def test_pending_handoff_repo_keeps_first_since_and_latest_reason(tmp_path: Path) -> None:
+    """§spec:durable-handoff: per collection, the shows covered by notices not yet
+    delivered, since when, and the last reason a notice failed."""
+    repo = PendingHandoffRepo(connect(tmp_path / "s.db"))
+    first = datetime(2026, 11, 1, 3, 0)
+    later = datetime(2026, 11, 8, 3, 0)
+    repo.mark_undelivered("s", "c", ["show-a", "show-b"], "webhook answered 503", first)
+    repo.mark_undelivered("s", "c", ["show-b", "show-c"], "no answer within 5 minutes", later)
+    repo.mark_undelivered("s", "other", ["show-z"], "elsewhere", later)
+
+    pending = repo.list("s", "c")
+    assert [p.identifier for p in pending] == ["show-a", "show-b", "show-c"]
+    # A show keeps the time it first went undelivered; every show carries the newest reason.
+    assert {p.identifier: p.since for p in pending} == {
+        "show-a": first, "show-b": first, "show-c": later,
+    }
+    assert {p.last_reason for p in pending} == {"no answer within 5 minutes"}
+
+
+def test_pending_handoff_repo_clear_and_drop(tmp_path: Path) -> None:
+    repo = PendingHandoffRepo(connect(tmp_path / "s.db"))
+    at = datetime(2026, 11, 1)
+    repo.mark_undelivered("s", "c", ["show-a", "show-b"], "boom", at)
+    repo.mark_undelivered("s", "other", ["show-a"], "boom", at)
+
+    repo.clear("s", "c", ["show-a"])
+    assert [p.identifier for p in repo.list("s", "c")] == ["show-b"]
+    assert [p.identifier for p in repo.list("s", "other")] == ["show-a"]
+
+    repo.drop("s", "c")
+    assert repo.list("s", "c") == []
+    assert [p.identifier for p in repo.list("s", "other")] == ["show-a"]

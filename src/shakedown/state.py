@@ -1,13 +1,15 @@
-"""DB-backed repositories for items, runs, drift, and library placement records."""
+"""DB-backed repositories for items, runs, drift, library placement, and pending handoffs."""
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from shakedown.db import transaction
 from shakedown.models import (
     Item,
     ItemStatus,
@@ -678,4 +680,78 @@ class PlacementRepo:
             VALUES (?, ?, ?)
             """,
             (source, collection, _iso(at)),
+        )
+
+
+@dataclass(frozen=True)
+class PendingShow:
+    """A show covered by a handoff notice not yet delivered (§spec:durable-handoff)."""
+
+    identifier: str
+    since: datetime
+    last_reason: str
+
+
+class PendingHandoffRepo:
+    """Per collection, the shows covered by handoff notices not yet delivered
+    (§spec:durable-handoff): resent with the collection's next notice until one is
+    delivered, and shown in `status` meanwhile."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def list(self, source: str, collection: str) -> list[PendingShow]:
+        cur = self.conn.execute(
+            """
+            SELECT identifier, since, last_reason FROM handoff_pending
+            WHERE source_name=? AND collection_name=? ORDER BY identifier
+            """,
+            (source, collection),
+        )
+        return [
+            PendingShow(row["identifier"], datetime.fromisoformat(row["since"]),
+                        row["last_reason"])
+            for row in cur
+        ]
+
+    def mark_undelivered(
+        self, source: str, collection: str, identifiers: Iterable[str], reason: str,
+        at: datetime,
+    ) -> None:
+        """Record a notice that was not delivered: its shows join the list (a show
+        already pending keeps its first time), and the whole list takes the reason."""
+        with transaction(self.conn):
+            self.conn.executemany(
+                """
+                INSERT INTO handoff_pending
+                    (source_name, collection_name, identifier, since, last_reason)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (source_name, collection_name, identifier) DO NOTHING
+                """,
+                [(source, collection, i, _iso(at), reason) for i in identifiers],
+            )
+            self.conn.execute(
+                """
+                UPDATE handoff_pending SET last_reason=?
+                WHERE source_name=? AND collection_name=?
+                """,
+                (reason, source, collection),
+            )
+
+    def clear(self, source: str, collection: str, identifiers: Iterable[str]) -> None:
+        """Remove shows from the list: a notice covering them was delivered, or they
+        left the library."""
+        self.conn.executemany(
+            """
+            DELETE FROM handoff_pending
+            WHERE source_name=? AND collection_name=? AND identifier=?
+            """,
+            [(source, collection, i) for i in identifiers],
+        )
+
+    def drop(self, source: str, collection: str) -> None:
+        """Forget the collection's whole list (its handoff was removed from config)."""
+        self.conn.execute(
+            "DELETE FROM handoff_pending WHERE source_name=? AND collection_name=?",
+            (source, collection),
         )

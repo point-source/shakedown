@@ -152,6 +152,23 @@ _PLACEMENT_SCHEMA = [
 ]
 _SCHEMA += _PLACEMENT_SCHEMA
 
+# Shows covered by handoff notices not yet delivered (§spec:durable-handoff). `since` is
+# when the show first went undelivered; `last_reason` is the newest failure, the same on
+# every row of the collection.
+_HANDOFF_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS handoff_pending (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        since            TEXT NOT NULL,
+        last_reason      TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name, identifier)
+    )
+    """,
+]
+_SCHEMA += _HANDOFF_SCHEMA
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and lazily create) the state DB at db_path."""
@@ -251,9 +268,10 @@ def _migrate_to_5(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_6(conn: sqlite3.Connection) -> None:
     """v5 → v6, the one migration of the ownership, handoff, and discovery increment
-    (§spec:state): add the library placement record and drop the skip-the-loser
-    collision columns, superseded by clash separation (§spec:library-ownership)."""
-    for stmt in _PLACEMENT_SCHEMA:
+    (§spec:state): add the library placement record and the pending-handoff record
+    (§spec:durable-handoff), and drop the skip-the-loser collision columns, superseded
+    by clash separation (§spec:library-ownership)."""
+    for stmt in _PLACEMENT_SCHEMA + _HANDOFF_SCHEMA:
         conn.execute(stmt)
     for column in ("collisions_dropped", "collision_paths"):
         if _has_column(conn, "runs", column):
