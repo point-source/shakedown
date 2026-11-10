@@ -258,7 +258,7 @@ def test_refused_lossless_show_mirrors_its_best_lossy_copy(
     `private`; the MP3s stay public. Both sources mirror the fallback."""
     archive, library = tmp_roots
     config = source.config(
-        archive, library, format_filters=["shn"], fallback_format_filters=["mp3"]
+        archive, library
     )
     show = "gd69-12-26.sbd"
     source.add_show(show, [("d1t01.shn", b"lossless", {"private": "true"})])

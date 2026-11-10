@@ -35,11 +35,8 @@ class CollectionConfig(BaseModel):
 
     name: str
     query: str
-    format_filters: list[str] = Field(default_factory=list)
-    exclude_filters: list[str] = Field(default_factory=list)
-    # Opt-in: formats to mirror instead when the source refuses every file
-    # `format_filters` wants (e.g. MP3 for a stream-only show's lossless tapes).
-    fallback_format_filters: list[str] = Field(default_factory=list)
+    # Which files to mirror is not configurable: the core keeps the best available and
+    # best playable copy plus every non-audio file (§spec:quality-selection).
     library_layout: str = "passthrough"
     prune_disappeared: bool = False
     # Opt-in per-collection fast-path (§spec:incremental-discovery); skips the per-item

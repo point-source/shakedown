@@ -47,8 +47,6 @@ def make_config(
     prune_disappeared: bool = False,
     incremental_discovery: bool = False,
     preserve_source_metadata: bool = False,
-    format_filters=None,
-    fallback_format_filters=None,
 ) -> Config:
     return Config(
         archive_root=archive_root,
@@ -61,8 +59,6 @@ def make_config(
                     CollectionConfig(
                         name="coll1",
                         query="*",
-                        format_filters=format_filters or [],
-                        fallback_format_filters=fallback_format_filters or [],
                         library_layout=library_layout,
                         on_complete=on_complete,
                         prune_disappeared=prune_disappeared,

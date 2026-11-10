@@ -288,3 +288,32 @@ sources:
 """)
     with pytest.raises(ConfigError):
         load(p)
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("format_filters", "[flac, shn]"),
+        ("exclude_filters", "['*_64kb.mp3']"),
+        ("fallback_format_filters", "[mp3]"),
+    ],
+)
+def test_removed_format_settings_fail_to_load_naming_the_key(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    """File choice follows the quality rule (§spec:quality-selection); a config that
+    still sets a removed format setting fails to load, naming it, so the operator
+    deletes it once on upgrade (§spec:configuration)."""
+    p = _write(tmp_path, f"""
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'collection:GratefulDead'
+        {key}: {value}
+""")
+    with pytest.raises(ConfigError, match=key):
+        load(p)

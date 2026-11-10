@@ -229,9 +229,7 @@ def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
     from shakedown.status import _collection_summary
 
     archive, library = tmp_roots
-    config = make_config(
-        archive, library, format_filters=["shn"], fallback_format_filters=["mp3"]
-    )
+    config = make_config(archive, library)
     item = _seed_item("gd-sbd")
     _stream_only(item)
     assert run_sync(config) == 0
@@ -263,8 +261,7 @@ def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
     again and still listed in `status` with its reason."""
     archive, library = tmp_roots
     config = make_config(
-        archive, library, incremental_discovery=incremental,
-        format_filters=["shn"], fallback_format_filters=["mp3"],
+        archive, library, incremental_discovery=incremental
     )
     item = _seed_item("gd-sbd")
     _stream_only(item)

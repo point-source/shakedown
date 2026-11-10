@@ -55,9 +55,8 @@ PINNED_FILE_MD5 = "eebc1b05345cffe3cf7a80b15f6251f6"
 PINNED_FILE_SIZE = 198658
 PINNED_CREATOR = "test"  # template field surfaced by the ia plugin for this item
 
-# `format_filters=["mp3"]` narrows the item's manifest to the single small MP3,
-# keeping the download to a few hundred KB.
-FORMAT_FILTERS = ["mp3"]
+# The item's only audio is that one small MP3, so the quality rule mirrors it plus
+# archive.org's small metadata files (§spec:quality-selection): a few hundred KB.
 
 # A query that matches exactly the pinned item.
 QUERY_MATCHES = f"identifier:{PINNED_IDENTIFIER}"
@@ -89,7 +88,6 @@ def _config(tmp: Path, *, query: str, layout: str, prune: bool) -> Config:
                     CollectionConfig(
                         name=COLLECTION,
                         query=query,
-                        format_filters=FORMAT_FILTERS,
                         library_layout=layout,
                         prune_disappeared=prune,
                     )

@@ -172,7 +172,7 @@ def test_reconcile_keeps_a_fallback_shows_reason(tmp_roots: tuple[Path, Path]) -
     from shakedown.selection import LOSSLESS_REFUSED_REASON
 
     archive, library = tmp_roots
-    config = make_config(archive, library, format_filters=["shn"], fallback_format_filters=["mp3"])
+    config = make_config(archive, library)
     FakePlugin.items["sbd"] = FakeItem(
         identifier="sbd",
         files=[
@@ -198,7 +198,7 @@ def test_reconcile_keeps_the_reason_of_a_show_whose_lookup_fails(
     from shakedown.selection import LOSSLESS_REFUSED_REASON
 
     archive, library = tmp_roots
-    config = make_config(archive, library, format_filters=["shn"], fallback_format_filters=["mp3"])
+    config = make_config(archive, library)
     FakePlugin.items["sbd"] = FakeItem(
         identifier="sbd",
         files=[

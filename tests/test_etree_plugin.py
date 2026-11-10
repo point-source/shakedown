@@ -38,18 +38,8 @@ def _make_plugin(handler: Handler) -> EtreePlugin:
     return plugin
 
 
-def _collection(
-    *,
-    query: str = "collection:etree",
-    format_filters: list[str] | None = None,
-    exclude_filters: list[str] | None = None,
-) -> CollectionConfig:
-    return CollectionConfig(
-        name="c",
-        query=query,
-        format_filters=format_filters or [],
-        exclude_filters=exclude_filters or [],
-    )
+def _collection(*, query: str = "collection:etree") -> CollectionConfig:
+    return CollectionConfig(name="c", query=query)
 
 
 def _search_response(identifiers: list[str], num_found: int) -> httpx.Response:
@@ -75,7 +65,7 @@ def _metadata_response(
 MD5 = "a" * 32
 
 
-def _look_up(plugin: EtreePlugin, identifier: str, coll: CollectionConfig):
+def _look_up(plugin: EtreePlugin, identifier: str):
     """The core's lookup of one listed item, as sync runs it."""
     return look_up_one(plugin, ListedItem(identifier), SourceBudget(2))
 
@@ -107,7 +97,7 @@ def test_lookup_describes_item_with_core_selected_manifest_and_metadata() -> Non
     ]
     plugin = _make_plugin(_gd77_handler(files))
 
-    item = _look_up(plugin, "gd77", _collection(format_filters=["flac"]))
+    item = _look_up(plugin, "gd77")
 
     assert isinstance(item, ItemDescriptor)
     assert item.identifier == "gd77"
@@ -155,7 +145,7 @@ def test_lookup_passes_the_core_timeout() -> None:
 def test_refused_lossless_falls_back_like_ia() -> None:
     """A stream-only show: archive.org flags the item ``access-restricted-item`` and
     marks its lossless files ``private``, while the MP3s stay public. etree gets the
-    same core selection as IA, including the opted-in fallback."""
+    same core selection as IA: the best lossy copy, with the reason."""
     from shakedown.selection import LOSSLESS_REFUSED_REASON
 
     files = [
@@ -165,11 +155,7 @@ def test_refused_lossless_falls_back_like_ia() -> None:
     plugin = _make_plugin(
         _gd77_handler(files, {"date": "1969-12-26", "access-restricted-item": "true"})
     )
-    coll = CollectionConfig(
-        name="c", query="q", format_filters=["shn"], fallback_format_filters=["mp3"]
-    )
-
-    item = _look_up(plugin, "gd77", coll)
+    item = _look_up(plugin, "gd77")
 
     assert isinstance(item, ItemDescriptor)
     assert item.is_restricted is False
@@ -271,7 +257,7 @@ def test_lookup_marks_access_restricted_item() -> None:
     files = [{"name": "x.flac", "format": "Flac", "size": "1", "md5": MD5}]
     plugin = _make_plugin(_gd77_handler(files, {"date": "1980", "access-restricted": "true"}))
 
-    item = _look_up(plugin, "gd77", _collection())
+    item = _look_up(plugin, "gd77")
     assert isinstance(item, ItemDescriptor)
     assert item.is_restricted is True
     assert item.restriction_reason == "access-restricted"

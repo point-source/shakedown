@@ -51,7 +51,7 @@ def _flac_item(archive: FakeArchive, identifier: str, metadata: dict | None = No
     )
 
 
-def _look_up(plugin: IAPlugin, identifier: str, coll: CollectionConfig, signal: str | None = None):
+def _look_up(plugin: IAPlugin, identifier: str, signal: str | None = None):
     """The core's lookup of one listed item, as sync runs it."""
     return look_up_one(plugin, ListedItem(identifier, signal), SourceBudget(4))
 
@@ -67,8 +67,7 @@ def test_lookup_describes_the_item_with_its_selected_manifest(archive) -> None:
         SHOW,
     )
 
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
-    desc = _look_up(plugin, "gd1977-05-08", coll)
+    desc = _look_up(plugin, "gd1977-05-08")
     assert isinstance(desc, ItemDescriptor)
     assert desc.identifier == "gd1977-05-08"
     assert [f.name for f in desc.manifest.files] == ["d1t01.flac"]
@@ -146,8 +145,7 @@ def test_lookup_marks_restricted_items(archive) -> None:
         },
     )
 
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
-    desc = _look_up(plugin, "gd-stream-only", coll)
+    desc = _look_up(plugin, "gd-stream-only")
     assert isinstance(desc, ItemDescriptor)
     assert desc.is_restricted is True
     assert "soundboard" in (desc.restriction_reason or "")
@@ -161,9 +159,8 @@ def test_lookup_retries_transient_fault_then_resolves(archive, monkeypatch) -> N
     _flac_item(archive, "gd-transient")
     good = archive.routes["/metadata/gd-transient"][0]
     archive.metadata("gd-transient", Reply(503), Reply(503), good)
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    desc = _look_up(plugin, "gd-transient", coll)
+    desc = _look_up(plugin, "gd-transient")
     assert isinstance(desc, ItemDescriptor)
     # two transient failures, third succeeds
     assert len(archive.calls_to("/metadata/gd-transient")) == 3
@@ -174,9 +171,8 @@ def test_lookup_retries_transient_fault_then_resolves(archive, monkeypatch) -> N
 def test_lookup_gives_up_after_bounded_attempts(archive) -> None:
     plugin = _make_plugin()
     archive.metadata("gd-down", Reply(503, b"still down"))
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    result = _look_up(plugin, "gd-down", coll)
+    result = _look_up(plugin, "gd-down")
     assert result == LookupFailure("gd-down", "lookup failed after 3 attempts: HTTP 503")
     assert len(archive.calls_to("/metadata/gd-down")) == LOOKUP_ATTEMPTS
 
@@ -184,9 +180,8 @@ def test_lookup_gives_up_after_bounded_attempts(archive) -> None:
 def test_unreadable_metadata_fails_at_once(archive) -> None:
     plugin = _make_plugin()
     archive.metadata("gd-bad", Reply(200, b"malformed metadata"))
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    result = _look_up(plugin, "gd-bad", coll)
+    result = _look_up(plugin, "gd-bad")
     assert isinstance(result, LookupFailure)
     assert result.reason.startswith("lookup failed: ")
     assert len(archive.calls_to("/metadata/gd-bad")) == 1
@@ -195,9 +190,8 @@ def test_unreadable_metadata_fails_at_once(archive) -> None:
 def test_nameless_file_entry_fails_at_once(archive) -> None:
     plugin = _make_plugin()
     archive.item("gd-x", [{"name": "a.flac", "md5": MD5_A}, {"size": "3", "md5": MD5_B}], SHOW)
-    coll = CollectionConfig(name="dead", query="x")
 
-    result = _look_up(plugin, "gd-x", coll)
+    result = _look_up(plugin, "gd-x")
     assert result == LookupFailure(
         "gd-x", "source sent a malformed file list: file entry 2 has no name"
     )
@@ -212,9 +206,8 @@ def test_lookup_honors_retry_after_header(archive, monkeypatch) -> None:
     _flac_item(archive, "gd-429")
     good = archive.routes["/metadata/gd-429"][0]
     archive.metadata("gd-429", Reply(429, b"rate limited", {"Retry-After": "7"}), good)
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    assert isinstance(_look_up(plugin, "gd-429", coll), ItemDescriptor)
+    assert isinstance(_look_up(plugin, "gd-429"), ItemDescriptor)
     assert delays == [7.0]  # honored the Retry-After delta, not the backoff schedule
 
 
@@ -228,18 +221,16 @@ def test_lookup_clamps_hostile_retry_after(archive, monkeypatch) -> None:
     _flac_item(archive, "gd-evil")
     good = archive.routes["/metadata/gd-evil"][0]
     archive.metadata("gd-evil", Reply(429, b"rate limited", {"Retry-After": "31536000"}), good)
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    assert isinstance(_look_up(plugin, "gd-evil", coll), ItemDescriptor)
+    assert isinstance(_look_up(plugin, "gd-evil"), ItemDescriptor)
     assert delays == [30.0]  # clamped, not a year
 
 
 def test_lookup_passes_the_core_timeout(archive) -> None:
     plugin = _make_plugin()
     _flac_item(archive, "gd-timeout")
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    assert isinstance(_look_up(plugin, "gd-timeout", coll), ItemDescriptor)
+    assert isinstance(_look_up(plugin, "gd-timeout"), ItemDescriptor)
     (call,) = archive.calls_to("/metadata/gd-timeout")
     assert (call.timeout.connect_timeout, call.timeout.read_timeout) == (
         LOOKUP_TIMEOUT, LOOKUP_TIMEOUT
@@ -549,10 +540,7 @@ def test_stream_only_show_falls_back_through_the_core(archive) -> None:
         },
     )
 
-    coll = CollectionConfig(
-        name="dead", query="x", format_filters=["shn"], fallback_format_filters=["mp3"]
-    )
-    desc = _look_up(plugin, "gd69-12-26.sbd", coll)
+    desc = _look_up(plugin, "gd69-12-26.sbd")
     assert isinstance(desc, ItemDescriptor)
     assert desc.is_restricted is False
     assert [f.name for f in desc.manifest.files] == ["d1t01.mp3", "info.txt"]

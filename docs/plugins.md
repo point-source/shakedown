@@ -104,7 +104,7 @@ ItemLookup(
   | `name` | The file's path relative to the item directory. Required. |
   | `size` | Byte size, as an int or a digit string, if the source reports it. |
   | `md5` | The source's MD5 checksum (hex), if it reports one. |
-  | `format` | The source's format name (e.g. `"Flac"`, `"VBR MP3"`), if any. |
+  | `format` | The source's format name (e.g. `"Flac"`, `"VBR MP3"`), if any. Files sharing a format name form one copy of the show. |
   | `refused` | `True` when the source will not serve this file (e.g. archive.org's per-file `private` flag). |
   | `derived_from` | The original file's name, when this file is a derivative of another. |
   | `bitrate` | Bitrate in kbps, when the source lists one. |
@@ -385,9 +385,11 @@ plugin must not reimplement any of them.
   `failed`, an item already mirrored keeps its status and files, and the
   collection is not stale. Only a failed *listing* makes a collection stale.
 - **One file-selection rule.** The core decides which of an item's listed files
-  to mirror, the same way for every source: it leaves out files the source
-  refuses and applies the collection's file settings, including the fallback for
-  a show whose wanted files are all refused.
+  to mirror, the same way for every source (SPEC §spec:quality-selection): the
+  best available copy, the best playable copy when that is a different format,
+  and every non-audio file. It ranks copies by the file extension, `format`,
+  `bitrate`, and `size` you pass through, and leaves out files the source
+  refuses. There are no per-collection file settings.
 - **Fresh temp dir per fetch.** For each item the core creates a private
   temporary directory and passes it as `dest_dir`. You write only there.
 - **Atomic promotion.** On a successful, complete fetch the core renames the
@@ -573,8 +575,6 @@ sources:
     collections:
       - name: my-collection
         query: 'genre:jazz year:1975'
-        format_filters: [flac, shn]
-        exclude_filters: ['*_64kb.mp3']
         # Renders the staging directory; original filenames are appended.
         # Only fields in the plugin's template_fields may be referenced.
         library_layout: '{year}/{date} - {venue}/{identifier}'
