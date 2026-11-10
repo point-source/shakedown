@@ -1626,3 +1626,23 @@ def test_refetch_reports_a_failed_lookup(tmp_roots: tuple[Path, Path]) -> None:
     assert {identifier for identifier, _ in FakePlugin.lookup_calls} == {"gd-a"}
     assert FakePlugin.fetch_count["gd-a"] == 1
     assert (archive / "fake-src" / "coll1" / "gd-a" / "gd-a.flac").is_file()
+
+
+def test_incremental_sync_stores_a_moved_signal_once_the_show_proves_unchanged(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A signal can move with no change to the files (a metadata edit). The sync that
+    looks the show up and finds it unchanged stores the new signal, so later syncs
+    skip it again (§spec:incremental-discovery, §req:success-criteria #11)."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=True)
+    item = _seed_item("gd-sbd")
+    item.change_signal = "v1"
+    assert run_sync(config) == 0
+    item.change_signal = "v2"
+    assert run_sync(config) == 0
+    looked_up = FakePlugin.lookups("gd-sbd")
+
+    assert run_sync(config) == 0
+
+    assert FakePlugin.lookups("gd-sbd") == looked_up, "skipped on the stored signal"
