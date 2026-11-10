@@ -411,6 +411,21 @@ def test_missing_archive_file_keeps_its_library_copy(tmp_path: Path) -> None:
     assert (lib.base / "X" / "a.flac").read_bytes() == b"a"
 
 
+def test_update_tolerates_a_refused_show(tmp_path: Path) -> None:
+    """A show whose folder would leave the library is refused during a sync too; the
+    run carries on and the full pass reports it."""
+    lib = Lib(tmp_path, layout="../{title}")
+    engine = lib.engine()
+    engine.begin()
+    lib.show("gd-a", {"a.flac": b"a"}, title="X")
+
+    engine.update("gd-a")
+    report = engine.finish()
+
+    assert list(report.issues) == ["gd-a"]
+    assert not (tmp_path / "library" / "fake-src" / "X").exists()
+
+
 def test_failed_removal_stays_recorded_and_is_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

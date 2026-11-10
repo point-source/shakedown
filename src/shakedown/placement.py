@@ -143,6 +143,8 @@ class LibraryPlacement:
         except TemplateError as e:
             self._refused[identifier] = f"{identifier}: {e}"
             return
+        if identifier in self._refused:
+            return  # an unsafe path: refused, and reported by the full pass
         affected = {identifier}
         for bare in (old, self._bare.get(identifier)):
             if bare is not None:
