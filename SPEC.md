@@ -1884,9 +1884,8 @@ completed, and once it completes the stale warning is gone.
 
 ## Release validation gate §spec:release-validation-gate
 
-*Status: implemented — `tests/test_release_workflows.py`, run by CI's
-`test` job, which the image-publishing `docker` job needs; the
-`release-validate` command is removed.*
+*Status: complete — `tests/test_release_workflows.py`, run by CI's
+`test` job, which the image-publishing `docker` job needs.*
 
 A bounded validation of the workflows users rely on runs in CI and must
 pass before any release image is published; the shipped product carries
