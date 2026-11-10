@@ -535,32 +535,26 @@ class PlacementRepo:
         )
         return {row["path"]: row["inode"] for row in cur}
 
-    def iter_placements(self, source: str, collection: str) -> Iterator[tuple[str, str]]:
-        """(identifier, path) for every placed file in the collection, by identifier."""
+    def placed_identifiers(self, source: str, collection: str) -> set[str]:
+        """Every show with at least one placed file in the collection."""
         cur = self.conn.execute(
             """
-            SELECT identifier, path FROM library_placements
-            WHERE source_name=? AND collection_name=? ORDER BY identifier, path
+            SELECT DISTINCT identifier FROM library_placements
+            WHERE source_name=? AND collection_name=?
             """,
             (source, collection),
         )
-        for row in cur:
-            yield row["identifier"], row["path"]
+        return {row["identifier"] for row in cur}
 
-    def placement(self, source: str, collection: str, path: str) -> tuple[str, int] | None:
-        """(owning identifier, placed inode) for a recorded path, else None."""
+    def owner_of(self, source: str, collection: str, path: str) -> str | None:
         row = self.conn.execute(
             """
-            SELECT identifier, inode FROM library_placements
+            SELECT identifier FROM library_placements
             WHERE source_name=? AND collection_name=? AND path=?
             """,
             (source, collection, path),
         ).fetchone()
-        return (row["identifier"], row["inode"]) if row else None
-
-    def owner_of(self, source: str, collection: str, path: str) -> str | None:
-        record = self.placement(source, collection, path)
-        return record[0] if record else None
+        return row["identifier"] if row else None
 
     def add_placement(
         self, source: str, collection: str, identifier: str, path: str, inode: int

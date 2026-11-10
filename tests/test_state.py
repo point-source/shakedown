@@ -431,10 +431,8 @@ def test_placement_repo_round_trip(tmp_path: Path) -> None:
     assert set(repo.placed_inodes("s", "c", "show-a")) == {"A/a.flac", "A/metadata.json"}
     assert repo.owner_of("s", "c", "B/b.flac") == "show-b"
     assert repo.owner_of("s", "c", "nope") is None
-    assert repo.placement("s", "c", "A/a.flac") == ("show-a", 2)  # last recorded inode
-    assert list(repo.iter_placements("s", "c")) == [
-        ("show-a", "A/a.flac"), ("show-a", "A/metadata.json"), ("show-b", "B/b.flac"),
-    ]
+    assert repo.placed_inodes("s", "c", "show-a")["A/a.flac"] == 2  # last recorded inode
+    assert repo.placed_identifiers("s", "c") == {"show-a", "show-b"}
     repo.remove_placement("s", "c", "A/a.flac")
     assert set(repo.placed_inodes("s", "c", "show-a")) == {"A/metadata.json"}
 

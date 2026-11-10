@@ -86,8 +86,8 @@ def has_archive_copy(item: Item) -> bool:
 class PlacementReport:
     """What one full pass left in effect."""
 
-    # (identifier, absolute folder) for every separated show, by folder.
-    separated: list[tuple[str, Path]] = field(default_factory=list)
+    # Shows staged into a folder labelled with their identifier (separations in effect).
+    separations: int = 0
     # Per-show issues: foreign-file conflicts, failed removals, refused paths, disk errors.
     issues: dict[str, list[str]] = field(default_factory=dict)
     # Absolute library folder of every show staged by the pass.
@@ -168,14 +168,7 @@ class LibraryPlacement:
             report.issues.setdefault(identifier, []).append(message)
         for identifier in self._bare:
             report.folder_of[identifier] = self.base / self._folder(identifier)
-        report.separated = sorted(
-            (
-                (identifier, self.base / self._folder(identifier))
-                for identifier in self._bare
-                if self._separated(identifier)
-            ),
-            key=lambda pair: (str(pair[1]), pair[0]),
-        )
+        report.separations = sum(1 for identifier in self._bare if self._separated(identifier))
         return report
 
     # --- folder index --------------------------------------------------------------
@@ -342,9 +335,7 @@ class LibraryPlacement:
     def _orphans(self, staged: set[str]) -> list[str]:
         """Shows with a placement or folder record that no longer stage (pruned,
         forgotten, archive copy gone). A refused show keeps its placement."""
-        recorded = {identifier for identifier, _ in self.repo.iter_placements(
-            self.source, self.collection.name
-        )}
+        recorded = self.repo.placed_identifiers(self.source, self.collection.name)
         recorded |= set(self.repo.folders(self.source, self.collection.name))
         return sorted(recorded - staged - set(self._refused))
 

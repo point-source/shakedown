@@ -101,14 +101,14 @@ def _run_restage(
                 "items_staged": len(report.folder_of),
                 "links_created": report.links_created,
                 "files_removed": report.files_removed,
-                "separations": len(report.separated),
+                "separations": report.separations,
             }
             log.info(
                 "[%s/%s] restage: staged=%d linked=%d removed=%d separated=%d issues=%d",
                 source.name, collection.name, len(report.folder_of), report.links_created,
-                report.files_removed, len(report.separated), len(report.issues),
+                report.files_removed, report.separations, len(report.issues),
             )
-            log_separations(source.name, collection.name, len(report.separated))
+            log_separations(source.name, collection.name, report.separations)
             finished = datetime.now()
             if report.issues:
                 failed += 1

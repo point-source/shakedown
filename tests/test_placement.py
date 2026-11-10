@@ -93,10 +93,7 @@ def test_clashing_shows_each_get_a_labelled_folder(tmp_path: Path) -> None:
         "Barton Hall [gd-b]/b.flac",
         "Winterland/c.flac",
     ]
-    assert report.separated == [
-        ("gd-a", lib.base / "Barton Hall [gd-a]"),
-        ("gd-b", lib.base / "Barton Hall [gd-b]"),
-    ]
+    assert report.separations == 2
     assert report.issues == {}
     assert lib.repo.list_separated(SRC, COLL) == [
         ("gd-a", "Barton Hall [gd-a]"), ("gd-b", "Barton Hall [gd-b]"),
@@ -159,7 +156,7 @@ def test_clash_ending_returns_survivor_to_bare_name(tmp_path: Path) -> None:
     assert lib.tree() == ["X/a.flac"]
     assert not (lib.base / "X [gd-b]").exists()
     assert not (lib.base / "X [gd-a]").exists()
-    assert report.separated == []
+    assert report.separations == 0
     assert lib.repo.list_separated(SRC, COLL) == []
 
 

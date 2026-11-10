@@ -481,7 +481,7 @@ def _refresh_collection(
         "[%s/%s] metadata refresh: refreshed=%d of %d mirrored",
         source.name, collection.name, refreshed, len(mirrored),
     )
-    log_separations(source.name, collection.name, len(report.separated))
+    log_separations(source.name, collection.name, report.separations)
     if report.render_error is not None:
         log.warning("[%s/%s] %s: %s", source.name, collection.name, *report.render_error)
         return 1
@@ -502,7 +502,7 @@ def _apply_placement_report(stats: CollectionSyncStats, report: PlacementReport)
         stats.failed += 1
         stats.staging_issues += 1
         stats.errors.extend(lines)
-    stats.separated = len(report.separated)
+    stats.separated = report.separations
     for identifier, archive_path in stats.fetched.items():
         folder = report.folder_of.get(identifier)
         if folder is None:
