@@ -217,7 +217,7 @@ def test_stale_run_still_resends_pending_shows(tmp_roots: tuple[Path, Path]) -> 
 
     config = _config(archive, library, GOOD)
     hooks = _Webhooks()
-    with patch.object(FakePlugin, "enumerate_items", side_effect=RuntimeError("down")):
+    with patch.object(FakePlugin, "list_items", side_effect=RuntimeError("down")):
         assert _sync(config, hooks) == 1  # stale: fails for its own reason
 
     (body,) = hooks.bodies()
@@ -246,7 +246,7 @@ def test_undelivered_failure_notice_is_not_queued(tmp_roots: tuple[Path, Path]) 
     hooks = _Webhooks()
     assert _sync(config, hooks) == 0  # delivers gd-a's notice
 
-    with patch.object(FakePlugin, "enumerate_items", side_effect=RuntimeError("down")):
+    with patch.object(FakePlugin, "list_items", side_effect=RuntimeError("down")):
         assert _sync(config, hooks) == 1
 
     assert _pending(config) == []
@@ -418,7 +418,7 @@ def test_status_shows_an_undelivered_failure_notice_for_that_run(
     config.notifications = NotificationsConfig(on_failure=FailureNotification(webhook=DOWN))
     cfg = write_config(tmp_path / "shakedown.yaml", config)
     _add_show("gd-a")
-    with patch.object(FakePlugin, "enumerate_items", side_effect=RuntimeError("down")):
+    with patch.object(FakePlugin, "list_items", side_effect=RuntimeError("down")):
         assert _sync(config, _Webhooks()) == 1
 
     lines = _status(cfg).splitlines()
