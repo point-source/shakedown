@@ -547,3 +547,27 @@ def test_files_finished_before_the_process_died_are_reused(archive, tmp_path: Pa
     assert sync_module._fetch_with_retries(plugin, desc, tmp_dir, collection).success
 
     assert _served_calls(archive, "gd-x") == ["a.flac", "b.flac", "b.flac"]
+
+
+def test_discover_marks_stream_only_items_from_their_metadata_flag(archive) -> None:
+    """archive.org flags stream-only shows (e.g. gd69-12-26.sbd.murphy.1821.sbeok.shnf)
+    with `access-restricted-item` and a `stream_only` collection, and answers 403 for
+    their lossless files. The flag marks them unavailable before any download."""
+    from shakedown.plugins.ia.plugin import DOWNLOAD_REFUSED_REASON
+
+    plugin = _make_plugin()
+    archive.search_results({"identifier": "gd69-12-26.sbd"})
+    _flac_item(
+        archive,
+        "gd69-12-26.sbd",
+        metadata={
+            "date": "1969-12-26",
+            "collection": ["GratefulDead", "etree", "stream_only"],
+            "access-restricted-item": "true",
+        },
+    )
+
+    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
+    desc = next(plugin.discover(coll))
+    assert desc.is_restricted is True
+    assert desc.restriction_reason == DOWNLOAD_REFUSED_REASON

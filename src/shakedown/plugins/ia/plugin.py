@@ -122,6 +122,10 @@ def _detect_restriction(item_meta: dict[str, Any]) -> tuple[bool, str | None]:
     """Heuristic for "this item is stream-only / download-disabled" (PRD §6, §13)."""
     if item_meta.get("access-restricted") in (True, "true", "1"):
         return True, item_meta.get("access-restricted-item-reason") or "access-restricted"
+    # archive.org's flag on stream-only shows (they also sit in its `stream_only`
+    # collection); their lossless files answer 403.
+    if item_meta.get("access-restricted-item") in (True, "true", "1"):
+        return True, DOWNLOAD_REFUSED_REASON
     if str(item_meta.get("noindex")).lower() == "true":
         return True, "noindex (item hidden by uploader)"
     return False, None
