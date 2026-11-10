@@ -68,3 +68,6 @@ def test_verify_deep_reconform_restores_upstream_bytes(tmp_roots: tuple[Path, Pa
     assert rc == 0
     assert archived.read_bytes() == b"upstream bytes"
     assert FakePlugin.fetch_count["gd-x"] == 2  # one initial sync, one reconform
+    # The library serves the restored bytes too, not the drifted copy.
+    staged = config.library_root / "fake-src" / "coll1" / "gd-x" / "gd-x.flac"
+    assert staged.stat().st_ino == archived.stat().st_ino

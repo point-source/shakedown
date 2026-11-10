@@ -1188,7 +1188,7 @@ def _execute_fetch_and_stage(
     items: ItemRepo,
     targets: list[PlannedItem],
     stats: CollectionSyncStats,
-    placement: LibraryPlacement | None = None,
+    placement: LibraryPlacement,
     budget: SourceBudget | None = None,
 ) -> None:
     """Concurrent fetch (capped by max_concurrent_downloads); sequential staging.
@@ -1227,7 +1227,7 @@ def _process_fetch_result(
     collection: CollectionConfig,
     items: ItemRepo,
     stats: CollectionSyncStats,
-    placement: LibraryPlacement | None,
+    placement: LibraryPlacement,
 ) -> None:
     """Apply one completed fetch: record the row, link it into the library, accumulate
     stats.
@@ -1274,8 +1274,7 @@ def _process_fetch_result(
     stats.fetched[desc.identifier] = outcome.archive_path
     # Linked now, not at the end of the run, so a run that dies later keeps it staged.
     # Issues are reported by the run's full staging pass, which meets them again.
-    if placement is not None:
-        placement.update(desc.identifier)
+    placement.update(desc.identifier)
 
 
 @dataclass

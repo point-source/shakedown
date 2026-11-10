@@ -17,10 +17,17 @@ from shakedown.config import Config
 from shakedown.db import connect, transaction
 from shakedown.lock import run_exclusive
 from shakedown.models import Item, ItemStatus, Manifest
+from shakedown.placement import LibraryPlacement
 from shakedown.plugins import registry
 from shakedown.plugins.base import ItemDescriptor
 from shakedown.state import DriftRepo, ItemRepo
-from shakedown.sync import CollectionSyncStats, PlanAction, PlannedItem, _execute_fetch_and_stage
+from shakedown.sync import (
+    CollectionSyncStats,
+    PlanAction,
+    PlannedItem,
+    _apply_placement_report,
+    _execute_fetch_and_stage,
+)
 from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
@@ -227,9 +234,14 @@ def _reconform(config: Config, items: ItemRepo, drifts: list[DriftRecord]) -> in
                 targets.append(PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM))
 
             stats = CollectionSyncStats()
+            # Re-fetched shows get new inodes: relink them so the library serves the
+            # restored bytes, not the drifted ones.
+            placement = LibraryPlacement(config, collection, source.name, items)
+            placement.begin()
             _execute_fetch_and_stage(
-                config, source, collection, plugin, items, targets, stats
+                config, source, collection, plugin, items, targets, stats, placement
             )
+            _apply_placement_report(stats, placement.finish())
             if stats.failed:
                 failed += stats.failed
     return 0 if failed == 0 else 1
