@@ -114,12 +114,14 @@ The serve container starts runs itself, so it needs the same image, mounts, user
 ## Writing a source plugin
 
 A source plugin teaches Shakedown how to talk to one kind of remote archive. It
-implements three methods on `shakedown.plugins.base.SourcePlugin` — `discover`,
-`fetch`, `verify` — plus a `type_name` and `template_fields` declaration, and
-registers itself. The core owns temp-dir lifecycle, atomic archive promotion,
-retries/backoff, staging, and the database, so plugins stay small.
+implements four methods on `shakedown.plugins.base.SourcePlugin` — `list_items`,
+`lookup_item`, `fetch`, `verify` — plus a `type_name` and `template_fields`
+declaration, and registers itself. Each method answers a single request. The core
+owns parallel lookups under the politeness budget, retries/backoff, isolating one
+bad item from the rest, choosing which files to mirror, temp-dir lifecycle,
+atomic archive promotion, staging, and the database, so plugins stay small.
 
-The full contract, the data types, the filter and failure-classification rules,
+The full contract, the data types, the failure-classification rules,
 registration, and a complete worked example live in
 [`docs/plugins.md`](docs/plugins.md) — the authoritative, self-contained guide.
 Reference your plugin from `shakedown.yaml` with `type: <your type_name>`.
