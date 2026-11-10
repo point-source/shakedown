@@ -331,8 +331,8 @@ Opt-in per collection (`incremental_discovery`, default off,
 **change signal in the search response itself** — a source-provided
 token that moves whenever the item's contents change (for IA, the
 item's update timestamp together with its total size) — and persists it
-alongside the recorded manifest (§spec:state). On a later sync, an item
-whose current signal matches the stored one is classified `unchanged`
+alongside the recorded manifest (§spec:state). On a later sync, a `complete`
+item whose current signal matches the stored one is classified `unchanged`
 **without** the per-item metadata round-trip. An item whose signal
 differs, or that has no stored signal, falls through to the full
 manifest comparison (§spec:sync-identity) exactly as today. This

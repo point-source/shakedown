@@ -1040,6 +1040,9 @@ def _signal_unchanged(signal: str | None, existing: Item | None) -> bool:
     return (
         signal is not None
         and existing is not None
+        # Only a complete show may skip the lookup: any other status (a refusal, a
+        # failure, a gap in the listing) is re-checked against the source.
+        and existing.status == ItemStatus.COMPLETE
         and existing.change_signal is not None
         and existing.change_signal == signal
         and not _files_missing(existing)

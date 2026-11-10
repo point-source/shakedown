@@ -292,6 +292,32 @@ def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
     assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", "fallback copy")]
 
 
+def test_incremental_sync_rechecks_a_show_left_unavailable_by_a_refused_refetch(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A refused refetch keeps the archive copy and its change signal; the next
+    incremental sync must still look the show up rather than skip it on the signal."""
+    from shakedown.sync import refetch_item
+
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=True)
+    item = _seed_item("gd-sbd")
+    item.change_signal = "v1"
+    assert run_sync(config) == 0
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+    assert refetch_item(config, "gd-sbd") == 1
+    described = FakePlugin.describe_count.get("gd-sbd", 0)
+
+    assert run_sync(config) == 0
+
+    assert FakePlugin.describe_count["gd-sbd"] == described + 1, "looked up, not skipped"
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE  # the archive copy matches the manifest
+    assert row.restriction_reason is None
+
+
 def test_refused_redownload_keeps_the_archive_copy(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
