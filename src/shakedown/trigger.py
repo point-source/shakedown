@@ -44,11 +44,7 @@ def _announce(message: dict[str, Any]) -> None:
     raw = os.environ.pop(READY_FD_ENV, None)
     if raw is None:
         return
-    try:
-        fd = int(raw)
-    except ValueError:
-        log.warning("ignoring %s=%r: not a file descriptor", READY_FD_ENV, raw)
-        return
+    fd = int(raw)  # only serve sets it, always to the pipe's fd number
     try:
         os.write(fd, (json.dumps(message) + "\n").encode())
     except OSError as e:
