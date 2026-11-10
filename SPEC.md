@@ -170,9 +170,10 @@ collection so a config typo can't silently discard recordings.
 
 A sync run for a (source, collection) pair proceeds in six phases:
 
-1. **Discover.** The source plugin enumerates all items currently
-   matching the collection's query, returning lightweight descriptors
-   with current manifests and metadata.
+1. **Discover.** The source plugin lists all items currently matching
+   the collection's query; the core looks each one up and chooses its
+   files, giving each item's current manifest and metadata
+   (§spec:per-item-isolation).
 2. **Plan.** Each remote item's current manifest is compared against
    the recorded manifest (§spec:sync-identity) and classified:
    `new` (not in DB), `unchanged` (manifests match — skip),
@@ -558,8 +559,8 @@ what is preserved.
 
 ## Source plugins §spec:source-plugins
 
-*Status: complete, except the core-owned listing/lookup contract that
-replaces `discover` (§spec:per-item-isolation) — not started.*
+*Status: complete, including the core-owned listing/lookup contract
+(§spec:per-item-isolation).*
 
 Sources are pluggable so that new archives can be added without core
 changes (§req:constraints). A plugin lists a collection, looks up one
@@ -615,7 +616,10 @@ documented interface" — not "installable third-party ecosystem."
 
 ## Per-item isolation on every source §spec:per-item-isolation
 
-*Status: not started*
+*Status: implemented, except the file-selection rule itself: the core
+applies the collection's `format_filters`, `exclude_filters`, and
+`fallback_format_filters` to every source until the quality rule replaces
+them (§spec:quality-selection).*
 
 A server error, timeout, or malformed file listing for one item marks
 only that item failed for the run; every other item still syncs and the
@@ -1946,9 +1950,9 @@ listed.
 ## Failure behavior §spec:failure-behavior
 
 *Status: complete, including the library ownership and cleanup rows
-(§spec:library-ownership, §spec:library-cleanup); the other rows citing
-sections of the ownership, handoff, and discovery increment — not
-started.*
+(§spec:library-ownership, §spec:library-cleanup) and the per-item lookup
+row (§spec:per-item-isolation); the other rows citing sections of the
+ownership, handoff, and discovery increment — not started.*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
