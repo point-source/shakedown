@@ -218,7 +218,7 @@ def test_sidecar_is_placed_when_preserved(tmp_path: Path) -> None:
     lib.show("gd-a", {"a.flac": b"a"}, title="X")
     lib.finish()
     assert lib.tree() == ["X/a.flac", "X/metadata.json"]
-    assert lib.repo.placements_for(SRC, COLL, "gd-a") == {"X/a.flac", "X/metadata.json"}
+    assert set(lib.repo.placed_inodes(SRC, COLL, "gd-a")) == {"X/a.flac", "X/metadata.json"}
 
 
 # --- WS3: never replace a foreign file ---------------------------------------------
@@ -242,7 +242,7 @@ def test_foreign_file_is_left_and_reported(tmp_path: Path) -> None:
         "left it and skipped that link"
     )
     assert lib.repo.list_unplaced(SRC, COLL) == ["X/a.flac"]
-    assert lib.repo.placements_for(SRC, COLL, "gd-a") == {"X/b.flac"}
+    assert set(lib.repo.placed_inodes(SRC, COLL, "gd-a")) == {"X/b.flac"}
 
 
 def test_stale_link_after_refetch_is_replaced(tmp_path: Path) -> None:
@@ -267,14 +267,14 @@ def test_unrecorded_link_to_archive_copy_is_adopted(tmp_path: Path) -> None:
     lib = Lib(tmp_path)
     item = lib.show("gd-a", {"a.flac": b"a"}, title="X")
     lib.engine().finish()  # adoption done; empty library
-    lib.repo.delete_show(SRC, COLL, "gd-a")
+    lib.repo.remove_placement(SRC, COLL, "X/a.flac")  # never recorded
     assert item.archive_path is not None
     assert (lib.base / "X" / "a.flac").exists()
 
     report = lib.finish()
 
     assert report.issues == {}
-    assert lib.repo.placements_for(SRC, COLL, "gd-a") == {"X/a.flac"}
+    assert set(lib.repo.placed_inodes(SRC, COLL, "gd-a")) == {"X/a.flac"}
 
 
 # --- WS4: placement-driven cleanup -------------------------------------------------
@@ -358,7 +358,7 @@ def test_file_replaced_at_a_placed_path_is_not_removed(tmp_path: Path) -> None:
     assert edited.read_bytes() == b"my edit"
     assert lib.tree() == ["New/a.flac", "Old/a.flac"]
     assert lib.repo.list_unplaced(SRC, COLL) == ["Old/a.flac"]
-    assert lib.repo.placements_for(SRC, COLL, "gd-a") == {"New/a.flac"}
+    assert set(lib.repo.placed_inodes(SRC, COLL, "gd-a")) == {"New/a.flac"}
     assert report.issues == {}
 
 
@@ -394,7 +394,7 @@ def test_show_without_archive_copy_loses_its_placement(tmp_path: Path) -> None:
     lib.finish()
 
     assert lib.tree() == ["Y/b.flac"]
-    assert lib.repo.placements_for(SRC, COLL, "gd-a") == set()
+    assert set(lib.repo.placed_inodes(SRC, COLL, "gd-a")) == set()
 
 
 def test_missing_archive_file_keeps_its_library_copy(tmp_path: Path) -> None:
@@ -504,5 +504,5 @@ def test_rebuilt_database_adopts_again(tmp_path: Path) -> None:
 
     lib.finish()
 
-    assert lib.repo.placements_for(SRC, COLL, "gd-a") == {"X/a.flac"}
+    assert set(lib.repo.placed_inodes(SRC, COLL, "gd-a")) == {"X/a.flac"}
     assert lib.repo.list_unplaced(SRC, COLL) == []

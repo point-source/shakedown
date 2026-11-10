@@ -407,8 +407,6 @@ class OperationOutcomeRepo:
         source: str,
         collection: str,
         resolved_at: datetime,
-        *,
-        affected_item: str | None = None,
     ) -> None:
         statuses = tuple(s.value for s in self.ACTIONABLE_STATUSES)
         placeholders = ", ".join("?" for _ in statuses)
@@ -419,10 +417,6 @@ class OperationOutcomeRepo:
             collection,
             *statuses,
         ]
-        item_filter = ""
-        if affected_item is not None:
-            item_filter = "AND affected_item=?"
-            params.append(affected_item)
         self.conn.execute(
             f"""
             UPDATE operation_outcomes
@@ -432,7 +426,6 @@ class OperationOutcomeRepo:
               AND collection_name=?
               AND resolved_at IS NULL
               AND status IN ({placeholders})
-              {item_filter}
             """,
             params,
         )
@@ -530,9 +523,6 @@ class PlacementRepo:
         self.conn = conn
 
     # --- placed files ---
-
-    def placements_for(self, source: str, collection: str, identifier: str) -> set[str]:
-        return set(self.placed_inodes(source, collection, identifier))
 
     def placed_inodes(self, source: str, collection: str, identifier: str) -> dict[str, int]:
         """path -> placed inode for every file the show has placed."""
@@ -650,14 +640,6 @@ class PlacementRepo:
             (source, collection),
         )
         return [(row["identifier"], row["folder"]) for row in cur]
-
-    def delete_show(self, source: str, collection: str, identifier: str) -> None:
-        """Drop a show's whole placement record (its files and its folder)."""
-        for table in ("library_placements", "library_folders"):
-            self.conn.execute(
-                f"DELETE FROM {table} WHERE source_name=? AND collection_name=? AND identifier=?",
-                (source, collection, identifier),
-            )
 
     # --- files shakedown did not place ---
 

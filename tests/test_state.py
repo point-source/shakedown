@@ -428,7 +428,7 @@ def test_placement_repo_round_trip(tmp_path: Path) -> None:
     repo.add_placement("s", "c", "show-b", "B/b.flac", 4)
     repo.add_placement("s", "other", "show-a", "A/a.flac", 5)  # other collection
 
-    assert repo.placements_for("s", "c", "show-a") == {"A/a.flac", "A/metadata.json"}
+    assert set(repo.placed_inodes("s", "c", "show-a")) == {"A/a.flac", "A/metadata.json"}
     assert repo.owner_of("s", "c", "B/b.flac") == "show-b"
     assert repo.owner_of("s", "c", "nope") is None
     assert repo.placement("s", "c", "A/a.flac") == ("show-a", 2)  # last recorded inode
@@ -436,7 +436,7 @@ def test_placement_repo_round_trip(tmp_path: Path) -> None:
         ("show-a", "A/a.flac"), ("show-a", "A/metadata.json"), ("show-b", "B/b.flac"),
     ]
     repo.remove_placement("s", "c", "A/a.flac")
-    assert repo.placements_for("s", "c", "show-a") == {"A/metadata.json"}
+    assert set(repo.placed_inodes("s", "c", "show-a")) == {"A/metadata.json"}
 
 
 def test_placement_repo_one_owner_per_path(tmp_path: Path) -> None:
@@ -478,14 +478,3 @@ def test_placement_repo_folders_unplaced_adoption(tmp_path: Path) -> None:
     repo.mark_adopted("s", "c", datetime(2026, 11, 10))
     assert repo.is_adopted("s", "c") is True
     assert repo.is_adopted("s", "other") is False
-
-
-def test_placement_repo_delete_show(tmp_path: Path) -> None:
-    repo = PlacementRepo(connect(tmp_path / "s.db"))
-    repo.add_placement("s", "c", "show-a", "A/a.flac", 8)
-    repo.set_folder("s", "c", "show-a", "A", separated=False)
-    repo.add_placement("s", "c", "show-b", "B/b.flac", 9)
-    repo.delete_show("s", "c", "show-a")
-    assert repo.placements_for("s", "c", "show-a") == set()
-    assert repo.folders("s", "c") == {}
-    assert repo.owner_of("s", "c", "B/b.flac") == "show-b"
