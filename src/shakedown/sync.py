@@ -725,17 +725,20 @@ def _sync_collection_phases(
             existing = items.get(source.name, collection.name, p.existing.identifier)
             if existing is None or existing.recorded_manifest is None:
                 continue
+            # A looked-up show brings its current reason (set for a fallback copy); a
+            # show skipped on an unchanged signal is complete and keeps its own.
+            reason = (
+                p.descriptor.restriction_reason
+                if p.descriptor is not None
+                else existing.restriction_reason
+            )
             if existing.status != ItemStatus.COMPLETE:
                 # Back upstream with the files we already hold (e.g. after an empty
                 # answer or a lifted restriction): the archive copy is complete again.
-                # A listed show brings its current reason (set for a fallback copy); a
-                # show skipped on an unchanged signal keeps the one on record.
-                reason = (
-                    p.descriptor.restriction_reason
-                    if p.descriptor is not None
-                    else existing.restriction_reason
-                )
                 _record_back_to_complete(items, existing, reason)
+            elif reason != existing.restriction_reason:
+                existing.restriction_reason = reason
+                items.upsert(existing)
             stage_result = _stage_or_fail(
                 config, collection, source.name, existing, existing.recorded_manifest,
                 stats, staged_paths,

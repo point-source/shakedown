@@ -292,6 +292,27 @@ def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
     assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", "fallback copy")]
 
 
+def test_complete_show_takes_the_current_reason_when_its_files_are_unchanged(
+    tmp_roots: tuple[Path, Path]
+) -> None:
+    """Switching a collection between wanting MP3s and falling back to them keeps the
+    same files, so only the listed reason changes; `status` must follow it."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed_item("gd-sbd")
+    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
+    assert run_sync(config) == 0
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+
+    item.restriction_reason = "fallback copy"
+    assert run_sync(config) == 0
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", "fallback copy")]
+
+    item.restriction_reason = None
+    assert run_sync(config) == 0
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == []
+
+
 def test_incremental_sync_rechecks_a_show_left_unavailable_by_a_refused_refetch(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
