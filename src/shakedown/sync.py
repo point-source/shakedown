@@ -728,7 +728,14 @@ def _sync_collection_phases(
             if existing.status != ItemStatus.COMPLETE:
                 # Back upstream with the files we already hold (e.g. after an empty
                 # answer or a lifted restriction): the archive copy is complete again.
-                _record_back_to_complete(items, existing)
+                # A listed show brings its current reason (set for a fallback copy); a
+                # show skipped on an unchanged signal keeps the one on record.
+                reason = (
+                    p.descriptor.restriction_reason
+                    if p.descriptor is not None
+                    else existing.restriction_reason
+                )
+                _record_back_to_complete(items, existing, reason)
             stage_result = _stage_or_fail(
                 config, collection, source.name, existing, existing.recorded_manifest,
                 stats, staged_paths,
@@ -846,8 +853,15 @@ def _pipelined_discover_and_fetch(
                 fetch_futures[fut] = planned
                 fut.add_done_callback(finished.put)
             elif planned.action == PlanAction.UNCHANGED:
-                # Re-staging needs only the record: drop the listed details now.
-                deferred.append(PlannedItem(None, planned.existing, PlanAction.UNCHANGED))
+                # Re-staging needs only the record and the current reason (set for a
+                # fallback copy): drop the rest of the listed details now.
+                deferred.append(
+                    PlannedItem(
+                        replace(desc, manifest=Manifest(files=()), metadata={}),
+                        planned.existing,
+                        PlanAction.UNCHANGED,
+                    )
+                )
             else:
                 # Unavailable is this show's own fact, safe to record the moment it is
                 # listed (SPEC §spec:discovery-pipeline); keep only its identifier.
@@ -1671,9 +1685,9 @@ def _record_complete(
     return item
 
 
-def _record_back_to_complete(items: ItemRepo, existing: Item) -> None:
+def _record_back_to_complete(items: ItemRepo, existing: Item, reason: str | None) -> None:
     existing.status = ItemStatus.COMPLETE
-    existing.restriction_reason = None
+    existing.restriction_reason = reason
     existing.last_verified_at = datetime.now()
     items.upsert(existing)
 

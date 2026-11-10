@@ -4,6 +4,8 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import pytest
+
 import shakedown.sync as sync_module
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect
@@ -263,6 +265,31 @@ def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
 
     assert (archive / "fake-src" / "coll1" / "gd-sbd" / "d1t01.shn").read_bytes() == b"lossless"
     assert restricted() == []
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
+    tmp_roots: tuple[Path, Path], incremental: bool
+) -> None:
+    """A fallback show that drops out of one listing and returns unchanged is complete
+    again and still listed in `status` with its reason."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=incremental)
+    item = _seed_item("gd-sbd")
+    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
+    item.restriction_reason = "fallback copy"
+    item.change_signal = "v1"
+    assert run_sync(config) == 0
+    del FakePlugin.items["gd-sbd"]
+    assert run_sync(config) == 0
+    FakePlugin.items["gd-sbd"] = item
+
+    assert run_sync(config) == 0
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", "fallback copy")]
 
 
 def test_refused_redownload_keeps_the_archive_copy(
