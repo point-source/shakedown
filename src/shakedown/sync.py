@@ -27,6 +27,7 @@ from shakedown.discovery import (
     ItemDescriptor,
     LookupFailure,
     SourceBudget,
+    describe_rows,
     source_budgets,
     stream_items,
 )
@@ -41,6 +42,7 @@ from shakedown.models import (
     OperationStatus,
     OperationType,
     Run,
+    RunKind,
 )
 from shakedown.notify import (
     SyncCompletePayload,
@@ -70,6 +72,13 @@ log = logging.getLogger(__name__)
 # Recorded as an item's restriction_reason when the source lists no audio for it
 # (operator-approved copy).
 NO_FILES_REASON = "source lists no audio files"
+
+# The command that retries a run of each kind, for its outcome's next safe action.
+_RERUN = {
+    RunKind.SYNC: "sync",
+    RunKind.REFETCH: "item refetch",
+    RunKind.RECONFORM: "verify --deep --reconform",
+}
 
 
 class PlanAction(StrEnum):
@@ -507,25 +516,77 @@ def _sync_collection(
             stats, started, dry_run=dry_run, budget=budget,
         )
     except Exception as e:
-        # An unexpected crash must still close the run record and its outcome, so
-        # `status` never shows a run stuck in progress and the next run starts clean.
-        stats.errors.append(f"sync crashed: {e}")
-        finished = datetime.now()
-        if run is not None and run.finished_at is None:
-            _finish_run(runs, run, stats, finished)
-        if outcome is not None and outcome.finished_at is None:
-            outcomes.finish(
-                outcome,
-                OperationStatus.FAILED_BEFORE_COMPLETION,
-                finished,
-                phase=outcome.phase,
-                completed_work=_completed_work(stats),
-                preservation_context="completed archive work retained",
-                deletion_context=_deletion_context(collection),
-                safe_next_action="check the logged error and rerun sync",
-                errors=stats.errors,
-            )
+        _close_crashed(runs, run, outcomes, outcome, stats, collection, e, RunKind.SYNC)
         raise
+
+
+def _close_crashed(
+    runs: RunRepo,
+    run: Run | None,
+    outcomes: OperationOutcomeRepo,
+    outcome: OperationOutcome | None,
+    stats: CollectionSyncStats,
+    collection: CollectionConfig,
+    error: Exception,
+    kind: RunKind,
+) -> None:
+    """An unexpected crash must still close the run record and its outcome, so
+    `status` never shows a run stuck in progress and the next run starts clean."""
+    stats.errors.append(f"{kind.value} crashed: {error}")
+    finished = datetime.now()
+    if run is not None and run.finished_at is None:
+        _finish_run(runs, run, stats, finished)
+    if outcome is not None and outcome.finished_at is None:
+        outcomes.finish(
+            outcome,
+            OperationStatus.FAILED_BEFORE_COMPLETION,
+            finished,
+            phase=outcome.phase,
+            completed_work=_completed_work(stats),
+            preservation_context="completed archive work retained",
+            deletion_context=_deletion_context(collection),
+            safe_next_action=f"check the logged error and rerun {_RERUN[kind]}",
+            errors=stats.errors,
+        )
+
+
+def _finish_outcome(
+    outcomes: OperationOutcomeRepo,
+    outcome: OperationOutcome,
+    stats: CollectionSyncStats,
+    collection: CollectionConfig,
+    finished: datetime,
+    kind: RunKind,
+) -> None:
+    """Close a run's outcome once its work is done (§spec:recoverable-operation-reporting).
+    A clean run clears earlier warnings of its own kind only: a single-show run did
+    not redo a sync's work, and a sync does not refetch an unchanged show."""
+    if stats.failed > 0:
+        phase = "stage" if stats.failed == stats.staging_issues else "fetch"
+        outcomes.finish(
+            outcome,
+            OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
+            finished,
+            phase=phase,
+            affected_item=_affected_item_from_errors(stats.errors),
+            completed_work=_completed_work(stats),
+            preservation_context="completed archive work retained",
+            deletion_context=_deletion_context(collection),
+            safe_next_action=f"fix failed item issues and rerun {_RERUN[kind]}",
+            errors=stats.errors,
+        )
+        return
+    outcomes.finish(
+        outcome,
+        OperationStatus.COMPLETED,
+        finished,
+        phase="record",
+        completed_work=_completed_work(stats),
+        deletion_context=_deletion_context(collection),
+    )
+    outcomes.resolve_actionable(
+        OperationType(kind.value), outcome.source_name, outcome.collection_name, finished
+    )
 
 
 def _sync_collection_phases(
@@ -709,33 +770,7 @@ def _sync_collection_phases(
     if run is not None:
         _finish_run(runs, run, stats, finished)
     if outcome is not None:
-        if stats.failed > 0:
-            phase = "stage" if stats.failed == stats.staging_issues else "fetch"
-            action = "fix failed item issues and rerun sync"
-            outcomes.finish(
-                outcome,
-                OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
-                finished,
-                phase=phase,
-                affected_item=_affected_item_from_errors(stats.errors),
-                completed_work=_completed_work(stats),
-                preservation_context="completed archive work retained",
-                deletion_context=_deletion_context(collection),
-                safe_next_action=action,
-                errors=stats.errors,
-            )
-        else:
-            outcomes.finish(
-                outcome,
-                OperationStatus.COMPLETED,
-                finished,
-                phase="record",
-                completed_work=_completed_work(stats),
-                deletion_context=_deletion_context(collection),
-            )
-            outcomes.resolve_actionable(
-                OperationType.SYNC, source.name, collection.name, finished
-            )
+        _finish_outcome(outcomes, outcome, stats, collection, finished, RunKind.SYNC)
 
     return stats
 
@@ -1779,43 +1814,199 @@ def _record_disappeared(
     items.upsert(existing)
 
 
-# --- single-item operations called from `shakedown item ...` ---
+# --- single-show runs: `item refetch` and `verify --deep --reconform` ---------------
+
+
+class UnknownShow(Exception):
+    """`item refetch` named an identifier that no configured collection records."""
+
 
 def refetch_item(config: Config, identifier: str) -> int:
-    """Force re-fetch of a single item by identifier across all configured collections."""
+    """`item refetch`: a single-show run of ``identifier`` in each configured collection
+    that records it, under the writer lock (§spec:single-show-runs). Raises UnknownShow
+    when none does."""
     return run_exclusive(config, lambda: _refetch_item(config, identifier))
 
 
 def _refetch_item(config: Config, identifier: str) -> int:
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        items = ItemRepo(conn)
+        targets = {
+            (source.name, collection.name): [identifier]
+            for source in config.sources
+            for collection in source.collections
+            if items.get(source.name, collection.name, identifier) is not None
+        }
+    if not targets:
+        raise UnknownShow(identifier)
+    return run_single_shows(config, targets, RunKind.REFETCH)
+
+
+def run_single_shows(
+    config: Config, targets: dict[tuple[str, str], list[str]], kind: RunKind
+) -> int:
+    """Run the sync pipeline for exactly these shows, keyed by (source, collection):
+    one run per collection, marked ``kind`` (§spec:single-show-runs). Each show is
+    looked up on its own — the collection is never listed — and every lookup and
+    download draws from the shared source budget (§spec:source-budget). The caller
+    holds the writer lock. Returns 0 when every show was fetched, else 1."""
+    work = [
+        (source, collection, registry.for_source(source), targets[key])
+        for source in config.sources
+        for collection in source.collections
+        if (key := (source.name, collection.name)) in targets and targets[key]
+    ]
+    if not work:
+        return 0
+    connect(config.state_db).close()  # type: ignore[arg-type]
+    budgets = source_budgets(config, [(s, p) for s, _, p, _ in work])
+    failed = 0
+    for source, collection, plugin, identifiers in work:
+        try:
+            stats = _single_show_collection(
+                config, source, collection, plugin, identifiers, kind, budgets[source.name]
+            )
+        except Exception:
+            log.exception("%s failed for %s/%s", kind.value, source.name, collection.name)
+            failed += 1
+            continue
+        log.info(
+            "%s/%s: %s new=%d updated=%d failed=%d unavailable=%d bytes=%d",
+            source.name, collection.name, kind.value, stats.new, stats.updated,
+            stats.failed, stats.unavailable, stats.bytes_downloaded,
+        )
+        log_separations(source.name, collection.name, stats.separated)
+        # A show the source refused was not fetched either: the command did not do
+        # what was asked.
+        if stats.failed > 0 or stats.unavailable > 0:
+            failed += 1
+    return 0 if failed == 0 else 1
+
+
+def _single_show_collection(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    plugin: SourcePlugin,
+    identifiers: list[str],
+    kind: RunKind,
+    budget: SourceBudget,
+) -> CollectionSyncStats:
+    """One collection's single-show run, recorded like a sync's: a run record and an
+    outcome, closed even if the run crashes."""
+    started = datetime.now()
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
-    for source in config.sources:
-        plugin = registry.for_source(source)
-        for collection in source.collections:
-            existing = items.get(source.name, collection.name, identifier)
-            if existing is None:
+    runs = RunRepo(conn)
+    outcomes = OperationOutcomeRepo(conn)
+    run = runs.start(source.name, collection.name, started, kind=kind)
+    outcome = outcomes.start(
+        OperationType(kind.value),
+        source.name,
+        collection.name,
+        started,
+        phase="fetch",
+        safe_next_action=f"restore source access and rerun {_RERUN[kind]}",
+    )
+    stats = CollectionSyncStats()
+    try:
+        _single_show_phases(
+            config, source, collection, plugin, identifiers, kind, budget,
+            items, runs, run, outcomes, outcome, stats, started,
+        )
+    except Exception as e:
+        _close_crashed(runs, run, outcomes, outcome, stats, collection, e, kind)
+        raise
+    return stats
+
+
+def _single_show_phases(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    plugin: SourcePlugin,
+    identifiers: list[str],
+    kind: RunKind,
+    budget: SourceBudget,
+    items: ItemRepo,
+    runs: RunRepo,
+    run: Run,
+    outcomes: OperationOutcomeRepo,
+    outcome: OperationOutcome,
+    stats: CollectionSyncStats,
+    started: datetime,
+) -> None:
+    """Look up, fetch, stage, hand off, and record — the sync's phases for just these
+    shows. Every show found is fetched again, even with an unchanged manifest: that is
+    what a refetch or reconform asks for. A show whose lookup fails, or that the
+    source's answer does not hold, is failed with the reason and left exactly as it
+    was — record, archive copy, and library placement."""
+    archive_root = config.archive_root / source.name / collection.name
+    # Finish any swap a crashed run left half done, so each show's archive copy is
+    # back in place even when this run does not fetch it.
+    _recover_interrupted_swaps(archive_root)
+    stats.discovered = len(identifiers)
+    placement = LibraryPlacement(config, collection, source.name, items)
+    placement.begin()
+
+    rows = [ListedItem(identifier) for identifier in identifiers]
+    with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
+        fetches: dict[Future[_FetchOutcome], PlannedItem] = {}
+        for found in describe_rows(plugin, rows, collection, budget):
+            if isinstance(found, LookupFailure):
+                _note_lookup_failure(stats, source.name, collection.name, found)
                 continue
-            log.info("refetch: %s/%s/%s", source.name, collection.name, identifier)
-            budget = source_budgets(config, [(source, plugin)])[source.name]
-            for found in stream_items(
-                plugin, collection, budget, set(),
-                look_up=lambda row: row.identifier == identifier,
-            ):
-                if isinstance(found, LookupFailure):
-                    log.warning("%s: %s", found.identifier, found.reason)
-                    return 1
-                manifest, fetch = plan_files(found.manifest, existing, refetch=True)
-                target = PlannedItem(
-                    replace(found, manifest=manifest), existing, PlanAction.CHANGED_UPSTREAM, fetch
+            if found.is_restricted:
+                # The source refuses the show: recorded unavailable, as a sync would.
+                log.info(
+                    "[%s/%s] %s: unavailable: %s",
+                    source.name, collection.name, found.identifier, found.restriction_reason,
                 )
-                stats = CollectionSyncStats()
-                placement = LibraryPlacement(config, collection, source.name, items)
-                placement.begin()
-                _execute_fetch_and_stage(
-                    config, source, collection, plugin, items, [target], stats, placement
+                _record_unavailable(items, source.name, collection.name, found)
+                stats.unavailable += 1
+                continue
+            if not found.manifest.files:
+                _note_lookup_failure(
+                    stats, source.name, collection.name,
+                    LookupFailure(
+                        found.identifier, f"{NO_FILES_REASON}; archive copy left untouched"
+                    ),
                 )
-                _apply_placement_report(stats, placement.finish())
-                ok = stats.failed == 0 and stats.unavailable == 0
-                return 0 if ok else 1
-    log.warning("identifier %s not found in any configured collection", identifier)
-    return 1
+                continue
+            existing = items.get(source.name, collection.name, found.identifier)
+            action = (
+                PlanAction.CHANGED_UPSTREAM
+                if existing is not None and has_archive_copy(existing)
+                else PlanAction.NEW
+            )
+            # Every selected file is downloaded again; archive-only copies the rule
+            # no longer selects stay (§spec:quality-selection).
+            manifest, fetch = plan_files(found.manifest, existing, refetch=True)
+            planned = PlannedItem(replace(found, manifest=manifest), existing, action, fetch)
+            archive_root.mkdir(parents=True, exist_ok=True)
+            fut = fetch_pool.submit(
+                _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
+            )
+            fetches[fut] = planned
+        for fut in as_completed(fetches):
+            # The sync's own fetch handling: record, link into the library, count.
+            _process_fetch_result(
+                fut, fetches[fut], source, collection, items, stats, placement
+            )
+
+    # Each show fetched here went through the sync's fetch, record, and link path
+    # above, and is staged with the same ownership and cleanup pass below
+    # (§spec:library-ownership, §spec:library-cleanup). Tag filling after a fetch on a
+    # `fill_tags` collection — including refilling after a reconform — belongs on that
+    # shared path; `stats.fetched` lists the shows this run fetched (§spec:tag-filling).
+    report = placement.finish()
+    _apply_placement_report(stats, report)
+
+    # The collection's handoff, exactly as a sync sends it, including shows still
+    # pending from earlier runs (§spec:durable-handoff).
+    finished = datetime.now()
+    _fire_notifications(
+        config, items, source, collection, stats, started, finished, report.folder_of
+    )
+    _finish_run(runs, run, stats, finished)
+    _finish_outcome(outcomes, outcome, stats, collection, finished, kind)

@@ -62,6 +62,8 @@ class FakePlugin(SourcePlugin):
     # Source names whose enumeration should raise, simulating an unreachable source —
     # exactly as a real source fault would — to exercise the readiness reachability probe.
     unreachable_sources: ClassVar[set[str]] = set()
+    # How many times a collection was listed.
+    list_calls: ClassVar[int] = 0
     # Every lookup_item call as (identifier, timeout).
     lookup_calls: ClassVar[list[tuple[str, float]]] = []
     # Per-identifier lookup replies, in order; the last one repeats. An exception is
@@ -74,6 +76,7 @@ class FakePlugin(SourcePlugin):
         return sum(1 for looked_up, _ in cls.lookup_calls if looked_up == identifier)
 
     def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:
+        FakePlugin.list_calls += 1
         if self.source_config.name in self.unreachable_sources:
             raise RuntimeError(f"source {self.source_config.name!r} is unreachable")
         for identifier, it in self.items.items():
@@ -130,6 +133,7 @@ def reset_fake() -> None:
     FakePlugin.unreachable_sources.clear()
     FakePlugin.lookup_calls.clear()
     FakePlugin.lookup_faults.clear()
+    FakePlugin.list_calls = 0
 
 
 def install_fake() -> None:
