@@ -171,13 +171,13 @@ def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selec
     playable = next((fmt for fmt in ranked if fmt.playable), None)
     staged = playable or best
 
-    entries = [_entry(f, library=True) for f in files if f in staged.files]
+    entries = [_entry(f, library=True) for f in staged.files]
     if best is not staged:
         entries += [_entry(f, library=False) for f in best.files]
     entries += [
         _entry(f, library=True)
         for f in files
-        if f not in audio and not f.refused and not _is_audio_zip(f)
+        if _audio_class(f) is None and not f.refused and not _is_audio_zip(f)
     ]
     manifest = Manifest(files=tuple(sorted(entries, key=lambda e: e.name)))
 
