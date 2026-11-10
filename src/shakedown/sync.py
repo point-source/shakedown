@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
@@ -45,7 +46,12 @@ from shakedown.notify import (
     fire_complete,
     fire_failure,
 )
-from shakedown.placement import LibraryPlacement, PlacementReport, log_separations
+from shakedown.placement import (
+    LibraryPlacement,
+    PlacementReport,
+    has_archive_copy,
+    log_separations,
+)
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ListedItem, SourcePlugin
 from shakedown.staging import (
@@ -53,7 +59,7 @@ from shakedown.staging import (
     manifest_reserves_sidecar_name,
     write_sidecar,
 )
-from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
+from shakedown.state import ItemRepo, OperationOutcomeRepo, PendingHandoffRepo, RunRepo
 from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
@@ -555,9 +561,12 @@ def _sync_collection_phases(
         stats.stale = True
         stats.errors.append(f"source enumeration failed: {enum_error}")
         # Shows fetched before the failure are valid; stage them. Nothing is pruned.
-        _apply_placement_report(stats, placement.finish())
+        report = placement.finish()
+        _apply_placement_report(stats, report)
         finished = datetime.now()
-        _fire_notifications(config, source, collection, stats, started, finished)
+        _fire_notifications(
+            config, items, source, collection, stats, started, finished, report.folder_of
+        )
         if run is not None:
             _finish_run(runs, run, stats, finished)
         if outcome is not None:
@@ -625,12 +634,15 @@ def _sync_collection_phases(
     # Stage: every show with an archive copy at its current folder, and every file
     # no longer placed (a pruned show, an old layout or name) removed
     # (§spec:library-ownership, §spec:library-cleanup).
-    _apply_placement_report(stats, placement.finish())
+    report = placement.finish()
+    _apply_placement_report(stats, report)
 
-    # Phase 5: notify. Fire before recording so any delivery failure is captured
-    # in the run's errors (visible in `status`) but never aborts the sync.
+    # Phase 5: notify. Fire before recording so an undelivered notice is captured
+    # in the run's errors but never aborts the sync (§spec:durable-handoff).
     finished = datetime.now()
-    _fire_notifications(config, source, collection, stats, started, finished)
+    _fire_notifications(
+        config, items, source, collection, stats, started, finished, report.folder_of
+    )
 
     # Phase 6: record run
     if run is not None:
@@ -812,22 +824,23 @@ def _pipelined_discover_and_fetch(
 
 def _fire_notifications(
     config: Config,
+    items: ItemRepo,
     source: SourceConfig,
     collection: CollectionConfig,
     stats: CollectionSyncStats,
     started: datetime,
     finished: datetime,
+    folder_of: dict[str, Path],
 ) -> None:
-    """Fire the once-per-(collection, run) handoff and failure notifications
-    (SPEC §spec:handoff).
+    """Send the once-per-(collection, run) handoff and failure notifications
+    (SPEC §spec:handoff, §spec:durable-handoff).
 
-    ``sync.complete`` fires when the run staged at least one item; ``sync.failed``
-    fires when the run failed (source enumeration stale, or one or more items failed).
-    Both are best-effort: a delivery failure is appended to ``stats.errors`` (recorded in the
-    run, surfaced by `status`) and never raises.
+    The handoff goes out on every run that has shows to hand off — newly staged or
+    still pending from an earlier run. ``sync.failed`` fires when the run failed
+    (source enumeration stale, or one or more items failed). A notice that is not
+    delivered is appended to ``stats.errors`` and never changes the run's outcome.
     """
     run_errors = list(stats.errors)  # substantive errors, before any delivery attempt
-    staging_root = str(config.library_root / source.name / collection.name)
     run_obj = {
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
@@ -837,20 +850,12 @@ def _fire_notifications(
         "bytes_downloaded": stats.bytes_downloaded,
     }
 
-    if stats.staged:
-        err = fire_complete(
-            collection,
-            SyncCompletePayload(
-                source=source.name,
-                collection=collection.name,
-                staging_root=staging_root,
-                run=run_obj,
-                staged=stats.staged,
-            ),
-        )
-        if err:
-            log.warning("[%s/%s] handoff not delivered: %s", source.name, collection.name, err)
-            stats.errors.append(f"handoff not delivered: {err}")
+    err = send_collection_handoff(
+        config, items, source.name, collection,
+        staged=stats.staged, folder_of=folder_of, run=run_obj,
+    )
+    if err:
+        stats.errors.append(f"handoff not delivered: {err}")
 
     if stats.stale or stats.failed > 0:
         err = fire_failure(
@@ -858,7 +863,7 @@ def _fire_notifications(
             SyncFailedPayload(
                 source=source.name,
                 collection=collection.name,
-                staging_root=staging_root,
+                staging_root=_staging_root(config, source.name, collection),
                 run=run_obj,
                 errors=run_errors,
             ),
@@ -868,6 +873,76 @@ def _fire_notifications(
                 "[%s/%s] failure notice not delivered: %s", source.name, collection.name, err
             )
             stats.errors.append(f"failure notice not delivered: {err}")
+
+
+def _staging_root(config: Config, source_name: str, collection: CollectionConfig) -> str:
+    return str(config.library_root / source_name / collection.name)
+
+
+def send_collection_handoff(
+    config: Config,
+    items: ItemRepo,
+    source_name: str,
+    collection: CollectionConfig,
+    *,
+    staged: list[dict[str, str]],
+    folder_of: dict[str, Path],
+    run: dict[str, Any],
+) -> str | None:
+    """Send this collection's handoff for one run (§spec:durable-handoff): ONE notice
+    whose ``staged`` list holds the shows the run staged plus every show still pending
+    from earlier runs, at their current library folders. Returns why the notice was not
+    delivered, or ``None``. Called by every run of a collection, sync or single-show.
+
+    ``staged`` holds this run's entries ({identifier, archive_path, staging_path});
+    ``folder_of`` is the library folder of every show staged after the run's full
+    placement pass. A delivered notice clears the shows it covered; an undelivered one
+    keeps them all pending with the reason. A pending show without an archive copy
+    (pruned) leaves the list; one with a copy but no folder this pass stays pending,
+    left out of this notice. With no ``on_complete`` the pending list is dropped.
+    """
+    pending = PendingHandoffRepo(items.conn)
+    if collection.on_complete is None:
+        pending.drop(source_name, collection.name)
+        return None
+
+    entries = {entry["identifier"]: entry for entry in staged}
+    gone: list[str] = []
+    for show in pending.list(source_name, collection.name):
+        if show.identifier in entries:
+            continue
+        item = items.get(source_name, collection.name, show.identifier)
+        if item is None or not has_archive_copy(item):
+            gone.append(show.identifier)
+            continue
+        folder = folder_of.get(show.identifier)
+        if folder is None:
+            continue
+        entries[show.identifier] = {
+            "identifier": show.identifier,
+            "archive_path": str(item.archive_path),
+            "staging_path": str(folder),
+        }
+    pending.clear(source_name, collection.name, gone)
+    if not entries:
+        return None
+
+    err = fire_complete(
+        collection,
+        SyncCompletePayload(
+            source=source_name,
+            collection=collection.name,
+            staging_root=_staging_root(config, source_name, collection),
+            run=run,
+            staged=list(entries.values()),
+        ),
+    )
+    if err is None:
+        pending.clear(source_name, collection.name, entries)
+        return None
+    log.warning("[%s/%s] handoff not delivered: %s", source_name, collection.name, err)
+    pending.mark_undelivered(source_name, collection.name, entries, err, datetime.now())
+    return err
 
 
 def _files_missing(item: Item) -> bool:
