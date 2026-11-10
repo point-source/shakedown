@@ -11,6 +11,7 @@ from shakedown.selection import (
     DOWNLOAD_REFUSED_REASON,
     LOSSLESS_REFUSED_REASON,
     NOT_PLAYABLE_SHN_REASON,
+    NOT_PLAYABLE_UNRECOGNISED_REASON,
     select,
 )
 
@@ -282,3 +283,12 @@ def test_zips_of_the_audio_are_left_out() -> None:
         _f("info.txt", "Text"),
     )
     assert _names(select(files, None)) == ["artwork.zip", "info.txt", "t01.mp3"]
+
+
+def test_unrecognised_audio_only_is_staged_as_is_and_not_playable() -> None:
+    """Operator decision (Q-6-4): kept and staged as is, and listed as not playable."""
+    files = (_f("t01.ape", "Monkey's Audio"), _f("t02.ape", "Monkey's Audio"), _f("info.txt", "Text"))
+    chosen = select(files, None)
+    assert _names(chosen, library=True) == ["info.txt", "t01.ape", "t02.ape"]
+    assert chosen.not_playable_reason == NOT_PLAYABLE_UNRECOGNISED_REASON
+    assert chosen.is_restricted is False

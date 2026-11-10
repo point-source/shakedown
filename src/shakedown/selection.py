@@ -19,8 +19,12 @@ from shakedown.models import Manifest, ManifestFile, SourceFile
 DOWNLOAD_REFUSED_REASON = "download refused by archive.org (stream-only or restricted)"
 # Recorded on a `complete` show whose lossless files the source refuses (SPEC verbatim).
 LOSSLESS_REFUSED_REASON = "lossless refused by archive.org; best lossy copy mirrored instead"
-# Recorded on a `complete` show whose only audio is SHN (operator-approved copy).
+# Recorded on a `complete` show whose only audio no common player reads
+# (operator-approved copy).
 NOT_PLAYABLE_SHN_REASON = "only in SHN; archive.org offers no playable copy"
+NOT_PLAYABLE_UNRECOGNISED_REASON = (
+    "only in an unrecognised audio format; archive.org offers no playable copy"
+)
 
 
 class _Class(IntEnum):
@@ -184,6 +188,10 @@ def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selec
     if best.cls is not _Class.LOSSLESS and lossless_refused:
         reason = LOSSLESS_REFUSED_REASON
     not_playable = None
-    if playable is None and _ext(best.files[0].name) in _UNPLAYABLE:
-        not_playable = NOT_PLAYABLE_SHN_REASON
+    if playable is None:
+        not_playable = (
+            NOT_PLAYABLE_UNRECOGNISED_REASON
+            if best.cls is _Class.UNRECOGNISED
+            else NOT_PLAYABLE_SHN_REASON
+        )
     return Selection(manifest, False, reason, not_playable)
