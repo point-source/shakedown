@@ -250,6 +250,8 @@ class CollectionSyncStats:
     # staging directories for the consolidated run/status summary.
     collisions_dropped: int = 0
     collision_paths: list[str] = field(default_factory=list)
+    # Fetches the source refused (recorded unavailable, not failed).
+    unavailable: int = 0
     # Items fetched and staged this run, for the sync.complete batch payload
     # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
     staged: list[dict[str, str]] = field(default_factory=list)
@@ -1225,6 +1227,7 @@ def _process_fetch_result(
     desc = target.descriptor
 
     if outcome.unavailable:
+        stats.unavailable += 1
         log.info(
             "[%s/%s] %s: unavailable: %s",
             source.name, collection.name, desc.identifier, outcome.error,
@@ -1773,7 +1776,8 @@ def _refetch_item(config: Config, identifier: str) -> int:
                 _execute_fetch_and_stage(
                     config, source, collection, plugin, items, [target], stats
                 )
-                return 0 if stats.failed == 0 and stats.collisions_dropped == 0 else 1
+                ok = stats.failed == 0 and stats.collisions_dropped == 0 and stats.unavailable == 0
+                return 0 if ok else 1
     log.warning("identifier %s not found in any configured collection", identifier)
     return 1
 

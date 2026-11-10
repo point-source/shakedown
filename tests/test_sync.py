@@ -214,6 +214,21 @@ def test_refused_show_is_rechecked_next_run_without_failing(
     assert row is not None and row.status == ItemStatus.UNAVAILABLE
 
 
+def test_refetch_of_a_refused_show_exits_nonzero(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Nothing was downloaded, so `item refetch` must not report success."""
+    from shakedown.sync import refetch_item
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-sbd")
+    assert run_sync(config) == 0
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+
+    assert refetch_item(config, "gd-sbd") == 1
+
+
 def test_refused_redownload_keeps_the_archive_copy(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
