@@ -1,6 +1,9 @@
 """Smoke test for shakedown serve. PRD §10."""
 from __future__ import annotations
 
+import asyncio
+import json
+import sys
 from pathlib import Path
 
 import httpx
@@ -12,11 +15,35 @@ from shakedown.server import TOKEN_ENV, build_app
 from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
+from tests.serve_child import SPEC_ENV
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CHILD_PREFIX = (sys.executable, "-m", "tests.serve_child")
+BUSY = "a run is in progress; try again when it finishes"
+AUTH = {"Authorization": "Bearer test-token"}
 
 
 def _app(config):  # type: ignore[no-untyped-def]
     """serve over a config file holding ``config`` (written beside the archive root)."""
     return build_app(write_config(config.archive_root.parent / "cfg.yaml", config))
+
+
+def _child_app(config, *, items=None, gate=None):  # type: ignore[no-untyped-def]
+    """serve whose triggered runs are fake-source child processes (tests.serve_child)."""
+    root = config.archive_root.parent
+    spec = root / "fake-spec.json"
+    spec.write_text(json.dumps({"items": items or {}, "gate": str(gate) if gate else None}))
+    return build_app(
+        write_config(root / "cfg.yaml", config),
+        argv_prefix=CHILD_PREFIX,
+        child_env={SPEC_ENV: str(spec), "PYTHONPATH": str(REPO_ROOT)},
+    )
+
+
+async def _finish(app) -> None:  # type: ignore[no-untyped-def]
+    """Wait until every run this serve started has exited and been counted."""
+    for triggered in app.state.triggered:
+        assert await asyncio.to_thread(triggered.done.wait, 30)
 
 
 @pytest.mark.asyncio
@@ -29,8 +56,9 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
     )
     assert run_sync(config) == 0
 
+    app = _child_app(config, items={"gd-x": {"x.flac": "audio"}})
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=_app(config)),
+        transport=httpx.ASGITransport(app=app),
         base_url="http://testserver",
     ) as client:
 
@@ -65,17 +93,24 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
             )
         ).status_code == 401
         r = await client.post("/sync", headers={"Authorization": "Bearer test-token"})
-        assert r.status_code == 200
-        assert r.json()["exit_code"] == 0
-        assert FakePlugin.fetch_count["gd-x"] == 1  # idempotent
+        assert r.status_code == 202
+        body = r.json()
+        assert body["started"] == "sync" and len(body["run_ids"]) == 1
+        await _finish(app)
+        last_run = (await client.get("/status")).json()[0]["last_run"]
+        assert last_run["run_id"] == body["run_ids"][0]
+        assert last_run["items_new"] == 0  # idempotent: the separate run saw it mirrored
 
         # verify: requires a bearer token
         r = await client.post(
             "/verify?deep=true",
             headers={"Authorization": "Bearer test-token"},
         )
-        assert r.status_code == 200
-        assert r.json()["exit_code"] == 0
+        assert r.status_code == 202
+        assert r.json() == {
+            "started": "verify", "source": None, "collection": None, "run_ids": [],
+        }
+        await _finish(app)
 
 
 @pytest.mark.asyncio
@@ -304,3 +339,144 @@ async def test_metrics_drop_a_collection_removed_from_the_config(
         config.sources[0].collections.pop()
         write_config(cfg_path, config)
         assert 'collection="coll2"' not in (await client.get("/metrics")).text
+
+
+# --- triggered runs are fresh one-shot runs on the current config ------------------
+
+@pytest.mark.asyncio
+async def test_sync_starts_a_fresh_run_on_the_config_as_edited(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Change a collection's layout with serve running, then trigger it: 202 at once
+    with the scope and run ids, the run stages under the new layout, and /status
+    shows that run (§spec:api-sync-runs user-level test path)."""
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    app = _child_app(config, items={"gd-x": {"x.flac": "audio"}})
+    config.sources[0].collections[0].library_layout = "renamed/{identifier}"
+    write_config(archive.parent / "cfg.yaml", config)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.post("/sync", params={"collection": "coll1"}, headers=AUTH)
+        assert r.status_code == 202
+        body = r.json()
+        assert body == {
+            "started": "sync", "source": None, "collection": "coll1",
+            "run_ids": [body["run_ids"][0]],
+        }
+        await _finish(app)
+        assert (library / "fake-src" / "coll1" / "renamed" / "gd-x" / "x.flac").is_file()
+        last_run = (await client.get("/status")).json()[0]["last_run"]
+        assert last_run["run_id"] == body["run_ids"][0]
+        assert last_run["finished_at"] is not None and last_run["items_new"] == 1
+        assert 'shakedown_sync_runs_total{result="ok"} 1.0' in (
+            await client.get("/metrics")
+        ).text
+
+
+@pytest.mark.asyncio
+async def test_sync_while_a_run_holds_the_lock_is_refused_and_nothing_is_queued(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    import sqlite3
+
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    gate = archive.parent / "go"
+    app = _child_app(config, items={"gd-x": {"x.flac": "audio"}}, gate=gate)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        try:
+            assert (await client.post("/sync", headers=AUTH)).status_code == 202
+            r = await client.post("/sync", headers=AUTH)
+            assert r.status_code == 409
+            assert r.json()["detail"] == BUSY
+        finally:
+            gate.touch()
+        await _finish(app)
+        assert len(app.state.triggered) == 1
+        metrics = (await client.get("/metrics")).text
+    assert 'shakedown_sync_runs_total{result="ok"} 1.0' in metrics
+    assert 'result="fail"' not in metrics  # a refusal is not a run
+    assert config.state_db is not None
+    conn = sqlite3.connect(config.state_db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_sync_is_refused_while_a_cli_run_holds_the_lock(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """The real child (`python -m shakedown`) meets a run started elsewhere."""
+    from shakedown.config import CollectionConfig, Config, SourceConfig
+    from shakedown.lock import writer_lock
+
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = Config(
+        archive_root=archive,
+        library_root=library,
+        sources=[SourceConfig(
+            name="ia", type="ia",
+            collections=[CollectionConfig(name="gd", query="collection:GratefulDead")],
+        )],
+    )
+    app = build_app(write_config(archive.parent / "cfg.yaml", config))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        with writer_lock(config):
+            r = await client.post("/sync", headers=AUTH)
+            assert (r.status_code, r.json()["detail"]) == (409, BUSY)
+            r = await client.post(
+                "/verify", params={"deep": True, "reconform": True}, headers=AUTH
+            )
+            assert (r.status_code, r.json()["detail"]) == (409, BUSY)
+
+
+@pytest.mark.asyncio
+async def test_a_killed_run_is_closed_and_counted_as_failed(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    import signal
+
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    gate = archive.parent / "go"
+    app = _child_app(config, items={"gd-x": {"x.flac": "audio"}}, gate=gate)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.post("/sync", headers=AUTH)
+        assert r.status_code == 202
+        app.state.triggered[0].process.send_signal(signal.SIGKILL)
+        await _finish(app)
+        last_run = (await client.get("/status")).json()[0]["last_run"]
+        assert last_run["run_id"] == r.json()["run_ids"][0]
+        assert last_run["finished_at"] is not None
+        assert "run ended unexpectedly (killed by SIGKILL)" in last_run["errors"]
+        metrics = (await client.get("/metrics")).text
+    assert 'shakedown_sync_runs_total{result="fail"} 1.0' in metrics
+
+
+@pytest.mark.asyncio
+async def test_reconform_without_deep_is_a_bad_request(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(make_config(archive, library))),
+        base_url="http://testserver",
+    ) as client:
+        r = await client.post("/verify", params={"reconform": True}, headers=AUTH)
+        assert r.status_code == 400
+        assert "deep" in r.json()["detail"]
