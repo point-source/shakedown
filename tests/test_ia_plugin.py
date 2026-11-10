@@ -574,3 +574,29 @@ def test_fetch_skips_download_when_every_file_is_already_verified(tmp_path: Path
 
     assert result.success is True
     mock_download.assert_not_called()
+
+
+def test_fetch_keeps_finished_files_when_download_raises_midway(tmp_path: Path) -> None:
+    """ia.download can finish some files and then raise on a later one; the
+    finished files are kept so the retry fetches only the rest."""
+    plugin = _make_plugin()
+    dest = tmp_path / ".tmp-gd-x"
+    served = {"a.flac": b"first", "b.flac": b"second"}
+    desc = _desc_for("gd-x", served)
+    calls: list[list[str]] = []
+
+    def dies_on_last(identifier, files, destdir, **kwargs):
+        calls.append(list(files))
+        target = Path(destdir) / identifier
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "a.flac").write_bytes(served["a.flac"])
+        raise RuntimeError("read timed out")
+
+    with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=dies_on_last):
+        assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is False
+    with patch(
+        "shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served, calls)
+    ):
+        assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is True
+
+    assert calls == [["a.flac", "b.flac"], ["b.flac"]]

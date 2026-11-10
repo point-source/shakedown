@@ -286,6 +286,9 @@ class IAPlugin(SourcePlugin):
                 )
         except Exception as e:
             log.warning("IA download failed for %s: %s", item.identifier, e)
+            # Keep the files finished before the failure; the next attempt reuses
+            # those that pass reusable_leftover() and fetches only the rest.
+            _flatten_ia_subdir(ia_subdir, dest_dir, target_files)
             return FetchResult(
                 success=False,
                 bytes_downloaded=0,
@@ -294,15 +297,7 @@ class IAPlugin(SourcePlugin):
                 retry_after=_retry_after_seconds(e),
             )
 
-        # Flatten IA's <dest_dir>/<identifier>/ subtree into dest_dir file by file,
-        # replacing any leftover; the core promotes dest_dir into the archive.
-        if ia_subdir.is_dir():
-            for name in target_files:
-                downloaded = ia_subdir / name
-                if downloaded.is_file():
-                    (dest_dir / name).parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(downloaded, dest_dir / name)
-            shutil.rmtree(ia_subdir)
+        _flatten_ia_subdir(ia_subdir, dest_dir, target_files)
 
         bytes_downloaded = 0
         missing: list[str] = []
@@ -343,6 +338,19 @@ class IAPlugin(SourcePlugin):
         """Cheap existence-only verify. Hashing belongs in `verify --deep`."""
         missing = [f.name for f in item.manifest.files if not (archive_path / f.name).is_file()]
         return VerifyResult(ok=not missing, missing_files=missing)
+
+
+def _flatten_ia_subdir(ia_subdir: Path, dest_dir: Path, names: list[str]) -> None:
+    """Move IA's <dest_dir>/<identifier>/ files into dest_dir file by file, replacing
+    any leftover; the core promotes dest_dir into the archive."""
+    if not ia_subdir.is_dir():
+        return
+    for name in names:
+        downloaded = ia_subdir / name
+        if downloaded.is_file():
+            (dest_dir / name).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(downloaded, dest_dir / name)
+    shutil.rmtree(ia_subdir)
 
 
 _RETRIABLE_MARKERS = (
