@@ -899,3 +899,19 @@ def test_shows_mirrored_before_the_upgrade_gain_track_titles(tmp_roots) -> None:
     assert FakePlugin.fetch_count == downloads
     tags = read_tags(_archive_file(config, "gd77", "d1t01.flac"))
     assert (tags["title"], tags["tracknumber"]) == (["Track 1"], ["1"])
+
+
+def test_an_identifier_starting_with_a_dot_is_never_stored(tmp_roots) -> None:
+    """Dot-names under a collection folder are shakedown's own (`.tagging`, `.tmp-`,
+    `.stale-`): a show stored as `.tagging` would be read as tag-write backups and
+    copied over another show's files on the next run."""
+    config = make_config(*tmp_roots, fill_tags=True)
+    _fake_show("gd77", tmp_roots[0].parent)
+    FakePlugin.items[".tagging"] = FakeItem(
+        ".tagging", [FakeFile("gd77/d1t01.flac", b"not the real recording")], metadata={}
+    )
+    assert run_sync(config) == 1
+    assert not (config.archive_root / "fake-src" / "coll1" / ".tagging").exists()
+    assert ".tagging" not in FakePlugin.fetch_count
+    assert run_sync(config) == 1  # the next run's recovery finds no backups to restore
+    assert read_tags(_archive_file(config, "gd77", "d1t01.flac"))["venue"] == ["Barton Hall"]

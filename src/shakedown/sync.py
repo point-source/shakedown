@@ -1461,8 +1461,10 @@ def _fsync_tree(root: Path) -> None:
 
 
 def _is_single_folder_name(name: str) -> bool:
+    """One folder name a show may own. Names starting with a dot are shakedown's own
+    under a collection folder (`.tmp-`, `.stale-`, `.tagging`; reconcile skips them)."""
     separators = {"/", os.sep} | ({os.altsep} if os.altsep else set())
-    return name not in ("", ".", "..") and not any(sep in name for sep in separators)
+    return bool(name) and not name.startswith(".") and not any(sep in name for sep in separators)
 
 
 def _fetch_one_budgeted(
