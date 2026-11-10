@@ -1174,14 +1174,15 @@ It is never scheduled by default (§req:constraints).
   upstream — re-seeding, public mirrors, preservation
   (§req:success-criteria #5). Each reconformed show is fetched as a
   single-show run (§spec:single-show-runs) and, on a `fill_tags`
-  collection, has its missing tags filled again afterwards.
+  collection, has its missing tags filled again afterwards. Only the
+  drifted files are downloaded: any the source still lists, a picked
+  copy or an archive-only one alike. A drifted file the source no
+  longer lists is reported in the run as not repaired and causes no
+  other download.
 
 ## CLI surface §spec:cli
 
-*Status: implemented, including `validate`
-(§spec:setup-readiness-validation), the removal of `release-validate`
-(§spec:release-validation-gate), and single-show operations as runs
-(§spec:single-show-runs).*
+*Status: complete*
 
 Shakedown is a one-shot CLI; every command runs to completion and
 exits (§req:constraints). The command surface:
@@ -1427,7 +1428,7 @@ paths and counts only, never credentials.
 
 ## Durable handoff §spec:durable-handoff
 
-*Status: implemented*
+*Status: complete*
 
 A handoff notice is either delivered or visibly pending and resent; a
 handoff only triggers the library tool's work and never waits for that
