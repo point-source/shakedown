@@ -37,12 +37,16 @@ Streaming server (Navidrome, etc.)
   materialized entirely as hardlinks. It is disposable: it can be wiped
   and rebuilt from the archive at any time without network traffic.
 - Every file in the library tree shares an inode with its archive
-  counterpart. Renaming, retagging, or deleting the library-side link
-  never affects the archive-side file or Shakedown's record of it, and
-  vice versa.
-- At startup, the system shall verify that `archive_root` and
-  `library_root` reside on the same filesystem and refuse to run with a
-  clear error if they do not. (§req:constraints)
+  counterpart. Renaming or deleting the library-side link never affects
+  the archive-side file or Shakedown's record of it, and vice versa. An
+  in-place retag through either path changes the shared bytes of both,
+  but never Shakedown's record of the item (§spec:sync-identity).
+- At startup, the system shall verify that a file in `archive_root` can
+  be hardlinked into `library_root` — by making and removing a real test
+  link — and refuse to run with a clear error if it cannot.
+  (§req:constraints) Comparing device IDs is not enough: Linux refuses
+  links across separate mounts of one filesystem, such as archive and
+  library bind-mounted into a container separately.
 
 **Why hardlinks, not symlinks or copies.** Symlinks dangle when a
 library tool moves the target into its own managed root — Beets does
@@ -52,7 +56,8 @@ bytes: either can be deleted without affecting the other, storage cost
 is 1x (§req:quality-attributes), and the mechanism is
 filesystem-native with zero runtime overhead. The accepted tradeoff is
 the same-filesystem constraint, which the QNAP deployment satisfies by
-putting both trees under one share (§spec:deployment). This is the
+putting both trees under one share, mounted into the container as one
+volume (§spec:deployment). This is the
 same seam the *arr ecosystem uses for its download→library handoff.
 
 ## Sync identity §spec:sync-identity
@@ -839,6 +844,9 @@ Long-running services in the stack:
   defined as Docker labels. Each job carries the same
   archive/library/config mounts and `IA_*` credentials as a manual
   run, mounts config read-only, and reaps its finished container.
+  Every Shakedown container — ofelia jobs, `serve`, manual runs — runs
+  as one configured user, so no path creates files another cannot
+  write (ofelia's own default is root).
 - **`shakedown-serve`** *(optional)* — the only long-lived Shakedown
   process, when present: the auth-protected control plane
   (§spec:serve) for status/metrics and ad-hoc triggers without SSH.
@@ -854,8 +862,10 @@ the stack, referenced by ofelia's per-tick jobs and (optionally) by
 `serve`.
 
 All data paths live under a single share
-(`/share/data/{archive,library,music,shakedown-config}`) so archive
-and library share a filesystem (§spec:system-shape).
+(`/share/data/{archive,library,music,shakedown-config}`), and every
+Shakedown container mounts that share once as `/data`, so archive and
+library share a filesystem *and* a mount — Linux refuses hardlinks
+across separate mounts (§spec:system-shape).
 
 **First bring-up does no unscoped work.** A freshly deployed stack
 does not sync anything on `up`; each collection syncs on its own
@@ -888,7 +898,9 @@ no scheduler code in Shakedown. Launching a fresh container per tick
 one-shot: there is no daemon to keep alive, and a tick can never
 silently no-op because a prior run has exited. Schedule changes are
 compose-file label edits; "did the Sunday sync run?" is answerable
-from the per-tick container logs. Missed schedules are harmless
+from the ofelia container's log, which records each tick's start, stop,
+output, and failure (the per-tick containers are deleted when they
+finish). Missed schedules are harmless
 because sync is idempotent at any cadence (§spec:sync-workflow).
 Accepted tradeoffs: per-tick job definitions repeat the mount/env
 wiring and live on the scheduler rather than on a worker service (more
@@ -923,7 +935,8 @@ Observable behavior:
 - `shakedown validate` checks the same startup configuration contract as
   every command, then continues into setup-specific probes: archive,
   library, and state paths are writable where writes are required;
-  archive and library share a filesystem; configured sources and
+  a test file in the archive can be hardlinked into the library;
+  configured sources and
   collections can be reached; required credential environment variables
   are present and accepted by the source when credentials are needed;
   layout templates are checked with the existing collision-risk guard;

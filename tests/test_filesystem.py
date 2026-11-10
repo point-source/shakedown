@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -9,44 +10,35 @@ import pytest
 from shakedown.filesystem import (
     FilesystemError,
     check_writable,
-    ensure_same_filesystem,
+    ensure_hardlinkable,
     hardlink,
     same_inode,
 )
 
 
-def test_same_filesystem_passes_when_identical(tmp_path: Path) -> None:
+def test_hardlinkable_passes_and_leaves_nothing_behind(tmp_path: Path) -> None:
     a = tmp_path / "a"
     b = tmp_path / "b"
-    ensure_same_filesystem(a, b)  # creates dirs; same FS by construction
+    ensure_hardlinkable(a, b)  # creates dirs; one filesystem by construction
     assert a.is_dir() and b.is_dir()
+    assert list(a.iterdir()) == []
+    assert list(b.iterdir()) == []
 
 
-def test_same_filesystem_raises_when_different(tmp_path: Path) -> None:
+def test_hardlinkable_fails_across_mounts(tmp_path: Path) -> None:
+    """Separate bind mounts share st_dev but refuse links with EXDEV."""
     a = tmp_path / "a"
     b = tmp_path / "b"
-    a.mkdir()
-    b.mkdir()
-    a_resolved = str(a.resolve())
-    b_resolved = str(b.resolve())
 
-    real_stat = os.stat
-    def fake_stat(p, *args, **kwargs):
-        s = real_stat(p, *args, **kwargs)
-        if str(p) in (b_resolved, str(b)):
-            class FakeStat:
-                def __getattr__(self, name):
-                    if name == "st_dev":
-                        return s.st_dev + 1
-                    return getattr(s, name)
-            return FakeStat()
-        return s
+    def exdev(src, dst, *args, **kwargs):
+        raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), str(src), None, str(dst))
 
-    _ = a_resolved  # only b's stat is faked
-    with patch("shakedown.filesystem.os.stat", side_effect=fake_stat), pytest.raises(
-        FilesystemError, match="same filesystem"
+    with patch("shakedown.filesystem.os.link", side_effect=exdev), pytest.raises(
+        FilesystemError, match="separate volume mounts"
     ):
-        ensure_same_filesystem(a, b)
+        ensure_hardlinkable(a, b)
+    assert list(a.iterdir()) == []
+    assert list(b.iterdir()) == []
 
 
 def test_check_writable_preserves_existing_probe_name(tmp_path: Path) -> None:

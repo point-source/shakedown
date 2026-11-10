@@ -1,13 +1,21 @@
 # Shakedown — example deployment for QNAP / any Docker host.
 #
 # Paste this into Container Station → Applications → Create. Edit volumes to
-# match your share layout. ALL paths under /share/data must live on the same
-# physical volume so hardlinks work (SPEC.md §spec:system-shape).
+# match your share layout. Shakedown hardlinks archive files into the library,
+# so archive and library must sit on one filesystem AND reach the container
+# through ONE volume mount: mount the parent (/share/data:/data), never
+# archive and library separately — Linux refuses hardlinks across separate
+# mounts even on the same disk (SPEC.md §spec:system-shape). Run
+# `shakedown validate` to confirm.
 #
 # Setup:
 #   1. File Station: create /share/data/{archive,library,music,shakedown-config}
 #   2. File Station: upload an initial shakedown.yaml to /share/data/shakedown-config/
-#   3. Container Station → Applications → Create: paste this YAML and your env vars
+#   3. Container Station → Applications → Create: paste this YAML and your env vars.
+#      SHAKEDOWN_IMAGE is required — Create fails until you set it, e.g. to
+#      ghcr.io/<owner>/shakedown:latest. Ofelia pulls the image before every
+#      tick, so `latest` updates Shakedown automatically to each release that
+#      passed CI. To hold a version instead, use a release tag such as 1.1.0.
 #
 # How scheduling works (SPEC.md §spec:deployment): ofelia is the only
 # long-running service. On each cron tick it launches a FRESH shakedown
@@ -20,7 +28,8 @@
 # sync immediately without waiting for the next tick, either (a) uncomment the
 # serve control plane below and POST /sync (no SSH), or (b) start a one-off
 # container from Container Station → Create with command
-# `sync --collection <name>` — the manual equivalent of a tick.
+# `sync --collection <name>`, the same mounts, and user SHAKEDOWN_USER —
+# the manual equivalent of a tick.
 
 services:
   ofelia:
@@ -34,16 +43,28 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
       # One job per collection. Each tick starts a fresh shakedown container
-      # from the image, runs one sync, then is removed (job-run + delete).
-      # The mounts mirror a manual run; config is mounted read-only. The
+      # from the image, runs one sync, then is removed (job-run + delete), so
+      # the run's output lands in THIS container's (shakedown-ofelia) log.
+      # Every label of a job must share one `ofelia.job-run.<name>.` prefix; a
+      # mismatched job type or name fails only in that log. After Create,
+      # check it shows one "New job registered" line per collection.
+      # The mounts mirror a manual run: the whole data share as one volume
+      # (hardlinks need it), plus config at /config. The config folder is
+      # also mounted read-only inside /data, so no run can rewrite it. The
       # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`
       # only carries the subcommand. Slice values (volume/environment) are
       # JSON arrays.
+      #
+      # `user` keeps every Shakedown container on ONE owner. Without it ofelia
+      # runs jobs as root, and root-owned files then lock out serve and manual
+      # runs. Set SHAKEDOWN_USER (uid:gid) to the owner of /share/data/archive
+      # and /share/data/library; it defaults to the image's user, 1000:1000.
       ofelia.job-run.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
-      ofelia.job-run.dead-sync.image: "ghcr.io/OWNER/shakedown:latest"   # replace OWNER with your fork's GitHub user/org
+      ofelia.job-run.dead-sync.image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
       ofelia.job-run.dead-sync.command: "sync --collection grateful-dead"
-      ofelia.job-run.dead-sync.volume: '["/share/data/archive:/data/archive", "/share/data/library:/data/library", "/share/data/shakedown-config:/config:ro"]'
+      ofelia.job-run.dead-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/data/shakedown-config:ro", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.dead-sync.delete: "true"
+      ofelia.job-run.dead-sync.user: "${SHAKEDOWN_USER:-1000:1000}"
       # Download-restricted collections only: uncomment to pass IA credentials
       # to this job. NOTE: values embedded here are visible via
       # `docker inspect` on the ofelia container — omit unless the collection
@@ -51,10 +72,11 @@ services:
       # ofelia.job-run.dead-sync.environment: '["IA_EMAIL=${IA_EMAIL:-}", "IA_PASSWORD=${IA_PASSWORD:-}"]'
 
       ofelia.job-run.phish-sync.schedule: "0 0 4 * * 0"  # Sunday 04:00
-      ofelia.job-run.phish-sync.image: "ghcr.io/OWNER/shakedown:latest"
+      ofelia.job-run.phish-sync.image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
       ofelia.job-run.phish-sync.command: "sync --collection phish"
-      ofelia.job-run.phish-sync.volume: '["/share/data/archive:/data/archive", "/share/data/library:/data/library", "/share/data/shakedown-config:/config:ro"]'
+      ofelia.job-run.phish-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/data/shakedown-config:ro", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.phish-sync.delete: "true"
+      ofelia.job-run.phish-sync.user: "${SHAKEDOWN_USER:-1000:1000}"
 
   # Optional: HTTP control plane for ad-hoc triggers + Prometheus metrics.
   # This is the recommended no-SSH way to trigger a sync on demand. Uncomment
@@ -65,12 +87,13 @@ services:
   #     "http://host:8080/sync?collection=grateful-dead"
   #
   # shakedown-serve:
-  #   image: ghcr.io/OWNER/shakedown:latest
+  #   image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
   #   container_name: shakedown-serve
+  #   user: "${SHAKEDOWN_USER:-1000:1000}"
   #   restart: unless-stopped
   #   volumes:
-  #     - /share/data/archive:/data/archive
-  #     - /share/data/library:/data/library
+  #     - /share/data:/data
+  #     - /share/data/shakedown-config:/data/shakedown-config:ro
   #     - /share/data/shakedown-config:/config:ro
   #   environment:
   #     - SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN}
@@ -79,6 +102,9 @@ services:
   #   command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
 
   # Optional: library tool. Beets reads /data/library, manages /data/music.
+  # These separate mounts suit beets' default `copy` import. To have beets
+  # hardlink or move instead, mount /share/data once here too — separate
+  # mounts refuse hardlinks, as for Shakedown above.
   #
   # beets:
   #   image: lscr.io/linuxserver/beets:latest

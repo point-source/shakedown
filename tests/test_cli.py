@@ -213,3 +213,51 @@ def test_item_forget_removes_row(tmp_path: Path, tmp_roots) -> None:
     from shakedown.state import ItemRepo
     conn = connect(config.state_db)
     assert ItemRepo(conn).get("fake-src", "coll1", "gd-x") is None
+
+
+def test_startup_refuses_when_archive_cannot_hardlink_into_library(
+    tmp_path: Path, tmp_roots
+) -> None:
+    import errno
+    import os
+    from unittest.mock import patch
+
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+
+    def exdev(src, dst, *args, **kwargs):
+        raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), str(src), None, str(dst))
+
+    with patch("shakedown.filesystem.os.link", side_effect=exdev):
+        result = CliRunner().invoke(main, ["--config", str(cfg), "sync", "--dry-run"])
+    assert result.exit_code == 2
+    assert "separate volume mounts" in result.output
+
+
+def test_version_matches_installed_package() -> None:
+    """--version reports the build's real version (derived from the git tag)."""
+    from importlib.metadata import version
+
+    result = CliRunner().invoke(main, ["--version"])
+    assert result.exit_code == 0
+    assert result.output.strip() == f"shakedown, version {version('shakedown')}"
+
+
+def test_read_only_commands_skip_the_hardlink_probe(tmp_path: Path, tmp_roots) -> None:
+    """`status` and `item show` diagnose a broken setup, so a library that cannot
+    take links (e.g. root-owned after a permission mix-up) must not block them."""
+    import errno
+    import os
+    from unittest.mock import patch
+
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+
+    def eacces(src, dst, *args, **kwargs):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(dst))
+
+    with patch("shakedown.filesystem.os.link", side_effect=eacces):
+        status = CliRunner().invoke(main, ["--config", str(cfg), "status"])
+        show = CliRunner().invoke(main, ["--config", str(cfg), "item", "show", "nope"])
+    assert status.exit_code == 0, status.output
+    assert show.exit_code == 0, show.output

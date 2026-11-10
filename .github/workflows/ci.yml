@@ -12,15 +12,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags: the package version comes from the latest git tag
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install uv
-        run: pip install uv
-      - name: Create virtualenv
-        run: uv venv --allow-existing .venv
-      - name: Install dependencies
-        run: uv pip install -e '.[dev,serve]'
+        run: pip install uv==0.13.7
+      - name: Install dependencies (from uv.lock)
+        run: uv sync --locked --python 3.12 --extra dev --extra serve
       - name: Lint
         run: .venv/bin/ruff check .
       - name: Typecheck
@@ -29,18 +29,28 @@ jobs:
         run: .venv/bin/pytest -v
 
   docker:
+    # Publish only what passed the tests. Pull requests build without pushing
+    # (smoke test); pushes to main run tests only.
+    needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags: the package version comes from the latest git tag
+
+      - name: Derive package version from git
+        id: version
+        run: echo "version=$(pipx run --spec setuptools-scm==10.3.4 setuptools-scm)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -62,7 +72,9 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            SHAKEDOWN_VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

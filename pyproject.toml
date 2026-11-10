@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.33.0", "hatch-vcs>=0.5.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "shakedown"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Durable mirroring of public music archives onto a local NAS, with a hardlink seam to library tools."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,6 +34,11 @@ dev = [
 [project.scripts]
 shakedown = "shakedown.cli:main"
 
+[tool.hatch.version]
+# The version comes from the latest git tag (v1.2.0 -> 1.2.0). Builds without
+# git history (the Docker image) pass it in via SETUPTOOLS_SCM_PRETEND_VERSION.
+source = "vcs"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/shakedown"]
 
@@ -58,6 +63,7 @@ testpaths = ["tests"]
 # Network tests are opt-in: deselected by default (and in CI), so the suite runs
 # fully offline. Reach them explicitly with `pytest -m network`.
 addopts = "-ra -m 'not network'"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "network: opt-in end-to-end test that downloads a real Internet Archive item; deselected by default, run with `pytest -m network`",
 ]

@@ -1,7 +1,8 @@
-"""Filesystem helpers: same-FS check, hardlink utilities. Enforces PRD §4."""
+"""Filesystem helpers: hardlink probe, hardlink utilities. Enforces PRD §4."""
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import tempfile
 from pathlib import Path
@@ -11,32 +12,46 @@ class FilesystemError(Exception):
     pass
 
 
-def ensure_same_filesystem(archive_root: Path, library_root: Path) -> None:
-    """Hard error if archive_root and library_root live on different filesystems.
+def ensure_hardlinkable(archive_root: Path, library_root: Path) -> None:
+    """Hard error unless a file in archive_root can be hardlinked into library_root.
 
-    Hardlinks require both ends on the same filesystem (PRD §4). Both directories
-    are created if they don't exist, since we'd create them on first use anyway.
+    Makes a real test link (PRD §4) instead of comparing device IDs: Linux refuses
+    links across separate mounts of one filesystem (EXDEV), e.g. archive and library
+    bind-mounted into a container separately, while both still report the same
+    st_dev. Both directories are created if missing, since first use would anyway.
+    The probe file and its link are always removed.
     """
+    probe: Path | None = None
+    link: Path | None = None
     try:
         archive_root.mkdir(parents=True, exist_ok=True)
         library_root.mkdir(parents=True, exist_ok=True)
-        a_dev = os.stat(archive_root).st_dev
-        l_dev = os.stat(library_root).st_dev
+        fd, probe_name = tempfile.mkstemp(prefix=".shakedown-link-probe-", dir=archive_root)
+        os.close(fd)
+        probe = Path(probe_name)
+        target = library_root / probe.name
+        os.link(probe, target)
+        link = target
     except OSError as e:
+        hint = (
+            "They are on different filesystems, or reach the container through separate "
+            "volume mounts; Linux refuses hardlinks across either, even on the same disk. "
+            "Put both on one filesystem, mount their shared parent folder once "
+            "(e.g. /share/data:/data), and try again."
+            if e.errno == errno.EXDEV
+            else "Fix the configured path, permissions, or volume mount and try again."
+        )
         raise FilesystemError(
-            f"archive_root and library_root must be usable directories.\n"
+            f"cannot hardlink files from archive_root into library_root: {e}\n"
             f"  archive_root={archive_root}\n"
             f"  library_root={library_root}\n"
-            f"Fix the configured path or volume mount and try again: {e}"
+            f"{hint}"
         ) from e
-    if a_dev != l_dev:
-        raise FilesystemError(
-            f"archive_root and library_root must live on the same filesystem "
-            f"for hardlinks to work.\n"
-            f"  archive_root={archive_root} (st_dev={a_dev})\n"
-            f"  library_root={library_root} (st_dev={l_dev})\n"
-            f"Move them under the same volume and try again."
-        )
+    finally:
+        for path in (link, probe):
+            if path is not None:
+                with contextlib.suppress(OSError):
+                    path.unlink()
 
 
 def check_writable(path: Path) -> None:
