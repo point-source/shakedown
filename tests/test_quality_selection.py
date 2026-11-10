@@ -534,7 +534,7 @@ def test_reconform_reports_a_drifted_file_the_source_no_longer_lists(
     assert (folder / "t01.shn").read_bytes() == b"retagged"
     last = _last_run(config)
     assert (last["kind"], last["items_failed"]) == ("reconform", 1)
-    assert any(e.startswith("gd-both: t01.shn ") for e in last["errors"])
+    assert "gd-both: t01.shn drifted and the source no longer serves it; not repaired" in last["errors"]
 
 
 def test_reconform_repairs_what_the_source_lists_beside_a_lost_file(
@@ -556,7 +556,7 @@ def test_reconform_repairs_what_the_source_lists_beside_a_lost_file(
     assert (folder / "t01.flac").read_bytes() == _flac().content
     last = _last_run(config)
     assert (last["items_updated"], last["items_failed"]) == (1, 1)
-    assert any(e.startswith("gd-both: t01.shn ") for e in last["errors"])
+    assert "gd-both: t01.shn drifted and the source no longer serves it; not repaired" in last["errors"]
 
 
 def test_reconform_does_not_download_a_drifted_file_the_source_refuses(
@@ -580,7 +580,7 @@ def test_reconform_does_not_download_a_drifted_file_the_source_refuses(
     assert _item(config, "gd-flac").status == ItemStatus.COMPLETE
     last = _last_run(config)
     assert last["items_failed"] == 1
-    assert any(e.startswith("gd-flac: t01.flac ") for e in last["errors"])
+    assert "gd-flac: t01.flac drifted and the source no longer serves it; not repaired" in last["errors"]
 
 
 def test_reconform_drops_a_lost_file_gone_from_disk_from_the_record(
