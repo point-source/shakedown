@@ -594,6 +594,11 @@ filenames are then hardlinked into that directory unchanged.
   tools (and users) can correlate the two trees by name. Tagging and
   renaming are the library tool's job, out of scope by charter
   (§req:constraints).
+- **Every field is sanitized, whether or not the template says
+  `|sanitize`.** Field values come from source metadata that uploaders
+  control, so a field must never add a path separator or a `..`
+  segment. A list value (a repeated metadata field) renders as one
+  comma-joined segment.
 - **Sanitization is conservative:** filesystem-hostile characters
   (slashes, colons, and similar) are replaced; non-ASCII is preserved.
   Archival metadata is multilingual and lossy transliteration would

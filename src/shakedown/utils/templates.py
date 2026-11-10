@@ -5,7 +5,11 @@ Grammar:
   placeholder := '{' field ('|' filter)* '}'
 
 Example:
-  "{year}/{date} - {venue|sanitize}/{filename}"
+  "{year}/{date} - {venue}/{identifier}"
+
+Every field value comes from source metadata that uploaders control, so each one is
+sanitized after its filters run, whether or not the template asks for `|sanitize`: a
+field can never add a path separator or a `..` segment (§spec:library-staging).
 """
 from __future__ import annotations
 
@@ -46,6 +50,9 @@ def render(template: str, fields: dict[str, Any]) -> str:
         parts = [p.strip() for p in spec.split("|")]
         name, filter_names = parts[0], parts[1:]
         value = fields.get(name)
+        if isinstance(value, (list, tuple)):
+            # A repeated metadata field (e.g. two venue tags) renders as one segment.
+            value = ", ".join(str(v) for v in value if v is not None) or None
         if value is None:
             # Missing or null field: render a literal `unknown` segment rather than
             # failing the item. Filters are skipped — the segment is the fixed
@@ -56,7 +63,7 @@ def render(template: str, fields: dict[str, Any]) -> str:
             if fname not in _FILTERS:
                 raise TemplateError(f"unknown filter: {fname!r}")
             out = _FILTERS[fname](out)
-        return out
+        return sanitize(out)
 
     return _PLACEHOLDER_RE.sub(_sub, template)
 

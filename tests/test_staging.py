@@ -181,3 +181,46 @@ def test_passthrough_layout_mirrors_archive(tmp_roots: tuple[Path, Path]) -> Non
         b = library / "fake-src" / "coll1" / "x" / name
         assert a.is_file() and b.is_file()
         assert a.stat().st_ino == b.stat().st_ino
+
+
+# --- Untrusted metadata in library paths (§spec:library-staging) ---
+
+
+def test_template_render_sanitizes_every_field_by_default() -> None:
+    # Layout fields come from the source's metadata, which uploaders control. A field
+    # without `|sanitize` must still never add a path separator or a `..` segment.
+    out = render("{year}/{date} - {venue}", {
+        "year": "../../x", "date": "1977/05/08", "venue": "..",
+    })
+    assert out == ".._.._x/1977_05_08 - _"
+
+
+def test_template_render_joins_list_values() -> None:
+    # A repeated metadata field arrives as a list; it renders as one readable segment,
+    # not as Python's `['a', 'b']`.
+    assert render("{venue}", {"venue": ["Barton Hall", "Cornell"]}) == "Barton Hall, Cornell"
+
+
+def test_crafted_metadata_cannot_stage_outside_the_library(tmp_path: Path) -> None:
+    """A title that walks out of the library must not replace a file outside it."""
+    archive = tmp_path / "archive"
+    library = tmp_path / "library"
+    config = make_config(archive, library, library_layout="{title}/{identifier}")
+    victim = tmp_path / "outside" / "a" / "x.flac"
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(b"precious")
+    (library / "fake-src" / "coll1").mkdir(parents=True)  # an established collection
+    FakePlugin.items["a"] = FakeItem(
+        identifier="a",
+        files=[FakeFile(name="x.flac", content=b"uploaded")],
+        metadata={"title": "../../../outside"},
+    )
+
+    assert run_sync(config) == 0
+
+    assert victim.read_bytes() == b"precious"
+    staged = [p for p in library.rglob("x.flac")]
+    assert len(staged) == 1
+    assert staged[0].is_relative_to(library / "fake-src" / "coll1")
+    assert ".." not in staged[0].relative_to(library).parts
+

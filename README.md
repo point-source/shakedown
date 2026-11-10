@@ -96,6 +96,10 @@ shakedown serve      [--host HOST] [--port PORT]    # optional HTTP control plan
 
 `shakedown verify --deep` is the **only** command that hashes on-disk bytes. It is operator-invoked, never scheduled. Drift (e.g. from Beets retagging in place) is informational, not an error. `--reconform` re-fetches drifted files from the source if you want byte-level fidelity to upstream.
 
+### Upgrading
+
+- **Library folder names (this release):** every `library_layout` field is now sanitized, even without `|sanitize`, so a folder built from a raw field that held a `/`, `:` or a list may get a new name. Run `shakedown restage --collection <name>` once per collection after upgrading to rebuild a clean library tree. The archive is untouched.
+
 ## Writing a source plugin
 
 A source plugin teaches Shakedown how to talk to one kind of remote archive. It
