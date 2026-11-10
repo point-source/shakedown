@@ -479,6 +479,29 @@ def test_v5_db_gains_the_not_playable_reason_and_reselects_every_show(tmp_path: 
     assert [f.library for f in item.recorded_manifest.files] == [True]
 
 
+def test_v5_db_keeps_every_show_and_dates_no_earlier_takedown(tmp_path: Path) -> None:
+    """The increment's one migration adds the date a show was first found missing
+    (§spec:item-lifecycle). A show already missing before the upgrade gets none:
+    `last_verified_at` is rewritten by every reconcile, so it is not that date."""
+    db_path = tmp_path / "legacy_v5.db"
+    _legacy_v5(
+        db_path,
+        _V5_ITEMS
+        + "INSERT INTO items (source_name, collection_name, identifier, status,"
+        " last_verified_at) VALUES"
+        " ('s', 'c', 'gone', 'disappeared', '2026-03-04T05:06:07'),"
+        " ('s', 'c', 'here', 'complete', '2026-03-04T05:06:07');",
+    )
+
+    conn = connect(db_path)
+    assert "disappeared_at" in _columns(conn, "items")
+    repo = ItemRepo(conn)
+    assert [i.identifier for i in repo.list_for_collection("s", "c")] == ["gone", "here"]
+    gone = repo.get("s", "c", "gone")
+    assert gone is not None and gone.status == ItemStatus.DISAPPEARED
+    assert gone.disappeared_at is None
+
+
 def test_not_playable_reason_round_trips(tmp_path: Path) -> None:
     repo = ItemRepo(connect(tmp_path / "s.db"))
     item = _make_item()
