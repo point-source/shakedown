@@ -110,7 +110,8 @@ criterion 5).
 
 ## Item lifecycle §spec:item-lifecycle
 
-*Status: implemented*
+*Status: implemented, except recording and showing when a show was
+removed upstream (below) — not started.*
 
 Every discovered item carries a persistent status:
 
@@ -144,6 +145,18 @@ Behavior the user can observe:
   per-item metadata failed to resolve this run is **not** `disappeared`
   — it is left as recorded and retried, since only absence from a
   successful enumeration marks disappearance (§spec:prune-safety).
+- **Removed upstream is a fact, not an error.** When a show becomes
+  `disappeared`, the system records the date it was first found
+  missing from a complete listing. A retained show stays on disk and in
+  the library for playback, and `status` shows it informationally —
+  "removed upstream on <date>; kept" (text: a count per collection;
+  JSON: each show with its date) — never as a warning, a recovery item,
+  or a cause of a non-zero exit. If the show is listed again, it returns
+  to `complete` and the date is cleared. (Operator decision,
+  2026-11-10.) Because a retained show no longer reads as a problem,
+  `item forget` is only for letting go of a show entirely; it removes
+  the show's record and library links and keeps its archive copy
+  (§spec:library-cleanup).
 
 **Why retention is the default.** Durable mirroring is the product's
 reason to exist; losing content must only ever be the user's explicit
