@@ -1445,27 +1445,15 @@ def _fetch_one(
             error=f"unsafe file name(s) escape item directory: {unsafe_names[:5]}",
         )
 
+    # Callers have already finished any swap a crashed run left half done
+    # (`_recover_interrupted_swaps`) and routed shows the source refuses away from
+    # the fetch. The temp dir is swept per-attempt inside _fetch_with_retries.
     tmp_dir = archive_root / f"{_TMP_PREFIX}{desc.identifier}"
     stale_dir = archive_root / f"{_STALE_PREFIX}{desc.identifier}"
 
-    # Finish a swap a prior crashed promotion left half done (the collection sweep
-    # covers sync; this covers `item refetch`), before any early return, so the
-    # archive copy is always back in place. The temp dir is swept per-attempt
-    # inside _fetch_with_retries.
-    _recover_swap(stale_dir, dest)
-
-    # A show the source refuses (flagged at lookup) stays unavailable with its reason;
-    # only `item refetch` reaches here with one, since classification routes it away.
-    if desc.is_restricted:
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
-        return _FetchOutcome(
-            success=False, archive_path=dest, error=desc.restriction_reason, unavailable=True
-        )
-
     # Never promote an empty fetch: it would replace the archive copy with an empty
-    # folder. Classification already routes an empty manifest to `unavailable`; this
-    # guards the paths that skip classification (`item refetch`).
+    # folder. Both callers route an empty manifest away first; this is the last line
+    # in front of the archive copy.
     if not desc.manifest.files:
         return _FetchOutcome(
             success=False,
