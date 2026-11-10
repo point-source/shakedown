@@ -26,6 +26,8 @@ class FakeFile:
     refused: bool = False
     derived_from: str | None = None
     bitrate: int | None = None
+    title: str | None = None
+    track: str | None = None
 
     @property
     def size(self) -> int:
@@ -102,6 +104,8 @@ class FakePlugin(SourcePlugin):
                     "refused": f.refused,
                     "derived_from": f.derived_from,
                     "bitrate": f.bitrate,
+                    "title": f.title,
+                    "track": f.track,
                 }
                 for f in it.files
             ],

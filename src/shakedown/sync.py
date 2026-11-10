@@ -70,7 +70,16 @@ from shakedown.state import (
     OperationOutcomeRepo,
     PendingHandoffRepo,
     RunRepo,
+    TagRecord,
     TagRepo,
+)
+from shakedown.tagging import (
+    Desired,
+    TagPlanner,
+    TagWriteError,
+    fill_file,
+    fingerprint,
+    tag_failure,
 )
 from shakedown.trigger import announce_started
 
@@ -106,6 +115,9 @@ class PlannedItem:
     # kept from the archive copy (§spec:quality-selection: an upgrade downloads only
     # what is missing).
     fetch: tuple[ManifestFile, ...] | None = None
+    # Each taggable file's computed tags, on a `fill_tags` collection: the downloaded
+    # files are tagged before the show enters the archive (§spec:tag-filling).
+    tags: Desired | None = None
 
 
 def plan_files(
@@ -668,8 +680,12 @@ def _sync_collection_phases(
 
     # Phases 1-4, pipelined: discover -> classify -> fetch + stage, overlapping downloads
     # with the remaining enumeration (SPEC §spec:discovery-pipeline, overlap lever).
+    planner = (
+        TagPlanner(items, source.name, collection.name) if collection.fill_tags else None
+    )
     enumerated_identifiers, deferred, enum_error = _pipelined_discover_and_fetch(
         config, source, collection, plugin, items, stats, placement, budget, by_identifier,
+        planner,
     )
     stats.discovered = len(enumerated_identifiers)
 
@@ -796,6 +812,7 @@ def _pipelined_discover_and_fetch(
     placement: LibraryPlacement,
     budget: SourceBudget,
     by_identifier: dict[str, Item],
+    planner: TagPlanner | None = None,
 ) -> tuple[set[str], list[PlannedItem], Exception | None]:
     """Overlap discover → classify → fetch (SPEC §spec:discovery-pipeline, overlap lever).
 
@@ -837,6 +854,11 @@ def _pipelined_discover_and_fetch(
         def dispatch(desc: ItemDescriptor) -> None:
             planned = _classify_one(desc, by_identifier)
             if planned.action in (PlanAction.NEW, PlanAction.CHANGED_UPSTREAM):
+                if planner is not None:
+                    assert planned.descriptor is not None
+                    planned.tags = planner.plan(
+                        desc.identifier, desc.metadata, planned.descriptor.manifest
+                    )
                 archive_root.mkdir(parents=True, exist_ok=True)
                 fut = fetch_pool.submit(
                     _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
@@ -1258,7 +1280,9 @@ def _process_fetch_result(
     else:
         stats.updated += 1
 
-    _record_complete(items, source.name, collection, desc, outcome.archive_path)
+    with transaction(items.conn):
+        _record_complete(items, source.name, collection, desc, outcome.archive_path)
+        _record_download_tags(items, source.name, collection.name, target, outcome)
     stats.fetched[desc.identifier] = outcome.archive_path
     # Linked now, not at the end of the run, so a run that dies later keeps it staged.
     # Issues are reported by the run's full staging pass, which meets them again.
@@ -1272,6 +1296,8 @@ class _FetchOutcome:
     bytes_downloaded: int = 0
     error: str | None = None
     unavailable: bool = False  # the source refuses to serve the item
+    # What tagging the downloaded files recorded, per file; None when nothing was tagged.
+    tag_records: dict[str, TagRecord | None] | None = None
 
 
 # Bounded core-owned retries for transient fetch faults (checksum mismatch,
@@ -1514,6 +1540,25 @@ def _fetch_one(
             error=f"missing after fetch: {verified.missing_files[:5]}",
         )
 
+    # Fill the downloads' missing tags while they are still in the temp dir, so the
+    # tagged bytes enter the archive atomically with the show (§spec:tag-filling).
+    # Kept files are links to the live archive copy and are never touched here.
+    tag_records: dict[str, TagRecord | None] | None = None
+    if target.tags is not None:
+        tag_records = {}
+        for name in sorted(fetched & target.tags.keys()):
+            try:
+                tag_records[name] = fill_file(tmp_dir / name, target.tags[name], None, None).record
+            except TagWriteError as e:
+                # The download may be torn: drop it, and the next run fetches it again.
+                (tmp_dir / name).unlink(missing_ok=True)
+                return _FetchOutcome(
+                    success=False,
+                    archive_path=dest,
+                    bytes_downloaded=fetch_result.bytes_downloaded,
+                    error=tag_failure(name, e),
+                )
+
     # Preserve the raw source metadata as a sidecar inside the temp dir *before* the
     # atomic promotion, so it lands in the archive atomically with the media or not at
     # all (§spec:metadata-preservation). It is written by the core, not the plugin, and
@@ -1537,6 +1582,7 @@ def _fetch_one(
         success=True,
         archive_path=dest,
         bytes_downloaded=fetch_result.bytes_downloaded,
+        tag_records=tag_records,
     )
 
 
@@ -1652,6 +1698,31 @@ def _record_complete(
     )
     items.upsert(item)
     return item
+
+
+def _record_download_tags(
+    items: ItemRepo,
+    source_name: str,
+    collection_name: str,
+    target: PlannedItem,
+    outcome: _FetchOutcome,
+) -> None:
+    """The downloaded files hold new bytes: their old tag records go, replaced by what
+    fetch-time tagging wrote. The show's fingerprint is kept only when every taggable
+    file was downloaded and tagged now; otherwise the run's pass over mirrored shows
+    (or, with `fill_tags` off, a later opt-in) revisits it (§spec:tag-filling)."""
+    assert target.descriptor is not None
+    desc = target.descriptor
+    repo = TagRepo(items.conn)
+    downloaded = {mf.name for mf in (target.fetch if target.fetch is not None else desc.manifest.files)}
+    repo.drop_files(source_name, collection_name, desc.identifier, sorted(downloaded))
+    for name, record in (outcome.tag_records or {}).items():
+        if record is not None:
+            repo.put_file(source_name, collection_name, desc.identifier, name, record)
+    if target.tags is not None and outcome.tag_records is not None and target.tags.keys() <= downloaded:
+        repo.set_fingerprint(source_name, collection_name, desc.identifier, fingerprint(target.tags))
+    else:
+        repo.clear_fingerprint(source_name, collection_name, desc.identifier)
 
 
 def _record_back_to_complete(items: ItemRepo, existing: Item, reason: str | None) -> None:
@@ -1975,6 +2046,9 @@ def _single_show_phases(
     placement = LibraryPlacement(config, collection, source.name, items)
     placement.begin()
 
+    planner = (
+        TagPlanner(items, source.name, collection.name) if collection.fill_tags else None
+    )
     unrepaired: set[str] = set()
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetches: dict[Future[_FetchOutcome], PlannedItem] = {}
@@ -2021,6 +2095,10 @@ def _single_show_phases(
                 else PlanAction.NEW
             )
             planned = PlannedItem(replace(found, manifest=manifest), existing, action, fetch)
+            if planner is not None:
+                # A reconform restores the drifted files' source bytes, then fills their
+                # gaps again (§spec:verify-drift).
+                planned.tags = planner.plan(identifier, found.metadata, manifest)
             archive_root.mkdir(parents=True, exist_ok=True)
             fut = fetch_pool.submit(
                 _fetch_one_budgeted, budget, plugin, planned, archive_root, collection

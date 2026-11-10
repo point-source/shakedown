@@ -47,6 +47,7 @@ def make_config(
     prune_disappeared: bool = False,
     incremental_discovery: bool = False,
     preserve_source_metadata: bool = False,
+    fill_tags: bool = False,
 ) -> Config:
     return Config(
         archive_root=archive_root,
@@ -64,6 +65,7 @@ def make_config(
                         prune_disappeared=prune_disappeared,
                         incremental_discovery=incremental_discovery,
                         preserve_source_metadata=preserve_source_metadata,
+                        fill_tags=fill_tags,
                     )
                 ],
             )

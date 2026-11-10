@@ -14,8 +14,8 @@ from shakedown import tagging
 from shakedown.config import CollectionConfig
 from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
-from shakedown.state import ItemRepo, TagRecord, TagRepo
-from shakedown.sync import _record_disappeared
+from shakedown.state import ItemRepo, RunRepo, TagRecord, TagRepo
+from shakedown.sync import _record_disappeared, run_sync
 from shakedown.tagging import (
     TagIndex,
     TagWriteError,
@@ -25,6 +25,8 @@ from shakedown.tagging import (
     recover_interrupted_tagging,
 )
 from tests.audio_fixtures import make_audio, read_tags
+from tests.conftest import make_config
+from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 
 
 def test_pruning_a_show_drops_its_tag_records(tmp_path: Path) -> None:
@@ -397,3 +399,132 @@ def test_a_backup_that_cannot_be_made_leaves_the_file_untouched(
     with pytest.raises(TagWriteError, match="No space left on device"):
         fill_file(path, DESIRED, None, backup)
     assert path.read_bytes() == original
+
+
+# --- sync: a newly fetched show is tagged before it enters the archive ---------------
+
+GD_META = {"creator": "Grateful Dead", "date": "1977-05-08", "venue": "Barton Hall",
+           "title": "Live at Barton Hall"}
+
+
+def _fake_show(identifier: str, tmp_path: Path, meta: dict | None = None,
+               names: tuple[str, ...] = ("d1t01.flac", "d1t02.flac")) -> FakeItem:
+    """A show whose files are real (untagged) audio, as the source serves them."""
+    src = tmp_path / "source-bytes" / identifier
+    files = [
+        FakeFile(n, make_audio(src / n).read_bytes(),
+                 format="Flac" if n.endswith(".flac") else "VBR MP3",
+                 title=f"Track {i}", track=str(i))
+        for i, n in enumerate(names, start=1)
+    ]
+    item = FakeItem(identifier, files, metadata={**(meta or GD_META)})
+    FakePlugin.items[identifier] = item
+    return item
+
+
+def _archive_file(config, identifier: str, name: str) -> Path:
+    return config.archive_root / "fake-src" / "coll1" / identifier / name
+
+
+def _library_file(config, name: str) -> Path:
+    [found] = [p for p in config.library_root.rglob(name) if p.is_file()]
+    return found
+
+
+def _tag_repo(config) -> TagRepo:
+    return TagRepo(connect(config.state_db))
+
+
+def test_a_new_show_arrives_tagged_on_a_fill_tags_collection(tmp_roots) -> None:
+    config = make_config(*tmp_roots, fill_tags=True)
+    item = _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(config) == 0
+
+    flac = _archive_file(config, "gd77", "d1t01.flac")
+    tags = read_tags(flac)
+    assert tags["artist"] == ["Grateful Dead"] and tags["albumartist"] == ["Grateful Dead"]
+    assert tags["album"] == ["1977-05-08 \N{EN DASH} Barton Hall"]
+    assert (tags["date"], tags["venue"]) == (["1977-05-08"], ["Barton Hall"])
+    assert (tags["title"], tags["tracknumber"]) == (["Track 1"], ["1"])
+    assert read_tags(_archive_file(config, "gd77", "d1t02.flac"))["title"] == ["Track 2"]
+    # The library holds the same, tagged file.
+    assert _library_file(config, "d1t01.flac").stat().st_ino == flac.stat().st_ino
+
+    records = _tag_repo(config).file_records("fake-src", "coll1", "gd77")
+    assert set(records) == {"d1t01.flac", "d1t02.flac"}
+    assert records["d1t01.flac"].post_tag_md5 == hashlib.md5(flac.read_bytes()).hexdigest()
+    assert records["d1t01.flac"].written["album"] == "1977-05-08 \N{EN DASH} Barton Hall"
+    assert "gd77" in _tag_repo(config).fingerprints("fake-src", "coll1")
+    # The recorded manifest stays the source's word (§spec:sync-identity).
+    stored = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "gd77")
+    assert stored is not None and stored.recorded_manifest is not None
+    assert {f.md5 for f in stored.recorded_manifest.files} == {f.md5 for f in item.files}
+
+
+def test_nothing_is_tagged_without_fill_tags(tmp_roots) -> None:
+    config = make_config(*tmp_roots)
+    item = _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(config) == 0
+    flac = _archive_file(config, "gd77", "d1t01.flac")
+    assert flac.read_bytes() == item.files[0].content
+    assert _tag_repo(config).file_records("fake-src", "coll1", "gd77") == {}
+
+
+def test_a_crash_while_tagging_a_download_leaves_nothing_in_the_archive(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(*tmp_roots, fill_tags=True)
+    _fake_show("gd77", tmp_roots[0].parent)
+
+    def crash(stage: str) -> None:
+        raise RuntimeError("killed mid-tagging")
+
+    monkeypatch.setattr(tagging, "_fault_point", crash)
+    assert run_sync(config) == 1
+    assert not (config.archive_root / "fake-src" / "coll1" / "gd77").exists()
+    assert _tag_repo(config).file_records("fake-src", "coll1", "gd77") == {}
+
+    monkeypatch.undo()
+    assert run_sync(config) == 0
+    assert read_tags(_archive_file(config, "gd77", "d1t01.flac"))["venue"] == ["Barton Hall"]
+
+
+def test_a_redownload_without_fill_tags_drops_the_files_tag_records(tmp_roots) -> None:
+    """The new bytes are the source's: no post-tag checksum may claim them."""
+    root = tmp_roots[0].parent
+    _fake_show("gd77", root)
+    assert run_sync(make_config(*tmp_roots, fill_tags=True)) == 0
+
+    item = FakePlugin.items["gd77"]
+    item.files[0] = FakeFile("d1t01.flac", item.files[0].content + b"\x00" * 10,
+                             format="Flac", title="Track 1", track="1")
+    config = make_config(*tmp_roots)
+    assert run_sync(config) == 0
+    assert _archive_file(config, "gd77", "d1t01.flac").read_bytes() == item.files[0].content
+    records = _tag_repo(config).file_records("fake-src", "coll1", "gd77")
+    assert set(records) == {"d1t02.flac"}
+    assert _tag_repo(config).fingerprints("fake-src", "coll1") == {}
+
+
+def test_a_disk_error_tagging_a_download_fails_the_show_for_a_retry(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(*tmp_roots, fill_tags=True)
+    _fake_show("gd77", tmp_roots[0].parent)
+
+    def full(self: object, target: Path) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tagging._Tags, "save", full)
+    assert run_sync(config) == 1
+    assert not (config.archive_root / "fake-src" / "coll1" / "gd77").exists()
+    latest = RunRepo(connect(config.state_db)).latest("fake-src", "coll1")
+    assert latest is not None
+    assert latest.errors == [
+        "gd77: could not fill tags in d1t01.flac ([Errno 28] No space left on device);"
+        " will retry on the next run"
+    ]
+
+    monkeypatch.undo()
+    assert run_sync(config) == 0
+    assert read_tags(_archive_file(config, "gd77", "d1t01.flac"))["album"]

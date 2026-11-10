@@ -28,7 +28,8 @@ from mutagen.mp3 import MP3
 from mutagen.oggvorbis import OggVorbis
 
 from shakedown.models import Manifest
-from shakedown.state import TagRecord
+from shakedown.placement import has_archive_copy
+from shakedown.state import ItemRepo, TagRecord
 
 log = logging.getLogger(__name__)
 
@@ -137,6 +138,32 @@ class TagIndex:
     def labelled(self, identifier: str) -> bool:
         key = self._key.get(identifier)
         return key is not None and len(self._members[key]) > 1
+
+
+class TagPlanner:
+    """One collection run's clash index, seeded from every show with an archive copy
+    and fed each show the run fetches, so a download is tagged with the album it gets
+    among the collection as known so far. A clash that only shows up later in the run
+    is corrected by the run's pass over mirrored shows."""
+
+    def __init__(self, items: ItemRepo, source: str, collection: str) -> None:
+        self.index = TagIndex()
+        for item in items.list_for_collection(source, collection):
+            if has_archive_copy(item):
+                assert item.recorded_manifest is not None
+                self.index.add(item.identifier, item.source_metadata, item.recorded_manifest)
+
+    def plan(self, identifier: str, metadata: Mapping[str, Any], manifest: Manifest) -> Desired:
+        self.index.add(identifier, metadata, manifest)
+        return desired_tags(
+            identifier, metadata, manifest, labelled=self.index.labelled(identifier)
+        )
+
+
+def tag_failure(file_name: str, error: object) -> str:
+    """Why a show's tags are missing after a tag write failed on the disk; the run
+    reports it as `<identifier>: <this>` (operator-approved copy, Q-8-4)."""
+    return f"could not fill tags in {file_name} ({error}); will retry on the next run"
 
 
 # --- writing one file ---------------------------------------------------------------
