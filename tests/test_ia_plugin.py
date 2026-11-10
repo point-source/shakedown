@@ -565,3 +565,24 @@ def test_credentials_from_an_env_file_with_line_endings_are_trimmed(monkeypatch)
     session = _get_ia_session(src)
 
     assert (session.access_key, session.secret_key) == ("me@example.org", "s3cret")
+
+
+def test_files_index_is_mirrored_without_its_unmatchable_checksum(archive) -> None:
+    """archive.org lists `<identifier>_files.xml` with a checksum the file can never
+    match (it lists itself; seen on the real-source test item). The core must not
+    check it, or every show would fail its download."""
+    plugin = _make_plugin()
+    archive.item(
+        "gd-index",
+        [
+            {"name": "d1t01.flac", "size": "9", "md5": MD5_A, "format": "Flac"},
+            {"name": "gd-index_files.xml", "md5": MD5_B, "format": "Metadata"},
+            {"name": "gd-index_meta.xml", "size": "3", "md5": "c" * 32, "format": "Metadata"},
+        ],
+    )
+    desc = _look_up(plugin, "gd-index")
+    assert isinstance(desc, ItemDescriptor)
+    by_name = {f.name: f for f in desc.manifest.files}
+    assert by_name["gd-index_files.xml"].md5 is None
+    assert by_name["gd-index_meta.xml"].md5 == "c" * 32
+    assert by_name["d1t01.flac"].md5 == MD5_A

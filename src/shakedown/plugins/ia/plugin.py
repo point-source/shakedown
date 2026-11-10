@@ -15,6 +15,7 @@ from urllib3 import Retry
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
+from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
     FetchResult,
     ItemLookup,
@@ -99,12 +100,6 @@ def _restriction_reason(item_meta: dict[str, Any]) -> str | None:
     return None
 
 
-def _is_private(file_meta: dict[str, Any]) -> bool:
-    """archive.org's per-file verdict: a `private` file answers 403 (e.g. the lossless
-    originals of a stream-only show, whose MP3s stay public)."""
-    return str(file_meta.get("private")).lower() == "true"
-
-
 def _combine_change_signal(hit: dict[str, Any]) -> str | None:
     """Combine IA's oai_updatedate and item_size into one change signal.
 
@@ -167,18 +162,7 @@ class IAPlugin(SourcePlugin):
         metadata: dict[str, Any] = dict(item.get("metadata") or {})
         return ItemLookup(
             metadata=_normalize_template_fields(identifier, metadata),
-            files=[
-                {
-                    "name": f.get("name"),
-                    "size": f.get("size"),
-                    "md5": f.get("md5"),
-                    "format": f.get("format"),
-                    "refused": _is_private(f),
-                    "derived_from": f.get("original"),
-                    "bitrate": f.get("bitrate"),
-                }
-                for f in item.get("files") or []
-            ],
+            files=file_records(identifier, item.get("files") or []),
             restriction_reason=_restriction_reason(metadata),
         )
 

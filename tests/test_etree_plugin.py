@@ -534,3 +534,17 @@ def test_listing_raises_when_num_found_falls_mid_listing() -> None:
     plugin = _make_plugin(handler)
     with pytest.raises(RuntimeError, match="2 of 3"):
         list(plugin.list_items(_collection()))
+
+
+def test_files_index_is_mirrored_without_its_unmatchable_checksum() -> None:
+    """Same archive.org quirk as on the ia source: `<identifier>_files.xml` lists a
+    checksum it can never match, so the core must not check it."""
+    files = [
+        {"name": "show.flac", "format": "Flac", "size": "10", "md5": MD5},
+        {"name": "gd77_files.xml", "format": "Metadata", "md5": "b" * 32},
+    ]
+    item = _look_up(_make_plugin(_gd77_handler(files)), "gd77")
+    assert isinstance(item, ItemDescriptor)
+    by_name = {f.name: f for f in item.manifest.files}
+    assert by_name["gd77_files.xml"].md5 is None
+    assert by_name["show.flac"].md5 == MD5

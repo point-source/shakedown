@@ -25,6 +25,7 @@ import httpx
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
+from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
     FetchResult,
     ItemLookup,
@@ -156,18 +157,7 @@ class EtreePlugin(SourcePlugin):
                 "venue": _first(meta, "venue"),
                 "coverage": _first(meta, "coverage"),
             },
-            files=[
-                {
-                    "name": f.get("name"),
-                    "size": f.get("size"),
-                    "md5": f.get("md5"),
-                    "format": f.get("format"),
-                    "refused": str(f.get("private")).lower() == "true",
-                    "derived_from": f.get("original"),
-                    "bitrate": f.get("bitrate"),
-                }
-                for f in doc.get("files", []) or []
-            ],
+            files=file_records(identifier, doc.get("files", []) or []),
             restriction_reason=_restriction_reason(meta),
         )
 
