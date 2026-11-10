@@ -157,7 +157,7 @@ def stage_item(
     # entry (§spec:metadata-preservation). It is regenerated from the DB-recorded metadata
     # when the archive copy is absent, so restage/reconcile stay network-free.
     if collection.preserve_source_metadata and not manifest_reserves_sidecar_name(manifest):
-        sidecar_src = _ensure_archive_sidecar(item)
+        sidecar_src = ensure_archive_sidecar(item)
         if sidecar_src is not None:
             _link_file(
                 sidecar_src, staging_dir / METADATA_SIDECAR, result, staged_paths,
@@ -205,7 +205,7 @@ def _link_file(
         result.collisions.append(f"{dst}: {e}")
 
 
-def _ensure_archive_sidecar(item: Item) -> Path | None:
+def ensure_archive_sidecar(item: Item) -> Path | None:
     """Return the item's archive-side metadata.json, regenerating it from recorded state
     when the on-disk copy is absent (§spec:metadata-preservation).
 
