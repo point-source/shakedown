@@ -1050,7 +1050,7 @@ sync; the old folder is gone without any download.
 
 ## Tag filling §spec:tag-filling
 
-*Status: not started*
+*Status: complete*
 
 A collection may opt in (`fill_tags`, default off, §spec:configuration)
 to having shakedown fill in missing basic tags from the source metadata
@@ -1148,8 +1148,8 @@ another tool; `verify --deep` reports exactly that file.
 ## Verification and drift §spec:verify-drift
 
 *Status: implemented, including reconform as single-show runs
-(§spec:single-show-runs), except comparison against post-tag checksums
-and refilling tags after a reconform (§spec:tag-filling) — not started.*
+(§spec:single-show-runs), comparison against post-tag checksums, and
+refilling tags after a reconform (§spec:tag-filling).*
 
 `shakedown verify` is the explicit, operator-invoked integrity tool.
 It is never scheduled by default (§req:constraints).
@@ -1224,8 +1224,8 @@ already works. Scheduling is deliberately someone else's job
 
 ## Single-show operations as runs §spec:single-show-runs
 
-*Status: implemented, except filling tags after a fetch on a `fill_tags`
-collection (§spec:tag-filling) — not started.*
+*Status: implemented, including filling tags after a fetch on a `fill_tags`
+collection (§spec:tag-filling).*
 
 Refetching one show, or reconforming drifted shows, behaves like a sync
 of exactly those shows (§req:success-criteria #23).
@@ -1283,8 +1283,7 @@ notice sent, both shows' bytes restored.
 ## Configuration §spec:configuration
 
 *Status: implemented, including the removal of the format settings
-(§spec:quality-selection), except `fill_tags` (§spec:tag-filling) — not
-started.*
+(§spec:quality-selection) and `fill_tags` (§spec:tag-filling).*
 
 All configuration lives in a single YAML file mounted at
 `/config/shakedown.yaml`, editable through File Station or any text
@@ -1332,9 +1331,9 @@ the run rather than being ignored).
 
 ## State persistence and recovery §spec:state
 
-*Status: implemented, including the library placement and pending-handoff
-records of the ownership, handoff, and discovery increment (below); its
-tag-filling records — not started.*
+*Status: implemented, including the library placement, pending-handoff, and
+tag-filling records of the ownership, handoff, and discovery increment
+(below).*
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
