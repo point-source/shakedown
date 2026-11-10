@@ -152,6 +152,68 @@ def test_discover_paginates_across_pages() -> None:
     assert [i.identifier for i in items] == ["a", "b", "c"]
 
 
+def test_discover_raises_when_listing_ends_short_of_num_found() -> None:
+    """An early empty page is a failed listing, not the whole collection: treating
+    it as complete would mark every unlisted show disappeared (or prune it)."""
+    pages: dict[str, list[str]] = {"1": ["a"], "2": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/advancedsearch.php":
+            page = request.url.params.get("page", "1")
+            return _search_response(pages.get(page, []), 3)
+        ident = request.url.path.rsplit("/", 1)[-1]
+        return _metadata_response({"identifier": ident}, [])
+
+    plugin = _make_plugin(handler)
+    with pytest.raises(RuntimeError, match="1 of 3"):
+        list(plugin.discover(_collection()))
+
+
+def test_discover_raises_when_page_ceiling_hit_short_of_num_found(monkeypatch) -> None:
+    import shakedown.plugins.etree.plugin as etree_module
+
+    monkeypatch.setattr(etree_module, "_MAX_PAGES", 2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/advancedsearch.php":
+            page = request.url.params.get("page", "1")
+            return _search_response([f"id{page}"], 1_000)
+        ident = request.url.path.rsplit("/", 1)[-1]
+        return _metadata_response({"identifier": ident}, [])
+
+    plugin = _make_plugin(handler)
+    with pytest.raises(RuntimeError, match="2 of 1000"):
+        list(plugin.discover(_collection()))
+
+
+def test_discover_raises_when_unstable_paging_repeats_an_item() -> None:
+    """A duplicate row must not stand in for a skipped show: count unique ids."""
+    pages: dict[str, list[str]] = {"1": ["a", "b"], "2": ["b"]}
+    seen_sort: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/advancedsearch.php":
+            seen_sort.append(request.url.params.get("sort[]"))
+            page = request.url.params.get("page", "1")
+            return _search_response(pages.get(page, []), 3)
+        ident = request.url.path.rsplit("/", 1)[-1]
+        return _metadata_response({"identifier": ident}, [])
+
+    plugin = _make_plugin(handler)
+    with pytest.raises(RuntimeError, match="2 of 3"):
+        ids = [d.identifier for d in plugin.discover(_collection())]
+        assert ids == ["a", "b"]  # never yields "b" twice
+    assert seen_sort and all(s == "identifier asc" for s in seen_sort)
+
+
+def test_discover_empty_collection_is_complete() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _search_response([], 0)
+
+    plugin = _make_plugin(handler)
+    assert list(plugin.discover(_collection())) == []
+
+
 def test_discover_raises_on_enumeration_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/advancedsearch.php":
@@ -354,3 +416,85 @@ def test_example_config_etree_layout_validates() -> None:
     config = load(root / "shakedown.example.yaml")
     etree_sources = [s for s in config.sources if s.type == "etree"]
     assert etree_sources, "example config should define an etree source"
+
+
+def test_retry_after_late_failure_fetches_only_the_missing_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One late error must not re-download a whole multi-gigabyte show: the next
+    attempt keeps files that match the manifest and fetches only the rest."""
+    import shakedown.sync as sync_module
+
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    contents = {f"t{i:02d}.flac": f"track {i}".encode() for i in range(1, 4)}
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = request.url.path.rsplit("/", 1)[-1]
+        requests.append(name)
+        if name == "t03.flac" and requests.count(name) == 1:
+            return httpx.Response(503, text="timeout")
+        return httpx.Response(200, content=contents[name])
+
+    plugin = _make_plugin(handler)
+    item = _item_with_files([
+        ManifestFile(n, len(c), hashlib.md5(c).hexdigest()) for n, c in contents.items()
+    ])
+    tmp_dir = tmp_path / ".tmp-gd77"
+
+    result = sync_module._fetch_with_retries(plugin, item, tmp_dir, _collection())
+
+    assert result.success is True
+    assert requests == ["t01.flac", "t02.flac", "t03.flac", "t03.flac"]
+    assert {p.name: p.read_bytes() for p in tmp_dir.iterdir()} == contents
+
+
+def test_fetch_refetches_leftover_file_that_does_not_match(tmp_path: Path) -> None:
+    content = b"flac-bytes"
+    (tmp_path / "show.flac").write_bytes(b"FLAC-BYTES")  # same size, wrong bytes
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, content=content)
+
+    plugin = _make_plugin(handler)
+    item = _item_with_files(
+        [ManifestFile("show.flac", len(content), hashlib.md5(content).hexdigest())]
+    )
+    result = plugin.fetch(item, tmp_path, [], [])
+
+    assert result.success is True
+    assert requests == ["/download/gd77/show.flac"]
+    assert (tmp_path / "show.flac").read_bytes() == content
+
+
+def test_fetch_refetches_leftover_file_it_cannot_check(tmp_path: Path) -> None:
+    (tmp_path / "show.flac").write_bytes(b"partial")
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(200, content=b"complete")
+
+    plugin = _make_plugin(handler)
+    item = _item_with_files([ManifestFile("show.flac", None, None)])
+    assert plugin.fetch(item, tmp_path, [], []).success is True
+    assert requests == ["/download/gd77/show.flac"]
+    assert (tmp_path / "show.flac").read_bytes() == b"complete"
+
+
+def test_discover_raises_when_num_found_falls_mid_listing() -> None:
+    """A total that drops between pages must not lower the completeness bar."""
+    pages = {"1": (["a", "b"], 3), "2": ([], 2)}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/advancedsearch.php":
+            ids, total = pages.get(request.url.params.get("page", "1"), ([], 0))
+            return _search_response(ids, total)
+        ident = request.url.path.rsplit("/", 1)[-1]
+        return _metadata_response({"identifier": ident}, [])
+
+    plugin = _make_plugin(handler)
+    with pytest.raises(RuntimeError, match="2 of 3"):
+        list(plugin.discover(_collection()))

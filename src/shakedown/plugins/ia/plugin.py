@@ -4,7 +4,6 @@ from __future__ import annotations
 import fnmatch
 import logging
 import os
-import shutil
 import time
 from collections.abc import Iterator
 from dataclasses import replace
@@ -15,7 +14,14 @@ import internetarchive as ia
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import Manifest, ManifestFile
-from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin, VerifyResult
+from shakedown.plugins.base import (
+    FetchResult,
+    ItemDescriptor,
+    SourcePlugin,
+    VerifyResult,
+    downloaded_file_mismatch,
+    reusable_leftover,
+)
 from shakedown.plugins.registry import register
 
 log = logging.getLogger(__name__)
@@ -231,9 +237,9 @@ class IAPlugin(SourcePlugin):
     ) -> FetchResult:
         """Download manifest files into dest_dir (a core-owned temp directory).
 
-        The plugin only writes bytes and verifies IA's per-file checksums; the
-        core owns the temp-dir lifecycle and the atomic rename into the archive
-        (SPEC.md §spec:sync-workflow).
+        The plugin only writes bytes and checks each file's size and md5 against the
+        manifest; the core owns the temp-dir lifecycle and the atomic rename into the
+        archive (SPEC.md §spec:sync-workflow).
         """
         if item.is_restricted:
             return FetchResult(
@@ -242,26 +248,39 @@ class IAPlugin(SourcePlugin):
                 error=f"restricted: {item.restriction_reason}",
             )
 
-        target_files = [f.name for f in item.manifest.files]
-        if not target_files:
-            return FetchResult(success=True, bytes_downloaded=0)
+        if not item.manifest.files:
+            # Zero files upstream (darked item, glitch, filter matches nothing) is not
+            # an empty success: the core would promote an empty folder over the copy.
+            return FetchResult(
+                success=False, bytes_downloaded=0, error="source lists no files to download"
+            )
 
         dest_dir.mkdir(parents=True, exist_ok=True)
+        # Files an earlier attempt (or a killed run) left in dest_dir are kept once
+        # they match the manifest's size and md5; download only the rest. Any other
+        # leftover is removed first so the library never resumes it blindly.
+        to_fetch = [
+            mf for mf in item.manifest.files if not reusable_leftover(dest_dir / mf.name, mf)
+        ]
+        for mf in to_fetch:
+            (dest_dir / mf.name).unlink(missing_ok=True)
+        target_files = [mf.name for mf in to_fetch]
 
         try:
-            ia.download(
-                item.identifier,
-                files=target_files,  # type: ignore[arg-type]  # IA accepts filenames at runtime
-                destdir=str(dest_dir),
-                # IA places files under <destdir>/<identifier>/...; strip that prefix below.
-                no_directory=False,
-                ignore_existing=False,
-                checksum=True,
-                # Core owns retries/backoff (SPEC §spec:failure-behavior); don't
-                # let the IA library retry underneath us.
-                retries=0,
-                archive_session=self._session,
-            )
+            if target_files:  # files=[] would mean "every file in the item"
+                ia.download(
+                    item.identifier,
+                    files=target_files,  # type: ignore[arg-type]  # IA accepts filenames at runtime
+                    destdir=str(dest_dir),
+                    # Write straight to <destdir>/<name>, so every finished file sits
+                    # where the next attempt looks for it, even if the run is killed.
+                    no_directory=True,
+                    ignore_existing=False,
+                    # Core owns retries/backoff (SPEC §spec:failure-behavior); don't
+                    # let the IA library retry underneath us.
+                    retries=0,
+                    archive_session=self._session,
+                )
         except Exception as e:
             log.warning("IA download failed for %s: %s", item.identifier, e)
             return FetchResult(
@@ -272,13 +291,6 @@ class IAPlugin(SourcePlugin):
                 retry_after=_retry_after_seconds(e),
             )
 
-        # IA's download writes to <dest_dir>/<identifier>/<filename>. Flatten that
-        # subtree into dest_dir; the core promotes dest_dir into the archive.
-        ia_subdir = dest_dir / item.identifier
-        if ia_subdir.is_dir():
-            for child in ia_subdir.iterdir():
-                shutil.move(str(child), str(dest_dir / child.name))
-            ia_subdir.rmdir()
 
         bytes_downloaded = 0
         missing: list[str] = []
@@ -297,6 +309,21 @@ class IAPlugin(SourcePlugin):
                 error=f"missing after fetch: {missing[:5]}",
                 retriable=True,
             )
+
+        # The internetarchive library checksums only files already on disk before a
+        # download, never what it just wrote, so check every file against the
+        # manifest here (reused leftovers were checked above). A corrupt file is
+        # removed and the fetch retried.
+        for mf in to_fetch:
+            mismatch = downloaded_file_mismatch(dest_dir / mf.name, mf)
+            if mismatch is not None:
+                (dest_dir / mf.name).unlink()
+                return FetchResult(
+                    success=False,
+                    bytes_downloaded=bytes_downloaded,
+                    error=mismatch,
+                    retriable=True,
+                )
 
         return FetchResult(success=True, bytes_downloaded=bytes_downloaded)
 

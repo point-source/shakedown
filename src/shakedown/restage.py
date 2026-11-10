@@ -11,6 +11,7 @@ from datetime import datetime
 
 from shakedown.config import Config
 from shakedown.db import connect
+from shakedown.lock import run_exclusive
 from shakedown.models import ItemStatus, OperationStatus, OperationType
 from shakedown.staging import stage_item
 from shakedown.state import ItemRepo, OperationOutcomeRepo
@@ -25,6 +26,14 @@ def run_restage(
     collection_filter: str | None = None,
 ) -> int:
     """Wipe and rebuild the library tree under each (source, collection) scope."""
+    return run_exclusive(
+        config, lambda: _run_restage(config, source_filter, collection_filter)
+    )
+
+
+def _run_restage(
+    config: Config, source_filter: str | None, collection_filter: str | None
+) -> int:
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     outcomes = OperationOutcomeRepo(conn)

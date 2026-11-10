@@ -1,6 +1,7 @@
 """Source plugin contract. PRD §7."""
 from __future__ import annotations
 
+import hashlib
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -10,7 +11,43 @@ from pathlib import Path
 from typing import Any
 
 from shakedown.config import CollectionConfig, SourceConfig
-from shakedown.models import Manifest
+from shakedown.models import Manifest, ManifestFile
+
+_HASH_CHUNK = 1024 * 1024
+
+
+def downloaded_file_mismatch(path: Path, expected: ManifestFile) -> str | None:
+    """Check a just-downloaded file in the core-owned temp dir against the source's
+    manifest entry: the size, then the md5, whichever the source reported. Returns a
+    reason on mismatch, None when the file matches (or the source gave nothing to
+    check against).
+
+    This is the arrival check (SPEC §spec:sync-workflow, step 3). Use it only on files
+    in the fetch temp dir — never on the archive, which library tools may retag in
+    place (§spec:sync-identity).
+    """
+    size = path.stat().st_size
+    if expected.size is not None and size != expected.size:
+        return f"size mismatch for {expected.name}: expected {expected.size}, got {size}"
+    if expected.md5 is not None:
+        digest = hashlib.md5()
+        with path.open("rb") as fh:
+            while chunk := fh.read(_HASH_CHUNK):
+                digest.update(chunk)
+        if digest.hexdigest() != expected.md5.lower():
+            return f"checksum mismatch for {expected.name}"
+    return None
+
+
+def reusable_leftover(path: Path, expected: ManifestFile) -> bool:
+    """True iff a file an earlier fetch attempt left in the temp dir can be kept: it
+    exists and matches the manifest's size and md5. A file the manifest gives nothing
+    to check against is never reused."""
+    return (
+        path.is_file()
+        and (expected.size is not None or expected.md5 is not None)
+        and downloaded_file_mismatch(path, expected) is None
+    )
 
 
 @dataclass(frozen=True)
@@ -137,8 +174,9 @@ class SourcePlugin(ABC):
         `dest_dir` into the archive on success and sweeps it on failure, so no
         plugin can commit partial state to the archive (SPEC.md §spec:sync-workflow).
 
-        Implementations must be idempotent: re-running on a populated dest_dir
-        should verify and skip matching files (the IA library does this natively).
+        `dest_dir` may hold files an earlier failed attempt left behind (the core
+        keeps them so one late error doesn't re-download a whole show). Keep such a
+        file only when `reusable_leftover` accepts it; fetch anything else.
         """
 
     @abstractmethod

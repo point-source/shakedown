@@ -30,6 +30,7 @@ from shakedown.plugins.base import (
     ItemDescriptor,
     SourcePlugin,
     VerifyResult,
+    reusable_leftover,
 )
 from shakedown.plugins.registry import register
 
@@ -217,16 +218,22 @@ class EtreePlugin(SourcePlugin):
 
         Raises on any enumeration failure so the core flags the collection stale
         and retains existing items, rather than treating an error as "everything
-        disappeared".
+        disappeared". A listing that ends before the search's own ``numFound`` (an
+        early empty page, or the page ceiling) is such a failure: the unlisted
+        shows are still upstream, and reading the short list as complete would
+        mark them disappeared or prune them.
         """
         page = 1
-        seen = 0
+        seen: set[str] = set()
+        num_found = 0
         while True:
             resp = self._client.get(
                 "/advancedsearch.php",
                 params={
                     "q": query,
                     "fl[]": "identifier",
+                    # A stable order keeps paging from skipping or repeating items.
+                    "sort[]": "identifier asc",
                     "rows": _PAGE_SIZE,
                     "page": page,
                     "output": "json",
@@ -235,22 +242,30 @@ class EtreePlugin(SourcePlugin):
             resp.raise_for_status()
             body = resp.json()
             response = body.get("response", {}) or {}
-            num_found = int(response.get("numFound", 0) or 0)
+            # Keep the largest total seen: a total that falls mid-listing (an item
+            # removed upstream) must not lower the completeness bar.
+            num_found = max(num_found, int(response.get("numFound", 0) or 0))
             docs = response.get("docs", []) or []
             if not docs:
                 break
             for doc in docs:
                 identifier = doc.get("identifier")
-                if identifier:
+                # Count unique ids: a repeated row must not stand in for a skipped one.
+                if identifier and identifier not in seen:
+                    seen.add(identifier)
                     yield identifier
-                    seen += 1
-            if seen >= num_found:
-                break
+            if len(seen) >= num_found:
+                return
             page += 1
             if page > _MAX_PAGES:
                 # Bound a source that reports an inflated numFound while never
                 # returning an empty page.
                 break
+        if len(seen) < num_found:
+            raise RuntimeError(
+                f"etree search for {query!r} ended early: "
+                f"listed {len(seen)} of {num_found} items"
+            )
 
     def _metadata(self, identifier: str) -> dict[str, Any]:
         resp = self._client.get(f"/metadata/{identifier}")
@@ -292,8 +307,9 @@ class EtreePlugin(SourcePlugin):
             out = dest_dir / mf.name
             out.parent.mkdir(parents=True, exist_ok=True)
 
-            # Idempotent: a file already present with the expected size is kept.
-            if out.is_file() and (mf.size is None or out.stat().st_size == mf.size):
+            # A file an earlier attempt left behind is kept only once it matches the
+            # manifest's size and md5; one we cannot check is fetched again.
+            if reusable_leftover(out, mf):
                 total += out.stat().st_size
                 continue
 

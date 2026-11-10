@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import shutil
 import threading
 import time
@@ -22,7 +23,16 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
-from shakedown.models import Item, ItemStatus, OperationStatus, OperationType, Run
+from shakedown.lock import run_exclusive
+from shakedown.models import (
+    Item,
+    ItemStatus,
+    Manifest,
+    OperationOutcome,
+    OperationStatus,
+    OperationType,
+    Run,
+)
 from shakedown.notify import (
     SyncCompletePayload,
     SyncFailedPayload,
@@ -144,6 +154,10 @@ def _discover_descriptors(
     return descriptors, enumerated
 
 
+# Recorded as an item's restriction_reason when the source lists no files for it.
+NO_FILES_REASON = "source lists no files matching this collection's filters"
+
+
 class PlanAction(StrEnum):
     NEW = "new"
     UNCHANGED = "unchanged"
@@ -198,7 +212,25 @@ def run_sync(
     With ``refresh_metadata`` the run instead re-resolves and rewrites the
     metadata.json sidecars for preserve-opted collections, without re-downloading
     media (§spec:metadata-preservation).
+
+    Every run except a dry run holds the writer lock (`shakedown.lock`): a second
+    concurrent writer exits non-zero instead of racing this one.
     """
+    if dry_run:
+        return _run_sync(config, source_filter, collection_filter, True, refresh_metadata)
+    return run_exclusive(
+        config,
+        lambda: _run_sync(config, source_filter, collection_filter, False, refresh_metadata),
+    )
+
+
+def _run_sync(
+    config: Config,
+    source_filter: str | None,
+    collection_filter: str | None,
+    dry_run: bool,
+    refresh_metadata: bool,
+) -> int:
     work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
     for source in config.sources:
         if source_filter and source.name != source_filter:
@@ -485,6 +517,51 @@ def _sync_collection(
     )
 
     stats = CollectionSyncStats()
+    try:
+        return _sync_collection_phases(
+            config, source, collection, plugin, items, runs, outcomes, run, outcome,
+            stats, started, dry_run=dry_run, budget=budget,
+        )
+    except Exception as e:
+        # An unexpected crash must still close the run record and its outcome, so
+        # `status` never shows a run stuck in progress and the next run starts clean.
+        stats.errors.append(f"sync crashed: {e}")
+        finished = datetime.now()
+        if run is not None and run.finished_at is None:
+            _finish_run(runs, run, stats, finished)
+        if outcome is not None and outcome.finished_at is None:
+            outcomes.finish(
+                outcome,
+                OperationStatus.FAILED_BEFORE_COMPLETION,
+                finished,
+                phase=outcome.phase,
+                completed_work=_completed_work(stats),
+                preservation_context="completed archive work retained",
+                deletion_context=_deletion_context(collection),
+                safe_next_action="check the logged error and rerun sync",
+                errors=stats.errors,
+            )
+        raise
+
+
+def _sync_collection_phases(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    plugin: SourcePlugin,
+    items: ItemRepo,
+    runs: RunRepo,
+    outcomes: OperationOutcomeRepo,
+    run: Run | None,
+    outcome: OperationOutcome | None,
+    stats: CollectionSyncStats,
+    started: datetime,
+    *,
+    dry_run: bool,
+    budget: SourceBudget,
+) -> CollectionSyncStats:
+    """The phases of `_sync_collection`, run inside its crash guard."""
+    conn = items.conn
     staged_paths: set[Path] = set()
 
     log.info("[%s/%s] discovering...", source.name, collection.name)
@@ -509,6 +586,10 @@ def _sync_collection(
         )
         _log_plan(source.name, collection.name, plan)
         return stats
+
+    # Finish any swap a crashed run left half done, before anything decides whether
+    # an item's archive copy exists.
+    _recover_interrupted_swaps(config.archive_root / source.name / collection.name)
 
     # Snapshot the pre-run DB state once. It drives per-item classification (is this
     # `new`/`changed-upstream`/`unchanged`?) and, after enumeration, the prune barrier
@@ -564,6 +645,11 @@ def _sync_collection(
         by_identifier, enumerated_identifiers, collection.prune_disappeared
     )
     _log_pipeline_plan(source.name, collection.name, stats, deferred, disappeared)
+    _sweep_abandoned_tmp_dirs(
+        config.archive_root / source.name / collection.name,
+        enumerated=enumerated_identifiers,
+        settled={_planned_identifier(p) for p in deferred},
+    )
 
     # Re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
     # stage_item is idempotent — already-linked files share an inode and are skipped.
@@ -573,11 +659,16 @@ def _sync_collection(
             and p.existing is not None
             and p.existing.recorded_manifest is not None
         ):
-            stage_result = stage_item(
+            if p.existing.status != ItemStatus.COMPLETE:
+                # Back upstream with the files we already hold (e.g. after an empty
+                # answer or a lifted restriction): the archive copy is complete again.
+                _record_back_to_complete(items, p.existing)
+            stage_result = _stage_or_fail(
                 config, collection, source.name, p.existing, p.existing.recorded_manifest,
-                staged_paths=staged_paths,
+                stats, staged_paths,
             )
-            _record_collision(stats, source.name, collection.name, stage_result)
+            if stage_result is not None:
+                _record_collision(stats, source.name, collection.name, stage_result)
 
     # Persist new state for unavailable / disappeared in one shot.
     with transaction(conn):
@@ -676,6 +767,9 @@ def _pipelined_discover_and_fetch(
 
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetch_futures: dict[Future[_FetchOutcome], PlannedItem] = {}
+        # Fetch workers announce completion here, so the orchestrating thread drains
+        # only finished fetches instead of rescanning the whole backlog each item.
+        finished: queue.SimpleQueue[Future[_FetchOutcome]] = queue.SimpleQueue()
 
         def dispatch(desc: ItemDescriptor) -> None:
             planned = _classify_one(desc, by_identifier)
@@ -685,6 +779,7 @@ def _pipelined_discover_and_fetch(
                     _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
                 )
                 fetch_futures[fut] = planned
+                fut.add_done_callback(finished.put)
             else:
                 deferred.append(planned)
 
@@ -702,22 +797,36 @@ def _pipelined_discover_and_fetch(
             if collection.incremental_discovery
             else _stream_descriptors(plugin, collection, budget, enumerated)
         )
-        try:
-            # Descriptors stream in as each resolves; dispatch classifies and fetches
-            # each immediately, so downloads overlap the remaining enumeration.
-            for desc in descriptor_stream:
-                dispatch(desc)
-        except Exception as e:  # any enumeration fault marks the collection stale
-            enum_error = e
+        def process(fut: Future[_FetchOutcome]) -> None:
+            _process_fetch_result(
+                fut, fetch_futures.pop(fut), config, source, collection, items, stats,
+                staged_paths,
+            )
 
-        # Drain every fetch already in flight. Those downloads are valid whether or not
+        descriptors = iter(descriptor_stream)
+        while True:
+            try:
+                # Descriptors stream in as each resolves; dispatch classifies and
+                # fetches each immediately, so downloads overlap the enumeration.
+                desc = next(descriptors, None)
+                if desc is None:
+                    break
+                dispatch(desc)
+            except Exception as e:  # any enumeration fault marks the collection stale
+                enum_error = e
+                break
+            # Record and link every download that has finished so far, without waiting
+            # for the listing to end (hours on a big collection): if the run dies, the
+            # finished downloads are already in the DB and are not fetched again.
+            while not finished.empty():
+                process(finished.get())
+
+        # Drain every fetch still in flight. Those downloads are valid whether or not
         # the enumeration completed, and recording them keeps the archive and DB
         # consistent (SPEC §spec:discovery-pipeline: an item may be fetched and staged
         # before discovery completes).
-        for fut in as_completed(fetch_futures):
-            _process_fetch_result(
-                fut, fetch_futures[fut], config, source, collection, items, stats, staged_paths
-            )
+        for fut in as_completed(list(fetch_futures)):
+            process(fut)
 
     return enumerated, deferred, enum_error
 
@@ -808,6 +917,13 @@ def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> Plann
     existing = by_identifier.get(desc.identifier)
     if desc.is_restricted:
         return PlannedItem(desc, existing, PlanAction.UNAVAILABLE)
+    if not desc.manifest.files:
+        # An empty file list (darked item, upstream glitch, or a filter that now matches
+        # nothing) is never "the item changed": fetching it would swap an empty folder in
+        # over the archive copy. Record it unavailable and keep the local copy.
+        return PlannedItem(
+            replace(desc, restriction_reason=NO_FILES_REASON), existing, PlanAction.UNAVAILABLE
+        )
     if existing is None or existing.recorded_manifest is None:
         return PlannedItem(desc, existing, PlanAction.NEW)
     if existing.recorded_manifest == desc.manifest:
@@ -1044,9 +1160,11 @@ def _process_fetch_result(
         stats.updated += 1
 
     new_item = _record_complete(items, source.name, collection, desc, outcome.archive_path)
-    stage_result = stage_item(
-        config, collection, source.name, new_item, desc.manifest, staged_paths=staged_paths,
+    stage_result = _stage_or_fail(
+        config, collection, source.name, new_item, desc.manifest, stats, staged_paths,
     )
+    if stage_result is None:
+        return  # archive copy recorded; the next sync or restage relinks it
     if stage_result.collisions:
         # Layout collision: this recording lost its staging path to another item this
         # run. The archive copy is intact; only the library link was dropped
@@ -1064,6 +1182,32 @@ def _process_fetch_result(
             "staging_path": str(stage_result.staging_dir),
         }
     )
+
+
+def _stage_or_fail(
+    config: Config,
+    collection: CollectionConfig,
+    source_name: str,
+    item: Item,
+    manifest: Manifest,
+    stats: CollectionSyncStats,
+    staged_paths: set[Path] | None,
+) -> StageResult | None:
+    """Stage one item, turning a disk error (permission denied, disk full, name too
+    long, EXDEV) into a per-item failure so the rest of the collection still links,
+    records, and notifies. Returns None when staging failed."""
+    try:
+        return stage_item(
+            config, collection, source_name, item, manifest, staged_paths=staged_paths,
+        )
+    except OSError as e:
+        log.warning(
+            "[%s/%s] %s: linking into the library failed: %s",
+            source_name, collection.name, item.identifier, e,
+        )
+        stats.failed += 1
+        stats.errors.append(f"{item.identifier}: linking into the library failed: {e}")
+        return None
 
 
 @dataclass
@@ -1111,17 +1255,31 @@ def _fetch_with_retries(
     Retries are core-owned, not delegated to the plugin's library: a transient
     fault (checksum mismatch, truncated download, rate limit) is retried up to
     `max_attempts` times. When the source supplies a `Retry-After`, we honor it
-    in place of exponential backoff. The temp dir is wiped before each attempt so
-    a partial write from the previous try never contaminates the next.
+    in place of exponential backoff.
+
+    The temp dir is kept between attempts (and runs), so one late error does not
+    re-download a whole show: plugins keep a leftover file only once it matches the
+    manifest's size and md5, and fetch the rest. Anything in the temp dir that is not
+    a manifest file is removed before each attempt.
     """
     for attempt in range(1, max_attempts + 1):
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_tmp_dir(desc, tmp_dir)
 
         result = plugin.fetch(
             desc, tmp_dir, collection.format_filters, collection.exclude_filters
         )
+        if result.success:
+            short = _size_mismatches(desc, tmp_dir)
+            if short:
+                # A plugin can report success over a short file (dropped connection,
+                # truncated write). Sizes are a stat, not a hash; retry like any
+                # truncated download.
+                result = FetchResult(
+                    success=False,
+                    bytes_downloaded=result.bytes_downloaded,
+                    error=f"size differs from the source after fetch: {short[:5]}",
+                    retriable=True,
+                )
         if result.success or not result.retriable or attempt == max_attempts:
             return result
 
@@ -1139,6 +1297,55 @@ def _fetch_with_retries(
         )
         time.sleep(delay)
     raise AssertionError("unreachable: max_attempts must be >= 1")
+
+
+def _prepare_tmp_dir(desc: ItemDescriptor, tmp_dir: Path) -> None:
+    """Create the temp dir, keeping files a previous attempt left for the manifest's
+    names (the plugin re-checks them before reuse) and removing everything else."""
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    wanted = {os.path.normpath(mf.name) for mf in desc.manifest.files}
+    wanted_dirs = {os.path.dirname(name) for name in wanted}
+    for dirpath, dirnames, filenames in os.walk(tmp_dir, topdown=False):
+        rel_dir = os.path.relpath(dirpath, tmp_dir)
+        for name in filenames:
+            rel = os.path.normpath(os.path.join(rel_dir, name))
+            if rel not in wanted:
+                os.unlink(os.path.join(dirpath, name))
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            rel = os.path.normpath(os.path.join(rel_dir, name))
+            if os.path.islink(path):
+                os.unlink(path)
+            elif not any(d == rel or d.startswith(rel + os.sep) for d in wanted_dirs):
+                shutil.rmtree(path)
+
+
+def _size_mismatches(desc: ItemDescriptor, tmp_dir: Path) -> list[str]:
+    """Manifest files present in the temp dir whose size differs from the source's.
+    Missing files are left to the plugin's verify() guard."""
+    short: list[str] = []
+    for mf in desc.manifest.files:
+        path = tmp_dir / mf.name
+        if mf.size is not None and path.is_file() and path.stat().st_size != mf.size:
+            short.append(mf.name)
+    return short
+
+
+def _fsync_path(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Flush every file and directory under ``root`` to disk, so a power cut after the
+    show is recorded complete cannot leave a truncated or missing file behind."""
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            _fsync_path(Path(dirpath) / name)
+        _fsync_path(Path(dirpath))
 
 
 def _fetch_one_budgeted(
@@ -1207,13 +1414,24 @@ def _fetch_one(
             error=f"unsafe file name(s) escape item directory: {unsafe_names[:5]}",
         )
 
-    tmp_dir = archive_root / f".tmp-{desc.identifier}"
-    stale_dir = archive_root / f".stale-{desc.identifier}"
+    tmp_dir = archive_root / f"{_TMP_PREFIX}{desc.identifier}"
+    stale_dir = archive_root / f"{_STALE_PREFIX}{desc.identifier}"
 
-    # Sweep any stale swap-aside dir from a prior crashed promotion; the temp dir
-    # is swept per-attempt inside _fetch_with_retries.
-    if stale_dir.exists():
-        shutil.rmtree(stale_dir)
+    # Finish a swap a prior crashed promotion left half done (the collection sweep
+    # covers sync; this covers `item refetch`), before any early return, so the
+    # archive copy is always back in place. The temp dir is swept per-attempt
+    # inside _fetch_with_retries.
+    _recover_swap(stale_dir, dest)
+
+    # Never promote an empty fetch: it would replace the archive copy with an empty
+    # folder. Classification already routes an empty manifest to `unavailable`; this
+    # guards the paths that skip classification (`item refetch`).
+    if not desc.manifest.files:
+        return _FetchOutcome(
+            success=False,
+            archive_path=dest,
+            error=f"{NO_FILES_REASON}; archive copy left untouched",
+        )
 
     fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, collection)
     if not fetch_result.success:
@@ -1253,12 +1471,64 @@ def _fetch_one(
         else:
             write_sidecar(tmp_dir / METADATA_SIDECAR, desc.metadata)
 
+    # Durable before recorded: the caller marks the show complete right after this,
+    # so flush the bytes, then the rename itself (the parent directory entry).
+    _fsync_tree(tmp_dir)
     _promote_atomically(tmp_dir, dest, stale_dir)
     return _FetchOutcome(
         success=True,
         archive_path=dest,
         bytes_downloaded=fetch_result.bytes_downloaded,
     )
+
+
+_STALE_PREFIX = ".stale-"
+
+
+_TMP_PREFIX = ".tmp-"
+
+
+def _planned_identifier(planned: PlannedItem) -> str:
+    if planned.descriptor is not None:
+        return planned.descriptor.identifier
+    assert planned.existing is not None  # signal-skipped items carry the DB row
+    return planned.existing.identifier
+
+
+def _sweep_abandoned_tmp_dirs(
+    archive_root: Path, *, enumerated: set[str], settled: set[str]
+) -> None:
+    """Remove temp dirs nothing will resume: those of shows gone upstream, or settled
+    this run as unchanged or unavailable. Run only after a complete enumeration. A
+    show fetched this run left none; a show whose fetch or metadata lookup failed
+    keeps its temp dir so the next run fetches only its missing files."""
+    if not archive_root.is_dir():
+        return
+    for tmp_dir in archive_root.glob(f"{_TMP_PREFIX}*"):
+        identifier = tmp_dir.name[len(_TMP_PREFIX):]
+        if (identifier not in enumerated or identifier in settled) and tmp_dir.is_dir():
+            shutil.rmtree(tmp_dir)
+
+
+def _recover_swap(stale_dir: Path, dest: Path) -> None:
+    """Finish a promotion a crash interrupted. With no live copy, the `.stale-` folder
+    holds the only archive copy: move it back. With a live copy, the new copy was
+    already installed: discard the old one."""
+    if not stale_dir.exists():
+        return
+    if dest.exists():
+        shutil.rmtree(stale_dir)
+    else:
+        log.warning("restoring %s from an interrupted swap", dest)
+        os.rename(stale_dir, dest)
+
+
+def _recover_interrupted_swaps(archive_root: Path) -> None:
+    if not archive_root.is_dir():
+        return
+    for stale_dir in archive_root.glob(f"{_STALE_PREFIX}*"):
+        if stale_dir.is_dir():
+            _recover_swap(stale_dir, archive_root / stale_dir.name[len(_STALE_PREFIX):])
 
 
 def _promote_atomically(tmp_dir: Path, dest: Path, stale_dir: Path) -> None:
@@ -1279,6 +1549,9 @@ def _promote_atomically(tmp_dir: Path, dest: Path, stale_dir: Path) -> None:
         if had_prior and stale_dir.exists() and not dest.exists():
             os.rename(stale_dir, dest)
         raise
+    # Make the new name durable before the old copy is deleted, so a power cut
+    # leaves either the new copy in place or the old one to restore.
+    _fsync_path(dest.parent)
     if stale_dir.exists():
         shutil.rmtree(stale_dir)
 
@@ -1306,6 +1579,13 @@ def _record_complete(
     )
     items.upsert(item)
     return item
+
+
+def _record_back_to_complete(items: ItemRepo, existing: Item) -> None:
+    existing.status = ItemStatus.COMPLETE
+    existing.restriction_reason = None
+    existing.last_verified_at = datetime.now()
+    items.upsert(existing)
 
 
 def _record_unavailable(
@@ -1387,6 +1667,10 @@ def _record_disappeared(
 
 def refetch_item(config: Config, identifier: str) -> int:
     """Force re-fetch of a single item by identifier across all configured collections."""
+    return run_exclusive(config, lambda: _refetch_item(config, identifier))
+
+
+def _refetch_item(config: Config, identifier: str) -> int:
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     for source in config.sources:

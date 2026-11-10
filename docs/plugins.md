@@ -228,6 +228,11 @@ not evidence that any item disappeared (§spec:failure-behavior). Returning an
 empty list, by contrast, would look like "every item disappeared" and could
 trigger pruning. Raise.
 
+A listing that stops short of the total the source itself reported (for
+example, a paged search that returns an empty page before its `numFound` is
+reached) is an enumeration failure too. Raise rather than yield the short
+list; the bundled `etree` plugin does this.
+
 ### `fetch(item, dest_dir, format_filters, exclude_filters)`
 
 ```python

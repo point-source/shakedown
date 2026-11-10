@@ -15,6 +15,7 @@ import click
 
 from shakedown.config import Config
 from shakedown.db import connect, transaction
+from shakedown.lock import run_exclusive
 from shakedown.models import Item, ItemStatus, Manifest
 from shakedown.plugins import registry
 from shakedown.plugins.base import ItemDescriptor
@@ -83,6 +84,25 @@ def _scan_drift(item: Item) -> list[DriftRecord]:
 def run_verify(
     config: Config,
     *,
+    source_filter: str | None,
+    collection_filter: str | None,
+    deep: bool,
+    reconform: bool,
+    list_drift: bool,
+    assume_yes: bool,
+) -> int:
+    def command() -> int:
+        return _run_verify(
+            config, source_filter, collection_filter, deep, reconform, list_drift, assume_yes
+        )
+
+    # --reconform re-fetches into the archive, so it holds the writer lock from the
+    # start: a busy lock fails fast instead of after a long --deep hash pass.
+    return run_exclusive(config, command) if reconform else command()
+
+
+def _run_verify(
+    config: Config,
     source_filter: str | None,
     collection_filter: str | None,
     deep: bool,

@@ -120,7 +120,7 @@ Every discovered item carries a persistent status:
 | `downloading` | Fetch in progress |
 | `complete` | Fetched successfully; manifest recorded |
 | `failed` | Fetch attempted and failed; retried on the next run |
-| `unavailable` | Source explicitly disallows download (e.g. stream-only); a human-readable `restriction_reason` is recorded and shown in `status` |
+| `unavailable` | Source explicitly disallows download (e.g. stream-only) or lists no files matching the collection's filters; a human-readable `restriction_reason` is recorded and shown in `status` |
 | `disappeared` | Previously `complete`, no longer in the source's enumeration; local files retained |
 | `pruned` | Vanished from a `prune_disappeared`-opted collection: archive files and staging links removed, DB record retained so `status` still reports the takedown |
 
@@ -169,10 +169,18 @@ A sync run for a (source, collection) pair proceeds in six phases:
 3. **Fetch.** For `new` and `changed-upstream` items, the plugin
    downloads into a temporary directory inside the archive tree,
    verifying source-provided checksums as bytes arrive. On full
-   success the temp directory is atomically renamed to its final
-   archive location and the manifest is persisted. A partial failure
-   leaves only the temp directory, cleaned up on the next run —
-   no partial state ever reaches the archive tree or the database.
+   success the core checks each file's size against the manifest
+   (retrying a short file like any truncated download), flushes the
+   files and the rename to disk, then atomically renames the temp
+   directory to its final archive location and persists the manifest
+   — so a power cut never leaves a short file recorded `complete`. A partial failure
+   leaves only the temp directory; the next attempt (or run) keeps
+   the files in it that match the manifest's size and checksum and
+   fetches only the rest — no partial state ever reaches the archive
+   tree or the database. After a complete enumeration, temp
+   directories nothing will resume (the item is unchanged,
+   unavailable, or gone upstream) are removed; those of items that
+   failed this run are kept for the next run.
 4. **Stage.** For every item in the archive, the library layout
    template is rendered and hardlinks are created
    (§spec:library-staging).
@@ -279,7 +287,10 @@ enumeration, so it is a **post-discovery barrier** that runs only after
 discovery finishes successfully, never against a partial set. The load-
 bearing invariants:
 
-- An item may be fetched and staged before discovery completes.
+- An item may be fetched and staged before discovery completes. Each
+  finished download is recorded and linked as soon as it completes,
+  not when discovery ends, so a run that dies mid-discovery never
+  leaves finished downloads unrecorded.
 - Pruning runs only after a complete, successful enumeration.
 - A partial or failed enumeration prunes nothing and marks the
   collection stale (§spec:failure-behavior) — a failed discovery is
@@ -549,10 +560,13 @@ cannot is unaffected and simply always resolves full manifests.
 Plugins shipped in v1:
 
 - **Internet Archive (`ia`).** Wraps the official `internetarchive`
-  Python package for search, download, and per-file checksum
-  verification — those problems are solved; the plugin does not
-  reimplement them. Optional credentials (for download-restricted
-  items) are read from environment variables only.
+  Python package for search and download — those problems are solved;
+  the plugin does not reimplement them. That package checksums only
+  files already on disk before a download, never the bytes it just
+  wrote, so the plugin checks each downloaded file's size and md5
+  against the manifest before reporting success. Optional credentials
+  (for download-restricted items) are read from environment variables
+  only.
 - **etree (`etree`).** A second, independently written plugin that
   proves the seam is real (§req:success-criteria #8): it drives
   archive.org's public HTTP/JSON API directly — a different integration
@@ -657,6 +671,13 @@ exits (§req:constraints). The command surface:
 
 - Commands shall exit non-zero on failure so failures surface at the
   scheduler/container layer (§req:quality-attributes: operability).
+- Writing commands — `sync` (except `--dry-run`), `restage`,
+  `reconcile`, `item refetch`, and `verify --reconform`, whether run from
+  the CLI, the scheduler, or `serve` — hold one exclusive writer lock
+  (a kernel `flock` on `<state_db>.lock`). A second writer exits non-zero
+  at once, naming the lock, instead of racing the first over shared temp
+  folders. The kernel releases the lock when the holder exits, even on a
+  crash, so a stale lock file never blocks the next run.
 - `status --json` emits machine-readable output for dashboards
   (Homepage/Homarr) in lieu of a web UI (§req:constraints).
 
@@ -1156,12 +1177,13 @@ degrade a single item or a single run, never the archive.
 
 | Failure | Behavior |
 | --- | --- |
-| Network drops mid-download | Partial temp dir cleaned up; resume on next run |
+| Network drops mid-download | Files in the temp dir that match the manifest are kept; the next attempt or run fetches only the rest |
 | Malformed source metadata | Item marked `failed`, error logged, run continues |
 | Checksum mismatch during download | Bounded retries, then item marked `failed` |
 | Cross-filesystem archive/library | Hard error at startup; refuse to run (§spec:system-shape) |
 | State DB corrupted or lost | `reconcile` rebuilds it without re-downloading (§spec:state) |
-| Disk full | Run aborts cleanly; no partial commits reach the archive |
+| Crash in the middle of swapping a re-fetched item into place | The next run finishes the swap: it moves the old copy back if the new one never landed, or discards the old copy if it did |
+| Disk full, or another disk error while linking into the library | That item counts as failed and the run continues; no partial commits reach the archive; the run record is always closed, even on a crash |
 | Source rate-limits | Core honors the plugin-surfaced `Retry-After`, backs off, resumes |
 | Slow/timing-out metadata during discovery | Bounded per-item timeout + back-off; other items proceed in parallel — one slow endpoint never stalls the run (§spec:slow-metadata) |
 | Discovery fails partway (pipelined) | Collection marked stale; nothing pruned — a partial enumeration is never read as items disappearing (§spec:discovery-pipeline) |
@@ -1173,8 +1195,10 @@ degrade a single item or a single run, never the archive.
 | User wipes archive tree | DB and library invalidated; full re-download — working as intended (§spec:state) |
 | Item restricted upstream | Local copy retained; status flips to `unavailable` with reason |
 | Restriction lifted upstream | Detected on next discover; fetched as new |
+| Source lists zero files for an item (darked, glitch, filter matches nothing) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
 | Item disappears upstream | Files retained by default; flagged `disappeared` (§spec:item-lifecycle) |
 | Source permanently gone | Existing items retained; collection reported stale in `status` |
+| Two writing commands overlap (scheduler tick, API trigger, manual run) | The second exits non-zero naming the writer lock; the first continues untouched (§spec:cli) |
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
 | Handoff webhook receiver down | Logged in run errors, visible in `status`; sync still succeeds (§spec:handoff) |
 
