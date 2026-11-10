@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.plugins.ia.plugin import IAPlugin
 
@@ -270,8 +272,8 @@ def test_describe_item_passes_bounded_timeout_in_request_kwargs() -> None:
     assert kwargs["request_kwargs"] == {"timeout": ia_plugin._METADATA_TIMEOUT}
 
 
-def test_fetch_flattens_ia_subdir_into_dest(tmp_path: Path) -> None:
-    """ia.download writes to <dest>/<id>/<file>; the plugin flattens to <dest>/<file>.
+def test_fetch_writes_files_directly_into_dest(tmp_path: Path) -> None:
+    """Files land at <dest>/<file>, never under an IA <dest>/<id>/ subdir.
 
     The plugin writes into the core-owned temp dir it is handed; the core owns the
     atomic promotion into the archive (see test_sync.py)."""
@@ -292,7 +294,8 @@ def test_fetch_flattens_ia_subdir_into_dest(tmp_path: Path) -> None:
 
     def fake_download(identifier, files, destdir, **kwargs):
         # Mirror what real ia.download does: place files under <destdir>/<identifier>/.
-        target = Path(destdir) / identifier
+        # Mirror real ia.download: <destdir>/<identifier>/ unless no_directory.
+        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
         target.mkdir(parents=True, exist_ok=True)
         (target / "d1t01.flac").write_bytes(b"audio")
 
@@ -323,7 +326,8 @@ def test_fetch_with_missing_files_after_download_returns_failure(tmp_path: Path)
 
     def fake_download(identifier, files, destdir, **kwargs):
         # Don't actually write the expected file; simulate IA dropping the request.
-        target = Path(destdir) / identifier
+        # Mirror real ia.download: <destdir>/<identifier>/ unless no_directory.
+        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
         target.mkdir(parents=True, exist_ok=True)
 
     with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=fake_download):
@@ -479,7 +483,8 @@ def _writer(served: dict[str, bytes], calls: list[list[str]] | None = None):
     def fake_download(identifier, files, destdir, **kwargs):
         if calls is not None:
             calls.append(list(files))
-        target = Path(destdir) / identifier
+        # Mirror real ia.download: <destdir>/<identifier>/ unless no_directory.
+        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
         target.mkdir(parents=True, exist_ok=True)
         for name in files:
             (target / name).parent.mkdir(parents=True, exist_ok=True)
@@ -545,7 +550,7 @@ def test_fetch_downloads_only_files_not_already_verified(tmp_path: Path) -> None
     assert {n: (dest / n).read_bytes() for n in served} == served
 
 
-def test_fetch_flattens_nested_names_over_leftovers(tmp_path: Path) -> None:
+def test_fetch_writes_nested_names_beside_reused_leftovers(tmp_path: Path) -> None:
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd-x"
     (dest / "disc1").mkdir(parents=True)
@@ -587,7 +592,8 @@ def test_fetch_keeps_finished_files_when_download_raises_midway(tmp_path: Path) 
 
     def dies_on_last(identifier, files, destdir, **kwargs):
         calls.append(list(files))
-        target = Path(destdir) / identifier
+        # Mirror real ia.download: <destdir>/<identifier>/ unless no_directory.
+        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
         target.mkdir(parents=True, exist_ok=True)
         (target / "a.flac").write_bytes(served["a.flac"])
         raise RuntimeError("read timed out")
@@ -598,5 +604,39 @@ def test_fetch_keeps_finished_files_when_download_raises_midway(tmp_path: Path) 
         "shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served, calls)
     ):
         assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is True
+
+    assert calls == [["a.flac", "b.flac"], ["b.flac"]]
+
+
+def test_files_finished_before_the_process_died_are_reused(tmp_path: Path, monkeypatch) -> None:
+    """A run killed mid-show (container stopped) leaves finished files in the temp
+    dir; the next run's fetch keeps them and downloads only the rest."""
+    import shakedown.sync as sync_module
+    from shakedown.config import CollectionConfig
+
+    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    plugin = _make_plugin()
+    tmp_dir = tmp_path / ".tmp-gd-x"
+    served = {"a.flac": b"first", "b.flac": b"second"}
+    desc = _desc_for("gd-x", served)
+    collection = CollectionConfig(name="dead", query="q")
+    calls: list[list[str]] = []
+
+    def killed_after_first(identifier, files, destdir, **kwargs):
+        calls.append(list(files))
+        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "a.flac").write_bytes(served["a.flac"])
+        raise SystemExit("container stopped")
+
+    with (
+        patch("shakedown.plugins.ia.plugin.ia.download", side_effect=killed_after_first),
+        pytest.raises(SystemExit),
+    ):
+        sync_module._fetch_with_retries(plugin, desc, tmp_dir, collection)
+    with patch(
+        "shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served, calls)
+    ):
+        assert sync_module._fetch_with_retries(plugin, desc, tmp_dir, collection).success
 
     assert calls == [["a.flac", "b.flac"], ["b.flac"]]

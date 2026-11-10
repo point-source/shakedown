@@ -4,7 +4,6 @@ from __future__ import annotations
 import fnmatch
 import logging
 import os
-import shutil
 import time
 from collections.abc import Iterator
 from dataclasses import replace
@@ -257,17 +256,14 @@ class IAPlugin(SourcePlugin):
             )
 
         dest_dir.mkdir(parents=True, exist_ok=True)
-        # IA's download writes to <dest_dir>/<identifier>/<filename>; clear any copy of
-        # that subtree a crashed attempt left so it can't be resumed blindly.
-        ia_subdir = dest_dir / item.identifier
-        if ia_subdir.is_dir():
-            shutil.rmtree(ia_subdir)
-
-        # Files an earlier attempt left in dest_dir are kept once they match the
-        # manifest's size and md5; download only the rest.
+        # Files an earlier attempt (or a killed run) left in dest_dir are kept once
+        # they match the manifest's size and md5; download only the rest. Any other
+        # leftover is removed first so the library never resumes it blindly.
         to_fetch = [
             mf for mf in item.manifest.files if not reusable_leftover(dest_dir / mf.name, mf)
         ]
+        for mf in to_fetch:
+            (dest_dir / mf.name).unlink(missing_ok=True)
         target_files = [mf.name for mf in to_fetch]
 
         try:
@@ -276,8 +272,9 @@ class IAPlugin(SourcePlugin):
                     item.identifier,
                     files=target_files,  # type: ignore[arg-type]  # IA accepts filenames at runtime
                     destdir=str(dest_dir),
-                    # IA places files under <destdir>/<identifier>/...; strip that prefix below.
-                    no_directory=False,
+                    # Write straight to <destdir>/<name>, so every finished file sits
+                    # where the next attempt looks for it, even if the run is killed.
+                    no_directory=True,
                     ignore_existing=False,
                     # Core owns retries/backoff (SPEC §spec:failure-behavior); don't
                     # let the IA library retry underneath us.
@@ -286,9 +283,6 @@ class IAPlugin(SourcePlugin):
                 )
         except Exception as e:
             log.warning("IA download failed for %s: %s", item.identifier, e)
-            # Keep the files finished before the failure; the next attempt reuses
-            # those that pass reusable_leftover() and fetches only the rest.
-            _flatten_ia_subdir(ia_subdir, dest_dir, target_files)
             return FetchResult(
                 success=False,
                 bytes_downloaded=0,
@@ -297,7 +291,6 @@ class IAPlugin(SourcePlugin):
                 retry_after=_retry_after_seconds(e),
             )
 
-        _flatten_ia_subdir(ia_subdir, dest_dir, target_files)
 
         bytes_downloaded = 0
         missing: list[str] = []
@@ -338,19 +331,6 @@ class IAPlugin(SourcePlugin):
         """Cheap existence-only verify. Hashing belongs in `verify --deep`."""
         missing = [f.name for f in item.manifest.files if not (archive_path / f.name).is_file()]
         return VerifyResult(ok=not missing, missing_files=missing)
-
-
-def _flatten_ia_subdir(ia_subdir: Path, dest_dir: Path, names: list[str]) -> None:
-    """Move IA's <dest_dir>/<identifier>/ files into dest_dir file by file, replacing
-    any leftover; the core promotes dest_dir into the archive."""
-    if not ia_subdir.is_dir():
-        return
-    for name in names:
-        downloaded = ia_subdir / name
-        if downloaded.is_file():
-            (dest_dir / name).parent.mkdir(parents=True, exist_ok=True)
-            os.replace(downloaded, dest_dir / name)
-    shutil.rmtree(ia_subdir)
 
 
 _RETRIABLE_MARKERS = (
