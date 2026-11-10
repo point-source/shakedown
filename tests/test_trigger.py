@@ -192,6 +192,7 @@ def test_watcher_reports_a_clean_exit_and_leaves_the_runs_as_the_child_closed_th
     gate.touch()
     assert result.run.done.wait(timeout=30)
     assert exits == [0]
+    assert config.state_db is not None
     row = _run_row(config.state_db, result.run.runs[0]["run_id"])
     assert row["finished_at"] is not None
     assert "ended unexpectedly" not in row["errors"]
@@ -217,6 +218,7 @@ def test_watcher_closes_the_runs_of_a_killed_child(
     assert result.run.done.wait(timeout=30)
     assert exits == [-signal.SIGKILL]
     [opened] = result.run.runs
+    assert config.state_db is not None
     row = _run_row(config.state_db, opened["run_id"])
     assert row["finished_at"] is not None
     assert "run ended unexpectedly (killed by SIGKILL)" in json.loads(row["errors"])

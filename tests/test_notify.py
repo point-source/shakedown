@@ -379,7 +379,7 @@ class _Receiver:
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
-            def log_message(self, *args: object) -> None:
+            def log_message(self, format: str, *args: object) -> None:
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

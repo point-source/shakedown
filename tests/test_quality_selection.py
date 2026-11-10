@@ -274,6 +274,7 @@ def test_reconcile_records_archive_files_the_rule_no_longer_selects(
     show = _show("gd-both", _flac(), _shn(), NOTES)
     _show("gd-shn-only", _shn())
     assert run_sync(config) == 0
+    assert config.state_db is not None
     config.state_db.unlink()
 
     assert run_reconcile(config) == 0
@@ -392,6 +393,7 @@ def test_an_unchanged_show_regains_its_change_signal_after_the_upgrade(
     show = _show("gd-flac", _flac(), NOTES)
     show.change_signal = "v1"
     assert run_sync(config) == 0
+    assert config.state_db is not None
     connect(config.state_db).execute("UPDATE items SET change_signal = NULL").connection.commit()
 
     assert run_sync(config) == 0  # the one lookup after the upgrade
