@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import shutil
 import threading
 import time
@@ -766,6 +767,9 @@ def _pipelined_discover_and_fetch(
 
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetch_futures: dict[Future[_FetchOutcome], PlannedItem] = {}
+        # Fetch workers announce completion here, so the orchestrating thread drains
+        # only finished fetches instead of rescanning the whole backlog each item.
+        finished: queue.SimpleQueue[Future[_FetchOutcome]] = queue.SimpleQueue()
 
         def dispatch(desc: ItemDescriptor) -> None:
             planned = _classify_one(desc, by_identifier)
@@ -775,6 +779,7 @@ def _pipelined_discover_and_fetch(
                     _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
                 )
                 fetch_futures[fut] = planned
+                fut.add_done_callback(finished.put)
             else:
                 deferred.append(planned)
 
@@ -813,8 +818,8 @@ def _pipelined_discover_and_fetch(
             # Record and link every download that has finished so far, without waiting
             # for the listing to end (hours on a big collection): if the run dies, the
             # finished downloads are already in the DB and are not fetched again.
-            for fut in [f for f in fetch_futures if f.done()]:
-                process(fut)
+            while not finished.empty():
+                process(finished.get())
 
         # Drain every fetch still in flight. Those downloads are valid whether or not
         # the enumeration completed, and recording them keeps the archive and DB
