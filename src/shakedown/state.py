@@ -140,15 +140,17 @@ class ItemRepo:
         for row in cur:
             yield _row_to_item(row)
 
-    def list_unavailable(self, source: str, collection: str) -> list[tuple[str, str | None]]:
-        """(identifier, restriction_reason) of the collection's unavailable items."""
+    def list_restricted(self, source: str, collection: str) -> list[tuple[str, str | None]]:
+        """(identifier, restriction_reason) of the collection's unavailable items and of
+        complete items mirrored from a fallback (they carry a reason)."""
         cur = self.conn.execute(
             """
             SELECT identifier, restriction_reason FROM items
-            WHERE source_name=? AND collection_name=? AND status=?
+            WHERE source_name=? AND collection_name=?
+              AND (status=? OR (status=? AND restriction_reason IS NOT NULL))
             ORDER BY identifier
             """,
-            (source, collection, ItemStatus.UNAVAILABLE.value),
+            (source, collection, ItemStatus.UNAVAILABLE.value, ItemStatus.COMPLETE.value),
         )
         return [(row["identifier"], row["restriction_reason"]) for row in cur]
 

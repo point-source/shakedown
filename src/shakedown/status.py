@@ -28,7 +28,7 @@ def _collection_summary(
 
     restricted = [
         {"identifier": identifier, "reason": reason}
-        for identifier, reason in items.list_unavailable(source_name, collection_name)
+        for identifier, reason in items.list_restricted(source_name, collection_name)
     ]
 
     return {

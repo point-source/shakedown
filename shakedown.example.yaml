@@ -31,6 +31,11 @@ sources:
         query: 'collection:GratefulDead'
         format_filters: [flac, shn]
         exclude_filters: ['*_64kb.mp3', '*_vbr.mp3']
+        # Opt-in: when archive.org refuses every lossless file of a show (stream-only
+        # soundboards), mirror its MP3 copy instead of skipping the show. `shakedown
+        # status` lists these shows; if the lossless files are served again later, the
+        # next sync fetches them in place of the MP3s.
+        fallback_format_filters: [mp3]
         # Template renders the staging *directory*; original filenames are appended
         # automatically (SPEC.md §spec:library-staging). Available IA fields: identifier, title, creator,
         # date, year, venue, coverage. Filters: sanitize, short, lower, upper. Every field

@@ -229,6 +229,42 @@ def test_refetch_of_a_refused_show_exits_nonzero(
     assert refetch_item(config, "gd-sbd") == 1
 
 
+def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
+    tmp_roots: tuple[Path, Path]
+) -> None:
+    """A show mirrored as its fallback (e.g. MP3 when archive.org refuses the lossless
+    files) is complete, and `status` lists it with the reason. When the lossless files
+    are served again, the next sync fetches them and the show leaves the list."""
+    from shakedown.state import DriftRepo
+    from shakedown.status import _collection_summary
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed_item("gd-sbd")
+    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
+    item.restriction_reason = "fallback copy"
+    assert run_sync(config) == 0
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    items, runs = ItemRepo(conn), RunRepo(conn)
+
+    def restricted() -> list[dict]:
+        return _collection_summary(
+            config, "fake-src", "coll1", items, runs, DriftRepo(conn), OperationOutcomeRepo(conn)
+        )["restricted"]
+
+    row = items.get("fake-src", "coll1", "gd-sbd")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+    assert restricted() == [{"identifier": "gd-sbd", "reason": "fallback copy"}]
+
+    item.files = [FakeFile(name="d1t01.shn", content=b"lossless")]
+    item.restriction_reason = None
+    assert run_sync(config) == 0
+
+    assert (archive / "fake-src" / "coll1" / "gd-sbd" / "d1t01.shn").read_bytes() == b"lossless"
+    assert restricted() == []
+
+
 def test_refused_redownload_keeps_the_archive_copy(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:

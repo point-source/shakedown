@@ -69,6 +69,8 @@ def _search_retry() -> Retry:
 
 # Recorded as the item's restriction_reason when archive.org refuses a download.
 DOWNLOAD_REFUSED_REASON = "download refused by archive.org (stream-only or restricted)"
+# Recorded on a show mirrored from the collection's fallback formats instead.
+FALLBACK_REASON = "lossless refused by archive.org; MP3 copy mirrored instead"
 
 
 def _metadata_backoff_seconds(attempt: int) -> float:
@@ -239,8 +241,19 @@ class IAPlugin(SourcePlugin):
             and _file_matches_filters(f, collection.format_filters, collection.exclude_filters)
             for f in files
         ):
-            # Every wanted file is one archive.org refuses to serve.
-            restricted, reason = True, DOWNLOAD_REFUSED_REASON
+            # Every wanted file is one archive.org refuses to serve: mirror the
+            # collection's fallback formats if it opted in and they are served.
+            fallback = (
+                _build_manifest(
+                    files, collection.fallback_format_filters, collection.exclude_filters
+                )
+                if collection.fallback_format_filters
+                else manifest
+            )
+            if fallback.files:
+                manifest, reason = fallback, FALLBACK_REASON
+            else:
+                restricted, reason = True, DOWNLOAD_REFUSED_REASON
         metadata = _normalize_template_fields(identifier, metadata)
         return ItemDescriptor(
             identifier=identifier,

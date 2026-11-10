@@ -745,7 +745,7 @@ Structure: top-level roots (`archive_root`, `library_root`,
 `state_db`) and global concurrency caps (`max_concurrent_downloads`,
 `max_concurrent_collections`); a list of `sources` (name, plugin
 `type`, optional auth) each containing `collections` (name, `query`,
-`format_filters`, `exclude_filters`, `library_layout`,
+`format_filters`, `exclude_filters`, `fallback_format_filters`, `library_layout`,
 `prune_disappeared`, `incremental_discovery`, `preserve_source_metadata`,
 `on_complete`); and global `notifications`.
 
@@ -1242,7 +1242,7 @@ degrade a single item or a single run, never the archive.
 | Library tool deletes staging links | Restored on next sync or `restage` |
 | User wipes library tree | Rebuilt by `restage` with zero downloads |
 | User wipes archive tree | DB and library invalidated; full re-download — working as intended (§spec:state) |
-| Item restricted upstream | Only the files the source refuses are left out (archive.org marks each one `private`); a file it serves is always mirrored. When every file the collection wants is refused: local copy retained; status flips to `unavailable` with reason |
+| Item restricted upstream | Only the files the source refuses are left out (archive.org marks each one `private`); a file it serves is always mirrored. When every file the collection wants is refused: if the collection opted into `fallback_format_filters` and the source serves those, the fallback copy is mirrored as `complete` and listed in `status` with its reason (a later sync replaces it once the wanted files are served); otherwise the local copy is retained and the status flips to `unavailable` with reason |
 | Source refuses a download (archive.org's 403 on a stream-only show with no restriction flag in its metadata) | Not a failure and not retried within the run: the item flips to `unavailable` with reason, the local copy (if any) is retained, and its temp directory is removed |
 | Restriction lifted upstream | Detected on next discover; fetched as new |
 | Source lists zero files for an item (darked, glitch, filter matches nothing) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |

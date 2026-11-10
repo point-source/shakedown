@@ -1661,6 +1661,8 @@ def _record_complete(
         discovered_at=now,
         downloaded_at=now,
         last_verified_at=now,
+        # Set when the copy is a fallback (e.g. MP3 for refused lossless files).
+        restriction_reason=desc.restriction_reason,
         source_metadata=desc.metadata,
         recorded_manifest=desc.manifest,
         change_signal=desc.change_signal,

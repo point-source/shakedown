@@ -609,3 +609,52 @@ def test_refused_files_are_left_out_of_a_mixed_format_manifest(archive) -> None:
     desc = next(plugin.discover(coll))
     assert desc.is_restricted is False
     assert [f.name for f in desc.manifest.files] == ["d1t01.flac"]
+
+
+def test_refused_lossless_show_falls_back_to_the_opted_in_formats(archive) -> None:
+    from shakedown.plugins.ia.plugin import FALLBACK_REASON
+
+    plugin = _make_plugin()
+    _stream_only_show(archive)
+
+    coll = CollectionConfig(
+        name="dead", query="x", format_filters=["shn"], fallback_format_filters=["mp3"]
+    )
+    desc = next(plugin.discover(coll))
+    assert desc.is_restricted is False
+    assert [f.name for f in desc.manifest.files] == ["d1t01.mp3"]
+    assert desc.restriction_reason == FALLBACK_REASON
+
+
+def test_fallback_is_unused_while_the_wanted_files_are_served(archive) -> None:
+    plugin = _make_plugin()
+    archive.search_results({"identifier": "gd-x"})
+    archive.item(
+        "gd-x",
+        [
+            {"name": "d1t01.shn", "size": "9", "md5": "s1", "format": "Shorten"},
+            {"name": "d1t01.mp3", "size": "3", "md5": "m1", "format": "VBR MP3"},
+        ],
+        SHOW,
+    )
+
+    coll = CollectionConfig(
+        name="dead", query="x", format_filters=["shn"], fallback_format_filters=["mp3"]
+    )
+    desc = next(plugin.discover(coll))
+    assert [f.name for f in desc.manifest.files] == ["d1t01.shn"]
+    assert desc.restriction_reason is None
+
+
+def test_refused_show_without_a_served_fallback_stays_unavailable(archive) -> None:
+    from shakedown.plugins.ia.plugin import DOWNLOAD_REFUSED_REASON
+
+    plugin = _make_plugin()
+    _stream_only_show(archive)
+
+    coll = CollectionConfig(
+        name="dead", query="x", format_filters=["shn"], fallback_format_filters=["flac"]
+    )
+    desc = next(plugin.discover(coll))
+    assert desc.is_restricted is True
+    assert desc.restriction_reason == DOWNLOAD_REFUSED_REASON
