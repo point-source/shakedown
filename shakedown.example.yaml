@@ -34,7 +34,8 @@ sources:
         # Opt-in: when archive.org refuses every lossless file of a show (stream-only
         # soundboards), mirror its MP3 copy instead of skipping the show. `shakedown
         # status` lists these shows; if the lossless files are served again later, the
-        # next sync fetches them in place of the MP3s.
+        # next sync fetches them in place of the MP3s. Read by `ia` sources only; an
+        # etree collection accepts the setting and ignores it.
         fallback_format_filters: [mp3]
         # Template renders the staging *directory*; original filenames are appended
         # automatically (SPEC.md §spec:library-staging). Available IA fields: identifier, title, creator,
@@ -56,6 +57,7 @@ sources:
       - name: phish
         query: 'collection:Phish'
         format_filters: [flac]
+        fallback_format_filters: [mp3]
         # Default library_layout is `passthrough`: mirrors the archive layout 1:1.
         # Opt-in fast-path for recurring no-op syncs (SPEC.md §spec:incremental-discovery):
         # when the source's cheap change signal is unchanged, skip the per-item metadata
