@@ -1510,3 +1510,102 @@ def test_incremental_flag_off_ignores_signal(tmp_roots: tuple[Path, Path]) -> No
 
     assert run_sync(config) == 0
     assert FakePlugin.lookups("gd1977-05-08") == 2, "flag off → signal ignored, full pass"
+
+
+# --- §spec:per-item-isolation: every listing operation follows the same rules ---------
+
+
+def test_one_failed_lookup_fails_only_that_show(tmp_roots: tuple[Path, Path]) -> None:
+    """A server error on every attempt for one show, a malformed file list for another:
+    only those two are listed failed with reasons, the rest sync, the collection is
+    not stale, the run exits 1, and the next run looks both up again."""
+    from shakedown.plugins.base import ItemLookup
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    for i in range(6):
+        _seed_item(f"gd-{i}")
+    FakePlugin.lookup_faults["gd-1"] = [TimeoutError("read timed out")]
+    FakePlugin.lookup_faults["gd-4"] = [
+        ItemLookup(metadata={}, files=[{"name": "a.flac"}, {"size": "3"}])
+    ]
+
+    assert run_sync(config) == 1
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    items = ItemRepo(conn)
+    latest = RunRepo(conn).latest("fake-src", "coll1")
+    assert latest is not None and latest.stale is False
+    assert latest.items_failed == 2
+    assert sorted(latest.errors) == [
+        "gd-1: lookup failed after 3 attempts: timed out",
+        "gd-4: source sent a malformed file list: file entry 2 has no name",
+    ]
+    for i in (0, 2, 3, 5):
+        row = items.get("fake-src", "coll1", f"gd-{i}")
+        assert row is not None and row.status == ItemStatus.COMPLETE
+    for i in (1, 4):
+        row = items.get("fake-src", "coll1", f"gd-{i}")
+        assert row is not None and row.status == ItemStatus.FAILED
+        assert row.restriction_reason == next(
+            e.split(": ", 1)[1] for e in latest.errors if e.startswith(f"gd-{i}:")
+        )
+
+    # The next run retries both; once the source answers, they sync.
+    FakePlugin.lookup_faults.clear()
+    FakePlugin.lookup_calls.clear()
+    assert run_sync(config) == 0
+    assert FakePlugin.lookups("gd-1") == 1 and FakePlugin.lookups("gd-4") == 1
+    for i in (1, 4):
+        row = items.get("fake-src", "coll1", f"gd-{i}")
+        assert row is not None and row.status == ItemStatus.COMPLETE
+
+
+def test_failed_lookup_skips_the_incremental_fast_path_next_run(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A new show whose lookup failed is recorded failed, so the next incremental run
+    looks it up instead of trusting its change signal."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=True)
+    item = _seed_item("gd-x")
+    item.change_signal = "v1"
+    FakePlugin.lookup_faults["gd-x"] = [TimeoutError("read timed out")]
+    assert run_sync(config) == 1
+    FakePlugin.lookup_faults.clear()
+
+    assert run_sync(config) == 0
+    assert FakePlugin.fetch_count["gd-x"] == 1
+
+
+def test_dry_run_lists_a_failed_lookup_without_writing(tmp_roots: tuple[Path, Path]) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-ok")
+    _seed_item("gd-bad")
+    FakePlugin.lookup_faults["gd-bad"] = [KeyError("files")]
+
+    assert run_sync(config, dry_run=True) == 1
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    assert ItemRepo(conn).get("fake-src", "coll1", "gd-bad") is None
+    assert FakePlugin.fetch_count == {}
+
+
+def test_refetch_reports_a_failed_lookup(tmp_roots: tuple[Path, Path]) -> None:
+    from shakedown.sync import refetch_item
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-a")
+    _seed_item("gd-b")
+    assert run_sync(config) == 0
+    FakePlugin.lookup_calls.clear()
+    FakePlugin.lookup_faults["gd-a"] = [ConnectionResetError("connection reset")]
+
+    assert refetch_item(config, "gd-a") == 1
+
+    # Only the show being refetched is looked up, and its archive copy is untouched.
+    assert {identifier for identifier, _ in FakePlugin.lookup_calls} == {"gd-a"}
+    assert FakePlugin.fetch_count["gd-a"] == 1
+    assert (archive / "fake-src" / "coll1" / "gd-a" / "gd-a.flac").is_file()

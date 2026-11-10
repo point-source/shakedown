@@ -116,3 +116,51 @@ def test_reconcile_keeps_prior_status_when_source_unreachable(
     assert row is not None
     assert row.status == ItemStatus.COMPLETE
     assert row.recorded_manifest is not None
+
+
+def test_reconcile_never_marks_a_listed_show_disappeared_because_its_lookup_failed(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """§spec:per-item-isolation: reconcile marks a show `disappeared` only when a
+    complete listing omits it. A show the listing still has, whose lookup fails, keeps
+    its status, manifest, and files; the failure is reported and reconcile exits 1."""
+    from shakedown.models import OperationStatus, OperationType
+    from shakedown.state import OperationOutcomeRepo
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["a"] = FakeItem(identifier="a", files=[FakeFile(name="a.flac", content=b"a")])
+    FakePlugin.items["b"] = FakeItem(identifier="b", files=[FakeFile(name="b.flac", content=b"b")])
+    assert run_sync(config) == 0
+    FakePlugin.lookup_faults["a"] = [ConnectionResetError("connection reset")]
+
+    assert run_reconcile(config) == 1
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "a")
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE
+    assert row.recorded_manifest is not None
+    assert (archive / "fake-src" / "coll1" / "a" / "a.flac").read_bytes() == b"a"
+    other = ItemRepo(conn).get("fake-src", "coll1", "b")
+    assert other is not None and other.status == ItemStatus.COMPLETE
+
+    outcome = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
+    assert outcome is not None
+    assert outcome.operation == OperationType.RECONCILE
+    assert outcome.status == OperationStatus.COMPLETED_WITH_ITEM_ISSUES
+    assert outcome.errors == ["a: lookup failed after 3 attempts: connection error"]
+
+
+def test_reconcile_looks_up_only_shows_on_disk(tmp_roots: tuple[Path, Path]) -> None:
+    """The listing says what is upstream; only shows on disk need their manifests."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["a"] = FakeItem(identifier="a", files=[FakeFile(name="a.flac", content=b"a")])
+    assert run_sync(config) == 0
+    FakePlugin.items["not-mirrored"] = FakeItem(identifier="not-mirrored")
+    FakePlugin.lookup_calls.clear()
+
+    assert run_reconcile(config) == 0
+
+    assert [identifier for identifier, _ in FakePlugin.lookup_calls] == ["a"]

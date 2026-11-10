@@ -210,3 +210,28 @@ def test_refresh_metadata_skips_opt_out_collections(tmp_roots: tuple[Path, Path]
     assert not (archive / "fake-src" / "coll1" / "gd-8" / METADATA_SIDECAR).exists()
     item = _read_item(config, "gd-8")
     assert item is not None and item.source_metadata["notes"] == "v1"  # DB unchanged
+
+
+def test_refresh_metadata_keeps_a_show_whose_lookup_fails(tmp_roots: tuple[Path, Path]) -> None:
+    """§spec:per-item-isolation: one failed lookup leaves that show's sidecar and
+    recorded metadata alone, the other shows still refresh, and the run says so."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, preserve_source_metadata=True)
+    _add_item("gd-9", {"notes": "v1"})
+    _add_item("gd-10", {"notes": "v1"})
+    assert run_sync(config) == 0
+
+    FakePlugin.items["gd-9"].metadata = {"notes": "v2"}
+    FakePlugin.items["gd-10"].metadata = {"notes": "v2"}
+    FakePlugin.lookup_faults["gd-9"] = [ConnectionResetError("connection reset")]
+
+    assert run_sync(config, refresh_metadata=True) == 1
+
+    kept = archive / "fake-src" / "coll1" / "gd-9" / METADATA_SIDECAR
+    assert json.loads(kept.read_text())["notes"] == "v1"
+    item = _read_item(config, "gd-9")
+    assert item is not None and item.source_metadata["notes"] == "v1"
+    refreshed = _read_item(config, "gd-10")
+    assert refreshed is not None and refreshed.source_metadata["notes"] == "v2"
+    # Only mirrored shows are looked up, and each once.
+    assert FakePlugin.lookups("gd-10") == 2  # the sync, then the refresh

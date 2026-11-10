@@ -149,6 +149,23 @@ def test_fix_then_rerun_passes(tmp_path: Path, tmp_roots) -> None:
     assert run_validate(cfg_path) == 0
 
 
+def test_source_check_lists_but_never_looks_items_up(tmp_path: Path, tmp_roots) -> None:
+    """§spec:per-item-isolation: validate's source check is a listing, judged by the
+    same rule as sync — only a failed listing fails it. One bad item does not."""
+    archive, library = tmp_roots
+    FakePlugin.items["ok-1"] = FakeItem(identifier="ok-1", files=[FakeFile("a.flac", b"a")])
+    FakePlugin.lookup_faults["ok-1"] = [ConnectionResetError("connection reset")]
+    cfg_path = _write_yaml(
+        tmp_path,
+        archive,
+        library,
+        [SourceConfig(name="fake-src", type="fake", collections=[_collection()])],
+    )
+
+    assert run_validate(cfg_path) == 0
+    assert FakePlugin.lookup_calls == []
+
+
 # -- handoff readiness ----------------------------------------------------------
 
 
