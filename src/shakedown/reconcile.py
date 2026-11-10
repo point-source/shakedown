@@ -114,14 +114,18 @@ def _reconcile_collection(
                     recorded_manifest=desc.manifest,
                 )
             else:
-                # On disk but not in current source enumeration. Two sub-cases:
-                #   (a) source is unreachable → preserve any prior manifest/metadata
-                #       so subsequent syncs still classify correctly when source returns;
-                #   (b) item disappeared upstream → status flips to DISAPPEARED per
-                #       PRD §6 enum. We can't tell (a) and (b) apart from one reconcile;
-                #       prefer DISAPPEARED only when we previously had a row, COMPLETE
-                #       otherwise (no row means no prior knowledge of upstream presence).
-                status = ItemStatus.DISAPPEARED if existing else ItemStatus.COMPLETE
+                # On disk but not in the source's listing. Prior manifest/metadata are
+                # kept either way, so later syncs still classify correctly.
+                #   (a) source unreachable → keep the prior status: an outage says
+                #       nothing about upstream presence;
+                #   (b) a complete listing omits it → DISAPPEARED (PRD §6) when we had
+                #       a row. With no row there is no prior knowledge → COMPLETE.
+                if existing is None:
+                    status = ItemStatus.COMPLETE
+                elif source_error is not None:
+                    status = existing.status
+                else:
+                    status = ItemStatus.DISAPPEARED
                 item = Item(
                     source_name=source.name,
                     collection_name=collection.name,

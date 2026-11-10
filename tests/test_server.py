@@ -137,6 +137,30 @@ async def test_serve_mutating_disabled_without_token(
         ).status_code == 503
 
 
+@pytest.mark.asyncio
+async def test_serve_unknown_collection_is_404(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
+    """A misspelled collection must not sync nothing and report success."""
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    auth = {"Authorization": "Bearer test-token"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(config)),
+        base_url="http://testserver",
+    ) as client:
+        for route in ("/sync", "/verify"):
+            r = await client.post(route, params={"collection": "nope"}, headers=auth)
+            assert r.status_code == 404, route
+            assert "coll1" in r.json()["detail"]
+        r = await client.post("/validate", params={"collection": "nope"})
+        assert r.status_code == 404
+        r = await client.post("/sync", params={"source": "nope"}, headers=auth)
+        assert r.status_code == 404
+        assert "fake-src" in r.json()["detail"]
+        # still authenticated first: no token, no config names
+        assert (await client.post("/sync", params={"collection": "nope"})).status_code == 401
+
+
 def test_api_reports_installed_package_version(tmp_roots: tuple[Path, Path]) -> None:
     from importlib.metadata import version
 

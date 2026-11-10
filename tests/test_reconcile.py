@@ -137,3 +137,27 @@ def test_reconcile_tolerates_source_unavailable(
     assert OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1") is None
     row = items.get("fake-src", "coll1", "a")
     assert row is not None and row.recorded_manifest is not None
+
+
+def test_reconcile_keeps_prior_status_when_source_unreachable(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """An outage is not a takedown: reconcile must not mark known shows disappeared."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["a"] = FakeItem(
+        identifier="a", files=[FakeFile(name="a.flac", content=b"a")]
+    )
+    assert run_sync(config) == 0
+
+    def discover_explodes(self, collection):
+        raise ConnectionError("upstream unreachable")
+        yield  # pragma: no cover  (keeps it a generator)
+
+    monkeypatch.setattr(FakePlugin, "discover", discover_explodes)
+    assert run_reconcile(config) == 1
+
+    row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "a")  # type: ignore[arg-type]
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE
+    assert row.recorded_manifest is not None

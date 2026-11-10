@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from shakedown.cli import main
@@ -108,7 +109,9 @@ sources:
     assert json.loads(sidecar.read_text())["notes"] == "v2"
 
 
-def test_sync_filters_apply(tmp_path: Path, tmp_roots) -> None:
+def test_sync_unknown_source_is_a_usage_error(tmp_path: Path, tmp_roots) -> None:
+    """A misspelled --source must fail visibly, not sync nothing and exit 0
+    (REQUIREMENTS: an unknown collection is never a silent no-op)."""
     archive, library = tmp_roots
     cfg = _write_config(tmp_path, archive, library)
     FakePlugin.items["gd-x"] = FakeItem(
@@ -117,8 +120,37 @@ def test_sync_filters_apply(tmp_path: Path, tmp_roots) -> None:
     result = CliRunner().invoke(
         main, ["--config", str(cfg), "sync", "--source", "nonexistent"]
     )
+    assert result.exit_code == 2
+    assert "nonexistent" in result.output and "fake-src" in result.output
+    assert FakePlugin.fetch_count == {}
+
+
+@pytest.mark.parametrize("command", [["sync"], ["restage"], ["verify"], ["validate"]])
+def test_unknown_collection_is_a_usage_error(
+    tmp_path: Path, tmp_roots, command: list[str]
+) -> None:
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+    result = CliRunner().invoke(
+        main, ["--config", str(cfg), *command, "--collection", "nope"]
+    )
+    assert result.exit_code == 2
+    assert "unknown collection 'nope'" in result.output
+    assert "coll1" in result.output
+    assert "all expected files present" not in result.output
+
+
+def test_known_collection_filter_still_syncs(tmp_path: Path, tmp_roots) -> None:
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"a")]
+    )
+    result = CliRunner().invoke(
+        main, ["--config", str(cfg), "sync", "--source", "fake-src", "--collection", "coll1"]
+    )
     assert result.exit_code == 0
-    assert FakePlugin.fetch_count == {}, "filter must skip all sources"
+    assert FakePlugin.fetch_count == {"gd-x": 1}
 
 
 def test_item_show_unknown_identifier(tmp_path: Path, tmp_roots) -> None:

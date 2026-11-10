@@ -5,7 +5,13 @@ Grammar:
   placeholder := '{' field ('|' filter)* '}'
 
 Example:
-  "{year}/{date} - {venue|sanitize}/{filename}"
+  "{year}/{date} - {venue}/{identifier}"
+
+Every field value comes from source metadata that uploaders control, so each one is
+made path-safe after its filters run, whether or not the template asks for
+`|sanitize`: a field can never add a path separator or a `..` segment
+(§spec:library-staging). `|sanitize` additionally collapses underscores and trims
+trailing dots and spaces.
 """
 from __future__ import annotations
 
@@ -13,7 +19,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from shakedown.utils.sanitize import sanitize
+from shakedown.utils.sanitize import path_safe, sanitize
 
 
 class TemplateError(Exception):
@@ -33,10 +39,11 @@ Filter = Callable[[str], str]
 _FILTERS: dict[str, Filter] = {
     "sanitize": sanitize,
     # `short`: keep first segment (word, abbreviation) — useful for {lineage_short}
-    "short": lambda v: v.split()[0] if v else v,
+    "short": lambda v: (v.split() or [""])[0],
     "lower": str.lower,
     "upper": str.upper,
 }
+FILTER_NAMES: tuple[str, ...] = tuple(sorted(_FILTERS))
 
 
 def render(template: str, fields: dict[str, Any]) -> str:
@@ -46,6 +53,9 @@ def render(template: str, fields: dict[str, Any]) -> str:
         parts = [p.strip() for p in spec.split("|")]
         name, filter_names = parts[0], parts[1:]
         value = fields.get(name)
+        if isinstance(value, (list, tuple)):
+            # A repeated metadata field (e.g. two venue tags) renders as one segment.
+            value = ", ".join(str(v) for v in value if v is not None) or None
         if value is None:
             # Missing or null field: render a literal `unknown` segment rather than
             # failing the item. Filters are skipped — the segment is the fixed
@@ -56,7 +66,7 @@ def render(template: str, fields: dict[str, Any]) -> str:
             if fname not in _FILTERS:
                 raise TemplateError(f"unknown filter: {fname!r}")
             out = _FILTERS[fname](out)
-        return out
+        return path_safe(out)
 
     return _PLACEHOLDER_RE.sub(_sub, template)
 
@@ -64,3 +74,13 @@ def render(template: str, fields: dict[str, Any]) -> str:
 def fields_in(template: str) -> set[str]:
     """Return the set of placeholder field names referenced in the template."""
     return {m.group(1).split("|", 1)[0].strip() for m in _PLACEHOLDER_RE.finditer(template)}
+
+
+def unknown_filters(template: str) -> set[str]:
+    """Return the filter names the template uses that the engine does not define."""
+    used = {
+        f.strip()
+        for m in _PLACEHOLDER_RE.finditer(template)
+        for f in m.group(1).split("|")[1:]
+    }
+    return used - _FILTERS.keys()

@@ -23,7 +23,7 @@ from prometheus_client import (
 )
 
 from shakedown import __version__
-from shakedown.config import Config
+from shakedown.config import Config, UnknownScopeError, check_scope
 from shakedown.db import connect
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
@@ -78,6 +78,12 @@ def build_app(config: Config) -> FastAPI:
         ):
             raise HTTPException(401, "invalid or missing bearer token")
 
+    def require_scope(source: str | None, collection: str | None) -> None:
+        try:
+            check_scope(config, source, collection)
+        except UnknownScopeError as e:
+            raise HTTPException(404, str(e)) from e
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -127,6 +133,7 @@ def build_app(config: Config) -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_token(authorization)
+        require_scope(source, collection)
         rc = do_sync(config, source_filter=source, collection_filter=collection)
         c_sync.labels("ok" if rc == 0 else "fail").inc()
         return {"exit_code": rc}
@@ -140,6 +147,7 @@ def build_app(config: Config) -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_token(authorization)
+        require_scope(source, collection)
         rc = do_verify(
             config,
             source_filter=source,
@@ -164,6 +172,7 @@ def build_app(config: Config) -> FastAPI:
         # sync and verify (§spec:serve, §spec:setup-readiness-validation).
         if live_handoff:
             require_token(authorization)
+        require_scope(source, collection)
         report = validate_config(
             config,
             source_filter=source,

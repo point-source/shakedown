@@ -106,6 +106,26 @@ sources:
     assert "filename" in str(exc_info.value)
 
 
+def test_layout_with_unknown_filter_rejected(tmp_path: Path) -> None:
+    """A misspelled filter must fail at load, before restage clears the library."""
+    p = _write(tmp_path, """
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'q'
+        library_layout: '{year}/{venue|sanitise}/{identifier}'
+""")
+    with pytest.raises(ConfigError) as exc_info:
+        load(p)
+    message = str(exc_info.value)
+    assert "sanitise" in message
+    assert "lower, sanitize, short, upper" in message
+
+
 def test_layout_with_known_fields_accepted(tmp_path: Path) -> None:
     """The shipped example layout must load cleanly."""
     p = _write(tmp_path, """

@@ -40,6 +40,16 @@ def _load_config(ctx: click.Context, *, check_filesystem: bool = True) -> config
     return cfg
 
 
+def _require_scope(
+    cfg: config_module.Config, source_filter: str | None, collection_filter: str | None
+) -> None:
+    """Fail with a usage error when --source/--collection names nothing configured."""
+    try:
+        config_module.check_scope(cfg, source_filter, collection_filter)
+    except config_module.UnknownScopeError as e:
+        raise click.UsageError(str(e)) from e
+
+
 @click.group()
 @click.version_option(__version__, prog_name="shakedown")
 @click.option(
@@ -82,6 +92,7 @@ def sync(
         click.echo("error: --dry-run and --refresh-metadata are mutually exclusive", err=True)
         ctx.exit(2)
     cfg = _load_config(ctx)
+    _require_scope(cfg, source_filter, collection_filter)
     from shakedown.sync import run_sync
 
     exit_code = run_sync(
@@ -156,6 +167,7 @@ def verify(
         click.echo("error: --reconform requires --deep", err=True)
         ctx.exit(2)
     cfg = _load_config(ctx)
+    _require_scope(cfg, source_filter, collection_filter)
     from shakedown.verify import run_verify
 
     exit_code = run_verify(
@@ -196,13 +208,16 @@ def validate(
     """
     from shakedown.validate import run_validate
 
-    exit_code = run_validate(
-        ctx.obj["config_path"],
-        source_filter=source_filter,
-        collection_filter=collection_filter,
-        live_handoff=live_handoff,
-        as_json=as_json,
-    )
+    try:
+        exit_code = run_validate(
+            ctx.obj["config_path"],
+            source_filter=source_filter,
+            collection_filter=collection_filter,
+            live_handoff=live_handoff,
+            as_json=as_json,
+        )
+    except config_module.UnknownScopeError as e:
+        raise click.UsageError(str(e)) from e
     ctx.exit(exit_code)
 
 
@@ -213,6 +228,7 @@ def validate(
 def restage(ctx: click.Context, source_filter: str | None, collection_filter: str | None) -> None:
     """Rebuild the staging hardlink tree without re-downloading."""
     cfg = _load_config(ctx)
+    _require_scope(cfg, source_filter, collection_filter)
     from shakedown.restage import run_restage
 
     exit_code = run_restage(

@@ -77,6 +77,18 @@ def check_writable(path: Path) -> None:
                 probe.unlink()
 
 
+def is_within(root: Path, candidate: Path) -> bool:
+    """True iff `candidate` stays inside `root` (no `..` or absolute-path escape).
+
+    Uses lexical normalization (not `resolve()`) so a symlink already inside the tree
+    isn't rejected; the check exists to stop a remote identifier, file name, or
+    metadata field from escaping the tree, not to police the operator's own layout.
+    """
+    base = os.path.normpath(root)
+    cand = os.path.normpath(candidate)
+    return cand == base or cand.startswith(base + os.sep)
+
+
 def same_inode(a: Path, b: Path) -> bool:
     """True if a and b refer to the same inode on the same device."""
     sa = a.stat()

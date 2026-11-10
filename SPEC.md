@@ -456,7 +456,10 @@ Two defenses, one proactive and one at runtime:
   `{identifier}` in the leaf). A non-passthrough template that references
   **no plugin field at all** — one constant path for every item, a
   guaranteed total collapse — is a hard config error, consistent with the
-  fail-fast config contract (§spec:configuration).
+  fail-fast config contract (§spec:configuration). So is a filter name
+  the template engine does not define (valid: `sanitize`, `short`,
+  `lower`, `upper`); a typo like `|sanitise` would otherwise fail
+  mid-sync, or mid-restage after the library was cleared.
 - **Runtime summary.** Recordings dropped to same-run template collisions
   are aggregated into one consolidated per-run line — how many were
   dropped and to which colliding paths — surfaced in the run summary and
@@ -586,7 +589,7 @@ documented interface" — not "installable third-party ecosystem."
 Per collection, the user provides a `library_layout` template that
 renders each item's **staging directory** under the library tree, from
 fields the source plugin surfaces (e.g.
-`{year}/{date} - {venue|sanitize}`). The item's original archive
+`{year}/{date} - {venue}/{identifier}`). The item's original archive
 filenames are then hardlinked into that directory unchanged.
 
 - **Templates produce directories, never renamed or retagged files.**
@@ -594,10 +597,23 @@ filenames are then hardlinked into that directory unchanged.
   tools (and users) can correlate the two trees by name. Tagging and
   renaming are the library tool's job, out of scope by charter
   (§req:constraints).
+- **Every field is made path-safe, whether or not the template says
+  `|sanitize`.** Field values come from source metadata that uploaders
+  control, so a field must never add a path separator or a `..`
+  segment: hostile characters become `_`, and a value made only of dots
+  becomes `_`. Nothing else changes, so two distinct identifiers never
+  render to the same folder. `|sanitize` additionally collapses repeated
+  underscores and trims trailing dots and spaces. A list value (a
+  repeated metadata field) renders as one comma-joined segment.
 - **Sanitization is conservative:** filesystem-hostile characters
   (slashes, colons, and similar) are replaced; non-ASCII is preserved.
   Archival metadata is multilingual and lossy transliteration would
   destroy information the library tool may want.
+- **Library paths stay inside the collection's library folder.** A
+  rendered folder or recorded file name that would land outside it is
+  refused and that item fails visibly (sync, restage), so source data
+  can never place, replace, or remove a file elsewhere — the library-side
+  twin of the archive's identifier containment check.
 - **Collisions are an error, not a silent overwrite.** If two items
   render the same staging path — or a hardlink target exists pointing
   at a different inode — the system shall report the collision and
@@ -619,7 +635,11 @@ filenames are then hardlinked into that directory unchanged.
 - `shakedown restage` rebuilds the staging tree from the archive
   without any network traffic — used after changing a template or
   wiping the library tree — and completes in under five minutes for a
-  ~14k-item collection (§req:success-criteria #3). Staging is also
+  ~14k-item collection (§req:success-criteria #3). It links every item
+  whose archive copy is on disk, whatever its status (a `disappeared`
+  show keeps its files, so it keeps its library folder). It renders every
+  item's library folder before clearing anything, so a layout that
+  cannot render leaves the existing tree in place. Staging is also
   self-healing: links deleted by a library tool are restored on the
   next sync or restage.
 
@@ -671,6 +691,10 @@ exits (§req:constraints). The command surface:
 
 - Commands shall exit non-zero on failure so failures surface at the
   scheduler/container layer (§req:quality-attributes: operability).
+- A `--source` or `--collection` that names nothing configured is a
+  usage error (exit 2) listing the configured names — never a run that
+  does nothing and exits 0 (§req:quality-attributes: scheduled runs are
+  observable).
 - Writing commands — `sync` (except `--dry-run`), `restage`,
   `reconcile`, `item refetch`, and `verify --reconform`, whether run from
   the CLI, the scheduler, or `serve` — hold one exclusive writer lock
@@ -764,7 +788,10 @@ Sync state lives in a single-file embedded SQLite database at
   (§spec:system-shape), the walk recovers each item's identity; a
   corrupted or reset database therefore never forces a re-download
   (§req:quality-attributes: durability). This is also the migration
-  path from a pre-existing manual mirror.
+  path from a pre-existing manual mirror. A known item missing from a
+  complete source listing is marked `disappeared`; when the source
+  cannot be reached, every known item keeps its prior status — an
+  outage is not a takedown.
 
 The one deliberately unrecoverable case: the user wipes the archive
 tree itself. Then database and library are both invalidated and a full
@@ -826,6 +853,10 @@ scheduler (§req:constraints).
 | `POST /sync?source=&collection=` | Trigger an ad-hoc sync (auth required) |
 | `POST /verify` | Trigger a verify run (auth required) |
 | `POST /validate` | Run setup readiness validation; live handoff validation is auth required |
+
+`POST /sync`, `/verify`, and `/validate` answer `404`, naming the
+configured sources or collections, when `source` or `collection` names
+nothing configured.
 
 Security posture (this endpoint accepts requests that cause network
 fetches and disk writes): mutating endpoints shall require a bearer

@@ -176,6 +176,28 @@ def test_disappeared_items_retained_by_default(tmp_roots: tuple[Path, Path]) -> 
     assert row is not None and row.status == ItemStatus.DISAPPEARED
 
 
+def test_disappeared_item_back_unchanged_is_complete_again(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A show missing from one listing that returns unchanged is complete again."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-show-back")
+    assert run_sync(config) == 0
+    returning = FakePlugin.items.pop("gd-show-back")
+    assert run_sync(config) == 0
+    items = ItemRepo(connect(config.state_db))  # type: ignore[arg-type]
+    row = items.get("fake-src", "coll1", "gd-show-back")
+    assert row is not None and row.status == ItemStatus.DISAPPEARED
+
+    FakePlugin.items["gd-show-back"] = returning
+    assert run_sync(config) == 0
+
+    row = items.get("fake-src", "coll1", "gd-show-back")
+    assert row is not None and row.status == ItemStatus.COMPLETE
+    assert FakePlugin.fetch_count == {"gd-show-back": 1}, "an unchanged return re-downloads nothing"
+
+
 def test_disappeared_pruned_when_opted_in(tmp_roots: tuple[Path, Path]) -> None:
     """§spec:item-lifecycle: prune_disappeared removes files + staging links but
     retains the DB record marked `pruned` so `status` can still report the takedown."""
