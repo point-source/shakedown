@@ -164,6 +164,11 @@ sources:
     assert cfg.sources[0].collections[0].library_layout == "{year}/{venue}"
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("ia/gd" in m and "per-item-unique" in m for m in warnings), warnings
+    assert any(
+        "two items sharing these fields get folders labelled with their identifier — add a "
+        "unique component such as {identifier} to the leaf" in m
+        for m in warnings
+    ), warnings
 
 
 def test_layout_with_unique_field_does_not_warn(

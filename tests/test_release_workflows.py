@@ -139,7 +139,7 @@ def test_first_setup_readiness_source_access(tmp_path: Path, tmp_roots) -> None:
 
 def test_first_setup_readiness_unsafe_layout(tmp_path: Path, tmp_roots) -> None:
     # `{title}` is a known fake field but not per-item-unique: two same-title items
-    # would collide. The config layer only warns; validate fails.
+    # would get labelled folders. The config layer only warns; validate fails.
     archive, library = tmp_roots
     src = SourceConfig(
         name="fake-src",
@@ -151,7 +151,9 @@ def test_first_setup_readiness_unsafe_layout(tmp_path: Path, tmp_roots) -> None:
     coll_group = next(g for g in report.groups if g.collection == "coll1")
     layout = next(c for c in coll_group.checks if c.name == "library layout is collision-safe")
     assert not layout.ok
-    assert layout.consequence and "collide" in layout.consequence
+    assert layout.consequence and layout.consequence.endswith(
+        "two items sharing these fields get folders labelled with their identifier"
+    )
 
 
 def test_first_setup_readiness_broken_handoff_target(tmp_path: Path, tmp_roots) -> None:

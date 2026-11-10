@@ -178,10 +178,10 @@ def _validate_layouts(config: Config) -> None:
       to the same path — a guaranteed total collapse config can prove, so it fails
       fast like every other config fault (§spec:configuration).
     - **No per-item-unique field → warning.** The layout keys only on shared fields
-      (e.g. `{year}/{venue}`); two items with the same values collide at staging time.
-      Config can't prove an arbitrary *combination* is lossy, so this is a proactive
-      heads-up, not a hard error — the runtime collision summary is the correctness
-      backstop that fires only on actual loss.
+      (e.g. `{year}/{venue}`); two items with the same values render the same folder
+      and are separated into folders labelled with their identifier at staging time
+      (§spec:library-ownership). Config can't prove an arbitrary *combination* clashes,
+      so this is a proactive heads-up, not a hard error.
     """
     from shakedown.plugins import registry
     from shakedown.utils.templates import FILTER_NAMES, fields_in, unknown_filters
@@ -221,9 +221,8 @@ def _validate_layouts(config: Config) -> None:
             if not (referenced & unique):
                 log.warning(
                     "%s/%s: library_layout %r references no per-item-unique field %s; "
-                    "two items sharing these fields will collide at staging and the "
-                    "loser will be dropped from the library — add a unique component "
-                    "such as {identifier} to the leaf",
+                    "two items sharing these fields get folders labelled with their "
+                    "identifier — add a unique component such as {identifier} to the leaf",
                     source.name,
                     collection.name,
                     collection.library_layout,

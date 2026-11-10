@@ -437,6 +437,11 @@ def test_failed_removal_stays_recorded_and_is_retried(
     }
     assert lib.repo.owner_of(SRC, COLL, "Old/a.flac") == "gd-a"
 
+    assert report.issues["gd-a"][0] == (
+        f"gd-a: could not remove {old} ([Errno 13] Permission denied); "
+        "will retry on the next run"
+    )
+
     monkeypatch.undo()
     report = lib.finish()
     assert report.issues == {}

@@ -19,7 +19,7 @@ from shakedown.state import ItemRepo, OperationOutcomeRepo
 log = logging.getLogger(__name__)
 
 # Next step shown in `status` after a restage that left per-show issues.
-RESTAGE_ISSUES_ACTION = "fix library layout and rerun restage"
+RESTAGE_ISSUES_ACTION = "fix the listed show issues and rerun restage"
 
 
 def run_restage(
