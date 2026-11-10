@@ -432,6 +432,10 @@ _RETRIABLE_MARKERS = (
     "timeout",
     "connection reset",
     "connection aborted",
+    # A file cut off mid-stream ("Connection broken: IncompleteRead(...)",
+    # "Response ended prematurely").
+    "connection broken",
+    "ended prematurely",
     "temporarily unavailable",
     "429",
     "502",

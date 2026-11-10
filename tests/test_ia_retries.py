@@ -153,3 +153,17 @@ def test_403_on_a_download_reports_the_show_unavailable(archive, tmp_path: Path)
     assert result.retriable is False
     assert result.error == ia_plugin.DOWNLOAD_REFUSED_REASON
     assert archive.calls_to("/download/gd1/d1t02.flac") == [], "stop at the first refusal"
+
+
+def test_download_cut_off_mid_stream_is_retriable(archive, tmp_path: Path) -> None:
+    """A connection that drops mid-file must reach the core's bounded retry."""
+    plugin = _plugin()
+    archive.item("gd1", FILES)
+    archive.file("gd1", "d1t01.flac", Reply(200, AUDIO[:3], {"Content-Length": "5"}))
+    desc = _search_then_describe(archive, plugin)
+    assert desc is not None
+
+    result = plugin.fetch(desc, tmp_path / ".tmp-gd1", [], [])
+
+    assert result.success is False
+    assert result.retriable is True
