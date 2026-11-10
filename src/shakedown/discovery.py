@@ -332,26 +332,40 @@ def stream_items(
     signal (§spec:prune-safety), so an item whose lookup fails is never read as gone.
 
     ``look_up`` decides per listed item whether to look it up (default: all) — the
-    incremental fast path skips unchanged items, single-item operations pick theirs.
+    incremental fast path skips unchanged items.
+    """
+    listing = list(plugin.list_items(collection))
+    enumerated.update(row.identifier for row in listing)
+    yield from describe_rows(
+        plugin, [row for row in listing if look_up is None or look_up(row)], collection, budget
+    )
+
+
+def describe_rows(
+    plugin: SourcePlugin,
+    rows: Sequence[ListedItem],
+    collection: CollectionConfig,
+    budget: SourceBudget,
+) -> Iterator[ItemDescriptor | LookupFailure]:
+    """Look up the given items in parallel across the shared budget, yielding each
+    description (or lookup failure) as it resolves. No listing: a single-show run
+    passes just the shows it acts on (§spec:single-show-runs).
 
     Lookups are submitted only as the consumer takes results, a few ahead of it, so a
     show's details live from its lookup until the consumer has handled them — never
     for the whole listing. Memory stays flat however large the collection.
     """
-    listing = list(plugin.list_items(collection))
-    enumerated.update(row.identifier for row in listing)
-    todo = [row for row in listing if look_up is None or look_up(row)]
-    if not todo:
+    if not rows:
         return
-    workers = min(budget.size, len(todo))
+    workers = min(budget.size, len(rows))
     window = 2 * workers
-    rows = iter(todo)
+    remaining = iter(rows)
     pending: set[Future[ItemDescriptor | LookupFailure]] = set()
     with ThreadPoolExecutor(max_workers=workers) as pool:
 
         def top_up() -> None:
             while len(pending) < window:
-                row = next(rows, None)
+                row = next(remaining, None)
                 if row is None:
                     return
                 pending.add(pool.submit(look_up_one, plugin, row, budget))
