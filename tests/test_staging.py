@@ -304,3 +304,32 @@ def test_restage_refuses_manifest_names_that_leave_the_library(tmp_path: Path) -
 
     assert victim.read_bytes() == b"precious"
     assert victim.stat().st_ino != (tmp_path / "deep" / "victim").stat().st_ino
+
+
+def test_prune_removes_safe_links_when_a_recorded_name_is_unsafe(tmp_path: Path) -> None:
+    """An unsafe recorded file name is skipped; the show's other links are still removed."""
+    archive = tmp_path / "archive"
+    library = tmp_path / "library"
+    config = make_config(archive, library, prune_disappeared=True)
+    FakePlugin.items["a"] = FakeItem(
+        identifier="a", files=[FakeFile(name="x.flac", content=b"a")]
+    )
+    assert run_sync(config) == 0
+    staged = library / "fake-src" / "coll1" / "a" / "x.flac"
+    assert staged.is_file()
+
+    from shakedown.reconcile import run_reconcile
+
+    FakePlugin.items["a"].files = [
+        FakeFile(name="x.flac", content=b"a"),
+        FakeFile(name="../../../../victim", content=b"evil"),
+    ]
+    assert run_reconcile(config) == 0
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"precious")
+
+    del FakePlugin.items["a"]
+    run_sync(config)  # the show disappears and is pruned
+
+    assert not staged.exists()
+    assert victim.read_bytes() == b"precious"

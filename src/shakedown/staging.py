@@ -242,11 +242,17 @@ def unstage_item(
         staging_dir = staging_dir_for(
             config, collection, source_name, item.source_metadata, item.archive_path
         )
-        targets = [_library_file(staging_dir, mf.name) for mf in item.recorded_manifest.files]
     except UnsafeLibraryPathError as e:
         log.warning("not unstaging %s: %s", item.identifier, e)
         return
-    for dst in targets:
+    for mf in item.recorded_manifest.files:
+        # Skip only the unsafe name: the show's other links must still go, or a pruned
+        # show stays browsable in the library after its archive copy is deleted.
+        try:
+            dst = _library_file(staging_dir, mf.name)
+        except UnsafeLibraryPathError as e:
+            log.warning("not unstaging %s/%s: %s", item.identifier, mf.name, e)
+            continue
         dst.unlink(missing_ok=True)
     # Drop the metadata.json sidecar link too, so the staging dir can go empty. Done
     # unconditionally (missing_ok) — idempotent, and it clears a stale link even if the
