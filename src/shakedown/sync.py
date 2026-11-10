@@ -191,8 +191,6 @@ class CollectionSyncStats:
     # Items fetched and staged this run, for the sync.complete batch payload
     # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
     staged: list[dict[str, str]] = field(default_factory=list)
-    # Identifiers whose fetch failed this run; their temp dirs are kept for resume.
-    fetch_failed: set[str] = field(default_factory=set)
 
 
 def run_sync(
@@ -647,7 +645,9 @@ def _sync_collection_phases(
     )
     _log_pipeline_plan(source.name, collection.name, stats, deferred, disappeared)
     _sweep_abandoned_tmp_dirs(
-        config.archive_root / source.name / collection.name, keep=stats.fetch_failed
+        config.archive_root / source.name / collection.name,
+        enumerated=enumerated_identifiers,
+        settled={_planned_identifier(p) for p in deferred},
     )
 
     # Re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
@@ -1144,7 +1144,6 @@ def _process_fetch_result(
 
     if not outcome.success:
         stats.failed += 1
-        stats.fetch_failed.add(desc.identifier)
         stats.errors.append(f"{desc.identifier}: {outcome.error}")
         _record_failed(items, source.name, collection, desc, outcome.error)
         return
@@ -1484,15 +1483,25 @@ _STALE_PREFIX = ".stale-"
 _TMP_PREFIX = ".tmp-"
 
 
-def _sweep_abandoned_tmp_dirs(archive_root: Path, *, keep: set[str]) -> None:
-    """Remove temp dirs nothing will resume. Run only after a complete enumeration:
-    a show fetched this run left none, so every leftover belongs to a show that is
-    unchanged, unavailable, or gone upstream — except those that failed this run,
-    which are kept so the next run fetches only their missing files."""
+def _planned_identifier(planned: PlannedItem) -> str:
+    if planned.descriptor is not None:
+        return planned.descriptor.identifier
+    assert planned.existing is not None  # signal-skipped items carry the DB row
+    return planned.existing.identifier
+
+
+def _sweep_abandoned_tmp_dirs(
+    archive_root: Path, *, enumerated: set[str], settled: set[str]
+) -> None:
+    """Remove temp dirs nothing will resume: those of shows gone upstream, or settled
+    this run as unchanged or unavailable. Run only after a complete enumeration. A
+    show fetched this run left none; a show whose fetch or metadata lookup failed
+    keeps its temp dir so the next run fetches only its missing files."""
     if not archive_root.is_dir():
         return
     for tmp_dir in archive_root.glob(f"{_TMP_PREFIX}*"):
-        if tmp_dir.name[len(_TMP_PREFIX):] not in keep and tmp_dir.is_dir():
+        identifier = tmp_dir.name[len(_TMP_PREFIX):]
+        if (identifier not in enumerated or identifier in settled) and tmp_dir.is_dir():
             shutil.rmtree(tmp_dir)
 
 

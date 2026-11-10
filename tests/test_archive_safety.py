@@ -447,3 +447,29 @@ def test_download_is_recorded_and_linked_before_enumeration_finishes(
     run_sync(config)
 
     assert observed == [ItemStatus.COMPLETE, True]
+
+
+def test_temp_dir_kept_for_show_whose_lookup_failed(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A show still listed upstream whose metadata lookup failed this run keeps its
+    partial downloads for the next run."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed("gd-a")
+    _seed("gd-b")
+    coll = archive / "fake-src" / "coll1"
+    coll.mkdir(parents=True)
+    (coll / ".tmp-gd-b").mkdir()
+    (coll / ".tmp-gd-b" / "gd-b.flac").write_bytes(b"partial")
+    real_describe = FakePlugin.describe_item
+
+    def flaky(self, identifier, collection):
+        return None if identifier == "gd-b" else real_describe(self, identifier, collection)
+
+    monkeypatch.setattr(FakePlugin, "describe_item", flaky)
+
+    assert run_sync(config) == 0
+
+    assert (coll / ".tmp-gd-b" / "gd-b.flac").is_file()
+
