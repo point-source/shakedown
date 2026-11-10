@@ -308,6 +308,15 @@ bearing invariants:
   is never pruned — enumeration, not description, is the prune signal
   (§spec:prune-safety).
 
+**Memory stays flat as a collection grows.** A show's details (metadata,
+manifest) are held only while that show is handled, never for the whole
+listing: per-item lookups run only a few ahead of the consumer, the
+listing pauses while a few shows already wait for a download, and the
+pre-run snapshot of recorded items leaves out their source metadata.
+Overlap is kept — downloads still begin while discovery is in progress —
+but discovery never races ahead of downloads, so a first sync of a large
+collection fits a small NAS.
+
 **Tradeoff.** Run counters accumulate from concurrent producers
 (discovery) and consumers (fetch), so per-run counts must be exact under
 concurrency. The invariant is what matters (counts are exact), not the

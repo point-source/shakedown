@@ -13,8 +13,8 @@ import queue
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -118,6 +118,43 @@ def _describe_one(
         return plugin.describe_item(identifier, collection)
 
 
+def _describe_paced[K](
+    plugin: SourcePlugin,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+    keyed_ids: Iterable[tuple[str, K]],
+    workers: int,
+) -> Iterator[tuple[ItemDescriptor | None, K]]:
+    """Resolve each (identifier, key) to its descriptor across the shared budget,
+    yielding (descriptor, key) as each resolves.
+
+    Lookups are submitted only as the consumer takes results, a few ahead of it, so a
+    show's details live from its lookup until the consumer has handled them — never
+    for the whole listing. Memory stays flat however large the collection.
+    """
+    window = 2 * workers
+    todo = iter(keyed_ids)
+    pending: dict[Future[ItemDescriptor | None], K] = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def top_up() -> None:
+            while len(pending) < window:
+                nxt = next(todo, None)
+                if nxt is None:
+                    return
+                identifier, key = nxt
+                fut = pool.submit(_describe_one, plugin, identifier, collection, budget)
+                pending[fut] = key
+
+        top_up()
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in done:
+                key = pending.pop(fut)
+                yield fut.result(), key
+                top_up()
+
+
 def _stream_descriptors(
     plugin: SourcePlugin,
     collection: CollectionConfig,
@@ -152,15 +189,11 @@ def _stream_descriptors(
     enumerated.update(ids)
     if not ids:
         return
-    with ThreadPoolExecutor(max_workers=min(budget.size, len(ids))) as pool:
-        futures = [
-            pool.submit(_describe_one, plugin, identifier, collection, budget)
-            for identifier in ids
-        ]
-        for fut in as_completed(futures):
-            desc = fut.result()
-            if desc is not None:
-                yield desc
+    for desc, _ in _describe_paced(
+        plugin, collection, budget, ((i, None) for i in ids), min(budget.size, len(ids))
+    ):
+        if desc is not None:
+            yield desc
 
 
 def _discover_descriptors(
@@ -622,9 +655,11 @@ def _sync_collection_phases(
     # (which recorded items were not seen this run?). A fetch upserts rows during the
     # run, but the disappeared decision is computed against this pre-run snapshot, so a
     # freshly fetched item is never mistaken for a vanished one.
+    # The snapshot leaves out each item's source metadata (planning never reads it);
+    # anything that writes or stages an item loads the full row first.
     by_identifier = {
         item.identifier: item
-        for item in items.list_for_collection(source.name, collection.name)
+        for item in items.list_for_planning(source.name, collection.name)
     }
 
     # Phases 1-4, pipelined: discover -> classify -> fetch + stage, overlapping downloads
@@ -685,12 +720,15 @@ def _sync_collection_phases(
             and p.existing is not None
             and p.existing.recorded_manifest is not None
         ):
-            if p.existing.status != ItemStatus.COMPLETE:
+            existing = items.get(source.name, collection.name, p.existing.identifier)
+            if existing is None or existing.recorded_manifest is None:
+                continue
+            if existing.status != ItemStatus.COMPLETE:
                 # Back upstream with the files we already hold (e.g. after an empty
                 # answer or a lifted restriction): the archive copy is complete again.
-                _record_back_to_complete(items, p.existing)
+                _record_back_to_complete(items, existing)
             stage_result = _stage_or_fail(
-                config, collection, source.name, p.existing, p.existing.recorded_manifest,
+                config, collection, source.name, existing, existing.recorded_manifest,
                 stats, staged_paths,
             )
             if stage_result is not None:
@@ -703,7 +741,9 @@ def _sync_collection_phases(
                 _record_unavailable(items, source.name, collection.name, p.descriptor)
         for p in disappeared:
             assert p.existing is not None
-            _record_disappeared(items, config, source.name, collection, p.existing)
+            existing = items.get(source.name, collection.name, p.existing.identifier)
+            if existing is not None:
+                _record_disappeared(items, config, source.name, collection, existing)
 
     # Phase 5: notify. Fire before recording so any delivery failure is captured
     # in the run's errors (visible in `status`) but never aborts the sync.
@@ -806,6 +846,9 @@ def _pipelined_discover_and_fetch(
                 )
                 fetch_futures[fut] = planned
                 fut.add_done_callback(finished.put)
+            elif planned.action == PlanAction.UNCHANGED:
+                # Re-staging needs only the record: drop the listed details now.
+                deferred.append(PlannedItem(None, planned.existing, PlanAction.UNCHANGED))
             else:
                 deferred.append(planned)
 
@@ -830,7 +873,12 @@ def _pipelined_discover_and_fetch(
             )
 
         descriptors = iter(descriptor_stream)
+        # Downloads take far longer than listing: take the next show only while few
+        # wait for a download, so listed shows never pile up in memory.
+        backlog = 2 * config.max_concurrent_downloads
         while True:
+            while len(fetch_futures) >= backlog:
+                process(finished.get())
             try:
                 # Descriptors stream in as each resolves; dispatch classifies and
                 # fetches each immediately, so downloads overlap the enumeration.
@@ -1010,15 +1058,11 @@ def _stream_descriptors_incremental(
             to_describe.append((identifier, signal))
     if not to_describe:
         return
-    with ThreadPoolExecutor(max_workers=min(budget.size, len(to_describe))) as pool:
-        futures = {
-            pool.submit(_describe_one, plugin, identifier, collection, budget): signal
-            for identifier, signal in to_describe
-        }
-        for fut in as_completed(futures):
-            desc = fut.result()
-            if desc is not None:
-                yield replace(desc, change_signal=futures[fut])
+    for desc, signal in _describe_paced(
+        plugin, collection, budget, to_describe, min(budget.size, len(to_describe))
+    ):
+        if desc is not None:
+            yield replace(desc, change_signal=signal)
 
 
 def _disappeared_plan(

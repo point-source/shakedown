@@ -124,6 +124,22 @@ class ItemRepo:
         for row in cur:
             yield _row_to_item(row)
 
+    def list_for_planning(self, source: str, collection: str) -> Iterator[Item]:
+        """The collection's items without their source metadata, which planning never
+        reads and which dominates memory on a large collection. Never upsert one of
+        these: `get()` the full item first."""
+        cur = self.conn.execute(
+            """
+            SELECT source_name, collection_name, identifier, status, archive_path,
+                   discovered_at, downloaded_at, last_verified_at, restriction_reason,
+                   NULL AS source_metadata, recorded_manifest, change_signal
+            FROM items WHERE source_name=? AND collection_name=? ORDER BY identifier
+            """,
+            (source, collection),
+        )
+        for row in cur:
+            yield _row_to_item(row)
+
     def count_by_status(self, source: str, collection: str) -> dict[ItemStatus, int]:
         cur = self.conn.execute(
             """
