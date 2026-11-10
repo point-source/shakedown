@@ -1468,7 +1468,7 @@ def test_incremental_skips_metadata_fetch_when_signal_unchanged(
     item = _seed_item("gd1977-05-08")
     item.change_signal = "sig-1"
 
-    # First run: item is NEW → fetched, and describe_item resolved it once.
+    # First run: item is NEW → fetched, and looked up once.
     assert run_sync(config) == 0
     assert FakePlugin.lookups("gd1977-05-08") == 1
     assert FakePlugin.fetch_count["gd1977-05-08"] == 1
@@ -1484,7 +1484,7 @@ def test_incremental_skips_metadata_fetch_when_signal_unchanged(
 
 
 def test_incremental_changed_signal_refetches(tmp_roots: tuple[Path, Path]) -> None:
-    """A changed signal falls through to describe_item and the full manifest
+    """A changed signal falls through to a lookup and the full manifest
     comparison, which refetches when the manifest differs."""
     archive, library = tmp_roots
     config = make_config(archive, library, incremental_discovery=True)
