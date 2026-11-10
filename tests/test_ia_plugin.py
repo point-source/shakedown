@@ -1,7 +1,7 @@
-"""IA plugin discover/fetch/verify against a fake archive.org below urllib3.
+"""IA plugin list/lookup/fetch/verify against a fake archive.org below urllib3.
 
-The pure helpers (_build_manifest, _detect_restriction, _file_matches_filters)
-are spot-checked from a different angle: end-to-end via the plugin facade.
+Lookups run through the core's envelope (shakedown.discovery), so these tests also
+prove the plugin's errors reach it intact: status, Retry-After, timeouts.
 """
 from __future__ import annotations
 
@@ -12,10 +12,21 @@ from pathlib import Path
 import pytest
 
 from shakedown.config import CollectionConfig, SourceConfig
+from shakedown.discovery import (
+    LOOKUP_ATTEMPTS,
+    LOOKUP_TIMEOUT,
+    ItemDescriptor,
+    LookupFailure,
+    SourceBudget,
+    look_up_one,
+)
+from shakedown.plugins.base import ListedItem
 from shakedown.plugins.ia.plugin import IAPlugin
 from tests.fake_archive import FakeArchive, Reply, fake_archive
 
 SHOW = {"title": "Show", "date": "1977-05-08"}
+MD5_A = "a" * 32
+MD5_B = "b" * 32
 
 
 @pytest.fixture()
@@ -36,45 +47,68 @@ def _make_plugin() -> IAPlugin:
 
 def _flac_item(archive: FakeArchive, identifier: str, metadata: dict | None = None) -> None:
     archive.item(
-        identifier, [{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}], metadata or SHOW
+        identifier, [{"name": "x.flac", "size": "1", "md5": MD5_A, "format": "Flac"}], metadata or SHOW
     )
 
 
-def test_discover_yields_descriptors_with_manifests(archive) -> None:
+def _look_up(plugin: IAPlugin, identifier: str, coll: CollectionConfig, signal: str | None = None):
+    """The core's lookup of one listed item, as sync runs it."""
+    return look_up_one(plugin, ListedItem(identifier, signal), coll, SourceBudget(4))
+
+
+def test_lookup_describes_the_item_with_its_selected_manifest(archive) -> None:
     plugin = _make_plugin()
-    archive.search_results({"identifier": "gd1977-05-08"})
     archive.item(
         "gd1977-05-08",
         [
-            {"name": "d1t01.flac", "size": "1000", "md5": "aaa", "format": "Flac"},
-            {"name": "d1t01_64kb.mp3", "size": "100", "md5": "bbb", "format": "VBR MP3"},
+            {"name": "d1t01.flac", "size": "1000", "md5": MD5_A, "format": "Flac"},
+            {"name": "d1t01_64kb.mp3", "size": "100", "md5": MD5_B, "format": "VBR MP3"},
         ],
         SHOW,
     )
 
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
-    descriptors = list(plugin.discover(coll))
-    assert len(descriptors) == 1
-    desc = descriptors[0]
+    desc = _look_up(plugin, "gd1977-05-08", coll)
+    assert isinstance(desc, ItemDescriptor)
     assert desc.identifier == "gd1977-05-08"
     assert [f.name for f in desc.manifest.files] == ["d1t01.flac"]
-    assert desc.manifest.files[0].md5 == "aaa"
+    assert desc.manifest.files[0].md5 == MD5_A
     assert desc.metadata["year"] == "1977"  # derived from date
     assert desc.is_restricted is False
 
 
-def test_discover_surfaces_combined_change_signal(archive) -> None:
+def test_lookup_item_passes_every_raw_file_through(archive) -> None:
+    """The plugin hands the core the whole listing, refused files and derivatives
+    included; choosing among them is the core's job."""
+    plugin = _make_plugin()
+    archive.item(
+        "gd-x",
+        [
+            {"name": "d1t01.shn", "size": "9", "md5": MD5_A, "format": "Shorten", "private": "true"},
+            {"name": "d1t01.mp3", "size": "3", "md5": MD5_B, "format": "VBR MP3",
+             "original": "d1t01.shn", "bitrate": "192"},
+            {"name": "gd-x_files.xml", "format": "Metadata"},
+        ],
+        SHOW,
+    )
+
+    answer = plugin.lookup_item("gd-x", LOOKUP_TIMEOUT)
+
+    shn, mp3, index = answer.files
+    assert (shn["name"], shn["refused"], shn["derived_from"]) == ("d1t01.shn", True, None)
+    assert (mp3["refused"], mp3["derived_from"], mp3["bitrate"]) == (False, "d1t01.shn", "192")
+    assert (index["size"], index["md5"]) == (None, None)
+    assert answer.restriction_reason is None
+
+
+def test_listing_surfaces_combined_change_signal(archive) -> None:
     plugin = _make_plugin()
     archive.search_results(
         {"identifier": "gd1977-05-08", "oai_updatedate": "2024-05-01T00:00:00Z", "item_size": 12345}
     )
-    archive.item(
-        "gd1977-05-08", [{"name": "d1t01.flac", "size": "1000", "md5": "aaa", "format": "Flac"}]
-    )
 
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
-    desc = next(plugin.discover(coll))
-    assert desc.change_signal == "2024-05-01T00:00:00Z|12345"
+    rows = list(plugin.list_items(CollectionConfig(name="dead", query="x")))
+    assert rows == [ListedItem("gd1977-05-08", "2024-05-01T00:00:00Z|12345")]
 
 
 def test_combine_change_signal_handles_list_and_missing() -> None:
@@ -91,19 +125,17 @@ def test_combine_change_signal_handles_list_and_missing() -> None:
     assert _combine_change_signal({"item_size": 42}) is None
 
 
-def test_enumerate_with_signals_requests_extra_fields(archive) -> None:
+def test_listing_requests_the_change_signal_fields(archive) -> None:
     plugin = _make_plugin()
     archive.search_results()
 
-    coll = CollectionConfig(name="dead", query="x")
-    list(plugin.enumerate_with_signals(coll))
+    list(plugin.list_items(CollectionConfig(name="dead", query="x")))
     (search,) = archive.calls_to("/services/search/v1/scrape")
     assert "fields=identifier%2Coai_updatedate%2Citem_size" in search.url
 
 
-def test_discover_marks_restricted_items(archive) -> None:
+def test_lookup_marks_restricted_items(archive) -> None:
     plugin = _make_plugin()
-    archive.search_results({"identifier": "gd-stream-only"})
     _flac_item(
         archive,
         "gd-stream-only",
@@ -115,32 +147,15 @@ def test_discover_marks_restricted_items(archive) -> None:
     )
 
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
-    desc = next(plugin.discover(coll))
+    desc = _look_up(plugin, "gd-stream-only", coll)
+    assert isinstance(desc, ItemDescriptor)
     assert desc.is_restricted is True
     assert "soundboard" in (desc.restriction_reason or "")
 
 
-def test_discover_skips_items_whose_metadata_fetch_raises(archive, monkeypatch) -> None:
-    from shakedown.plugins.ia import plugin as ia_plugin
-
-    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
-
-    plugin = _make_plugin()
-    archive.search_results({"identifier": "good-1"}, {"identifier": "bad-1"}, {"identifier": "good-2"})
-    _flac_item(archive, "good-1")
-    _flac_item(archive, "good-2")
-    # Retriable transient fault → retried up to the cap, then skipped.
-    archive.metadata("bad-1", ConnectionResetError("connection reset by peer"))
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
-    descriptors = list(plugin.discover(coll))
-    assert {d.identifier for d in descriptors} == {"good-1", "good-2"}
-
-
-def test_describe_item_retries_transient_fault_then_resolves(archive, monkeypatch) -> None:
-    from shakedown.plugins.ia import plugin as ia_plugin
-
+def test_lookup_retries_transient_fault_then_resolves(archive, monkeypatch) -> None:
     delays: list[float] = []
-    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
+    monkeypatch.setattr("shakedown.discovery._sleep", delays.append)
 
     plugin = _make_plugin()
     _flac_item(archive, "gd-transient")
@@ -148,47 +163,50 @@ def test_describe_item_retries_transient_fault_then_resolves(archive, monkeypatc
     archive.metadata("gd-transient", Reply(503), Reply(503), good)
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    desc = plugin.describe_item("gd-transient", coll)
-    assert desc is not None
-    assert desc.identifier == "gd-transient"
+    desc = _look_up(plugin, "gd-transient", coll)
+    assert isinstance(desc, ItemDescriptor)
     # two transient failures, third succeeds
     assert len(archive.calls_to("/metadata/gd-transient")) == 3
-    # Two backoff sleeps recorded (attempts 1 and 2 failed transiently).
-    assert delays == [ia_plugin._metadata_backoff_seconds(1), ia_plugin._metadata_backoff_seconds(2)]
+    assert delays == [1.0, 2.0]  # exponential backoff between attempts
+    assert archive.sleeps == []  # nothing below the core waited
 
 
-def test_describe_item_gives_up_after_max_attempts(archive, monkeypatch) -> None:
-    from shakedown.plugins.ia import plugin as ia_plugin
-
-    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
-
+def test_lookup_gives_up_after_bounded_attempts(archive) -> None:
     plugin = _make_plugin()
     archive.metadata("gd-down", Reply(503, b"still down"))
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    assert plugin.describe_item("gd-down", coll) is None
-    assert len(archive.calls_to("/metadata/gd-down")) == ia_plugin._MAX_METADATA_ATTEMPTS
+    result = _look_up(plugin, "gd-down", coll)
+    assert result == LookupFailure("gd-down", "lookup failed after 3 attempts: HTTP 503")
+    assert len(archive.calls_to("/metadata/gd-down")) == LOOKUP_ATTEMPTS
 
 
-def test_describe_item_does_not_retry_non_retriable_fault(archive, monkeypatch) -> None:
-    from shakedown.plugins.ia import plugin as ia_plugin
-
-    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
-
+def test_unreadable_metadata_fails_at_once(archive) -> None:
     plugin = _make_plugin()
     archive.metadata("gd-bad", Reply(200, b"malformed metadata"))
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    assert plugin.describe_item("gd-bad", coll) is None
-    # non-retriable → exactly one attempt
+    result = _look_up(plugin, "gd-bad", coll)
+    assert isinstance(result, LookupFailure)
+    assert result.reason.startswith("lookup failed: ")
     assert len(archive.calls_to("/metadata/gd-bad")) == 1
 
 
-def test_describe_item_honors_retry_after_header(archive, monkeypatch) -> None:
-    from shakedown.plugins.ia import plugin as ia_plugin
+def test_nameless_file_entry_fails_at_once(archive) -> None:
+    plugin = _make_plugin()
+    archive.item("gd-x", [{"name": "a.flac", "md5": MD5_A}, {"size": "3", "md5": MD5_B}], SHOW)
+    coll = CollectionConfig(name="dead", query="x")
 
+    result = _look_up(plugin, "gd-x", coll)
+    assert result == LookupFailure(
+        "gd-x", "source sent a malformed file list: file entry 2 has no name"
+    )
+    assert len(archive.calls_to("/metadata/gd-x")) == 1
+
+
+def test_lookup_honors_retry_after_header(archive, monkeypatch) -> None:
     delays: list[float] = []
-    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
+    monkeypatch.setattr("shakedown.discovery._sleep", delays.append)
 
     plugin = _make_plugin()
     _flac_item(archive, "gd-429")
@@ -196,19 +214,15 @@ def test_describe_item_honors_retry_after_header(archive, monkeypatch) -> None:
     archive.metadata("gd-429", Reply(429, b"rate limited", {"Retry-After": "7"}), good)
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    desc = plugin.describe_item("gd-429", coll)
-    assert desc is not None
+    assert isinstance(_look_up(plugin, "gd-429", coll), ItemDescriptor)
     assert delays == [7.0]  # honored the Retry-After delta, not the backoff schedule
 
 
-def test_describe_item_clamps_hostile_retry_after(archive, monkeypatch) -> None:
-    """A describe worker holds a shared SourceBudget slot while it sleeps, so an
-    upstream-controlled Retry-After must be clamped to the backoff cap — a hostile
-    endpoint can't pin the slot for an attacker-chosen wait."""
-    from shakedown.plugins.ia import plugin as ia_plugin
-
+def test_lookup_clamps_hostile_retry_after(archive, monkeypatch) -> None:
+    """An upstream-controlled Retry-After is clamped to the backoff cap — a hostile
+    endpoint can't hold a worker for an attacker-chosen wait."""
     delays: list[float] = []
-    monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
+    monkeypatch.setattr("shakedown.discovery._sleep", delays.append)
 
     plugin = _make_plugin()
     _flac_item(archive, "gd-evil")
@@ -216,21 +230,20 @@ def test_describe_item_clamps_hostile_retry_after(archive, monkeypatch) -> None:
     archive.metadata("gd-evil", Reply(429, b"rate limited", {"Retry-After": "31536000"}), good)
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    desc = plugin.describe_item("gd-evil", coll)
-    assert desc is not None
-    assert delays == [ia_plugin._METADATA_MAX_BACKOFF_SECONDS]  # clamped, not a year
+    assert isinstance(_look_up(plugin, "gd-evil", coll), ItemDescriptor)
+    assert delays == [30.0]  # clamped, not a year
 
 
-def test_describe_item_passes_bounded_timeout(archive) -> None:
-    from shakedown.plugins.ia import plugin as ia_plugin
-
+def test_lookup_passes_the_core_timeout(archive) -> None:
     plugin = _make_plugin()
     _flac_item(archive, "gd-timeout")
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
-    assert plugin.describe_item("gd-timeout", coll) is not None
+    assert isinstance(_look_up(plugin, "gd-timeout", coll), ItemDescriptor)
     (call,) = archive.calls_to("/metadata/gd-timeout")
-    assert (call.timeout.connect_timeout, call.timeout.read_timeout) == ia_plugin._METADATA_TIMEOUT
+    assert (call.timeout.connect_timeout, call.timeout.read_timeout) == (
+        LOOKUP_TIMEOUT, LOOKUP_TIMEOUT
+    )
 
 
 def _served_calls(archive: FakeArchive, identifier: str) -> list[str]:
@@ -252,8 +265,8 @@ def test_fetch_writes_files_directly_into_dest(archive, tmp_path: Path) -> None:
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd1977-05-08"
 
+    from shakedown.discovery import ItemDescriptor
     from shakedown.models import Manifest, ManifestFile
-    from shakedown.plugins.base import ItemDescriptor
 
     desc = ItemDescriptor(
         identifier="gd1977-05-08",
@@ -268,7 +281,7 @@ def test_fetch_writes_files_directly_into_dest(archive, tmp_path: Path) -> None:
         Reply(200, b"audio", {"Last-Modified": "Sun, 08 May 1977 23:00:00 GMT"}),
     )
 
-    result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, dest)
 
     assert result.success
     assert result.bytes_downloaded == 5
@@ -288,31 +301,12 @@ def test_fetch_quotes_file_names_in_the_url(archive, tmp_path: Path) -> None:
     served = {"disc 1/a#1.flac": b"first"}
     archive.file("gd-x", "disc 1/a#1.flac", Reply(200, b"first"))
 
-    result = plugin.fetch(_desc_for("gd-x", served), tmp_path / ".tmp-gd-x", [], [])
+    desc = _desc_for("gd-x", served)
+    result = plugin.fetch(desc.identifier, desc.manifest.files, tmp_path / ".tmp-gd-x")
 
     assert result.success is True
     (call,) = archive.calls_to("/download/gd-x/disc 1/a#1.flac")
     assert "/download/gd-x/disc%201/a%231.flac" in call.url
-
-
-def test_fetch_refuses_restricted_items_without_calling_download(archive, tmp_path: Path) -> None:
-    plugin = _make_plugin()
-    from shakedown.models import Manifest
-    from shakedown.plugins.base import ItemDescriptor
-
-    desc = ItemDescriptor(
-        identifier="gd-restricted",
-        manifest=Manifest(files=()),
-        metadata={},
-        is_restricted=True,
-        restriction_reason="soundboard request",
-    )
-
-    result = plugin.fetch(desc, tmp_path / "x", format_filters=[], exclude_filters=[])
-
-    assert result.success is False
-    assert "restricted" in (result.error or "")
-    assert archive.calls == []
 
 
 def test_fetch_returns_failure_when_download_raises(archive, tmp_path: Path) -> None:
@@ -321,8 +315,8 @@ def test_fetch_returns_failure_when_download_raises(archive, tmp_path: Path) -> 
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd-x"
 
+    from shakedown.discovery import ItemDescriptor
     from shakedown.models import Manifest, ManifestFile
-    from shakedown.plugins.base import ItemDescriptor
     desc = ItemDescriptor(
         identifier="gd-x",
         manifest=Manifest(files=(ManifestFile("real.flac", 8, "abc"),)),
@@ -330,7 +324,7 @@ def test_fetch_returns_failure_when_download_raises(archive, tmp_path: Path) -> 
     )
     archive.file("gd-x", "real.flac", ConnectionResetError("simulated network drop"))
 
-    result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, dest)
 
     assert result.success is False
     assert result.retriable is True
@@ -383,8 +377,8 @@ def test_verify_existence_only_does_not_hash(tmp_path: Path) -> None:
     archive_path.mkdir()
     (archive_path / "present.flac").write_bytes(b"whatever")
 
+    from shakedown.discovery import ItemDescriptor
     from shakedown.models import Manifest, ManifestFile
-    from shakedown.plugins.base import ItemDescriptor
     desc = ItemDescriptor(
         identifier="gd-x",
         manifest=Manifest(files=(
@@ -394,34 +388,18 @@ def test_verify_existence_only_does_not_hash(tmp_path: Path) -> None:
         metadata={},
     )
 
-    result = plugin.verify(desc, archive_path)
+    result = plugin.verify(desc.manifest.files, archive_path)
     assert result.ok is False  # missing.flac is missing
     assert result.missing_files == ["missing.flac"]
     # Note: present.flac's md5 is wrong but verify() must still consider it "present".
     # The point: verify() never hashes — that's verify --deep's job.
 
 
-def test_fetch_with_empty_manifest_fails_without_download(archive, tmp_path: Path) -> None:
-    """Zero files upstream is never a successful (empty) fetch: promoting it would
-    replace the archive copy with an empty folder."""
-    plugin = _make_plugin()
-    from shakedown.models import Manifest
-    from shakedown.plugins.base import ItemDescriptor
-
-    desc = ItemDescriptor(identifier="gd-dark", manifest=Manifest(files=()), metadata={})
-
-    result = plugin.fetch(desc, tmp_path / "x", format_filters=[], exclude_filters=[])
-
-    assert result.success is False
-    assert result.retriable is False
-    assert archive.calls == []
-
-
 def _desc_for(identifier: str, files: dict[str, bytes], *, md5s: dict[str, str] | None = None):
     import hashlib
 
+    from shakedown.discovery import ItemDescriptor
     from shakedown.models import Manifest, ManifestFile
-    from shakedown.plugins.base import ItemDescriptor
 
     md5s = md5s or {}
     return ItemDescriptor(
@@ -442,7 +420,7 @@ def test_fetch_rejects_download_whose_md5_does_not_match(archive, tmp_path: Path
     desc = _desc_for("gd-x", {"a.flac": b"audio"})
     _serve(archive, "gd-x", {"a.flac": b"AUDIO"})  # same size, corrupted bytes
 
-    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, dest)
 
     assert result.success is False
     assert result.retriable is True
@@ -456,7 +434,7 @@ def test_fetch_rejects_download_whose_size_does_not_match(archive, tmp_path: Pat
     desc = _desc_for("gd-x", {"a.flac": b"audio"})
     _serve(archive, "gd-x", {"a.flac": b"aud"})  # truncated
 
-    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, dest)
 
     assert result.success is False
     assert result.retriable is True
@@ -475,7 +453,7 @@ def test_fetch_downloads_only_files_not_already_verified(archive, tmp_path: Path
     (dest / "b.flac").write_bytes(b"sec")  # partial leftover
     _serve(archive, "gd-x", served)
 
-    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, dest)
 
     assert result.success is True
     assert _served_calls(archive, "gd-x") == ["b.flac", "c.flac"]
@@ -491,7 +469,7 @@ def test_fetch_writes_nested_names_beside_reused_leftovers(archive, tmp_path: Pa
     (dest / "disc1" / "a.flac").write_bytes(b"first")
     _serve(archive, "gd-x", served)
 
-    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, dest)
 
     assert result.success is True
     assert {n: (dest / n).read_bytes() for n in served} == served
@@ -505,7 +483,7 @@ def test_fetch_skips_download_when_every_file_is_already_verified(archive, tmp_p
     desc = _desc_for("gd-x", {"a.flac": b"first"})
     (dest / "a.flac").write_bytes(b"first")
 
-    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, dest)
 
     assert result.success is True
     assert archive.calls == []
@@ -521,8 +499,8 @@ def test_fetch_keeps_finished_files_when_download_raises_midway(archive, tmp_pat
     archive.file("gd-x", "a.flac", Reply(200, served["a.flac"]))
     archive.file("gd-x", "b.flac", TimeoutError("read timed out"), Reply(200, served["b.flac"]))
 
-    assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is False
-    assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is True
+    assert plugin.fetch(desc.identifier, desc.manifest.files, dest).success is False
+    assert plugin.fetch(desc.identifier, desc.manifest.files, dest).success is True
 
     assert _served_calls(archive, "gd-x") == ["a.flac", "b.flac", "b.flac"]
 
@@ -531,34 +509,35 @@ def test_files_finished_before_the_process_died_are_reused(archive, tmp_path: Pa
     """A run killed mid-show (container stopped) leaves finished files in the temp
     dir; the next run's fetch keeps them and downloads only the rest."""
     import shakedown.sync as sync_module
-    from shakedown.config import CollectionConfig
 
     monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
     plugin = _make_plugin()
     tmp_dir = tmp_path / ".tmp-gd-x"
     served = {"a.flac": b"first", "b.flac": b"second"}
     desc = _desc_for("gd-x", served)
-    collection = CollectionConfig(name="dead", query="q")
     archive.file("gd-x", "a.flac", Reply(200, served["a.flac"]))
     archive.file("gd-x", "b.flac", SystemExit("container stopped"), Reply(200, served["b.flac"]))
 
     with pytest.raises(SystemExit):
-        sync_module._fetch_with_retries(plugin, desc, tmp_dir, collection)
-    assert sync_module._fetch_with_retries(plugin, desc, tmp_dir, collection).success
+        sync_module._fetch_with_retries(plugin, desc, tmp_dir)
+    assert sync_module._fetch_with_retries(plugin, desc, tmp_dir).success
 
     assert _served_calls(archive, "gd-x") == ["a.flac", "b.flac", "b.flac"]
 
 
-def _stream_only_show(archive: FakeArchive) -> None:
+def test_stream_only_show_falls_back_through_the_core(archive) -> None:
     """Shaped like gd69-12-26.sbd.murphy.1821.sbeok.shnf: archive.org marks the
-    lossless originals `private` (downloads answer 403); the MP3s stay public."""
-    archive.search_results({"identifier": "gd69-12-26.sbd"})
+    lossless originals `private` (downloads answer 403); the MP3s stay public. The
+    core's selection mirrors the opted-in fallback (rules in tests/test_selection.py)."""
+    from shakedown.selection import FALLBACK_REASON
+
+    plugin = _make_plugin()
     archive.item(
         "gd69-12-26.sbd",
         [
-            {"name": "d1t01.shn", "size": "9", "md5": "s1", "format": "Shorten", "private": "true"},
-            {"name": "d1t01.mp3", "size": "3", "md5": "m1", "format": "VBR MP3"},
-            {"name": "info.txt", "size": "2", "md5": "t1", "format": "Text"},
+            {"name": "d1t01.shn", "size": "9", "md5": MD5_A, "format": "Shorten", "private": "true"},
+            {"name": "d1t01.mp3", "size": "3", "md5": MD5_B, "format": "VBR MP3"},
+            {"name": "info.txt", "size": "2", "md5": "c" * 32, "format": "Text"},
         ],
         {
             "date": "1969-12-26",
@@ -567,94 +546,11 @@ def _stream_only_show(archive: FakeArchive) -> None:
         },
     )
 
-
-def test_stream_only_show_is_unavailable_when_only_refused_files_are_wanted(archive) -> None:
-    from shakedown.plugins.ia.plugin import DOWNLOAD_REFUSED_REASON
-
-    plugin = _make_plugin()
-    _stream_only_show(archive)
-
-    coll = CollectionConfig(name="dead", query="x", format_filters=["shn"])
-    desc = next(plugin.discover(coll))
-    assert desc.is_restricted is True
-    assert desc.restriction_reason == DOWNLOAD_REFUSED_REASON
-
-
-def test_stream_only_show_still_mirrors_the_files_archive_org_serves(archive) -> None:
-    """The restriction never hides a file that downloads: an MP3 collection gets the
-    show's public MP3s."""
-    plugin = _make_plugin()
-    _stream_only_show(archive)
-
-    coll = CollectionConfig(name="dead", query="x", format_filters=["mp3"])
-    desc = next(plugin.discover(coll))
-    assert desc.is_restricted is False
-    assert [f.name for f in desc.manifest.files] == ["d1t01.mp3"]
-
-
-def test_refused_files_are_left_out_of_a_mixed_format_manifest(archive) -> None:
-    """With several accepted formats, the refused ones drop out and the rest mirror."""
-    plugin = _make_plugin()
-    archive.search_results({"identifier": "gd-x"})
-    archive.item(
-        "gd-x",
-        [
-            {"name": "d1t01.shn", "size": "9", "md5": "s1", "format": "Shorten", "private": "true"},
-            {"name": "d1t01.flac", "size": "8", "md5": "f1", "format": "Flac"},
-        ],
-        SHOW,
-    )
-
-    coll = CollectionConfig(name="dead", query="x", format_filters=["flac", "shn"])
-    desc = next(plugin.discover(coll))
-    assert desc.is_restricted is False
-    assert [f.name for f in desc.manifest.files] == ["d1t01.flac"]
-
-
-def test_refused_lossless_show_falls_back_to_the_opted_in_formats(archive) -> None:
-    from shakedown.plugins.ia.plugin import FALLBACK_REASON
-
-    plugin = _make_plugin()
-    _stream_only_show(archive)
-
     coll = CollectionConfig(
         name="dead", query="x", format_filters=["shn"], fallback_format_filters=["mp3"]
     )
-    desc = next(plugin.discover(coll))
+    desc = _look_up(plugin, "gd69-12-26.sbd", coll)
+    assert isinstance(desc, ItemDescriptor)
     assert desc.is_restricted is False
     assert [f.name for f in desc.manifest.files] == ["d1t01.mp3"]
     assert desc.restriction_reason == FALLBACK_REASON
-
-
-def test_fallback_is_unused_while_the_wanted_files_are_served(archive) -> None:
-    plugin = _make_plugin()
-    archive.search_results({"identifier": "gd-x"})
-    archive.item(
-        "gd-x",
-        [
-            {"name": "d1t01.shn", "size": "9", "md5": "s1", "format": "Shorten"},
-            {"name": "d1t01.mp3", "size": "3", "md5": "m1", "format": "VBR MP3"},
-        ],
-        SHOW,
-    )
-
-    coll = CollectionConfig(
-        name="dead", query="x", format_filters=["shn"], fallback_format_filters=["mp3"]
-    )
-    desc = next(plugin.discover(coll))
-    assert [f.name for f in desc.manifest.files] == ["d1t01.shn"]
-    assert desc.restriction_reason is None
-
-
-def test_refused_show_without_a_served_fallback_stays_unavailable(archive) -> None:
-    from shakedown.plugins.ia.plugin import DOWNLOAD_REFUSED_REASON
-
-    plugin = _make_plugin()
-    _stream_only_show(archive)
-
-    coll = CollectionConfig(
-        name="dead", query="x", format_filters=["shn"], fallback_format_filters=["flac"]
-    )
-    desc = next(plugin.discover(coll))
-    assert desc.is_restricted is True
-    assert desc.restriction_reason == DOWNLOAD_REFUSED_REASON

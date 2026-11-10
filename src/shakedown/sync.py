@@ -12,8 +12,7 @@ import os
 import queue
 import shutil
 import time
-from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -22,7 +21,13 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
-from shakedown.discovery import SourceBudget, source_budgets
+from shakedown.discovery import (
+    ItemDescriptor,
+    LookupFailure,
+    SourceBudget,
+    source_budgets,
+    stream_items,
+)
 from shakedown.filesystem import is_within
 from shakedown.lock import run_exclusive
 from shakedown.models import (
@@ -42,7 +47,7 @@ from shakedown.notify import (
 )
 from shakedown.placement import LibraryPlacement, PlacementReport, log_separations
 from shakedown.plugins import registry
-from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
+from shakedown.plugins.base import FetchResult, ListedItem, SourcePlugin
 from shakedown.staging import (
     METADATA_SIDECAR,
     manifest_reserves_sidecar_name,
@@ -52,113 +57,6 @@ from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
-
-
-def _describe_one(
-    plugin: SourcePlugin,
-    identifier: str,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-) -> ItemDescriptor | None:
-    with budget.slot():
-        return plugin.describe_item(identifier, collection)
-
-
-def _describe_paced[K](
-    plugin: SourcePlugin,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-    keyed_ids: Iterable[tuple[str, K]],
-    workers: int,
-) -> Iterator[tuple[ItemDescriptor | None, K]]:
-    """Resolve each (identifier, key) to its descriptor across the shared budget,
-    yielding (descriptor, key) as each resolves.
-
-    Lookups are submitted only as the consumer takes results, a few ahead of it, so a
-    show's details live from its lookup until the consumer has handled them — never
-    for the whole listing. Memory stays flat however large the collection.
-    """
-    window = 2 * workers
-    todo = iter(keyed_ids)
-    pending: dict[Future[ItemDescriptor | None], K] = {}
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-
-        def top_up() -> None:
-            while len(pending) < window:
-                nxt = next(todo, None)
-                if nxt is None:
-                    return
-                identifier, key = nxt
-                fut = pool.submit(_describe_one, plugin, identifier, collection, budget)
-                pending[fut] = key
-
-        top_up()
-        while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for fut in done:
-                key = pending.pop(fut)
-                yield fut.result(), key
-                top_up()
-
-
-def _stream_descriptors(
-    plugin: SourcePlugin,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-    enumerated: set[str],
-) -> Iterator[ItemDescriptor]:
-    """Yield item descriptors as they resolve, fanning per-item metadata resolution
-    across the shared per-source budget (SPEC §spec:discovery-pipeline).
-
-    Sources exposing `enumerate_items()` get concurrent `describe_item()` resolution
-    bounded by the source budget, yielded by `_describe_paced` so a consumer can act on
-    each item the moment it resolves (the overlap lever). Sources without the
-    enumerate/describe split fall back to the serial `discover()` stream. A transient
-    per-item fault yields None from `describe_item` and is dropped, exactly as the serial
-    path skipped a failed metadata fetch. Materializing the id list or a `describe_item`
-    call raising propagates to the consumer, which treats it as an enumeration failure.
-
-    Every identifier the enumeration returned is added to ``enumerated`` — including one
-    whose `describe_item` transiently failed and was dropped. That set, not the resolved
-    descriptors, is the prune signal (SPEC §spec:prune-safety): an enumerated-but-unresolved
-    item is still present in the collection, so it must never be read as `disappeared`. In
-    the `discover()` fallback there is no enumerate/describe split, so ``enumerated``
-    collects the resolved identifiers instead.
-    """
-    identifiers = plugin.enumerate_items(collection)
-    if identifiers is None:
-        for desc in plugin.discover(collection):
-            enumerated.add(desc.identifier)
-            yield desc
-        return
-    ids = list(identifiers)  # materialize the enumeration (may raise -> stale)
-    enumerated.update(ids)
-    if not ids:
-        return
-    for desc, _ in _describe_paced(
-        plugin, collection, budget, ((i, None) for i in ids), min(budget.size, len(ids))
-    ):
-        if desc is not None:
-            yield desc
-
-
-def _discover_descriptors(
-    plugin: SourcePlugin,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-) -> tuple[list[ItemDescriptor], set[str]]:
-    """Materialize the full enumeration for the dry-run path (Discover + Plan, no fetch).
-    The real run streams the same descriptors (`_stream_descriptors`) into the fetch
-    pipeline instead of buffering them here.
-
-    Returns the resolved descriptors plus the set of *enumerated* identifiers — the prune
-    signal. The latter is a superset of the described identifiers: an item enumeration
-    listed but whose description failed is present for prune purposes even though it
-    resolved to no descriptor (SPEC §spec:prune-safety).
-    """
-    enumerated: set[str] = set()
-    descriptors = list(_stream_descriptors(plugin, collection, budget, enumerated))
-    return descriptors, enumerated
 
 
 # Recorded as an item's restriction_reason when the source lists no files for it.
@@ -400,11 +298,21 @@ def _refresh_collection(
         log.info("[%s/%s] metadata refresh: no mirrored items", source.name, collection.name)
         return 0
 
-    enumerated: set[str] = set()
+    mirrored_ids = {it.identifier for it in mirrored}
     fresh: dict[str, ItemDescriptor] = {}
+    failed = 0
     try:
-        for desc in _stream_descriptors(plugin, collection, budget, enumerated):
-            fresh[desc.identifier] = desc
+        for found in stream_items(
+            plugin, collection, budget, set(),
+            look_up=lambda row: row.identifier in mirrored_ids,
+        ):
+            if isinstance(found, LookupFailure):
+                # The item keeps its sidecar and recorded metadata; retried next refresh.
+                failed += 1
+                log.warning("[%s/%s] %s: %s", source.name, collection.name,
+                            found.identifier, found.reason)
+            else:
+                fresh[found.identifier] = found
     except Exception as e:
         log.warning(
             "[%s/%s] metadata refresh enumeration failed: %s", source.name, collection.name, e
@@ -415,7 +323,7 @@ def _refresh_collection(
     for item in mirrored:
         desc = fresh.get(item.identifier)
         if desc is None:
-            continue  # no longer enumerated upstream; nothing to re-resolve from
+            continue  # not listed upstream, or its lookup failed (logged above)
         assert item.archive_path is not None and item.recorded_manifest is not None
         item.source_metadata = desc.metadata
         # Rewrite the DB record always, but skip the sidecar when a media file claims its
@@ -587,10 +495,14 @@ def _sync_collection_phases(
         # Dry-run performs Discover and Plan only (SPEC §spec:sync-workflow): no fetch,
         # no overlap to exploit, no writes. Materialize the enumeration and report the
         # plan without touching disk or DB.
+        enumerated_identifiers: set[str] = set()
+        descriptors: list[ItemDescriptor] = []
         try:
-            descriptors, enumerated_identifiers = _discover_descriptors(
-                plugin, collection, budget
-            )
+            for found in stream_items(plugin, collection, budget, enumerated_identifiers):
+                if isinstance(found, LookupFailure):
+                    _note_lookup_failure(stats, source.name, collection.name, found)
+                else:
+                    descriptors.append(found)
         except Exception as e:
             log.warning("[%s/%s] source enumeration failed: %s", source.name, collection.name, e)
             stats.stale = True
@@ -779,10 +691,10 @@ def _pipelined_discover_and_fetch(
     - ``enumerated`` — every identifier the enumeration returned; the input to the
       prune/`disappeared` barrier, which the caller runs only when ``enum_error`` is None.
       Prune eligibility keys on absence from *this* set, never on absence from the
-      described set: an item enumeration listed but whose `describe_item` failed this run
+      described set: an item enumeration listed but whose lookup failed this run
       is still present and must never be pruned or flagged `disappeared`
-      (SPEC §spec:prune-safety). Such an item is left entirely untouched — not in
-      ``deferred``, not fetched — so its DB row is reconsidered unchanged next run.
+      (SPEC §spec:prune-safety). Such an item is listed failed and never fetched or
+      deferred; a recorded item keeps its DB row unchanged for the next run.
     - ``deferred`` — the UNCHANGED / UNAVAILABLE planned items.
     - ``enum_error`` — the exception if enumeration faulted partway (the collection goes
       stale and nothing is pruned), else None for a complete, successful enumeration.
@@ -842,12 +754,20 @@ def _pipelined_discover_and_fetch(
             # caller's idempotent re-stage pass (§spec:incremental-discovery).
             deferred.append(PlannedItem(None, existing, PlanAction.UNCHANGED))
 
-        descriptor_stream = (
-            _stream_descriptors_incremental(
-                plugin, collection, budget, by_identifier, on_skip, enumerated
-            )
-            if collection.incremental_discovery
-            else _stream_descriptors(plugin, collection, budget, enumerated)
+        def look_up(row: ListedItem) -> bool:
+            # Incremental fast path (§spec:incremental-discovery): an item whose stored
+            # change signal still matches is UNCHANGED without a lookup.
+            existing = by_identifier.get(row.identifier)
+            if collection.incremental_discovery and _signal_unchanged(
+                row.change_signal, existing
+            ):
+                assert existing is not None  # _signal_unchanged guarantees it
+                on_skip(row.identifier, existing)
+                return False
+            return True
+
+        descriptor_stream = stream_items(
+            plugin, collection, budget, enumerated, look_up=look_up
         )
         def process(fut: Future[_FetchOutcome]) -> None:
             _process_fetch_result(
@@ -867,7 +787,10 @@ def _pipelined_discover_and_fetch(
                 desc = next(descriptors, None)
                 if desc is None:
                     break
-                dispatch(desc)
+                if isinstance(desc, LookupFailure):
+                    _record_lookup_failure(items, source.name, collection.name, desc, stats)
+                else:
+                    dispatch(desc)
             except Exception as e:  # any enumeration fault marks the collection stale
                 enum_error = e
                 break
@@ -1001,48 +924,6 @@ def _signal_unchanged(signal: str | None, existing: Item | None) -> bool:
     )
 
 
-def _stream_descriptors_incremental(
-    plugin: SourcePlugin,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-    by_identifier: dict[str, Item],
-    on_skip: Callable[[str, Item], None],
-    enumerated: set[str],
-) -> Iterator[ItemDescriptor]:
-    """Incremental-discovery variant of _stream_descriptors (§spec:incremental-discovery).
-
-    Requests the cheap per-item change signal from the source's search. An item whose
-    stored signal matches (and whose files are present) is reported UNCHANGED via
-    on_skip WITHOUT the per-item metadata fetch — describe_item()/get_item() is never
-    called for it. Every other item (signal changed, no stored signal, or vanished
-    files) falls through to describe_item() and the full manifest comparison, exactly
-    as today; the fresh signal is attached to its descriptor so a successful fetch
-    persists it. Falls back to the non-incremental stream when the plugin exposes no
-    signal (enumerate_with_signals returns None).
-    """
-    signals = plugin.enumerate_with_signals(collection)
-    if signals is None:
-        yield from _stream_descriptors(plugin, collection, budget, enumerated)
-        return
-    pairs = list(signals)  # materialize the enumeration (may raise -> stale)
-    enumerated.update(identifier for identifier, _ in pairs)
-    to_describe: list[tuple[str, str | None]] = []
-    for identifier, signal in pairs:
-        existing = by_identifier.get(identifier)
-        if _signal_unchanged(signal, existing):
-            assert existing is not None  # _signal_unchanged guarantees it
-            on_skip(identifier, existing)
-        else:
-            to_describe.append((identifier, signal))
-    if not to_describe:
-        return
-    for desc, signal in _describe_paced(
-        plugin, collection, budget, to_describe, min(budget.size, len(to_describe))
-    ):
-        if desc is not None:
-            yield replace(desc, change_signal=signal)
-
-
 def _disappeared_plan(
     by_identifier: dict[str, Item],
     enumerated_identifiers: set[str],
@@ -1055,7 +936,7 @@ def _disappeared_plan(
 
     Eligibility keys on absence from ``enumerated_identifiers`` — every identifier the
     source *listed* — never on absence from the successfully-*described* set. An item the
-    enumeration returned counts as present even when its `describe_item` failed this run,
+    enumeration returned counts as present even when its lookup failed this run,
     so a transient metadata fault can never masquerade as a takedown (SPEC §spec:prune-safety).
 
     Already-terminal states are skipped so a still-absent item isn't reprocessed every
@@ -1250,7 +1131,6 @@ def _fetch_with_retries(
     plugin: SourcePlugin,
     desc: ItemDescriptor,
     tmp_dir: Path,
-    collection: CollectionConfig,
     *,
     max_attempts: int = _MAX_FETCH_ATTEMPTS,
 ) -> FetchResult:
@@ -1269,9 +1149,7 @@ def _fetch_with_retries(
     for attempt in range(1, max_attempts + 1):
         _prepare_tmp_dir(desc, tmp_dir)
 
-        result = plugin.fetch(
-            desc, tmp_dir, collection.format_filters, collection.exclude_filters
-        )
+        result = plugin.fetch(desc.identifier, desc.manifest.files, tmp_dir)
         if result.success:
             short = _size_mismatches(desc, tmp_dir)
             if short:
@@ -1446,7 +1324,7 @@ def _fetch_one(
             error=f"{NO_FILES_REASON}; archive copy left untouched",
         )
 
-    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, collection)
+    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir)
     if fetch_result.unavailable:
         # Nothing will resume a download the source refuses; the archive copy (if
         # any) is untouched.
@@ -1468,7 +1346,7 @@ def _fetch_one(
     # check through the plugin's own verify() contract (no byte hashing —
     # SPEC §spec:sync-identity) so a plugin can't commit partial state even if it
     # over-reports success.
-    verified = plugin.verify(desc, tmp_dir)
+    verified = plugin.verify(desc.manifest.files, tmp_dir)
     if not verified.ok:
         return _FetchOutcome(
             success=False,
@@ -1634,6 +1512,46 @@ def _record_unavailable(
     items.upsert(item)
 
 
+def _note_lookup_failure(
+    stats: CollectionSyncStats, source_name: str, collection_name: str, failure: LookupFailure
+) -> None:
+    """List a failed lookup in the run's item failures (§spec:per-item-isolation)."""
+    log.warning("[%s/%s] %s: %s", source_name, collection_name, failure.identifier, failure.reason)
+    stats.failed += 1
+    stats.errors.append(f"{failure.identifier}: {failure.reason}")
+
+
+def _record_lookup_failure(
+    items: ItemRepo,
+    source_name: str,
+    collection_name: str,
+    failure: LookupFailure,
+    stats: CollectionSyncStats,
+) -> None:
+    """A listed item whose lookup failed this run (§spec:per-item-isolation).
+
+    It is listed failed with its reason and retried next run. A new item is recorded
+    `failed`; an item already recorded is left exactly as it was — status, manifest,
+    and files — so a mirrored show is never touched by a bad lookup
+    (§spec:prune-safety). It stays in the run's listing, so it is never `disappeared`.
+    """
+    _note_lookup_failure(stats, source_name, collection_name, failure)
+    if items.get(source_name, collection_name, failure.identifier) is not None:
+        return
+    now = datetime.now()
+    items.upsert(
+        Item(
+            source_name=source_name,
+            collection_name=collection_name,
+            identifier=failure.identifier,
+            status=ItemStatus.FAILED,
+            discovered_at=now,
+            last_verified_at=now,
+            restriction_reason=failure.reason,
+        )
+    )
+
+
 def _record_failed(
     items: ItemRepo,
     source_name: str,
@@ -1702,10 +1620,15 @@ def _refetch_item(config: Config, identifier: str) -> int:
             if existing is None:
                 continue
             log.info("refetch: %s/%s/%s", source.name, collection.name, identifier)
-            for desc in plugin.discover(collection):
-                if desc.identifier != identifier:
-                    continue
-                target = PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
+            budget = source_budgets(config, [(source, plugin)])[source.name]
+            for found in stream_items(
+                plugin, collection, budget, set(),
+                look_up=lambda row: row.identifier == identifier,
+            ):
+                if isinstance(found, LookupFailure):
+                    log.warning("%s: %s", found.identifier, found.reason)
+                    return 1
+                target = PlannedItem(found, existing, PlanAction.CHANGED_UPSTREAM)
                 stats = CollectionSyncStats()
                 placement = LibraryPlacement(config, collection, source.name, items)
                 placement.begin()

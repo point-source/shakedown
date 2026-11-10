@@ -12,8 +12,9 @@ import httpx
 import pytest
 
 from shakedown.config import CollectionConfig, SourceConfig
+from shakedown.discovery import ItemDescriptor, SourceBudget, look_up_one
 from shakedown.models import Manifest, ManifestFile
-from shakedown.plugins.base import ItemDescriptor
+from shakedown.plugins.base import ListedItem
 from shakedown.plugins.etree.plugin import EtreePlugin
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -69,22 +70,22 @@ def _metadata_response(
     return httpx.Response(200, json={"metadata": metadata, "files": list(files)})
 
 
-# -- discover ---------------------------------------------------------------
+# -- list / look up ------------------------------------------------------------
+
+MD5 = "a" * 32
 
 
-def test_discover_yields_filtered_manifest_and_metadata() -> None:
-    files = [
-        {"name": "show.flac", "format": "Flac", "size": "10", "md5": "aaa"},
-        {"name": "show_64kb.mp3", "format": "VBR MP3", "size": "3", "md5": "bbb"},
-        {"name": "notes.txt", "format": "Text", "size": "2", "md5": "ccc"},
-    ]
+def _look_up(plugin: EtreePlugin, identifier: str, coll: CollectionConfig):
+    """The core's lookup of one listed item, as sync runs it."""
+    return look_up_one(plugin, ListedItem(identifier), coll, SourceBudget(2))
 
+
+def _gd77_handler(files: list[dict[str, Any]], metadata: dict[str, Any] | None = None) -> Handler:
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/advancedsearch.php":
-            return _search_response(["gd77"], 1)
         if request.url.path == "/metadata/gd77":
             return _metadata_response(
-                {
+                metadata
+                or {
                     "title": "Cornell 5/8/77",
                     "creator": "Grateful Dead",
                     "date": "1977-05-08",
@@ -95,18 +96,26 @@ def test_discover_yields_filtered_manifest_and_metadata() -> None:
             )
         raise AssertionError(f"unexpected path {request.url.path}")
 
-    plugin = _make_plugin(handler)
-    items = list(plugin.discover(_collection(format_filters=["flac"])))
+    return handler
 
-    assert len(items) == 1
-    item = items[0]
+
+def test_lookup_describes_item_with_core_selected_manifest_and_metadata() -> None:
+    files = [
+        {"name": "show.flac", "format": "Flac", "size": "10", "md5": MD5},
+        {"name": "show_64kb.mp3", "format": "VBR MP3", "size": "3", "md5": "b" * 32},
+        {"name": "notes.txt", "format": "Text", "size": "2", "md5": "c" * 32},
+    ]
+    plugin = _make_plugin(_gd77_handler(files))
+
+    item = _look_up(plugin, "gd77", _collection(format_filters=["flac"]))
+
+    assert isinstance(item, ItemDescriptor)
     assert item.identifier == "gd77"
     # Only the flac survives the keep-filter.
-    names = {f.name for f in item.manifest.files}
-    assert names == {"show.flac"}
+    assert [f.name for f in item.manifest.files] == ["show.flac"]
     mf = item.manifest.files[0]
     assert mf.size == 10
-    assert mf.md5 == "aaa"
+    assert mf.md5 == MD5
     # Every advertised template field is populated.
     for key in EtreePlugin.template_fields:
         assert key in item.metadata
@@ -117,25 +126,58 @@ def test_discover_yields_filtered_manifest_and_metadata() -> None:
     assert not item.is_restricted
 
 
-def test_discover_exclude_filters_drop_files() -> None:
+def test_lookup_item_passes_every_raw_file_through() -> None:
     files = [
-        {"name": "a.flac", "format": "Flac", "size": "1", "md5": "1"},
-        {"name": "a_vbr.mp3", "format": "VBR MP3", "size": "1", "md5": "2"},
+        {"name": "d1t01.shn", "format": "Shorten", "size": "9", "md5": MD5, "private": "true"},
+        {"name": "d1t01.mp3", "format": "VBR MP3", "size": "3", "md5": "b" * 32,
+         "original": "d1t01.shn", "bitrate": "192"},
     ]
+    plugin = _make_plugin(_gd77_handler(files))
+
+    answer = plugin.lookup_item("gd77", 30.0)
+
+    shn, mp3 = answer.files
+    assert (shn["name"], shn["refused"], shn["derived_from"]) == ("d1t01.shn", True, None)
+    assert (mp3["refused"], mp3["derived_from"], mp3["bitrate"]) == (False, "d1t01.shn", "192")
+
+
+def test_lookup_passes_the_core_timeout() -> None:
+    seen: list[object] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/advancedsearch.php":
-            return _search_response(["x"], 1)
-        return _metadata_response({"date": "1990-01-01"}, files)
+        seen.append(request.extensions["timeout"])
+        return _metadata_response({"date": "1977"}, [])
 
-    plugin = _make_plugin(handler)
-    # Empty format_filters keeps everything not excluded.
-    items = list(plugin.discover(_collection(exclude_filters=["*_vbr.mp3"])))
-    names = {f.name for f in items[0].manifest.files}
-    assert names == {"a.flac"}
+    _make_plugin(handler).lookup_item("gd77", 12.5)
+    assert seen == [{"connect": 12.5, "read": 12.5, "write": 12.5, "pool": 12.5}]
 
 
-def test_discover_paginates_across_pages() -> None:
+def test_refused_lossless_falls_back_like_ia() -> None:
+    """A stream-only show: archive.org flags the item ``access-restricted-item`` and
+    marks its lossless files ``private``, while the MP3s stay public. etree gets the
+    same core selection as IA, including the opted-in fallback."""
+    from shakedown.selection import FALLBACK_REASON
+
+    files = [
+        {"name": "d1t01.shn", "format": "Shorten", "size": "9", "md5": MD5, "private": "true"},
+        {"name": "d1t01.mp3", "format": "VBR MP3", "size": "3", "md5": "b" * 32},
+    ]
+    plugin = _make_plugin(
+        _gd77_handler(files, {"date": "1969-12-26", "access-restricted-item": "true"})
+    )
+    coll = CollectionConfig(
+        name="c", query="q", format_filters=["shn"], fallback_format_filters=["mp3"]
+    )
+
+    item = _look_up(plugin, "gd77", coll)
+
+    assert isinstance(item, ItemDescriptor)
+    assert item.is_restricted is False
+    assert [f.name for f in item.manifest.files] == ["d1t01.mp3"]
+    assert item.restriction_reason == FALLBACK_REASON
+
+
+def test_listing_paginates_across_pages() -> None:
     # 3 items total, page size in the plugin is 100 but numFound drives the loop;
     # we return one doc per page and a numFound of 3 to force three requests.
     pages: dict[str, list[str]] = {"1": ["a"], "2": ["b"], "3": ["c"]}
@@ -148,11 +190,11 @@ def test_discover_paginates_across_pages() -> None:
         return _metadata_response({"identifier": ident, "date": "2000"}, [])
 
     plugin = _make_plugin(handler)
-    items = list(plugin.discover(_collection()))
+    items = list(plugin.list_items(_collection()))
     assert [i.identifier for i in items] == ["a", "b", "c"]
 
 
-def test_discover_raises_when_listing_ends_short_of_num_found() -> None:
+def test_listing_raises_when_listing_ends_short_of_num_found() -> None:
     """An early empty page is a failed listing, not the whole collection: treating
     it as complete would mark every unlisted show disappeared (or prune it)."""
     pages: dict[str, list[str]] = {"1": ["a"], "2": []}
@@ -166,10 +208,10 @@ def test_discover_raises_when_listing_ends_short_of_num_found() -> None:
 
     plugin = _make_plugin(handler)
     with pytest.raises(RuntimeError, match="1 of 3"):
-        list(plugin.discover(_collection()))
+        list(plugin.list_items(_collection()))
 
 
-def test_discover_raises_when_page_ceiling_hit_short_of_num_found(monkeypatch) -> None:
+def test_listing_raises_when_page_ceiling_hit_short_of_num_found(monkeypatch) -> None:
     import shakedown.plugins.etree.plugin as etree_module
 
     monkeypatch.setattr(etree_module, "_MAX_PAGES", 2)
@@ -183,10 +225,10 @@ def test_discover_raises_when_page_ceiling_hit_short_of_num_found(monkeypatch) -
 
     plugin = _make_plugin(handler)
     with pytest.raises(RuntimeError, match="2 of 1000"):
-        list(plugin.discover(_collection()))
+        list(plugin.list_items(_collection()))
 
 
-def test_discover_raises_when_unstable_paging_repeats_an_item() -> None:
+def test_listing_raises_when_unstable_paging_repeats_an_item() -> None:
     """A duplicate row must not stand in for a skipped show: count unique ids."""
     pages: dict[str, list[str]] = {"1": ["a", "b"], "2": ["b"]}
     seen_sort: list[str | None] = []
@@ -201,20 +243,20 @@ def test_discover_raises_when_unstable_paging_repeats_an_item() -> None:
 
     plugin = _make_plugin(handler)
     with pytest.raises(RuntimeError, match="2 of 3"):
-        ids = [d.identifier for d in plugin.discover(_collection())]
+        ids = [d.identifier for d in plugin.list_items(_collection())]
         assert ids == ["a", "b"]  # never yields "b" twice
     assert seen_sort and all(s == "identifier asc" for s in seen_sort)
 
 
-def test_discover_empty_collection_is_complete() -> None:
+def test_listing_empty_collection_is_complete() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return _search_response([], 0)
 
     plugin = _make_plugin(handler)
-    assert list(plugin.discover(_collection())) == []
+    assert list(plugin.list_items(_collection())) == []
 
 
-def test_discover_raises_on_enumeration_error() -> None:
+def test_listing_raises_on_enumeration_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/advancedsearch.php":
             return httpx.Response(500, text="boom")
@@ -222,34 +264,24 @@ def test_discover_raises_on_enumeration_error() -> None:
 
     plugin = _make_plugin(handler)
     with pytest.raises(httpx.HTTPStatusError):
-        list(plugin.discover(_collection()))
+        list(plugin.list_items(_collection()))
 
 
-def test_discover_marks_restricted_item() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/advancedsearch.php":
-            return _search_response(["dark1"], 1)
-        return _metadata_response(
-            {"date": "1980", "access-restricted-item": "true"},
-            [{"name": "x.flac", "format": "Flac", "size": "1", "md5": "1"}],
-        )
+def test_lookup_marks_access_restricted_item() -> None:
+    files = [{"name": "x.flac", "format": "Flac", "size": "1", "md5": MD5}]
+    plugin = _make_plugin(_gd77_handler(files, {"date": "1980", "access-restricted": "true"}))
 
-    plugin = _make_plugin(handler)
-    items = list(plugin.discover(_collection()))
-    assert items[0].is_restricted is True
-    assert items[0].restriction_reason == "access-restricted-item"
+    item = _look_up(plugin, "gd77", _collection())
+    assert isinstance(item, ItemDescriptor)
+    assert item.is_restricted is True
+    assert item.restriction_reason == "access-restricted"
 
 
 # -- fetch ------------------------------------------------------------------
 
 
-def _item_with_files(files: list[ManifestFile], *, restricted: bool = False) -> ItemDescriptor:
-    return ItemDescriptor(
-        identifier="gd77",
-        manifest=Manifest(files=tuple(files)),
-        is_restricted=restricted,
-        restriction_reason="dark" if restricted else None,
-    )
+def _item_with_files(files: list[ManifestFile]) -> ItemDescriptor:
+    return ItemDescriptor(identifier="gd77", manifest=Manifest(files=tuple(files)))
 
 
 def test_fetch_writes_files_and_reports_bytes(tmp_path: Path) -> None:
@@ -262,7 +294,7 @@ def test_fetch_writes_files_and_reports_bytes(tmp_path: Path) -> None:
 
     plugin = _make_plugin(handler)
     item = _item_with_files([ManifestFile("show.flac", len(content), md5)])
-    result = plugin.fetch(item, tmp_path, [], [])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is True
     assert result.bytes_downloaded == len(content)
@@ -275,7 +307,7 @@ def test_fetch_retriable_on_503(tmp_path: Path) -> None:
 
     plugin = _make_plugin(handler)
     item = _item_with_files([ManifestFile("show.flac", None, None)])
-    result = plugin.fetch(item, tmp_path, [], [])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is False
     assert result.retriable is True
@@ -287,7 +319,7 @@ def test_fetch_retriable_on_checksum_mismatch(tmp_path: Path) -> None:
 
     plugin = _make_plugin(handler)
     item = _item_with_files([ManifestFile("show.flac", None, "deadbeef")])
-    result = plugin.fetch(item, tmp_path, [], [])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is False
     assert result.retriable is True
@@ -302,7 +334,7 @@ def test_fetch_non_retriable_on_404(tmp_path: Path) -> None:
 
     plugin = _make_plugin(handler)
     item = _item_with_files([ManifestFile("gone.flac", None, None)])
-    result = plugin.fetch(item, tmp_path, [], [])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is False
     assert result.retriable is False
@@ -314,28 +346,11 @@ def test_fetch_parses_numeric_retry_after(tmp_path: Path) -> None:
 
     plugin = _make_plugin(handler)
     item = _item_with_files([ManifestFile("show.flac", None, None)])
-    result = plugin.fetch(item, tmp_path, [], [])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is False
     assert result.retriable is True
     assert result.retry_after == 42.0
-
-
-def test_fetch_fails_fast_on_restricted_without_download(tmp_path: Path) -> None:
-    calls: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
-        return httpx.Response(200, content=b"should-not-happen")
-
-    plugin = _make_plugin(handler)
-    item = _item_with_files([ManifestFile("show.flac", None, None)], restricted=True)
-    result = plugin.fetch(item, tmp_path, [], [])
-
-    assert result.success is False
-    assert result.retriable is False
-    assert result.bytes_downloaded == 0
-    assert calls == []  # no download attempted
 
 
 def test_fetch_rejects_path_traversal_file_name(tmp_path: Path) -> None:
@@ -351,7 +366,7 @@ def test_fetch_rejects_path_traversal_file_name(tmp_path: Path) -> None:
     plugin = _make_plugin(handler)
     for evil in ("../escape.flac", "/etc/evil.flac", "a/../../escape.flac", "", "."):
         item = _item_with_files([ManifestFile(evil, None, None)])
-        result = plugin.fetch(item, dest, [], [])
+        result = plugin.fetch(item.identifier, item.manifest.files, dest)
         assert result.success is False
         assert result.retriable is False
         assert "unsafe file name" in (result.error or "")
@@ -369,7 +384,7 @@ def test_fetch_is_idempotent_over_existing_file(tmp_path: Path) -> None:
 
     plugin = _make_plugin(handler)
     item = _item_with_files([ManifestFile("show.flac", len(content), md5)])
-    result = plugin.fetch(item, tmp_path, [], [])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is True
     assert result.bytes_downloaded == len(content)
@@ -387,13 +402,13 @@ def test_verify_reports_missing_and_ok(tmp_path: Path) -> None:
         [ManifestFile("a.flac", None, None), ManifestFile("b.flac", None, None)]
     )
 
-    missing = plugin.verify(item, tmp_path)
+    missing = plugin.verify(item.manifest.files, tmp_path)
     assert missing.ok is False
     assert set(missing.missing_files) == {"a.flac", "b.flac"}
 
     (tmp_path / "a.flac").write_bytes(b"1")
     (tmp_path / "b.flac").write_bytes(b"2")
-    present = plugin.verify(item, tmp_path)
+    present = plugin.verify(item.manifest.files, tmp_path)
     assert present.ok is True
     assert present.missing_files == []
 
@@ -442,7 +457,7 @@ def test_retry_after_late_failure_fetches_only_the_missing_file(
     ])
     tmp_dir = tmp_path / ".tmp-gd77"
 
-    result = sync_module._fetch_with_retries(plugin, item, tmp_dir, _collection())
+    result = sync_module._fetch_with_retries(plugin, item, tmp_dir)
 
     assert result.success is True
     assert requests == ["t01.flac", "t02.flac", "t03.flac", "t03.flac"]
@@ -462,7 +477,7 @@ def test_fetch_refetches_leftover_file_that_does_not_match(tmp_path: Path) -> No
     item = _item_with_files(
         [ManifestFile("show.flac", len(content), hashlib.md5(content).hexdigest())]
     )
-    result = plugin.fetch(item, tmp_path, [], [])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is True
     assert requests == ["/download/gd77/show.flac"]
@@ -479,12 +494,12 @@ def test_fetch_refetches_leftover_file_it_cannot_check(tmp_path: Path) -> None:
 
     plugin = _make_plugin(handler)
     item = _item_with_files([ManifestFile("show.flac", None, None)])
-    assert plugin.fetch(item, tmp_path, [], []).success is True
+    assert plugin.fetch(item.identifier, item.manifest.files, tmp_path).success is True
     assert requests == ["/download/gd77/show.flac"]
     assert (tmp_path / "show.flac").read_bytes() == b"complete"
 
 
-def test_discover_raises_when_num_found_falls_mid_listing() -> None:
+def test_listing_raises_when_num_found_falls_mid_listing() -> None:
     """A total that drops between pages must not lower the completeness bar."""
     pages = {"1": (["a", "b"], 3), "2": ([], 2)}
 
@@ -497,4 +512,4 @@ def test_discover_raises_when_num_found_falls_mid_listing() -> None:
 
     plugin = _make_plugin(handler)
     with pytest.raises(RuntimeError, match="2 of 3"):
-        list(plugin.discover(_collection()))
+        list(plugin.list_items(_collection()))

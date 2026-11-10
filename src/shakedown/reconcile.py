@@ -4,6 +4,10 @@ Disaster recovery / migration from a manual setup. PRD §10, §13. Never re-down
 falls back to source for the manifest, but trusts on-disk presence as the source of
 truth for "do I have this?". Tolerates an unreachable source: items on disk are still
 recorded, just without a recorded_manifest.
+
+Listing and lookups follow the same rules as sync (SPEC §spec:per-item-isolation): only
+a complete listing that omits an item marks it `disappeared`; an item whose lookup
+fails keeps what it had and is reported.
 """
 from __future__ import annotations
 
@@ -12,10 +16,17 @@ from datetime import datetime
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
+from shakedown.discovery import (
+    ItemDescriptor,
+    LookupFailure,
+    SourceBudget,
+    source_budgets,
+    stream_items,
+)
 from shakedown.lock import run_exclusive
 from shakedown.models import Item, ItemStatus, OperationStatus, OperationType
 from shakedown.plugins import registry
-from shakedown.plugins.base import ItemDescriptor
+from shakedown.plugins.base import SourcePlugin
 from shakedown.state import ItemRepo, OperationOutcomeRepo
 
 log = logging.getLogger(__name__)
@@ -34,9 +45,10 @@ def _run_reconcile(config: Config) -> int:
 
     for source in config.sources:
         plugin = registry.for_source(source)
+        budget = source_budgets(config, [(source, plugin)])[source.name]
         for collection in source.collections:
             failed += _reconcile_collection(
-                config, source, collection, plugin, items, outcomes, conn
+                config, source, collection, plugin, budget, items, outcomes, conn
             )
     return 0 if failed == 0 else 1
 
@@ -45,7 +57,8 @@ def _reconcile_collection(
     config: Config,
     source: SourceConfig,
     collection: CollectionConfig,
-    plugin,
+    plugin: SourcePlugin,
+    budget: SourceBudget,
     items: ItemRepo,
     outcomes: OperationOutcomeRepo,
     conn,
@@ -67,15 +80,27 @@ def _reconcile_collection(
             if p.is_dir() and not p.name.startswith(".")
         }
 
+    # Look up only what is on disk; the listing alone says what is still upstream.
+    listed: set[str] = set()
     descriptors_by_id: dict[str, ItemDescriptor] = {}
+    lookup_failures: list[LookupFailure] = []
     source_error: Exception | None = None
     try:
-        for desc in plugin.discover(collection):
-            descriptors_by_id[desc.identifier] = desc
+        for found in stream_items(
+            plugin, collection, budget, listed,
+            look_up=lambda row: row.identifier in on_disk_ids,
+        ):
+            if isinstance(found, LookupFailure):
+                lookup_failures.append(found)
+                log.warning(
+                    "[%s/%s] %s: %s", source.name, collection.name, found.identifier, found.reason
+                )
+            else:
+                descriptors_by_id[found.identifier] = found
     except Exception as e:
         source_error = e
         log.exception(
-            "[%s/%s] source discover failed; reconciling on-disk items without manifests",
+            "[%s/%s] source listing failed; reconciling on-disk items without manifests",
             source.name, collection.name,
         )
 
@@ -114,15 +139,15 @@ def _reconcile_collection(
                     recorded_manifest=desc.manifest,
                 )
             else:
-                # On disk but not in the source's listing. Prior manifest/metadata are
+                # On disk, but no description this run. Prior manifest/metadata are
                 # kept either way, so later syncs still classify correctly.
-                #   (a) source unreachable → keep the prior status: an outage says
-                #       nothing about upstream presence;
+                #   (a) listing failed, or listed but its lookup failed → keep the
+                #       prior status: neither says the item left upstream;
                 #   (b) a complete listing omits it → DISAPPEARED (PRD §6) when we had
                 #       a row. With no row there is no prior knowledge → COMPLETE.
                 if existing is None:
                     status = ItemStatus.COMPLETE
-                elif source_error is not None:
+                elif source_error is not None or identifier in listed:
                     status = existing.status
                 else:
                     status = ItemStatus.DISAPPEARED
@@ -159,6 +184,20 @@ def _reconcile_collection(
             deletion_context="no deletion requested",
             safe_next_action="restore source access and rerun reconcile",
             errors=[str(source_error)],
+        )
+        return 1
+    if lookup_failures:
+        outcomes.finish(
+            outcome,
+            OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
+            finished,
+            phase="fetch-manifests",
+            affected_item=lookup_failures[0].identifier,
+            completed_work=completed_work,
+            preservation_context="local recordings retained",
+            deletion_context="no deletion requested",
+            safe_next_action="restore source access and rerun reconcile",
+            errors=[f"{f.identifier}: {f.reason}" for f in lookup_failures],
         )
         return 1
     outcomes.finish(

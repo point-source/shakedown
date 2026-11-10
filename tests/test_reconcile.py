@@ -109,7 +109,7 @@ def test_reconcile_keeps_prior_status_when_source_unreachable(
         raise ConnectionError("upstream unreachable")
         yield  # pragma: no cover  (keeps it a generator)
 
-    monkeypatch.setattr(FakePlugin, "discover", discover_explodes)
+    monkeypatch.setattr(FakePlugin, "list_items", discover_explodes)
     assert run_reconcile(config) == 1
 
     row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "a")  # type: ignore[arg-type]

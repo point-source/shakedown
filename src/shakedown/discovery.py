@@ -11,15 +11,18 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 import requests
 
-from shakedown.config import Config, SourceConfig
-from shakedown.plugins.base import ItemLookup, SourcePlugin
+from shakedown.config import CollectionConfig, Config, SourceConfig
+from shakedown.models import Manifest, SourceFile
+from shakedown.plugins.base import ItemLookup, ListedItem, SourcePlugin
+from shakedown.selection import select
 
 # The per-item lookup envelope, matched to archive.org's real latency
 # (SPEC §spec:slow-metadata): a slow, 5xx, or 429 answer costs a bounded wait.
@@ -27,6 +30,7 @@ LOOKUP_TIMEOUT = 30.0  # seconds, handed to the plugin for its single request
 LOOKUP_ATTEMPTS = 3
 _LOOKUP_BACKOFF_BASE_SECONDS = 1.0
 _LOOKUP_MAX_BACKOFF_SECONDS = 30.0
+_sleep = time.sleep  # looked up per call, so tests can skip real backoff
 
 
 class SourceBudget:
@@ -82,18 +86,6 @@ def source_budgets(
 
 
 # --- the one description validator ----------------------------------------------
-
-
-@dataclass(frozen=True)
-class SourceFile:
-    """One file the source lists for an item, after validation."""
-    name: str
-    size: int | None
-    md5: str | None
-    format: str | None = None
-    refused: bool = False  # the source will not serve this file
-    derived_from: str | None = None  # the original file, for a derivative
-    bitrate: int | None = None  # kbps, when the source lists it
 
 
 @dataclass(frozen=True)
@@ -255,7 +247,7 @@ def lookup(
     identifier: str,
     budget: SourceBudget,
     *,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], None] | None = None,
 ) -> ItemDetails | LookupFailure:
     """Look up one item under the core's envelope (SPEC §spec:per-item-isolation).
 
@@ -279,5 +271,111 @@ def lookup(
                 return LookupFailure(
                     identifier, f"lookup failed after {LOOKUP_ATTEMPTS} attempts: {said}"
                 )
-            sleep(_backoff_seconds(attempt, e))
+            (sleep or _sleep)(_backoff_seconds(attempt, e))
     raise AssertionError("unreachable: LOOKUP_ATTEMPTS must be >= 1")
+
+
+# --- from a listing to item descriptions ------------------------------------------
+
+
+@dataclass(frozen=True)
+class ItemDescriptor:
+    """What the core knows about one listed item after its lookup and file selection.
+
+    Carries enough to:
+    - identify the item uniquely (identifier),
+    - decide whether we have it (manifest comparison via .manifest),
+    - render staging templates (.metadata),
+    - flag restricted items without a fetch attempt (.is_restricted/.restriction_reason).
+    """
+    identifier: str
+    manifest: Manifest
+    metadata: dict[str, Any] = field(default_factory=dict)
+    is_restricted: bool = False
+    restriction_reason: str | None = None
+    # source-provided change signal for incremental discovery (§spec:incremental-discovery);
+    # a token that moves whenever the item's contents change. None when the source exposes
+    # no cheap signal.
+    change_signal: str | None = None
+
+
+def describe(
+    identifier: str,
+    details: ItemDetails,
+    collection: CollectionConfig,
+    change_signal: str | None = None,
+) -> ItemDescriptor:
+    """Turn a validated lookup into a descriptor: choose the files to mirror."""
+    chosen = select(details.files, details.restriction_reason, collection)
+    return ItemDescriptor(
+        identifier=identifier,
+        manifest=chosen.manifest,
+        metadata=details.metadata,
+        is_restricted=chosen.is_restricted,
+        restriction_reason=chosen.restriction_reason,
+        change_signal=change_signal,
+    )
+
+
+def look_up_one(
+    plugin: SourcePlugin,
+    listed: ListedItem,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+) -> ItemDescriptor | LookupFailure:
+    """Look up one listed item and describe it, or report why it could not be."""
+    result = lookup(plugin, listed.identifier, budget)
+    if isinstance(result, LookupFailure):
+        return result
+    return describe(listed.identifier, result, collection, listed.change_signal)
+
+
+def stream_items(
+    plugin: SourcePlugin,
+    collection: CollectionConfig,
+    budget: SourceBudget,
+    enumerated: set[str],
+    *,
+    look_up: Callable[[ListedItem], bool] | None = None,
+) -> Iterator[ItemDescriptor | LookupFailure]:
+    """List the collection, then look its items up in parallel across the shared
+    budget, yielding each description (or lookup failure) as it resolves
+    (SPEC §spec:discovery-pipeline, §spec:per-item-isolation).
+
+    The listing is taken in full first; a listing that raises propagates, and the
+    caller marks the collection stale. Every listed identifier is added to
+    ``enumerated`` before any lookup — that set, not the described one, is the prune
+    signal (§spec:prune-safety), so an item whose lookup fails is never read as gone.
+
+    ``look_up`` decides per listed item whether to look it up (default: all) — the
+    incremental fast path skips unchanged items, single-item operations pick theirs.
+
+    Lookups are submitted only as the consumer takes results, a few ahead of it, so a
+    show's details live from its lookup until the consumer has handled them — never
+    for the whole listing. Memory stays flat however large the collection.
+    """
+    listing = list(plugin.list_items(collection))
+    enumerated.update(row.identifier for row in listing)
+    todo = [row for row in listing if look_up is None or look_up(row)]
+    if not todo:
+        return
+    workers = min(budget.size, len(todo))
+    window = 2 * workers
+    rows = iter(todo)
+    pending: set[Future[ItemDescriptor | LookupFailure]] = set()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def top_up() -> None:
+            while len(pending) < window:
+                row = next(rows, None)
+                if row is None:
+                    return
+                pending.add(pool.submit(look_up_one, plugin, row, collection, budget))
+
+        top_up()
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for fut in done:
+                pending.discard(fut)
+                yield fut.result()
+                top_up()

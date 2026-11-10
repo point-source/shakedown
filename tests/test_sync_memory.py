@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 import tracemalloc
+from dataclasses import replace
 from pathlib import Path
 
 from shakedown.sync import run_sync
@@ -29,15 +30,14 @@ def _seed() -> None:
 
 def _fresh_metadata(monkeypatch) -> None:
     """A real source builds new metadata objects for every lookup."""
-    real_describe = FakePlugin.describe_item
+    real_lookup = FakePlugin.lookup_item
 
-    def describe(self, identifier, collection):
-        desc = real_describe(self, identifier, collection)
-        if desc is not None:
-            desc.metadata["notes"] = identifier + "x" * METADATA_BYTES
-        return desc
+    def lookup(self, identifier, timeout):
+        answer = real_lookup(self, identifier, timeout)
+        notes = identifier + "x" * METADATA_BYTES
+        return replace(answer, metadata={**answer.metadata, "notes": notes})
 
-    monkeypatch.setattr(FakePlugin, "describe_item", describe)
+    monkeypatch.setattr(FakePlugin, "lookup_item", lookup)
 
 
 def _warm_up(config) -> None:
@@ -57,9 +57,9 @@ def _peak_mb(config) -> float:
 def _slow_downloads(monkeypatch) -> None:
     real_fetch = FakePlugin.fetch
 
-    def slow_fetch(self, item, dest_dir, format_filters, exclude_filters):
+    def slow_fetch(self, identifier, files, dest_dir):
         time.sleep(0.01)
-        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+        return real_fetch(self, identifier, files, dest_dir)
 
     monkeypatch.setattr(FakePlugin, "fetch", slow_fetch)
 
@@ -75,30 +75,6 @@ def test_first_sync_does_not_hold_every_show_while_downloads_lag(
     _seed()
     _fresh_metadata(monkeypatch)
     _slow_downloads(monkeypatch)
-
-    assert _peak_mb(config) < 5
-
-
-def test_first_sync_from_a_serial_listing_does_not_queue_every_show(
-    tmp_roots: tuple[Path, Path], monkeypatch
-) -> None:
-    """A source that lists through discover() alone (like etree) outruns downloads:
-    shows waiting for a download must not pile up in memory."""
-    archive, library = tmp_roots
-    config = make_config(archive, library)
-    _warm_up(config)
-    _seed()
-    _fresh_metadata(monkeypatch)
-    _slow_downloads(monkeypatch)
-
-    def serial_discover(self, collection):
-        for identifier in list(self.items):
-            desc = self.describe_item(identifier, collection)
-            if desc is not None:
-                yield desc
-
-    monkeypatch.setattr(FakePlugin, "discover", serial_discover)
-    monkeypatch.setattr(FakePlugin, "enumerate_items", lambda self, collection: None)
 
     assert _peak_mb(config) < 5
 

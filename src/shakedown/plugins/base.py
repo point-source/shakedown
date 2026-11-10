@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from shakedown.config import CollectionConfig, SourceConfig
-from shakedown.models import Manifest, ManifestFile
+from shakedown.models import ManifestFile
 
 _HASH_CHUNK = 1024 * 1024
 
@@ -79,27 +79,6 @@ class ItemLookup:
     restriction_reason: str | None = None
 
 
-@dataclass(frozen=True)
-class ItemDescriptor:
-    """Lightweight descriptor returned by discover().
-
-    Carries enough to:
-    - identify the item uniquely (identifier),
-    - decide whether we have it (manifest comparison via .manifest),
-    - render staging templates (.metadata),
-    - flag restricted items without a fetch attempt (.is_restricted/.restriction_reason).
-    """
-    identifier: str
-    manifest: Manifest
-    metadata: dict[str, Any] = field(default_factory=dict)
-    is_restricted: bool = False
-    restriction_reason: str | None = None
-    # source-provided change signal for incremental discovery (§spec:incremental-discovery);
-    # a token that moves whenever the item's contents change. None when the source exposes
-    # no cheap signal.
-    change_signal: str | None = None
-
-
 @dataclass
 class FetchResult:
     """Outcome of fetch() for a single item.
@@ -162,59 +141,32 @@ class SourcePlugin(ABC):
     def __init__(self, source_config: SourceConfig) -> None:
         self.source_config = source_config
 
+    @abstractmethod
     def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:
-        """List the collection: every item currently matching its query."""
-        raise NotImplementedError
+        """List the collection: every item currently matching its query, with the
+        source's change signal when it has one.
 
-    def lookup_item(self, identifier: str, timeout: float) -> ItemLookup:
-        """Look up one item with a single request that times out after ``timeout``
-        seconds."""
-        raise NotImplementedError
+        Raising means the listing failed: the core marks the collection stale and
+        prunes nothing. The listing must be complete or raise — a short list reads
+        as items having left the collection.
+        """
 
     @abstractmethod
-    def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
-        """Enumerate items currently matching the collection's query."""
+    def lookup_item(self, identifier: str, timeout: float) -> ItemLookup:
+        """Look up one item: its metadata, any item-level restriction, and every file
+        the source lists for it.
 
-    def enumerate_items(self, collection: CollectionConfig) -> Iterator[str] | None:
-        """Cheaply list item identifiers so the core can fan `describe_item()` across
-        the shared per-source budget (SPEC §spec:discovery-pipeline). Return None
-        (the default) to signal this source has no cheap enumerate/describe split;
-        the core then drains `discover()` serially. Raising signals an enumeration
-        failure (the core marks the collection stale), exactly like `discover()`.
+        Make exactly one request, timing out after ``timeout`` seconds, and let any
+        error propagate. The core owns retries, validation, file selection, and
+        isolating a failed lookup to this item (SPEC §spec:per-item-isolation).
         """
-        return None
-
-    def enumerate_with_signals(
-        self, collection: CollectionConfig
-    ) -> Iterator[tuple[str, str | None]] | None:
-        """Cheap enumeration paired with each item's source change signal
-        (§spec:incremental-discovery): the same single search as enumerate_items,
-        but also yielding the change signal per item so the core can skip the
-        per-item metadata fetch when the stored signal is unchanged. Return None
-        (the default) when the source has no cheap change signal; the core then
-        always resolves the full descriptor via describe_item(). Raising signals an
-        enumeration failure, exactly like enumerate_items()."""
-        return None
-
-    def describe_item(
-        self, identifier: str, collection: CollectionConfig
-    ) -> ItemDescriptor | None:
-        """Resolve one enumerated identifier to a descriptor — the expensive per-item
-        metadata fetch. Only called when `enumerate_items()` returns an iterator.
-        Return None to skip the item (a transient fault already handled). Sources that
-        do not support the enumerate/describe split need not implement this.
-        """
-        raise NotImplementedError
 
     @abstractmethod
     def fetch(
-        self,
-        item: ItemDescriptor,
-        dest_dir: Path,
-        format_filters: list[str],
-        exclude_filters: list[str],
+        self, identifier: str, files: Sequence[ManifestFile], dest_dir: Path
     ) -> FetchResult:
-        """Download files matching filters into dest_dir, verifying source checksums.
+        """Download the given files of one item into dest_dir, verifying source
+        checksums.
 
         `dest_dir` is a fresh, core-owned temporary directory. The plugin only
         writes the item's files there and reports the outcome; it MUST NOT touch
@@ -228,8 +180,8 @@ class SourcePlugin(ABC):
         """
 
     @abstractmethod
-    def verify(self, item: ItemDescriptor, archive_path: Path) -> VerifyResult:
-        """Cheap re-check: every expected file present on disk."""
+    def verify(self, files: Sequence[ManifestFile], archive_path: Path) -> VerifyResult:
+        """Cheap re-check: every given file present on disk."""
 
     # -- readiness probes (§spec:setup-readiness-validation) ----------------
     # Both are strictly non-mutating: they read from the source but never download a
@@ -242,7 +194,7 @@ class SourcePlugin(ABC):
         Default: a source with no ``auth`` block needs no credentials (pass); otherwise
         every configured credential env var must be present and non-empty. Acceptance —
         whether the source *honors* the credentials — is exercised by
-        :meth:`check_reachable`, whose enumeration runs under the authenticated session,
+        :meth:`check_reachable`, whose listing runs under the authenticated session,
         so a rejected key surfaces there with the source's own error text. Plugins that
         can cheaply confirm acceptance out-of-band may override.
         """
@@ -268,19 +220,16 @@ class SourcePlugin(ABC):
     def check_reachable(self, collection: CollectionConfig) -> ProbeResult:
         """Readiness probe that the source (and this collection's query) can be reached.
 
-        Default: pull only the first page of enumeration — a bounded, read-only touch
+        Default: pull only the first page of the listing — a bounded, read-only touch
         that never downloads item files. An empty-but-reachable collection passes; a
         source that raises (network down, bad query, rejected credentials) fails with
         the source's own error text. Reraising is caught here and turned into a
         failing :class:`ProbeResult`, never propagated.
         """
         try:
-            ids = self.enumerate_items(collection)
-            if ids is None:
-                ids = (d.identifier for d in self.discover(collection))
-            # Touch at most the first identifier: enough to force a real request without
-            # draining the whole (possibly huge) enumeration.
-            list(islice(ids, 1))
+            # Touch at most the first row: enough to force a real request without
+            # draining the whole (possibly huge) listing.
+            list(islice(self.list_items(collection), 1))
             return ProbeResult(ok=True)
         except Exception as e:  # any source fault is a readiness failure, never a crash
             return ProbeResult(

@@ -12,8 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from shakedown.config import CollectionConfig
-from shakedown.discovery import SourceFile
-from shakedown.models import Manifest, ManifestFile
+from shakedown.models import Manifest, ManifestFile, SourceFile
 
 # Recorded as the item's restriction_reason when archive.org refuses a download.
 DOWNLOAD_REFUSED_REASON = "download refused by archive.org (stream-only or restricted)"

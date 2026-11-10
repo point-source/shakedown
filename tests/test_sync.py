@@ -11,6 +11,7 @@ from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect
 from shakedown.models import ItemStatus, OperationStatus, OperationType
 from shakedown.plugins.base import FetchResult
+from shakedown.selection import FALLBACK_REASON
 from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
@@ -25,6 +26,15 @@ def _seed_item(identifier: str, *, content: bytes = b"hello world") -> FakeItem:
     )
     FakePlugin.items[identifier] = item
     return item
+
+
+def _stream_only(item: FakeItem, *, refused: bool = True) -> None:
+    """A show whose lossless files archive.org refuses (unless ``refused`` is False)
+    while its MP3 copy stays public."""
+    item.files = [
+        FakeFile(name="d1t01.shn", content=b"lossless", refused=refused),
+        FakeFile(name="d1t01.mp3", content=b"mp3"),
+    ]
 
 
 def test_sync_is_idempotent(tmp_roots: tuple[Path, Path]) -> None:
@@ -140,14 +150,14 @@ def _refuse_downloads_of(monkeypatch, *identifiers: str) -> None:
     stream-only show whose metadata carries no restriction flag)."""
     real_fetch = FakePlugin.fetch
 
-    def fetch(self, item, dest_dir, format_filters, exclude_filters):
-        if item.identifier in identifiers:
-            FakePlugin.fetch_count[item.identifier] = FakePlugin.fetch_count.get(item.identifier, 0) + 1
+    def fetch(self, identifier, files, dest_dir):
+        if identifier in identifiers:
+            FakePlugin.fetch_count[identifier] = FakePlugin.fetch_count.get(identifier, 0) + 1
             dest_dir.mkdir(parents=True, exist_ok=True)
             return FetchResult(
                 success=False, bytes_downloaded=0, error="refused", unavailable=True
             )
-        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+        return real_fetch(self, identifier, files, dest_dir)
 
     monkeypatch.setattr(FakePlugin, "fetch", fetch)
 
@@ -219,10 +229,11 @@ def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
     from shakedown.status import _collection_summary
 
     archive, library = tmp_roots
-    config = make_config(archive, library)
+    config = make_config(
+        archive, library, format_filters=["shn"], fallback_format_filters=["mp3"]
+    )
     item = _seed_item("gd-sbd")
-    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
-    item.restriction_reason = "fallback copy"
+    _stream_only(item)
     assert run_sync(config) == 0
 
     conn = connect(config.state_db)  # type: ignore[arg-type]
@@ -235,10 +246,9 @@ def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
 
     row = items.get("fake-src", "coll1", "gd-sbd")
     assert row is not None and row.status == ItemStatus.COMPLETE
-    assert restricted() == [{"identifier": "gd-sbd", "reason": "fallback copy"}]
+    assert restricted() == [{"identifier": "gd-sbd", "reason": FALLBACK_REASON}]
 
-    item.files = [FakeFile(name="d1t01.shn", content=b"lossless")]
-    item.restriction_reason = None
+    _stream_only(item, refused=False)
     assert run_sync(config) == 0
 
     assert (archive / "fake-src" / "coll1" / "gd-sbd" / "d1t01.shn").read_bytes() == b"lossless"
@@ -252,10 +262,12 @@ def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
     """A fallback show that drops out of one listing and returns unchanged is complete
     again and still listed in `status` with its reason."""
     archive, library = tmp_roots
-    config = make_config(archive, library, incremental_discovery=incremental)
+    config = make_config(
+        archive, library, incremental_discovery=incremental,
+        format_filters=["shn"], fallback_format_filters=["mp3"],
+    )
     item = _seed_item("gd-sbd")
-    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
-    item.restriction_reason = "fallback copy"
+    _stream_only(item)
     item.change_signal = "v1"
     assert run_sync(config) == 0
     del FakePlugin.items["gd-sbd"]
@@ -267,7 +279,7 @@ def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
     conn = connect(config.state_db)  # type: ignore[arg-type]
     row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
     assert row is not None and row.status == ItemStatus.COMPLETE
-    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", "fallback copy")]
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", FALLBACK_REASON)]
 
 
 def test_complete_show_takes_the_current_reason_when_its_files_are_unchanged(
@@ -276,17 +288,18 @@ def test_complete_show_takes_the_current_reason_when_its_files_are_unchanged(
     """Switching a collection between wanting MP3s and falling back to them keeps the
     same files, so only the listed reason changes; `status` must follow it."""
     archive, library = tmp_roots
-    config = make_config(archive, library)
+    config = make_config(archive, library, format_filters=["mp3"])
+    collection = config.sources[0].collections[0]
     item = _seed_item("gd-sbd")
-    item.files = [FakeFile(name="d1t01.mp3", content=b"mp3")]
+    _stream_only(item)
     assert run_sync(config) == 0
     conn = connect(config.state_db)  # type: ignore[arg-type]
 
-    item.restriction_reason = "fallback copy"
+    collection.format_filters, collection.fallback_format_filters = ["shn"], ["mp3"]
     assert run_sync(config) == 0
-    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", "fallback copy")]
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", FALLBACK_REASON)]
 
-    item.restriction_reason = None
+    collection.format_filters, collection.fallback_format_filters = ["mp3"], []
     assert run_sync(config) == 0
     assert ItemRepo(conn).list_restricted("fake-src", "coll1") == []
 
@@ -305,11 +318,11 @@ def test_incremental_sync_rechecks_a_show_left_unavailable_by_a_refused_refetch(
     assert run_sync(config) == 0
     _refuse_downloads_of(monkeypatch, "gd-sbd")
     assert refetch_item(config, "gd-sbd") == 1
-    described = FakePlugin.describe_count.get("gd-sbd", 0)
+    described = FakePlugin.lookups("gd-sbd")
 
     assert run_sync(config) == 0
 
-    assert FakePlugin.describe_count["gd-sbd"] == described + 1, "looked up, not skipped"
+    assert FakePlugin.lookups("gd-sbd") == described + 1, "looked up, not skipped"
     conn = connect(config.state_db)  # type: ignore[arg-type]
     row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
     assert row is not None
@@ -467,12 +480,12 @@ def test_disappeared_item_pruned_when_prune_enabled_later(tmp_roots: tuple[Path,
     assert row.archive_path is None
 
 
-def test_describe_failure_does_not_prune_still_enumerated_item(
-    tmp_roots: tuple[Path, Path], monkeypatch
+def test_lookup_failure_does_not_prune_still_listed_item(
+    tmp_roots: tuple[Path, Path]
 ) -> None:
-    """§spec:prune-safety: on a prune_disappeared collection, a transient describe_item
-    failure for a still-enumerated item must NOT prune or disappear it. Prune eligibility
-    keys on absence from the enumeration, never on absence from the described set."""
+    """§spec:prune-safety: on a prune_disappeared collection, a failed lookup for a
+    still-listed item must NOT prune or disappear it. Prune eligibility keys on absence
+    from the listing, never on absence from the described set."""
     archive, library = tmp_roots
     config = make_config(archive, library, prune_disappeared=True)
     _seed_item("gd-prune-safe")
@@ -483,40 +496,37 @@ def test_describe_failure_does_not_prune_still_enumerated_item(
     staged = library / "fake-src" / "coll1" / "gd-prune-safe"
     assert archived.is_dir() and staged.is_dir()
 
-    # Re-sync: enumeration still lists the item, but its per-item description fails
-    # transiently (describe_item returns None). It must be left exactly as recorded.
-    real_describe = FakePlugin.describe_item
-
-    def flaky_describe(self, identifier, collection):
-        if identifier == "gd-prune-safe":
-            return None  # transient per-item metadata fault
-        return real_describe(self, identifier, collection)
-
-    monkeypatch.setattr(FakePlugin, "describe_item", flaky_describe)
-    assert run_sync(config) == 0
+    # Re-sync: the listing still has the item, but its lookup fails on every attempt
+    # (connection reset). It must be left exactly as recorded, and listed failed
+    # (§spec:per-item-isolation), so the run exits non-zero.
+    FakePlugin.lookup_faults["gd-prune-safe"] = [ConnectionResetError("connection reset")]
+    assert run_sync(config) == 1
 
     # Archive files retained; the DB row is untouched (still COMPLETE) — never
-    # disappeared, pruned, or failed. status reports it exactly as before.
-    assert archived.is_dir(), "a describe failure must not remove archive files"
+    # disappeared, pruned, or failed.
+    assert archived.is_dir(), "a lookup failure must not remove archive files"
+    assert staged.is_dir(), "a lookup failure must not unstage the show"
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     row = items.get("fake-src", "coll1", "gd-prune-safe")
     assert row is not None and row.status == ItemStatus.COMPLETE
-    # The enumeration succeeded, so the collection is not stale either.
+    # The listing succeeded, so the collection is not stale either.
     latest = RunRepo(conn).latest("fake-src", "coll1")
     assert latest is not None and latest.stale is False
+    assert latest.items_failed == 1
+    assert latest.errors == [
+        "gd-prune-safe: lookup failed after 3 attempts: connection error"
+    ]
 
-    # A later clean re-sync (describe recovers) resolves the item normally.
-    monkeypatch.undo()
+    # A later clean re-sync (the lookup recovers) resolves the item normally.
+    FakePlugin.lookup_faults.clear()
     assert run_sync(config) == 0
     row = items.get("fake-src", "coll1", "gd-prune-safe")
     assert row is not None and row.status == ItemStatus.COMPLETE
     assert archived.is_dir()
 
 
-def test_stale_source_retains_items_and_flags_run(
-    tmp_roots: tuple[Path, Path], monkeypatch
-) -> None:
+def test_stale_source_retains_items_and_flags_run(tmp_roots: tuple[Path, Path]) -> None:
     """§spec:failure-behavior: when source enumeration fails, the run is flagged
     stale and the collection's existing items are retained untouched."""
     archive, library = tmp_roots
@@ -528,14 +538,8 @@ def test_stale_source_retains_items_and_flags_run(
     archived = archive / "fake-src" / "coll1" / "gd-show" / "gd-show.flac"
     assert archived.is_file()
 
-    # Source goes unreachable: enumeration raises instead of listing identifiers.
-    # The parallel driver materializes enumerate_items() before describe/plan, so a
-    # raise here still reaches the stale handler exactly as a failed discover() did.
-    def unreachable_enumerate(self, collection):
-        raise ConnectionError("source unreachable")
-        yield  # pragma: no cover  (keep it a generator, like the real enumerate_items)
-
-    monkeypatch.setattr(FakePlugin, "enumerate_items", unreachable_enumerate)
+    # Source goes unreachable: the listing raises instead of listing identifiers.
+    FakePlugin.unreachable_sources.add("fake-src")
 
     # The sync surfaces failure, but the existing item and its files remain.
     assert run_sync(config) == 1
@@ -562,7 +566,7 @@ def test_stale_source_retains_items_and_flags_run(
     assert recovery.deletion_context == "no deletion requested"
     assert recovery.safe_next_action == "restore source access and rerun sync"
 
-    monkeypatch.undo()
+    FakePlugin.unreachable_sources.clear()
     assert run_sync(config) == 0
     assert OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1") is None
 
@@ -767,7 +771,7 @@ def test_partial_fetch_is_not_promoted(tmp_roots: tuple[Path, Path], monkeypatch
 
     from shakedown.plugins.base import FetchResult
 
-    def partial_fetch(self, item, dest_dir, format_filters, exclude_filters):
+    def partial_fetch(self, identifier, files, dest_dir):
         # Claim success but never write the manifest file into the temp dir.
         dest_dir.mkdir(parents=True, exist_ok=True)
         return FetchResult(success=True, bytes_downloaded=0)
@@ -798,14 +802,14 @@ def test_retriable_fetch_failure_is_retried_then_succeeds(
     attempts = {"n": 0}
     real_fetch = FakePlugin.fetch
 
-    def flaky_fetch(self, item, dest_dir, format_filters, exclude_filters):
+    def flaky_fetch(self, identifier, files, dest_dir):
         attempts["n"] += 1
         if attempts["n"] < 3:
             return FetchResult(
                 success=False, bytes_downloaded=0,
                 error="checksum mismatch", retriable=True,
             )
-        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+        return real_fetch(self, identifier, files, dest_dir)
 
     monkeypatch.setattr(FakePlugin, "fetch", flaky_fetch)
 
@@ -828,7 +832,7 @@ def test_retriable_fetch_failure_gives_up_after_bounded_attempts(
     monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
     attempts = {"n": 0}
 
-    def always_fail(self, item, dest_dir, format_filters, exclude_filters):
+    def always_fail(self, identifier, files, dest_dir):
         attempts["n"] += 1
         return FetchResult(
             success=False, bytes_downloaded=0, error="checksum mismatch", retriable=True,
@@ -852,7 +856,7 @@ def test_non_retriable_fetch_failure_is_not_retried(
     monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
     attempts = {"n": 0}
 
-    def hard_fail(self, item, dest_dir, format_filters, exclude_filters):
+    def hard_fail(self, identifier, files, dest_dir):
         attempts["n"] += 1
         return FetchResult(
             success=False, bytes_downloaded=0, error="malformed metadata", retriable=False,
@@ -879,14 +883,14 @@ def test_retry_after_is_honored_over_backoff(
     attempts = {"n": 0}
     real_fetch = FakePlugin.fetch
 
-    def rate_limited(self, item, dest_dir, format_filters, exclude_filters):
+    def rate_limited(self, identifier, files, dest_dir):
         attempts["n"] += 1
         if attempts["n"] == 1:
             return FetchResult(
                 success=False, bytes_downloaded=0,
                 error="429 too many requests", retriable=True, retry_after=7.5,
             )
-        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+        return real_fetch(self, identifier, files, dest_dir)
 
     monkeypatch.setattr(FakePlugin, "fetch", rate_limited)
 
@@ -910,14 +914,14 @@ def test_retry_after_is_clamped_to_backoff_cap(
     attempts = {"n": 0}
     real_fetch = FakePlugin.fetch
 
-    def rate_limited(self, item, dest_dir, format_filters, exclude_filters):
+    def rate_limited(self, identifier, files, dest_dir):
         attempts["n"] += 1
         if attempts["n"] == 1:
             return FetchResult(
                 success=False, bytes_downloaded=0,
                 error="429 too many requests", retriable=True, retry_after=31_536_000.0,
             )
-        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+        return real_fetch(self, identifier, files, dest_dir)
 
     monkeypatch.setattr(FakePlugin, "fetch", rate_limited)
 
@@ -965,15 +969,15 @@ def test_collections_sync_concurrently(tmp_roots: tuple[Path, Path], monkeypatch
     _seed_item("gd-show")
 
     barrier = threading.Barrier(2, timeout=5)
-    orig_enumerate = FakePlugin.enumerate_items
+    orig_enumerate = FakePlugin.list_items
 
     def gated_enumerate(self, collection):
         # Block until both collection workers are at discovery start simultaneously.
-        # enumerate_items() is called once per collection at the top of discovery.
+        # list_items() is called once per collection at the top of discovery.
         barrier.wait()
         return orig_enumerate(self, collection)
 
-    monkeypatch.setattr(FakePlugin, "enumerate_items", gated_enumerate)
+    monkeypatch.setattr(FakePlugin, "list_items", gated_enumerate)
 
     assert run_sync(config) == 0, "both collections must be in flight at once"
     for coll in ("c1", "c2"):
@@ -988,13 +992,13 @@ def test_collection_cap_of_one_serializes(tmp_roots: tuple[Path, Path], monkeypa
     _seed_item("gd-show")
 
     barrier = threading.Barrier(2, timeout=0.5)
-    orig_enumerate = FakePlugin.enumerate_items
+    orig_enumerate = FakePlugin.list_items
 
     def gated_enumerate(self, collection):
         barrier.wait()  # never satisfied with only one worker at a time
         return orig_enumerate(self, collection)
 
-    monkeypatch.setattr(FakePlugin, "enumerate_items", gated_enumerate)
+    monkeypatch.setattr(FakePlugin, "list_items", gated_enumerate)
 
     assert run_sync(config) == 1, "serial execution can't satisfy a 2-party barrier"
 
@@ -1036,13 +1040,13 @@ def test_source_budget_bounds_fetches_across_collections(
     state = {"in_flight": 0, "max": 0}
     real_fetch = FakePlugin.fetch
 
-    def instrumented_fetch(self, item, dest_dir, format_filters, exclude_filters):
+    def instrumented_fetch(self, identifier, files, dest_dir):
         with lock:
             state["in_flight"] += 1
             state["max"] = max(state["max"], state["in_flight"])
         try:
             _time.sleep(0.02)  # hold the slot so overlap is real
-            return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+            return real_fetch(self, identifier, files, dest_dir)
         finally:
             with lock:
                 state["in_flight"] -= 1
@@ -1092,13 +1096,13 @@ def test_sources_on_one_host_share_one_budget(
     state = {"in_flight": 0, "max": 0}
     real_fetch = FakePlugin.fetch
 
-    def instrumented_fetch(self, item, dest_dir, format_filters, exclude_filters):
+    def instrumented_fetch(self, identifier, files, dest_dir):
         with lock:
             state["in_flight"] += 1
             state["max"] = max(state["max"], state["in_flight"])
         try:
             _time.sleep(0.02)  # hold the slot so overlap is real
-            return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+            return real_fetch(self, identifier, files, dest_dir)
         finally:
             with lock:
                 state["in_flight"] -= 1
@@ -1134,9 +1138,9 @@ def test_traversal_identifier_is_rejected(tmp_roots: tuple[Path, Path], monkeypa
     fetched: list[str] = []
     real_fetch = FakePlugin.fetch
 
-    def tracking_fetch(self, item, dest_dir, format_filters, exclude_filters):
-        fetched.append(item.identifier)
-        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+    def tracking_fetch(self, identifier, files, dest_dir):
+        fetched.append(identifier)
+        return real_fetch(self, identifier, files, dest_dir)
 
     monkeypatch.setattr(FakePlugin, "fetch", tracking_fetch)
 
@@ -1177,7 +1181,7 @@ def _two_collection_budget_config(
 def test_concurrent_discovery_bounded_by_source_budget(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
-    """§spec:discovery-pipeline + §spec:source-budget: per-item describe_item() runs
+    """§spec:discovery-pipeline + §spec:source-budget: per-item lookup_item() runs
     CONCURRENTLY across the drain, but the shared per-source budget is the hard ceiling
     on simultaneous metadata fetches — even with two collections of the source running
     at once (max_concurrent_collections=2) and a larger download pool. With
@@ -1195,21 +1199,21 @@ def test_concurrent_discovery_bounded_by_source_budget(
     lock = threading.Lock()
     state = {"in_flight": 0, "max": 0}
     described: set[str] = set()
-    real_describe = FakePlugin.describe_item
+    real_lookup = FakePlugin.lookup_item
 
-    def instrumented_describe(self, identifier, collection):
+    def instrumented_describe(self, identifier, timeout):
         with lock:
             state["in_flight"] += 1
             state["max"] = max(state["max"], state["in_flight"])
             described.add(identifier)
         try:
             _time.sleep(0.02)  # hold the slot so overlap is real
-            return real_describe(self, identifier, collection)
+            return real_lookup(self, identifier, timeout)
         finally:
             with lock:
                 state["in_flight"] -= 1
 
-    monkeypatch.setattr(FakePlugin, "describe_item", instrumented_describe)
+    monkeypatch.setattr(FakePlugin, "lookup_item", instrumented_describe)
 
     assert run_sync(config) == 0
     # Every enumerated item's metadata was resolved (concurrency didn't drop any).
@@ -1228,7 +1232,7 @@ def test_concurrent_discovery_bounded_by_source_budget(
 def test_slow_item_does_not_stall_others_during_discovery(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
-    """§spec:discovery-pipeline: because describe_item() is fanned across the budget,
+    """§spec:discovery-pipeline: because lookup_item() is fanned across the budget,
     one slow item's metadata fetch must not serialize the others behind it. With a
     budget >= 2, a deliberately slow describe overlaps the fast ones in time — proving
     the resolution is concurrent, not a serial drain."""
@@ -1243,18 +1247,18 @@ def test_slow_item_does_not_stall_others_during_discovery(
 
     lock = threading.Lock()
     intervals: dict[str, tuple[float, float]] = {}
-    real_describe = FakePlugin.describe_item
+    real_lookup = FakePlugin.lookup_item
 
-    def timed_describe(self, identifier, collection):
+    def timed_describe(self, identifier, timeout):
         start = _time.perf_counter()
         _time.sleep(0.4 if identifier == slow_id else 0.02)
-        result = real_describe(self, identifier, collection)
+        result = real_lookup(self, identifier, timeout)
         end = _time.perf_counter()
         with lock:
             intervals[identifier] = (start, end)
         return result
 
-    monkeypatch.setattr(FakePlugin, "describe_item", timed_describe)
+    monkeypatch.setattr(FakePlugin, "lookup_item", timed_describe)
 
     assert run_sync(config) == 0
     # All items resolved and mirrored.
@@ -1364,22 +1368,22 @@ def test_download_overlaps_discovery(tmp_roots: tuple[Path, Path], monkeypatch) 
     lock = threading.Lock()
     describe_end: dict[str, float] = {}
     fetch_start: dict[str, float] = {}
-    real_describe = FakePlugin.describe_item
+    real_lookup = FakePlugin.lookup_item
     real_fetch = FakePlugin.fetch
 
-    def timed_describe(self, identifier, collection):
+    def timed_describe(self, identifier, timeout):
         _time.sleep(0.3 if identifier == "slow" else 0.01)
-        result = real_describe(self, identifier, collection)
+        result = real_lookup(self, identifier, timeout)
         with lock:
             describe_end[identifier] = _time.perf_counter()
         return result
 
-    def timed_fetch(self, item, dest_dir, format_filters, exclude_filters):
+    def timed_fetch(self, identifier, files, dest_dir):
         with lock:
-            fetch_start[item.identifier] = _time.perf_counter()
-        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+            fetch_start[identifier] = _time.perf_counter()
+        return real_fetch(self, identifier, files, dest_dir)
 
-    monkeypatch.setattr(FakePlugin, "describe_item", timed_describe)
+    monkeypatch.setattr(FakePlugin, "lookup_item", timed_describe)
     monkeypatch.setattr(FakePlugin, "fetch", timed_fetch)
 
     assert run_sync(config) == 0
@@ -1391,63 +1395,40 @@ def test_download_overlaps_discovery(tmp_roots: tuple[Path, Path], monkeypatch) 
     )
 
 
-def test_discovery_failure_partway_prunes_nothing(
+def test_listing_failure_partway_prunes_nothing(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
-    """§spec:discovery-pipeline: a discovery failure PARTWAY through leaves the
-    collection stale with ZERO items pruned — a partial enumeration is never read as
-    items disappearing, even on a prune_disappeared collection. An item resolved and
-    fetched before the fault is still retained (fetch may precede completion)."""
+    """§spec:discovery-pipeline, §spec:per-item-isolation: a listing that fails PARTWAY
+    leaves the collection stale with ZERO items pruned — a partial listing is never read
+    as items disappearing, even on a prune_disappeared collection. Only the listing can
+    make a collection stale; a failed lookup cannot (see the prune-safety test)."""
+    from shakedown.plugins.base import ListedItem
+
     archive, library = tmp_roots
-    # budget=1 serializes describe resolution, so the fault is deterministic: the new
-    # item resolves and is fetched, then the next describe raises.
-    config = Config(
-        archive_root=archive,
-        library_root=library,
-        sources=[
-            SourceConfig(
-                name="fake-src",
-                type="fake",
-                max_concurrent_requests=1,
-                collections=[
-                    CollectionConfig(name="coll1", query="*", prune_disappeared=True)
-                ],
-            )
-        ],
-    )
-    _seed_item("keep-me")  # pre-existing; will vanish from the (failed) enumeration
+    config = make_config(archive, library, prune_disappeared=True)
+    _seed_item("keep-me")  # pre-existing; missing from the (failed) listing
 
     assert run_sync(config) == 0
     assert (archive / "fake-src" / "coll1" / "keep-me").is_dir()
 
-    # Second sync: the source no longer lists keep-me; it lists a new item then faults
-    # resolving the next one — so the enumeration never completes.
-    FakePlugin.items.clear()
+    # Second sync: the source lists a new item, then the listing faults.
+    def partial_listing(self, collection):
+        yield ListedItem("new-good")
+        raise ConnectionError("search endpoint failed mid-listing")
+
+    monkeypatch.setattr(FakePlugin, "list_items", partial_listing)
     _seed_item("new-good")
-    _seed_item("faulty")
-
-    real_describe = FakePlugin.describe_item
-
-    def flaky_describe(self, identifier, collection):
-        if identifier == "faulty":
-            raise ConnectionError("metadata endpoint failed mid-enumeration")
-        return real_describe(self, identifier, collection)
-
-    monkeypatch.setattr(FakePlugin, "describe_item", flaky_describe)
 
     assert run_sync(config) == 1  # a stale run surfaces as failure
 
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
 
-    # keep-me is NOT pruned despite prune_disappeared — the enumeration failed, so its
+    # keep-me is NOT pruned despite prune_disappeared — the listing failed, so its
     # absence is not treated as a disappearance.
-    assert (archive / "fake-src" / "coll1" / "keep-me").is_dir(), "must not prune on failed enumeration"
+    assert (archive / "fake-src" / "coll1" / "keep-me").is_dir(), "must not prune on failed listing"
     keep = items.get("fake-src", "coll1", "keep-me")
     assert keep is not None and keep.status == ItemStatus.COMPLETE
-
-    # The item resolved+fetched before the fault is retained (fetch precedes completion).
-    assert (archive / "fake-src" / "coll1" / "new-good").is_dir(), "item fetched before the fault is retained"
 
     # And the run is flagged stale — the signal `status` reports.
     latest = RunRepo(conn).latest("fake-src", "coll1")
@@ -1467,12 +1448,12 @@ def test_incremental_skips_metadata_fetch_when_signal_unchanged(
 
     # First run: item is NEW → fetched, and describe_item resolved it once.
     assert run_sync(config) == 0
-    assert FakePlugin.describe_count["gd1977-05-08"] == 1
+    assert FakePlugin.lookups("gd1977-05-08") == 1
     assert FakePlugin.fetch_count["gd1977-05-08"] == 1
 
     # Second run: signal unchanged → skip the metadata fetch entirely.
     assert run_sync(config) == 0
-    assert FakePlugin.describe_count["gd1977-05-08"] == 1, "no second metadata fetch"
+    assert FakePlugin.lookups("gd1977-05-08") == 1, "no second metadata fetch"
     assert FakePlugin.fetch_count["gd1977-05-08"] == 1, "no refetch"
 
     conn = connect(config.state_db)  # type: ignore[arg-type]
@@ -1489,7 +1470,7 @@ def test_incremental_changed_signal_refetches(tmp_roots: tuple[Path, Path]) -> N
     item.change_signal = "sig-1"
 
     assert run_sync(config) == 0
-    assert FakePlugin.describe_count["gd1977-05-08"] == 1
+    assert FakePlugin.lookups("gd1977-05-08") == 1
     assert FakePlugin.fetch_count["gd1977-05-08"] == 1
 
     # Source publishes new bytes (manifest changes) AND bumps the change signal.
@@ -1497,7 +1478,7 @@ def test_incremental_changed_signal_refetches(tmp_roots: tuple[Path, Path]) -> N
     item.change_signal = "sig-2"
 
     assert run_sync(config) == 0
-    assert FakePlugin.describe_count["gd1977-05-08"] == 2, "signal changed → metadata fetched"
+    assert FakePlugin.lookups("gd1977-05-08") == 2, "signal changed → metadata fetched"
     assert FakePlugin.fetch_count["gd1977-05-08"] == 2, "changed-upstream → refetched"
 
 
@@ -1510,10 +1491,10 @@ def test_incremental_no_stored_signal_falls_through(tmp_roots: tuple[Path, Path]
     item.change_signal = None
 
     assert run_sync(config) == 0
-    assert FakePlugin.describe_count["gd1977-05-08"] == 1
+    assert FakePlugin.lookups("gd1977-05-08") == 1
 
     assert run_sync(config) == 0
-    assert FakePlugin.describe_count["gd1977-05-08"] == 2, "no signal → full metadata pass each run"
+    assert FakePlugin.lookups("gd1977-05-08") == 2, "no signal → full metadata pass each run"
 
 
 def test_incremental_flag_off_ignores_signal(tmp_roots: tuple[Path, Path]) -> None:
@@ -1525,7 +1506,7 @@ def test_incremental_flag_off_ignores_signal(tmp_roots: tuple[Path, Path]) -> No
     item.change_signal = "sig-1"
 
     assert run_sync(config) == 0
-    assert FakePlugin.describe_count["gd1977-05-08"] == 1
+    assert FakePlugin.lookups("gd1977-05-08") == 1
 
     assert run_sync(config) == 0
-    assert FakePlugin.describe_count["gd1977-05-08"] == 2, "flag off → signal ignored, full pass"
+    assert FakePlugin.lookups("gd1977-05-08") == 2, "flag off → signal ignored, full pass"

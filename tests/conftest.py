@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from tests.fake_plugin import FakePlugin, install_fake, reset_fake
+
+
+@pytest.fixture(autouse=True)
+def _no_lookup_backoff() -> Iterator[None]:
+    """Lookup retries back off for real seconds; tests count attempts, not time.
+
+    Its own patch context, not the shared `monkeypatch` fixture: instantiating that
+    here would tear it down after fixtures a test requests later (fake_archive's
+    time.sleep patch), restoring their patched value instead of the real one."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("shakedown.discovery._sleep", lambda _seconds: None)
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +48,7 @@ def make_config(
     incremental_discovery: bool = False,
     preserve_source_metadata: bool = False,
     format_filters=None,
+    fallback_format_filters=None,
 ) -> Config:
     return Config(
         archive_root=archive_root,
@@ -48,6 +62,7 @@ def make_config(
                         name="coll1",
                         query="*",
                         format_filters=format_filters or [],
+                        fallback_format_filters=fallback_format_filters or [],
                         library_layout=library_layout,
                         on_complete=on_complete,
                         prune_disappeared=prune_disappeared,

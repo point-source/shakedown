@@ -216,7 +216,7 @@ def test_partial_failure_recovery_sync(
         identifier="gd-x", files=[FakeFile(name="x.flac", content=b"a")]
     )
 
-    def failing_fetch(self, item, dest_dir, format_filters, exclude_filters):
+    def failing_fetch(self, identifier, files, dest_dir):
         raise RuntimeError("simulated mid-run failure")
 
     monkeypatch.setattr(FakePlugin, "fetch", failing_fetch)
@@ -300,7 +300,7 @@ def test_partial_failure_recovery_restage(
 def test_partial_failure_recovery_reconcile(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
-    """If `discover` raises (source down, network out), reconcile still records on-disk
+    """If the listing raises (source down, network out), reconcile still records on-disk
     items rather than refusing to run."""
     archive, library = tmp_roots
     config = make_config(archive, library)
@@ -314,7 +314,7 @@ def test_partial_failure_recovery_reconcile(
         raise ConnectionError("upstream unreachable")
         yield  # pragma: no cover  (keeps it a generator)
 
-    monkeypatch.setattr(FakePlugin, "discover", discover_explodes)
+    monkeypatch.setattr(FakePlugin, "list_items", discover_explodes)
     assert run_reconcile(config) == 1
     assert (archive / "fake-src" / "coll1" / "a" / "a.flac").read_bytes() == b"a"
 
@@ -353,7 +353,7 @@ def test_partial_failure_recovery_validation(
         raise ConnectionError("source unreachable")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(FakePlugin, "enumerate_items", unreachable_enumerate)
+    monkeypatch.setattr(FakePlugin, "list_items", unreachable_enumerate)
     failed = CliRunner().invoke(main, ["--config", str(cfg), "validate"])
     assert failed.exit_code == 1
     assert "fake-src/coll1" in failed.output

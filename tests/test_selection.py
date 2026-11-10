@@ -7,7 +7,7 @@ show whose wanted files are all refused."""
 from __future__ import annotations
 
 from shakedown.config import CollectionConfig
-from shakedown.discovery import SourceFile
+from shakedown.models import SourceFile
 from shakedown.selection import DOWNLOAD_REFUSED_REASON, FALLBACK_REASON, select
 
 

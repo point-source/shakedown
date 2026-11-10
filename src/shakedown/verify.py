@@ -15,11 +15,11 @@ import click
 
 from shakedown.config import Config
 from shakedown.db import connect, transaction
+from shakedown.discovery import ItemDescriptor, LookupFailure, source_budgets, stream_items
 from shakedown.lock import run_exclusive
-from shakedown.models import Item, ItemStatus, Manifest
+from shakedown.models import Item, ItemStatus
 from shakedown.placement import LibraryPlacement
 from shakedown.plugins import registry
-from shakedown.plugins.base import ItemDescriptor
 from shakedown.state import DriftRepo, ItemRepo
 from shakedown.sync import (
     CollectionSyncStats,
@@ -141,12 +141,8 @@ def _run_verify(
                 if not deep:
                     # cheap check: existence only, via plugin
                     plugin = registry.for_source(source)
-                    desc = ItemDescriptor(
-                        identifier=item.identifier,
-                        manifest=item.recorded_manifest or Manifest(files=()),
-                        metadata=item.source_metadata,
-                    )
-                    result = plugin.verify(desc, item.archive_path)  # type: ignore[arg-type]
+                    files = item.recorded_manifest.files if item.recorded_manifest else ()
+                    result = plugin.verify(files, item.archive_path)  # type: ignore[arg-type]
                     if not result.ok:
                         missing_summary[(source.name, collection.name)] = (
                             missing_summary.get((source.name, collection.name), 0)
@@ -220,9 +216,16 @@ def _reconform(config: Config, items: ItemRepo, drifts: list[DriftRecord]) -> in
                 len(ids), source.name, collection.name,
             )
             descriptors_by_id: dict[str, ItemDescriptor] = {}
-            for desc in plugin.discover(collection):
-                if desc.identifier in ids:
-                    descriptors_by_id[desc.identifier] = desc
+            budget = source_budgets(config, [(source, plugin)])[source.name]
+            wanted: set[str] = ids
+            for found in stream_items(
+                plugin, collection, budget, set(),
+                look_up=lambda row, wanted=wanted: row.identifier in wanted,
+            ):
+                if isinstance(found, LookupFailure):
+                    log.warning("reconform: %s: %s", found.identifier, found.reason)
+                else:
+                    descriptors_by_id[found.identifier] = found
 
             targets: list[PlannedItem] = []
             for identifier in ids:

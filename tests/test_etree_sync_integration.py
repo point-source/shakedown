@@ -47,7 +47,7 @@ def _handler(request: httpx.Request) -> httpx.Response:
                     {"name": "gd77-05-08d1t01.flac", "size": str(len(_FLAC)),
                      "md5": _MD5, "format": "Flac"},
                     {"name": "gd77-05-08d1t01_64kb.mp3", "size": "10",
-                     "md5": "x", "format": "VBR MP3"},
+                     "md5": "9" * 32, "format": "VBR MP3"},
                 ],
             },
         )

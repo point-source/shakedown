@@ -212,7 +212,7 @@ def test_status_reports_stale_collection(tmp_path: Path, tmp_roots, monkeypatch)
         raise ConnectionError("source unreachable")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(FakePlugin, "enumerate_items", unreachable_enumerate)
+    monkeypatch.setattr(FakePlugin, "list_items", unreachable_enumerate)
     assert run_sync(config) == 1
 
     result = CliRunner().invoke(main, ["--config", str(cfg), "status"])

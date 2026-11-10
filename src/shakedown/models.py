@@ -50,6 +50,19 @@ class ManifestFile:
 
 
 @dataclass(frozen=True)
+class SourceFile:
+    """One file a source lists for an item, as validated by the core
+    (shakedown.discovery.validate_lookup); file selection chooses among these."""
+    name: str
+    size: int | None
+    md5: str | None
+    format: str | None = None
+    refused: bool = False  # the source will not serve this file
+    derived_from: str | None = None  # the original file, for a derivative
+    bitrate: int | None = None  # kbps, when the source lists it
+
+
+@dataclass(frozen=True)
 class Manifest:
     """Source's reported file list for an item, as recorded at fetch time.
 
