@@ -71,3 +71,19 @@ def test_verify_deep_reconform_restores_upstream_bytes(tmp_roots: tuple[Path, Pa
     # The library serves the restored bytes too, not the drifted copy.
     staged = config.library_root / "fake-src" / "coll1" / "gd-x" / "gd-x.flac"
     assert staged.stat().st_ino == archived.stat().st_ino
+
+
+def test_reconform_fails_when_a_drifted_shows_lookup_fails(tmp_roots: tuple[Path, Path]) -> None:
+    """The drift was not repaired, so reconform must not report success."""
+    config, archived = _setup_with_one_item(tmp_roots, content=b"upstream bytes")
+    archived.write_bytes(b"locally mutated bytes")
+    FakePlugin.lookup_faults["gd-x"] = [ConnectionResetError("connection reset")]
+
+    rc = run_verify(
+        config, source_filter=None, collection_filter=None,
+        deep=True, reconform=True, list_drift=False, assume_yes=True,
+    )
+
+    assert rc == 1
+    assert archived.read_bytes() == b"locally mutated bytes"
+    assert FakePlugin.fetch_count["gd-x"] == 1

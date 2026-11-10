@@ -216,6 +216,7 @@ def _reconform(config: Config, items: ItemRepo, drifts: list[DriftRecord]) -> in
                 len(ids), source.name, collection.name,
             )
             descriptors_by_id: dict[str, ItemDescriptor] = {}
+            lookup_failed: set[str] = set()
             budget = source_budgets(config, [(source, plugin)])[source.name]
             wanted: set[str] = ids
             for found in stream_items(
@@ -223,12 +224,15 @@ def _reconform(config: Config, items: ItemRepo, drifts: list[DriftRecord]) -> in
                 look_up=lambda row, wanted=wanted: row.identifier in wanted,
             ):
                 if isinstance(found, LookupFailure):
+                    # The drift stays unrepaired: a failure, not a skip.
                     log.warning("reconform: %s: %s", found.identifier, found.reason)
+                    lookup_failed.add(found.identifier)
                 else:
                     descriptors_by_id[found.identifier] = found
 
+            failed += len(lookup_failed)
             targets: list[PlannedItem] = []
-            for identifier in ids:
+            for identifier in ids - lookup_failed:
                 desc = descriptors_by_id.get(identifier)
                 existing = items.get(source.name, collection.name, identifier)
                 if desc is None or existing is None:
