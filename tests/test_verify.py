@@ -36,7 +36,7 @@ def test_verify_deep_detects_drift(tmp_roots: tuple[Path, Path]) -> None:
     config, archived = _setup_with_one_item(tmp_roots)
     archived.write_bytes(b"original audio + ID3v2 tags rewritten by Beets")
 
-    conn = connect(config.state_db)
+    conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     item = items.get("fake-src", "coll1", "gd-x")
     assert item is not None
