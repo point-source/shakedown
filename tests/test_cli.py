@@ -48,6 +48,17 @@ def test_verify_reconform_without_deep_exits_two(tmp_path: Path, tmp_roots) -> N
     assert "--reconform requires --deep" in result.output
 
 
+def test_item_refetch_of_an_unrecorded_show_exits_two(tmp_path: Path, tmp_roots) -> None:
+    """§spec:single-show-runs: an identifier that names no recorded show is a usage
+    error, and nothing is looked up."""
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+    result = CliRunner().invoke(main, ["--config", str(cfg), "item", "refetch", "gd-nope"])
+    assert result.exit_code == 2
+    assert "gd-nope" in result.output
+    assert FakePlugin.lookup_calls == []
+
+
 def test_status_against_empty_db(tmp_path: Path, tmp_roots) -> None:
     archive, library = tmp_roots
     cfg = _write_config(tmp_path, archive, library)

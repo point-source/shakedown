@@ -242,9 +242,13 @@ def item_show(ctx: click.Context, identifier: str) -> None:
 @click.pass_context
 def item_refetch(ctx: click.Context, identifier: str) -> None:
     cfg = _load_config(ctx)
-    from shakedown.sync import refetch_item
+    from shakedown.sync import UnknownShow, refetch_item
 
-    ctx.exit(refetch_item(cfg, identifier))
+    try:
+        exit_code = refetch_item(cfg, identifier)
+    except UnknownShow as e:
+        raise click.UsageError(f"no recorded show named {identifier!r}") from e
+    ctx.exit(exit_code)
 
 
 @main.command()
