@@ -280,6 +280,8 @@ class ItemDescriptor:
     metadata: dict[str, Any] = field(default_factory=dict)
     is_restricted: bool = False
     restriction_reason: str | None = None
+    # set when the show has no copy a common player reads (§spec:quality-selection)
+    not_playable_reason: str | None = None
     # source-provided change signal for incremental discovery (§spec:incremental-discovery);
     # a token that moves whenever the item's contents change. None when the source exposes
     # no cheap signal.
@@ -287,34 +289,29 @@ class ItemDescriptor:
 
 
 def describe(
-    identifier: str,
-    details: ItemDetails,
-    collection: CollectionConfig,
-    change_signal: str | None = None,
+    identifier: str, details: ItemDetails, change_signal: str | None = None
 ) -> ItemDescriptor:
     """Turn a validated lookup into a descriptor: choose the files to mirror."""
-    chosen = select(details.files, details.restriction_reason, collection)
+    chosen = select(details.files, details.restriction_reason)
     return ItemDescriptor(
         identifier=identifier,
         manifest=chosen.manifest,
         metadata=details.metadata,
         is_restricted=chosen.is_restricted,
         restriction_reason=chosen.restriction_reason,
+        not_playable_reason=chosen.not_playable_reason,
         change_signal=change_signal,
     )
 
 
 def look_up_one(
-    plugin: SourcePlugin,
-    listed: ListedItem,
-    collection: CollectionConfig,
-    budget: SourceBudget,
+    plugin: SourcePlugin, listed: ListedItem, budget: SourceBudget
 ) -> ItemDescriptor | LookupFailure:
     """Look up one listed item and describe it, or report why it could not be."""
     result = lookup(plugin, listed.identifier, budget)
     if isinstance(result, LookupFailure):
         return result
-    return describe(listed.identifier, result, collection, listed.change_signal)
+    return describe(listed.identifier, result, listed.change_signal)
 
 
 def stream_items(
@@ -357,7 +354,7 @@ def stream_items(
                 row = next(rows, None)
                 if row is None:
                     return
-                pending.add(pool.submit(look_up_one, plugin, row, collection, budget))
+                pending.add(pool.submit(look_up_one, plugin, row, budget))
 
         top_up()
         while pending:

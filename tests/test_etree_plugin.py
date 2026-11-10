@@ -77,7 +77,7 @@ MD5 = "a" * 32
 
 def _look_up(plugin: EtreePlugin, identifier: str, coll: CollectionConfig):
     """The core's lookup of one listed item, as sync runs it."""
-    return look_up_one(plugin, ListedItem(identifier), coll, SourceBudget(2))
+    return look_up_one(plugin, ListedItem(identifier), SourceBudget(2))
 
 
 def _gd77_handler(files: list[dict[str, Any]], metadata: dict[str, Any] | None = None) -> Handler:
@@ -111,9 +111,9 @@ def test_lookup_describes_item_with_core_selected_manifest_and_metadata() -> Non
 
     assert isinstance(item, ItemDescriptor)
     assert item.identifier == "gd77"
-    # Only the flac survives the keep-filter.
-    assert [f.name for f in item.manifest.files] == ["show.flac"]
-    mf = item.manifest.files[0]
+    # The best copy (the flac) and every non-audio file; no lossy derivative.
+    assert [f.name for f in item.manifest.files] == ["notes.txt", "show.flac"]
+    mf = item.manifest.files[1]
     assert mf.size == 10
     assert mf.md5 == MD5
     # Every advertised template field is populated.
@@ -156,7 +156,7 @@ def test_refused_lossless_falls_back_like_ia() -> None:
     """A stream-only show: archive.org flags the item ``access-restricted-item`` and
     marks its lossless files ``private``, while the MP3s stay public. etree gets the
     same core selection as IA, including the opted-in fallback."""
-    from shakedown.selection import FALLBACK_REASON
+    from shakedown.selection import LOSSLESS_REFUSED_REASON
 
     files = [
         {"name": "d1t01.shn", "format": "Shorten", "size": "9", "md5": MD5, "private": "true"},
@@ -174,7 +174,7 @@ def test_refused_lossless_falls_back_like_ia() -> None:
     assert isinstance(item, ItemDescriptor)
     assert item.is_restricted is False
     assert [f.name for f in item.manifest.files] == ["d1t01.mp3"]
-    assert item.restriction_reason == FALLBACK_REASON
+    assert item.restriction_reason == LOSSLESS_REFUSED_REASON
 
 
 def test_listing_paginates_across_pages() -> None:

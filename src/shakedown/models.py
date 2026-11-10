@@ -36,17 +36,29 @@ class OperationStatus(StrEnum):
 
 @dataclass(frozen=True)
 class ManifestFile:
-    """One file in a source's manifest. Identity-bearing fields only."""
+    """One file in a source's manifest: the identity-bearing fields (name, size, md5)
+    plus whether the library stages it (§spec:quality-selection). `library` is not
+    part of the identity: an archive-only copy is still a copy the archive holds."""
     name: str
     size: int | None
     md5: str | None
+    library: bool = True
 
     def to_json(self) -> dict[str, Any]:
-        return {"name": self.name, "size": self.size, "md5": self.md5}
+        raw: dict[str, Any] = {"name": self.name, "size": self.size, "md5": self.md5}
+        if not self.library:
+            raw["library"] = False
+        return raw
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> ManifestFile:
-        return cls(name=raw["name"], size=raw.get("size"), md5=raw.get("md5"))
+        # Records written before the quality rule carry no flag: every file is staged.
+        return cls(
+            name=raw["name"],
+            size=raw.get("size"),
+            md5=raw.get("md5"),
+            library=raw.get("library", True),
+        )
 
 
 @dataclass(frozen=True)

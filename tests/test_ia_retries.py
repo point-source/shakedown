@@ -43,7 +43,7 @@ def _search_then_describe(archive: FakeArchive, plugin: IAPlugin, identifier: st
     archive.search_results({"identifier": identifier})
     (row,) = plugin.list_items(COLLECTION)
     assert row.identifier == identifier
-    return look_up_one(plugin, row, COLLECTION, SourceBudget(4))
+    return look_up_one(plugin, row, SourceBudget(4))
 
 
 def test_metadata_5xx_after_a_search_is_asked_once_per_shakedown_attempt(archive) -> None:

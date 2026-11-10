@@ -11,7 +11,7 @@ from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect
 from shakedown.models import ItemStatus, OperationStatus, OperationType
 from shakedown.plugins.base import FetchResult
-from shakedown.selection import FALLBACK_REASON
+from shakedown.selection import LOSSLESS_REFUSED_REASON
 from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
@@ -246,7 +246,7 @@ def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
 
     row = items.get("fake-src", "coll1", "gd-sbd")
     assert row is not None and row.status == ItemStatus.COMPLETE
-    assert restricted() == [{"identifier": "gd-sbd", "reason": FALLBACK_REASON}]
+    assert restricted() == [{"identifier": "gd-sbd", "reason": LOSSLESS_REFUSED_REASON}]
 
     _stream_only(item, refused=False)
     assert run_sync(config) == 0
@@ -279,28 +279,26 @@ def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
     conn = connect(config.state_db)  # type: ignore[arg-type]
     row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
     assert row is not None and row.status == ItemStatus.COMPLETE
-    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", FALLBACK_REASON)]
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", LOSSLESS_REFUSED_REASON)]
 
 
 def test_complete_show_takes_the_current_reason_when_its_files_are_unchanged(
     tmp_roots: tuple[Path, Path]
 ) -> None:
-    """Switching a collection between wanting MP3s and falling back to them keeps the
-    same files, so only the listed reason changes; `status` must follow it."""
+    """When the source stops listing a stream-only show's refused lossless files, the
+    same MP3 copy stays selected, so only the listed reason changes; `status` must
+    follow it."""
     archive, library = tmp_roots
-    config = make_config(archive, library, format_filters=["mp3"])
-    collection = config.sources[0].collections[0]
+    config = make_config(archive, library)
     item = _seed_item("gd-sbd")
     _stream_only(item)
     assert run_sync(config) == 0
     conn = connect(config.state_db)  # type: ignore[arg-type]
+    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", LOSSLESS_REFUSED_REASON)]
 
-    collection.format_filters, collection.fallback_format_filters = ["shn"], ["mp3"]
+    item.files = [f for f in item.files if not f.refused]
     assert run_sync(config) == 0
-    assert ItemRepo(conn).list_restricted("fake-src", "coll1") == [("gd-sbd", FALLBACK_REASON)]
-
-    collection.format_filters, collection.fallback_format_filters = ["mp3"], []
-    assert run_sync(config) == 0
+    assert FakePlugin.fetch_count["gd-sbd"] == 1
     assert ItemRepo(conn).list_restricted("fake-src", "coll1") == []
 
 

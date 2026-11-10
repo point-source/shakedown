@@ -23,7 +23,7 @@ from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect
 from shakedown.models import ItemStatus
 from shakedown.reconcile import run_reconcile
-from shakedown.selection import FALLBACK_REASON
+from shakedown.selection import LOSSLESS_REFUSED_REASON
 from shakedown.state import ItemRepo, RunRepo
 from shakedown.status import print_status
 from shakedown.sync import run_sync
@@ -271,10 +271,10 @@ def test_refused_lossless_show_mirrors_its_best_lossy_copy(
 
     row = _row(config, show)
     assert row is not None and row.status == ItemStatus.COMPLETE
-    assert row.restriction_reason == FALLBACK_REASON
+    assert row.restriction_reason == LOSSLESS_REFUSED_REASON
     assert (archive / "src" / "coll" / show / "d1t01.mp3").read_bytes() == b"mp3"
     assert not (archive / "src" / "coll" / show / "d1t01.shn").exists()
-    assert _status_json(config)["restricted"] == [{"identifier": show, "reason": FALLBACK_REASON}]
+    assert _status_json(config)["restricted"] == [{"identifier": show, "reason": LOSSLESS_REFUSED_REASON}]
 
 
 def test_listing_failure_marks_the_collection_stale_and_prunes_nothing(

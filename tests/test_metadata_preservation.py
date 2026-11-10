@@ -94,7 +94,10 @@ def test_media_file_named_metadata_json_is_not_clobbered(
     config = make_config(archive, library, preserve_source_metadata=True)
     FakePlugin.items["gd-clash"] = FakeItem(
         identifier="gd-clash",
-        files=[FakeFile(name=METADATA_SIDECAR, content=b"real audio payload")],
+        files=[
+            FakeFile(name="d1t01.flac", content=b"audio"),
+            FakeFile(name=METADATA_SIDECAR, content=b"real audio payload"),
+        ],
         metadata={"notes": "context"},
     )
 

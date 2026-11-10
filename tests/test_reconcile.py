@@ -169,7 +169,7 @@ def test_reconcile_looks_up_only_shows_on_disk(tmp_roots: tuple[Path, Path]) -> 
 def test_reconcile_keeps_a_fallback_shows_reason(tmp_roots: tuple[Path, Path]) -> None:
     """A show mirrored as its fallback copy stays listed in `status` with its reason
     after a rebuild (§spec:item-lifecycle: restricted shows appear with their reason)."""
-    from shakedown.selection import FALLBACK_REASON
+    from shakedown.selection import LOSSLESS_REFUSED_REASON
 
     archive, library = tmp_roots
     config = make_config(archive, library, format_filters=["shn"], fallback_format_filters=["mp3"])
@@ -188,14 +188,14 @@ def test_reconcile_keeps_a_fallback_shows_reason(tmp_roots: tuple[Path, Path]) -
     row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "sbd")  # type: ignore[arg-type]
     assert row is not None
     assert row.status == ItemStatus.COMPLETE
-    assert row.restriction_reason == FALLBACK_REASON
+    assert row.restriction_reason == LOSSLESS_REFUSED_REASON
 
 
 def test_reconcile_keeps_the_reason_of_a_show_whose_lookup_fails(
     tmp_roots: tuple[Path, Path],
 ) -> None:
     """A show that keeps its prior status keeps everything it had, its reason too."""
-    from shakedown.selection import FALLBACK_REASON
+    from shakedown.selection import LOSSLESS_REFUSED_REASON
 
     archive, library = tmp_roots
     config = make_config(archive, library, format_filters=["shn"], fallback_format_filters=["mp3"])
@@ -215,4 +215,4 @@ def test_reconcile_keeps_the_reason_of_a_show_whose_lookup_fails(
     row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "sbd")  # type: ignore[arg-type]
     assert row is not None
     assert row.status == ItemStatus.COMPLETE
-    assert row.restriction_reason == FALLBACK_REASON
+    assert row.restriction_reason == LOSSLESS_REFUSED_REASON

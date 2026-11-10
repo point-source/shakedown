@@ -53,7 +53,7 @@ def _flac_item(archive: FakeArchive, identifier: str, metadata: dict | None = No
 
 def _look_up(plugin: IAPlugin, identifier: str, coll: CollectionConfig, signal: str | None = None):
     """The core's lookup of one listed item, as sync runs it."""
-    return look_up_one(plugin, ListedItem(identifier, signal), coll, SourceBudget(4))
+    return look_up_one(plugin, ListedItem(identifier, signal), SourceBudget(4))
 
 
 def test_lookup_describes_the_item_with_its_selected_manifest(archive) -> None:
@@ -531,8 +531,8 @@ def test_files_finished_before_the_process_died_are_reused(archive, tmp_path: Pa
 def test_stream_only_show_falls_back_through_the_core(archive) -> None:
     """Shaped like gd69-12-26.sbd.murphy.1821.sbeok.shnf: archive.org marks the
     lossless originals `private` (downloads answer 403); the MP3s stay public. The
-    core's selection mirrors the opted-in fallback (rules in tests/test_selection.py)."""
-    from shakedown.selection import FALLBACK_REASON
+    core's selection mirrors the best lossy copy (rules in tests/test_selection.py)."""
+    from shakedown.selection import LOSSLESS_REFUSED_REASON
 
     plugin = _make_plugin()
     archive.item(
@@ -555,8 +555,8 @@ def test_stream_only_show_falls_back_through_the_core(archive) -> None:
     desc = _look_up(plugin, "gd69-12-26.sbd", coll)
     assert isinstance(desc, ItemDescriptor)
     assert desc.is_restricted is False
-    assert [f.name for f in desc.manifest.files] == ["d1t01.mp3"]
-    assert desc.restriction_reason == FALLBACK_REASON
+    assert [f.name for f in desc.manifest.files] == ["d1t01.mp3", "info.txt"]
+    assert desc.restriction_reason == LOSSLESS_REFUSED_REASON
 
 
 def test_credentials_from_an_env_file_with_line_endings_are_trimmed(monkeypatch) -> None:
