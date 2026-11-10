@@ -72,6 +72,9 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         body = r.json()
         assert body[0]["source"] == "fake-src"
         assert body[0]["counts"]["complete"] == 1
+        # Same summary as `status --json` (§spec:library-ownership, §spec:library-cleanup).
+        assert body[0]["separations"] == []
+        assert body[0]["unplaced_files"] == []
 
         # metrics: open, prometheus text
         r = await client.get("/metrics")

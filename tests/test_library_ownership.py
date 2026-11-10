@@ -232,3 +232,91 @@ def test_upgrade_clears_a_show_linked_into_two_folders_without_downloading(
     assert repo.list_unplaced("fake-src", "coll1") == [
         "1992-03-01 - Variety Playhouse Atlanta/t0.flac"
     ]
+
+
+# --- surfaces: run summary, status text/JSON (GET /status shares the JSON) ----------
+
+
+def test_run_summary_reports_separations_without_failing(
+    tmp_roots: tuple[Path, Path], caplog
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library, library_layout=LAYOUT)
+    _two_tapes()
+
+    with caplog.at_level("INFO"):
+        assert run_sync(config) == 0
+
+    assert (
+        "fake-src/coll1: 2 shows render the same library folder; each was staged into "
+        "its own folder labelled with its identifier"
+    ) in caplog.messages
+
+
+def test_status_lists_separations_and_files_not_placed(
+    tmp_roots: tuple[Path, Path], capsys
+) -> None:
+    import json
+
+    from shakedown.status import print_status
+
+    archive, library = tmp_roots
+    config = make_config(archive, library, library_layout=LAYOUT)
+    _two_tapes()
+    assert run_sync(config) == 0
+    notes = _base(library) / "1977-05-09 - Buffalo" / "notes.txt"
+    notes.write_text("mine")
+    # A layout change moves Buffalo; its old folder keeps my notes, which get reported.
+    relaid = make_config(archive, library, library_layout="{venue} {date}")
+    assert run_sync(relaid) == 0
+
+    print_status(relaid, as_json=True)
+    summary = json.loads(capsys.readouterr().out)[0]
+    sbd = _base(library) / "Barton Hall 1977-05-08 [gd77-05-08.sbd]"
+    aud = _base(library) / "Barton Hall 1977-05-08 [gd77-05-08.aud]"
+    assert summary["separations"] == [
+        {"identifier": "gd77-05-08.aud", "folder": str(aud)},
+        {"identifier": "gd77-05-08.sbd", "folder": str(sbd)},
+    ]
+    assert summary["unplaced_files"] == [str(notes)]
+
+    print_status(relaid, as_json=False)
+    out = capsys.readouterr().out
+    assert "  shared folder names (2 shows, each labelled by identifier):\n" in out
+    assert f"    - gd77-05-08.aud → {str(aud)!r}\n" in out
+    assert f"    - gd77-05-08.sbd → {str(sbd)!r}\n" in out
+    assert (
+        "  library files not placed by shakedown: 1 (left in place; paths in status --json)\n"
+    ) in out
+
+
+def test_status_caps_the_separation_list(tmp_roots: tuple[Path, Path], capsys) -> None:
+    from shakedown.status import print_status
+
+    archive, library = tmp_roots
+    config = make_config(archive, library, library_layout=LAYOUT)
+    for i in range(12):
+        _seed(f"gd-{i:02d}", date="1977-05-08", venue="Barton Hall")
+    assert run_sync(config) == 0
+
+    print_status(config, as_json=False)
+    out = capsys.readouterr().out
+    assert "  shared folder names (12 shows, each labelled by identifier):\n" in out
+    assert sum(line.startswith("    - gd-") for line in out.splitlines()) == 10
+    assert "    ... and 2 more\n" in out
+
+
+def test_status_is_quiet_without_separations_or_strays(
+    tmp_roots: tuple[Path, Path], capsys
+) -> None:
+    from shakedown.status import print_status
+
+    archive, library = tmp_roots
+    config = make_config(archive, library, library_layout=LAYOUT)
+    _seed("gd-a", date="1977-05-08", venue="Barton Hall")
+    assert run_sync(config) == 0
+
+    print_status(config, as_json=False)
+    out = capsys.readouterr().out
+    assert "shared folder names" not in out
+    assert "not placed by shakedown" not in out

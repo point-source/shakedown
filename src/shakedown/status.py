@@ -9,7 +9,7 @@ import click
 from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.models import ItemStatus, OperationOutcome
-from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
+from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, PlacementRepo, RunRepo
 
 
 def _collection_summary(
@@ -30,6 +30,8 @@ def _collection_summary(
         {"identifier": identifier, "reason": reason}
         for identifier, reason in items.list_restricted(source_name, collection_name)
     ]
+    placements = PlacementRepo(items.conn)
+    library_dir = config.library_root / source_name / collection_name
 
     return {
         "source": source_name,
@@ -40,6 +42,17 @@ def _collection_summary(
         "last_run": _summarize_run(last) if last else None,
         "recovery": _summarize_recovery(recovery) if recovery else None,
         "restricted": restricted,
+        # Shows that render the same library folder, each staged into its own folder
+        # labelled with its identifier (§spec:library-ownership).
+        "separations": [
+            {"identifier": identifier, "folder": str(library_dir / folder)}
+            for identifier, folder in placements.list_separated(source_name, collection_name)
+        ],
+        # Library files shakedown did not place, left in place (§spec:library-cleanup).
+        "unplaced_files": [
+            str(library_dir / path)
+            for path in placements.list_unplaced(source_name, collection_name)
+        ],
         # Stale = the most recent run failed to enumerate the source; existing
         # items are retained (§spec:failure-behavior).
         "stale": bool(last.stale) if last else False,
@@ -136,6 +149,22 @@ def print_status(config: Config, *, as_json: bool) -> None:
             click.echo("  last run: never")
         click.echo("  items: " + ", ".join(f"{k}={v}" for k, v in s["counts"].items() if v))
         click.echo(f"  disk:  {s['bytes_on_disk'] / 1e9:.2f} GiB")
+        separations = s["separations"]
+        if separations:
+            click.echo(
+                f"  shared folder names ({len(separations)} shows, each labelled by identifier):"
+            )
+            for sep in separations[:10]:
+                # `!r`: folder names come from source metadata via the layout template and
+                # may carry control characters — repr neutralizes terminal escapes.
+                click.echo(f"    - {sep['identifier']} → {sep['folder']!r}")
+            if len(separations) > 10:
+                click.echo(f"    ... and {len(separations) - 10} more")
+        if s["unplaced_files"]:
+            click.echo(
+                f"  library files not placed by shakedown: {len(s['unplaced_files'])} "
+                "(left in place; paths in status --json)"
+            )
         if s["drift_files"]:
             click.echo(f"  drift: {s['drift_files']} files (run `verify --deep --list` for paths)")
         if s["restricted"]:
