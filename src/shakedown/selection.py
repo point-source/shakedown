@@ -40,6 +40,9 @@ _EITHER = frozenset({"m4a"})
 _UNPLAYABLE = frozenset({"shn"})
 # Audio the product does not rank: kept only when nothing recognised covers the show.
 _OTHER_AUDIO = frozenset({"ape", "wv", "wma", "mpc", "tta", "ra", "mp2", "dsf", "dff", "au"})
+# Among lossless copies, this order first, then larger size per track (operator,
+# 2026-11-10): 24-bit FLAC over 16-bit, never WAV over FLAC of the same audio.
+_LOSSLESS_ORDER = {"flac": 0, "m4a": 1, "wav": 2, "aif": 3, "aiff": 3, "shn": 4}
 
 
 def _ext(name: str) -> str:
@@ -88,25 +91,35 @@ def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
     return out
 
 
-def _lossy_measure(fmt: _Format, by_bitrate: bool) -> float:
-    """Lossy quality: mean per-file bitrate when every compared copy lists one, else
-    size per track. -1 when the source gives neither (ranks last among lossy)."""
-    if by_bitrate:
-        return sum(f.bitrate or 0 for f in fmt.files) / len(fmt.files)
+def _size_per_track(fmt: _Format) -> float:
+    """-1 when the source lists no size for some file (ranks last)."""
     if any(f.size is None for f in fmt.files):
         return -1
     return sum(f.size or 0 for f in fmt.files) / len(fmt.files)
 
 
 def _ranked(candidates: list[_Format]) -> list[_Format]:
-    """Best first: lossless, then lossy by bitrate or size per track, then
-    unrecognised. Among lossless, a playable copy ranks above SHN."""
+    """Best first: lossless, then lossy, then unrecognised.
+
+    Lossless: a playable copy above SHN, then FLAC, Apple Lossless, WAV, AIFF, then
+    larger size per track. Lossy: mean per-file bitrate when every compared copy lists
+    one, else size per track.
+    """
     lossy = [c for c in candidates if c.cls is _Class.LOSSY]
     by_bitrate = bool(lossy) and all(f.bitrate for c in lossy for f in c.files)
 
-    def key(c: _Format) -> tuple[int, int, float, str]:
-        measure = _lossy_measure(c, by_bitrate) if c.cls is _Class.LOSSY else 0.0
-        return (-c.cls, 0 if c.playable else 1, -measure, c.key)
+    def key(c: _Format) -> tuple[int, int, int, float, str]:
+        order, measure = 0, 0.0
+        if c.cls is _Class.LOSSLESS:
+            order = _LOSSLESS_ORDER.get(_ext(c.files[0].name), len(_LOSSLESS_ORDER))
+            measure = _size_per_track(c)
+        elif c.cls is _Class.LOSSY:
+            measure = (
+                sum(f.bitrate or 0 for f in c.files) / len(c.files)
+                if by_bitrate
+                else _size_per_track(c)
+            )
+        return (-c.cls, 0 if c.playable else 1, order, -measure, c.key)
 
     return sorted(candidates, key=key)
 

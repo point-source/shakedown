@@ -255,3 +255,18 @@ def test_library_flag_is_not_part_of_manifest_identity() -> None:
     staged = Manifest(files=(ManifestFile("a.shn", 1, None),))
     archive_only = Manifest(files=(ManifestFile("a.shn", 1, None, library=False),))
     assert staged == archive_only
+
+
+def test_lossless_copies_rank_flac_alac_wav_aiff_then_larger_size_per_track() -> None:
+    """Operator decision (Q-6-1): a fixed format order, then larger size per track
+    (24-bit over 16-bit FLAC), never WAV over FLAC of the same audio."""
+    flac16 = (_f("t01.flac", "Flac", size=30 * MB),)
+    flac24 = (_f("t01_24.flac", "24bit Flac", size=60 * MB),)
+    wav = (_f("t01.wav", "WAVE", size=90 * MB),)
+    alac = (_f("t01.m4a", "Apple Lossless Audio", size=40 * MB),)
+    aiff = (_f("t01.aif", "AIFF", size=95 * MB),)
+    assert _names(select((*flac16, *flac24), None)) == ["t01_24.flac"]
+    assert _names(select((*wav, *flac16), None)) == ["t01.flac"]
+    assert _names(select((*aiff, *wav, *alac), None)) == ["t01.m4a"]
+    assert _names(select((*aiff, *wav), None)) == ["t01.wav"]
+
