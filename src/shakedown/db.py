@@ -30,6 +30,9 @@ _SCHEMA = [
         change_signal      TEXT,
         -- why the show has no copy a common player reads (§spec:quality-selection)
         not_playable_reason TEXT,
+        -- when the show was first found missing from a complete listing
+        -- (§spec:item-lifecycle)
+        disappeared_at     TEXT,
         PRIMARY KEY (source_name, collection_name, identifier)
     )
     """,
@@ -313,7 +316,12 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
     The quality rule (§spec:quality-selection) adds each show's not-playable reason,
     and clears every stored change signal once: the first sync after the upgrade then
     looks every show up and applies the new rule, even on an incremental collection
-    (§spec:incremental-discovery)."""
+    (§spec:incremental-discovery).
+
+    Each show records the date it was first found missing upstream
+    (§spec:item-lifecycle). Shows already missing before the upgrade get none: the
+    only candidate, `last_verified_at`, is rewritten by every reconcile, so it is not
+    reliably that date."""
     for stmt in _PLACEMENT_SCHEMA + _HANDOFF_SCHEMA + _TAG_SCHEMA:
         conn.execute(stmt)
     if not _has_column(conn, "runs", "failure_notice_error"):
@@ -325,6 +333,8 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE runs DROP COLUMN {column}")
     if not _has_column(conn, "items", "not_playable_reason"):
         conn.execute("ALTER TABLE items ADD COLUMN not_playable_reason TEXT")
+    if not _has_column(conn, "items", "disappeared_at"):
+        conn.execute("ALTER TABLE items ADD COLUMN disappeared_at TEXT")
     conn.execute("UPDATE items SET change_signal = NULL")
 
 

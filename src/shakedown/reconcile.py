@@ -187,6 +187,16 @@ def _reconcile_collection(
                     status = existing.status
                 else:
                     status = ItemStatus.DISAPPEARED
+                # A show still missing keeps the date it was first found missing; one
+                # found missing now gets today (§spec:item-lifecycle).
+                disappeared_at = None
+                if status == ItemStatus.DISAPPEARED:
+                    assert existing is not None
+                    disappeared_at = (
+                        existing.disappeared_at
+                        if existing.status == ItemStatus.DISAPPEARED
+                        else now
+                    )
                 item = Item(
                     source_name=source.name,
                     collection_name=collection.name,
@@ -201,6 +211,7 @@ def _reconcile_collection(
                     recorded_manifest=held,
                     change_signal=existing.change_signal if existing else None,
                     not_playable_reason=existing.not_playable_reason if existing else None,
+                    disappeared_at=disappeared_at,
                 )
             items.upsert(item)
 

@@ -1772,6 +1772,8 @@ def _record_back_to_complete(items: ItemRepo, existing: Item, reason: str | None
     existing.status = ItemStatus.COMPLETE
     existing.restriction_reason = reason
     existing.last_verified_at = datetime.now()
+    # Listed again: no longer removed upstream (§spec:item-lifecycle).
+    existing.disappeared_at = None
     items.upsert(existing)
 
 
@@ -1875,19 +1877,25 @@ def _record_disappeared(
     the archive files but *retain the DB record* marked `pruned`, so `shakedown status`
     can still report the takedown; the run's staging pass then removes its library
     links, so its bytes are freed (§spec:library-cleanup).
+
+    Either way the record keeps the date the show was first found missing: set now
+    unless it was already `disappeared`, whose date (or lack of one, for a show gone
+    before dates were recorded) stands (§spec:item-lifecycle).
     """
+    now = datetime.now()
+    if existing.status != ItemStatus.DISAPPEARED:
+        existing.disappeared_at = now
+    existing.last_verified_at = now
     if collection.prune_disappeared:
         if existing.archive_path and existing.archive_path.exists():
             shutil.rmtree(existing.archive_path)
         existing.status = ItemStatus.PRUNED
         existing.archive_path = None
-        existing.last_verified_at = datetime.now()
         items.upsert(existing)
         # The tagged bytes are gone with the archive copy (§spec:tag-filling).
         TagRepo(items.conn).delete_show(source_name, collection.name, existing.identifier)
         return
     existing.status = ItemStatus.DISAPPEARED
-    existing.last_verified_at = datetime.now()
     items.upsert(existing)
 
 

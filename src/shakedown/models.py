@@ -139,6 +139,9 @@ class Item:
     change_signal: str | None = None
     # set when the show has no copy a common player reads (§spec:quality-selection)
     not_playable_reason: str | None = None
+    # when the show was first found missing from a complete listing; cleared when it
+    # is listed again (§spec:item-lifecycle)
+    disappeared_at: datetime | None = None
 
 
 @dataclass
