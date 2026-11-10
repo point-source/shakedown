@@ -1215,7 +1215,7 @@ degrade a single item or a single run, never the archive.
 | State DB corrupted or lost | `reconcile` rebuilds it without re-downloading (§spec:state) |
 | Crash in the middle of swapping a re-fetched item into place | The next run finishes the swap: it moves the old copy back if the new one never landed, or discards the old copy if it did |
 | Disk full, or another disk error while linking into the library | That item counts as failed and the run continues; no partial commits reach the archive; the run record is always closed, even on a crash |
-| Source rate-limits | Core honors the plugin-surfaced `Retry-After`, backs off, resumes |
+| Source rate-limits | Core honors the plugin-surfaced `Retry-After` up to its back-off cap, backs off, resumes. Nothing retries underneath: each metadata or file request goes out once per core attempt; only the collection search, which has no core retry, keeps a bounded retry of its own under the same cap |
 | Slow/timing-out metadata during discovery | Bounded per-item timeout + back-off; other items proceed in parallel — one slow endpoint never stalls the run (§spec:slow-metadata) |
 | Discovery fails partway (pipelined) | Collection marked stale; nothing pruned — a partial enumeration is never read as items disappearing (§spec:discovery-pipeline) |
 | Per-item metadata (describe) fails for an enumerated item | Item left as recorded — not pruned, not `disappeared`, not `failed` — and retried next run (§spec:prune-safety) |

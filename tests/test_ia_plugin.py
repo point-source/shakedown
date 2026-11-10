@@ -5,14 +5,24 @@ are spot-checked from a different angle: end-to-end via the plugin facade.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.plugins.ia.plugin import IAPlugin
+from tests.fake_archive import FakeArchive, Reply, fake_archive
+
+SHOW = {"title": "Show", "date": "1977-05-08"}
+
+
+@pytest.fixture()
+def archive() -> Iterator[FakeArchive]:
+    """archive.org, faked below urllib3 (see tests/fake_archive.py)."""
+    with fake_archive() as fake:
+        yield fake
 
 
 def _make_plugin() -> IAPlugin:
@@ -21,26 +31,25 @@ def _make_plugin() -> IAPlugin:
         type="ia",
         collections=[CollectionConfig(name="dead", query="collection:GratefulDead")],
     )
-    with patch("shakedown.plugins.ia.plugin.ia.get_session", return_value=MagicMock()):
-        return IAPlugin(src)
+    return IAPlugin(src)
 
 
-def _fake_ia_item(identifier: str, files: list[dict[str, Any]], metadata: dict | None = None) -> MagicMock:
-    item = MagicMock()
-    item.files = files
-    item.metadata = metadata or {"title": "Show", "date": "1977-05-08"}
-    return item
+def _flac_item(archive: FakeArchive, identifier: str, metadata: dict | None = None) -> None:
+    archive.item(
+        identifier, [{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}], metadata or SHOW
+    )
 
 
-def test_discover_yields_descriptors_with_manifests() -> None:
+def test_discover_yields_descriptors_with_manifests(archive) -> None:
     plugin = _make_plugin()
-    plugin._session.search_items.return_value = iter([{"identifier": "gd1977-05-08"}])
-    plugin._session.get_item.return_value = _fake_ia_item(
+    archive.search_results({"identifier": "gd1977-05-08"})
+    archive.item(
         "gd1977-05-08",
-        files=[
+        [
             {"name": "d1t01.flac", "size": "1000", "md5": "aaa", "format": "Flac"},
             {"name": "d1t01_64kb.mp3", "size": "100", "md5": "bbb", "format": "VBR MP3"},
         ],
+        SHOW,
     )
 
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
@@ -54,14 +63,13 @@ def test_discover_yields_descriptors_with_manifests() -> None:
     assert desc.is_restricted is False
 
 
-def test_discover_surfaces_combined_change_signal() -> None:
+def test_discover_surfaces_combined_change_signal(archive) -> None:
     plugin = _make_plugin()
-    plugin._session.search_items.return_value = iter(
-        [{"identifier": "gd1977-05-08", "oai_updatedate": "2024-05-01T00:00:00Z", "item_size": 12345}]
+    archive.search_results(
+        {"identifier": "gd1977-05-08", "oai_updatedate": "2024-05-01T00:00:00Z", "item_size": 12345}
     )
-    plugin._session.get_item.return_value = _fake_ia_item(
-        "gd1977-05-08",
-        files=[{"name": "d1t01.flac", "size": "1000", "md5": "aaa", "format": "Flac"}],
+    archive.item(
+        "gd1977-05-08", [{"name": "d1t01.flac", "size": "1000", "md5": "aaa", "format": "Flac"}]
     )
 
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
@@ -83,22 +91,22 @@ def test_combine_change_signal_handles_list_and_missing() -> None:
     assert _combine_change_signal({"item_size": 42}) is None
 
 
-def test_enumerate_with_signals_requests_extra_fields() -> None:
+def test_enumerate_with_signals_requests_extra_fields(archive) -> None:
     plugin = _make_plugin()
-    plugin._session.search_items.return_value = iter([])
+    archive.search_results()
 
     coll = CollectionConfig(name="dead", query="x")
     list(plugin.enumerate_with_signals(coll))
-    _, kwargs = plugin._session.search_items.call_args
-    assert kwargs["fields"] == ["identifier", "oai_updatedate", "item_size"]
+    (search,) = archive.calls_to("/services/search/v1/scrape")
+    assert "fields=identifier%2Coai_updatedate%2Citem_size" in search.url
 
 
-def test_discover_marks_restricted_items() -> None:
+def test_discover_marks_restricted_items(archive) -> None:
     plugin = _make_plugin()
-    plugin._session.search_items.return_value = iter([{"identifier": "gd-stream-only"}])
-    plugin._session.get_item.return_value = _fake_ia_item(
+    archive.search_results({"identifier": "gd-stream-only"})
+    _flac_item(
+        archive,
         "gd-stream-only",
-        files=[{"name": "x.flac", "size": "1", "md5": "x", "format": "Flac"}],
         metadata={
             "date": "1977-05-08",
             "access-restricted": "true",
@@ -112,116 +120,80 @@ def test_discover_marks_restricted_items() -> None:
     assert "soundboard" in (desc.restriction_reason or "")
 
 
-def test_discover_skips_items_whose_metadata_fetch_raises(monkeypatch) -> None:
+def test_discover_skips_items_whose_metadata_fetch_raises(archive, monkeypatch) -> None:
     from shakedown.plugins.ia import plugin as ia_plugin
 
     monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
 
     plugin = _make_plugin()
-    plugin._session.search_items.return_value = iter(
-        [{"identifier": "good-1"}, {"identifier": "bad-1"}, {"identifier": "good-2"}]
-    )
-
-    def get_item(identifier, **kwargs):
-        if identifier == "bad-1":
-            # Retriable transient fault → retried up to the cap, then skipped.
-            raise ConnectionError("connection reset by peer")
-        return _fake_ia_item(
-            identifier, files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
-        )
-
-    plugin._session.get_item.side_effect = get_item
+    archive.search_results({"identifier": "good-1"}, {"identifier": "bad-1"}, {"identifier": "good-2"})
+    _flac_item(archive, "good-1")
+    _flac_item(archive, "good-2")
+    # Retriable transient fault → retried up to the cap, then skipped.
+    archive.metadata("bad-1", ConnectionResetError("connection reset by peer"))
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
     descriptors = list(plugin.discover(coll))
     assert {d.identifier for d in descriptors} == {"good-1", "good-2"}
 
 
-def test_describe_item_retries_transient_fault_then_resolves(monkeypatch) -> None:
+def test_describe_item_retries_transient_fault_then_resolves(archive, monkeypatch) -> None:
     from shakedown.plugins.ia import plugin as ia_plugin
 
     delays: list[float] = []
     monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
 
     plugin = _make_plugin()
-    good_item = _fake_ia_item(
-        "gd-transient", files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
-    )
-    calls = {"n": 0}
-
-    def get_item(identifier, **kwargs):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise _HTTPError("service unavailable", _FakeResponse(503))
-        return good_item
-
-    plugin._session.get_item.side_effect = get_item
+    _flac_item(archive, "gd-transient")
+    good = archive.routes["/metadata/gd-transient"][0]
+    archive.metadata("gd-transient", Reply(503), Reply(503), good)
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
     desc = plugin.describe_item("gd-transient", coll)
     assert desc is not None
     assert desc.identifier == "gd-transient"
-    assert calls["n"] == 3  # two transient failures, third succeeds
+    # two transient failures, third succeeds
+    assert len(archive.calls_to("/metadata/gd-transient")) == 3
     # Two backoff sleeps recorded (attempts 1 and 2 failed transiently).
     assert delays == [ia_plugin._metadata_backoff_seconds(1), ia_plugin._metadata_backoff_seconds(2)]
 
 
-def test_describe_item_gives_up_after_max_attempts(monkeypatch) -> None:
+def test_describe_item_gives_up_after_max_attempts(archive, monkeypatch) -> None:
     from shakedown.plugins.ia import plugin as ia_plugin
 
     monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
 
     plugin = _make_plugin()
-    calls = {"n": 0}
-
-    def get_item(identifier, **kwargs):
-        calls["n"] += 1
-        raise _HTTPError("still down", _FakeResponse(503))
-
-    plugin._session.get_item.side_effect = get_item
+    archive.metadata("gd-down", Reply(503, b"still down"))
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
     assert plugin.describe_item("gd-down", coll) is None
-    assert calls["n"] == ia_plugin._MAX_METADATA_ATTEMPTS
+    assert len(archive.calls_to("/metadata/gd-down")) == ia_plugin._MAX_METADATA_ATTEMPTS
 
 
-def test_describe_item_does_not_retry_non_retriable_fault(monkeypatch) -> None:
+def test_describe_item_does_not_retry_non_retriable_fault(archive, monkeypatch) -> None:
     from shakedown.plugins.ia import plugin as ia_plugin
 
     monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: None)
 
     plugin = _make_plugin()
-    calls = {"n": 0}
-
-    def get_item(identifier, **kwargs):
-        calls["n"] += 1
-        raise RuntimeError("malformed metadata")
-
-    plugin._session.get_item.side_effect = get_item
+    archive.metadata("gd-bad", Reply(200, b"malformed metadata"))
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
     assert plugin.describe_item("gd-bad", coll) is None
-    assert calls["n"] == 1  # non-retriable → exactly one attempt
+    # non-retriable → exactly one attempt
+    assert len(archive.calls_to("/metadata/gd-bad")) == 1
 
 
-def test_describe_item_honors_retry_after_header(monkeypatch) -> None:
+def test_describe_item_honors_retry_after_header(archive, monkeypatch) -> None:
     from shakedown.plugins.ia import plugin as ia_plugin
 
     delays: list[float] = []
     monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
 
     plugin = _make_plugin()
-    good_item = _fake_ia_item(
-        "gd-429", files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
-    )
-    calls = {"n": 0}
-
-    def get_item(identifier, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise _HTTPError("rate limited", _FakeResponse(429, {"Retry-After": "7"}))
-        return good_item
-
-    plugin._session.get_item.side_effect = get_item
+    _flac_item(archive, "gd-429")
+    good = archive.routes["/metadata/gd-429"][0]
+    archive.metadata("gd-429", Reply(429, b"rate limited", {"Retry-After": "7"}), good)
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
     desc = plugin.describe_item("gd-429", coll)
@@ -229,7 +201,7 @@ def test_describe_item_honors_retry_after_header(monkeypatch) -> None:
     assert delays == [7.0]  # honored the Retry-After delta, not the backoff schedule
 
 
-def test_describe_item_clamps_hostile_retry_after(monkeypatch) -> None:
+def test_describe_item_clamps_hostile_retry_after(archive, monkeypatch) -> None:
     """A describe worker holds a shared SourceBudget slot while it sleeps, so an
     upstream-controlled Retry-After must be clamped to the backoff cap — a hostile
     endpoint can't pin the slot for an attacker-chosen wait."""
@@ -239,18 +211,9 @@ def test_describe_item_clamps_hostile_retry_after(monkeypatch) -> None:
     monkeypatch.setattr(ia_plugin.time, "sleep", lambda d: delays.append(d))
 
     plugin = _make_plugin()
-    good_item = _fake_ia_item(
-        "gd-evil", files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
-    )
-    calls = {"n": 0}
-
-    def get_item(identifier, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise _HTTPError("rate limited", _FakeResponse(429, {"Retry-After": "31536000"}))
-        return good_item
-
-    plugin._session.get_item.side_effect = get_item
+    _flac_item(archive, "gd-evil")
+    good = archive.routes["/metadata/gd-evil"][0]
+    archive.metadata("gd-evil", Reply(429, b"rate limited", {"Retry-After": "31536000"}), good)
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
     desc = plugin.describe_item("gd-evil", coll)
@@ -258,21 +221,30 @@ def test_describe_item_clamps_hostile_retry_after(monkeypatch) -> None:
     assert delays == [ia_plugin._METADATA_MAX_BACKOFF_SECONDS]  # clamped, not a year
 
 
-def test_describe_item_passes_bounded_timeout_in_request_kwargs() -> None:
+def test_describe_item_passes_bounded_timeout(archive) -> None:
     from shakedown.plugins.ia import plugin as ia_plugin
 
     plugin = _make_plugin()
-    plugin._session.get_item.return_value = _fake_ia_item(
-        "gd-timeout", files=[{"name": "x.flac", "size": "1", "md5": "z", "format": "Flac"}]
-    )
+    _flac_item(archive, "gd-timeout")
     coll = CollectionConfig(name="dead", query="x", format_filters=["flac"])
 
     assert plugin.describe_item("gd-timeout", coll) is not None
-    _, kwargs = plugin._session.get_item.call_args
-    assert kwargs["request_kwargs"] == {"timeout": ia_plugin._METADATA_TIMEOUT}
+    (call,) = archive.calls_to("/metadata/gd-timeout")
+    assert (call.timeout.connect_timeout, call.timeout.read_timeout) == ia_plugin._METADATA_TIMEOUT
 
 
-def test_fetch_writes_files_directly_into_dest(tmp_path: Path) -> None:
+def _served_calls(archive: FakeArchive, identifier: str) -> list[str]:
+    """File names downloaded, in request order."""
+    prefix = f"/download/{identifier}/"
+    return [c.path[len(prefix):] for c in archive.calls if c.path.startswith(prefix)]
+
+
+def _serve(archive: FakeArchive, identifier: str, served: dict[str, bytes]) -> None:
+    for name, content in served.items():
+        archive.file(identifier, name, Reply(200, content))
+
+
+def test_fetch_writes_files_directly_into_dest(archive, tmp_path: Path) -> None:
     """Files land at <dest>/<file>, never under an IA <dest>/<id>/ subdir.
 
     The plugin writes into the core-owned temp dir it is handed; the core owns the
@@ -291,53 +263,39 @@ def test_fetch_writes_files_directly_into_dest(tmp_path: Path) -> None:
         ),
         metadata={},
     )
+    archive.file(
+        "gd1977-05-08", "d1t01.flac",
+        Reply(200, b"audio", {"Last-Modified": "Sun, 08 May 1977 23:00:00 GMT"}),
+    )
 
-    def fake_download(identifier, files, destdir, **kwargs):
-        # Mirror what real ia.download does: place files under <destdir>/<identifier>/.
-        # Mirror real ia.download: <destdir>/<identifier>/ unless no_directory.
-        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "d1t01.flac").write_bytes(b"audio")
-
-    with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=fake_download):
-        result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
+    result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
 
     assert result.success
     assert result.bytes_downloaded == 5
     final = dest / "d1t01.flac"
     assert final.is_file()
     assert final.read_bytes() == b"audio"
-    # No stale <dest>/<identifier>/ subdir from the IA layout should remain.
+    # No <dest>/<identifier>/ subdir from the IA layout.
     assert not (dest / desc.identifier).exists()
+    # The upstream timestamp is kept, as the internetarchive library did.
+    assert final.stat().st_mtime == datetime(1977, 5, 8, 23, tzinfo=UTC).timestamp()
+    (call,) = archive.calls_to("/download/gd1977-05-08/d1t01.flac")
+    assert "cnt=0" in call.url  # mirroring doesn't count as views
 
 
-def test_fetch_with_missing_files_after_download_returns_failure(tmp_path: Path) -> None:
+def test_fetch_quotes_file_names_in_the_url(archive, tmp_path: Path) -> None:
     plugin = _make_plugin()
-    dest = tmp_path / ".tmp-gd-x"
+    served = {"disc 1/a#1.flac": b"first"}
+    archive.file("gd-x", "disc 1/a#1.flac", Reply(200, b"first"))
 
-    from shakedown.models import Manifest, ManifestFile
-    from shakedown.plugins.base import ItemDescriptor
+    result = plugin.fetch(_desc_for("gd-x", served), tmp_path / ".tmp-gd-x", [], [])
 
-    desc = ItemDescriptor(
-        identifier="gd-x",
-        manifest=Manifest(files=(ManifestFile("expected.flac", 5, "abc"),)),
-        metadata={},
-    )
-
-    def fake_download(identifier, files, destdir, **kwargs):
-        # Don't actually write the expected file; simulate IA dropping the request.
-        # Mirror real ia.download: <destdir>/<identifier>/ unless no_directory.
-        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
-        target.mkdir(parents=True, exist_ok=True)
-
-    with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=fake_download):
-        result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
-
-    assert result.success is False
-    assert "missing after fetch" in (result.error or "")
+    assert result.success is True
+    (call,) = archive.calls_to("/download/gd-x/disc 1/a#1.flac")
+    assert "/download/gd-x/disc%201/a%231.flac" in call.url
 
 
-def test_fetch_refuses_restricted_items_without_calling_download(tmp_path: Path) -> None:
+def test_fetch_refuses_restricted_items_without_calling_download(archive, tmp_path: Path) -> None:
     plugin = _make_plugin()
     from shakedown.models import Manifest
     from shakedown.plugins.base import ItemDescriptor
@@ -350,16 +308,15 @@ def test_fetch_refuses_restricted_items_without_calling_download(tmp_path: Path)
         restriction_reason="soundboard request",
     )
 
-    with patch("shakedown.plugins.ia.plugin.ia.download") as mock_download:
-        result = plugin.fetch(desc, tmp_path / "x", format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc, tmp_path / "x", format_filters=[], exclude_filters=[])
 
     assert result.success is False
     assert "restricted" in (result.error or "")
-    mock_download.assert_not_called()
+    assert archive.calls == []
 
 
-def test_fetch_returns_failure_when_download_raises(tmp_path: Path) -> None:
-    """When ia.download raises, the plugin reports failure and leaves promotion to
+def test_fetch_returns_failure_when_download_raises(archive, tmp_path: Path) -> None:
+    """When a download raises, the plugin reports failure and leaves promotion to
     the core (which keeps prior archive bytes intact — see test_sync.py)."""
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd-x"
@@ -371,15 +328,14 @@ def test_fetch_returns_failure_when_download_raises(tmp_path: Path) -> None:
         manifest=Manifest(files=(ManifestFile("real.flac", 8, "abc"),)),
         metadata={},
     )
+    archive.file("gd-x", "real.flac", ConnectionResetError("simulated network drop"))
 
-    def fake_download_raises(identifier, files, destdir, **kwargs):
-        raise RuntimeError("simulated network drop")
-
-    with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=fake_download_raises):
-        result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
+    result = plugin.fetch(desc, dest, format_filters=["flac"], exclude_filters=[])
 
     assert result.success is False
+    assert result.retriable is True
     assert "simulated network drop" in (result.error or "")
+
 
 
 class _FakeResponse:
@@ -445,7 +401,7 @@ def test_verify_existence_only_does_not_hash(tmp_path: Path) -> None:
     # The point: verify() never hashes — that's verify --deep's job.
 
 
-def test_fetch_with_empty_manifest_fails_without_download(tmp_path: Path) -> None:
+def test_fetch_with_empty_manifest_fails_without_download(archive, tmp_path: Path) -> None:
     """Zero files upstream is never a successful (empty) fetch: promoting it would
     replace the archive copy with an empty folder."""
     plugin = _make_plugin()
@@ -454,12 +410,11 @@ def test_fetch_with_empty_manifest_fails_without_download(tmp_path: Path) -> Non
 
     desc = ItemDescriptor(identifier="gd-dark", manifest=Manifest(files=()), metadata={})
 
-    with patch("shakedown.plugins.ia.plugin.ia.download") as mock_download:
-        result = plugin.fetch(desc, tmp_path / "x", format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc, tmp_path / "x", format_filters=[], exclude_filters=[])
 
     assert result.success is False
     assert result.retriable is False
-    mock_download.assert_not_called()
+    assert archive.calls == []
 
 
 def _desc_for(identifier: str, files: dict[str, bytes], *, md5s: dict[str, str] | None = None):
@@ -479,32 +434,15 @@ def _desc_for(identifier: str, files: dict[str, bytes], *, md5s: dict[str, str] 
     )
 
 
-def _writer(served: dict[str, bytes], calls: list[list[str]] | None = None):
-    def fake_download(identifier, files, destdir, **kwargs):
-        if calls is not None:
-            calls.append(list(files))
-        # Mirror real ia.download: <destdir>/<identifier>/ unless no_directory.
-        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
-        target.mkdir(parents=True, exist_ok=True)
-        for name in files:
-            (target / name).parent.mkdir(parents=True, exist_ok=True)
-            (target / name).write_bytes(served[name])
-
-    return fake_download
-
-
-def test_fetch_rejects_download_whose_md5_does_not_match(tmp_path: Path) -> None:
-    """The internetarchive library only checksums files already on disk; the plugin
-    must check what it just downloaded against the manifest before reporting success."""
+def test_fetch_rejects_download_whose_md5_does_not_match(archive, tmp_path: Path) -> None:
+    """The plugin must check what it just downloaded against the manifest before
+    reporting success."""
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd-x"
     desc = _desc_for("gd-x", {"a.flac": b"audio"})
+    _serve(archive, "gd-x", {"a.flac": b"AUDIO"})  # same size, corrupted bytes
 
-    with patch(
-        "shakedown.plugins.ia.plugin.ia.download",
-        side_effect=_writer({"a.flac": b"AUDIO"}),  # same size, corrupted bytes
-    ):
-        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
 
     assert result.success is False
     assert result.retriable is True
@@ -512,23 +450,20 @@ def test_fetch_rejects_download_whose_md5_does_not_match(tmp_path: Path) -> None
     assert not (dest / "a.flac").exists(), "a corrupt file must not stay in the temp dir"
 
 
-def test_fetch_rejects_download_whose_size_does_not_match(tmp_path: Path) -> None:
+def test_fetch_rejects_download_whose_size_does_not_match(archive, tmp_path: Path) -> None:
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd-x"
     desc = _desc_for("gd-x", {"a.flac": b"audio"})
+    _serve(archive, "gd-x", {"a.flac": b"aud"})  # truncated
 
-    with patch(
-        "shakedown.plugins.ia.plugin.ia.download",
-        side_effect=_writer({"a.flac": b"aud"}),  # truncated
-    ):
-        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
 
     assert result.success is False
     assert result.retriable is True
     assert not (dest / "a.flac").exists()
 
 
-def test_fetch_downloads_only_files_not_already_verified(tmp_path: Path) -> None:
+def test_fetch_downloads_only_files_not_already_verified(archive, tmp_path: Path) -> None:
     """Files a failed attempt left in the temp dir are kept when they match the
     manifest; only the rest are downloaded."""
     plugin = _make_plugin()
@@ -538,77 +473,61 @@ def test_fetch_downloads_only_files_not_already_verified(tmp_path: Path) -> None
     desc = _desc_for("gd-x", served)
     (dest / "a.flac").write_bytes(b"first")  # verified leftover
     (dest / "b.flac").write_bytes(b"sec")  # partial leftover
-    calls: list[list[str]] = []
+    _serve(archive, "gd-x", served)
 
-    with patch(
-        "shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served, calls)
-    ):
-        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
 
     assert result.success is True
-    assert calls == [["b.flac", "c.flac"]]
+    assert _served_calls(archive, "gd-x") == ["b.flac", "c.flac"]
     assert {n: (dest / n).read_bytes() for n in served} == served
 
 
-def test_fetch_writes_nested_names_beside_reused_leftovers(tmp_path: Path) -> None:
+def test_fetch_writes_nested_names_beside_reused_leftovers(archive, tmp_path: Path) -> None:
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd-x"
     (dest / "disc1").mkdir(parents=True)
     served = {"disc1/a.flac": b"first", "disc1/b.flac": b"second"}
     desc = _desc_for("gd-x", served)
     (dest / "disc1" / "a.flac").write_bytes(b"first")
+    _serve(archive, "gd-x", served)
 
-    with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served)):
-        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
 
     assert result.success is True
     assert {n: (dest / n).read_bytes() for n in served} == served
     assert not (dest / "gd-x").exists()
 
 
-def test_fetch_skips_download_when_every_file_is_already_verified(tmp_path: Path) -> None:
-    """ia.download(files=[]) means "every file in the item"; never call it with none."""
+def test_fetch_skips_download_when_every_file_is_already_verified(archive, tmp_path: Path) -> None:
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd-x"
     dest.mkdir()
     desc = _desc_for("gd-x", {"a.flac": b"first"})
     (dest / "a.flac").write_bytes(b"first")
 
-    with patch("shakedown.plugins.ia.plugin.ia.download") as mock_download:
-        result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
+    result = plugin.fetch(desc, dest, format_filters=[], exclude_filters=[])
 
     assert result.success is True
-    mock_download.assert_not_called()
+    assert archive.calls == []
 
 
-def test_fetch_keeps_finished_files_when_download_raises_midway(tmp_path: Path) -> None:
-    """ia.download can finish some files and then raise on a later one; the
-    finished files are kept so the retry fetches only the rest."""
+def test_fetch_keeps_finished_files_when_download_raises_midway(archive, tmp_path: Path) -> None:
+    """A fetch can finish some files and then fail on a later one; the finished
+    files are kept so the retry fetches only the rest."""
     plugin = _make_plugin()
     dest = tmp_path / ".tmp-gd-x"
     served = {"a.flac": b"first", "b.flac": b"second"}
     desc = _desc_for("gd-x", served)
-    calls: list[list[str]] = []
+    archive.file("gd-x", "a.flac", Reply(200, served["a.flac"]))
+    archive.file("gd-x", "b.flac", TimeoutError("read timed out"), Reply(200, served["b.flac"]))
 
-    def dies_on_last(identifier, files, destdir, **kwargs):
-        calls.append(list(files))
-        # Mirror real ia.download: <destdir>/<identifier>/ unless no_directory.
-        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "a.flac").write_bytes(served["a.flac"])
-        raise RuntimeError("read timed out")
+    assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is False
+    assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is True
 
-    with patch("shakedown.plugins.ia.plugin.ia.download", side_effect=dies_on_last):
-        assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is False
-    with patch(
-        "shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served, calls)
-    ):
-        assert plugin.fetch(desc, dest, format_filters=[], exclude_filters=[]).success is True
-
-    assert calls == [["a.flac", "b.flac"], ["b.flac"]]
+    assert _served_calls(archive, "gd-x") == ["a.flac", "b.flac", "b.flac"]
 
 
-def test_files_finished_before_the_process_died_are_reused(tmp_path: Path, monkeypatch) -> None:
+def test_files_finished_before_the_process_died_are_reused(archive, tmp_path: Path, monkeypatch) -> None:
     """A run killed mid-show (container stopped) leaves finished files in the temp
     dir; the next run's fetch keeps them and downloads only the rest."""
     import shakedown.sync as sync_module
@@ -620,23 +539,11 @@ def test_files_finished_before_the_process_died_are_reused(tmp_path: Path, monke
     served = {"a.flac": b"first", "b.flac": b"second"}
     desc = _desc_for("gd-x", served)
     collection = CollectionConfig(name="dead", query="q")
-    calls: list[list[str]] = []
+    archive.file("gd-x", "a.flac", Reply(200, served["a.flac"]))
+    archive.file("gd-x", "b.flac", SystemExit("container stopped"), Reply(200, served["b.flac"]))
 
-    def killed_after_first(identifier, files, destdir, **kwargs):
-        calls.append(list(files))
-        target = Path(destdir) if kwargs.get("no_directory") else Path(destdir) / identifier
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "a.flac").write_bytes(served["a.flac"])
-        raise SystemExit("container stopped")
-
-    with (
-        patch("shakedown.plugins.ia.plugin.ia.download", side_effect=killed_after_first),
-        pytest.raises(SystemExit),
-    ):
+    with pytest.raises(SystemExit):
         sync_module._fetch_with_retries(plugin, desc, tmp_dir, collection)
-    with patch(
-        "shakedown.plugins.ia.plugin.ia.download", side_effect=_writer(served, calls)
-    ):
-        assert sync_module._fetch_with_retries(plugin, desc, tmp_dir, collection).success
+    assert sync_module._fetch_with_retries(plugin, desc, tmp_dir, collection).success
 
-    assert calls == [["a.flac", "b.flac"], ["b.flac"]]
+    assert _served_calls(archive, "gd-x") == ["a.flac", "b.flac", "b.flac"]
