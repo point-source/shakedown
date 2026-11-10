@@ -1330,9 +1330,9 @@ the run rather than being ignored).
 
 ## State persistence and recovery §spec:state
 
-*Status: implemented, including the library placement record of the
-ownership, handoff, and discovery increment (below); its tag-filling and
-durable-handoff records — not started.*
+*Status: implemented, including the library placement and pending-handoff
+records of the ownership, handoff, and discovery increment (below); its
+tag-filling records — not started.*
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -1388,9 +1388,8 @@ pretending otherwise would be false durability.
 
 ## Library handoff and notifications §spec:handoff
 
-*Status: implemented, except delivery guarantees, resend, status
-visibility, and the shipped recipe (§spec:durable-handoff) — not
-started.*
+*Status: implemented, including delivery guarantees, resend, status
+visibility, and the shipped recipe (§spec:durable-handoff).*
 
 After a sync that staged at least one item for a collection (or that
 has undelivered shows to resend, §spec:durable-handoff), the system
@@ -1429,7 +1428,8 @@ paths and counts only, never credentials.
 
 ## Durable handoff §spec:durable-handoff
 
-*Status: not started*
+*Status: implemented, except resending from single-show runs
+(§spec:single-show-runs) — not started.*
 
 A handoff notice is either delivered or visibly pending and resent; a
 handoff only triggers the library tool's work and never waits for that
@@ -1950,8 +1950,9 @@ listed.
 ## Failure behavior §spec:failure-behavior
 
 *Status: complete, including the library ownership and cleanup rows
-(§spec:library-ownership, §spec:library-cleanup) and the per-item lookup
-row (§spec:per-item-isolation); the other rows citing sections of the
+(§spec:library-ownership, §spec:library-cleanup), the per-item lookup
+row (§spec:per-item-isolation), and the handoff row
+(§spec:durable-handoff); the other rows citing sections of the
 ownership, handoff, and discovery increment — not started.*
 
 The resilience contract (§req:quality-attributes): single failures
@@ -1985,7 +1986,7 @@ degrade a single item or a single run, never the archive.
 | Source permanently gone | Existing items retained; collection reported stale in `status` |
 | Two writing commands overlap (scheduler tick, API trigger, manual run) | The second exits non-zero naming the writer lock; the first continues untouched (§spec:cli) |
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
-| Handoff target down, failing, or slow | Slow: waited for. Failed: notice recorded undelivered, shown in `status`, resent on the collection's next run; the sync still succeeds (§spec:durable-handoff) |
+| Handoff target down, failing, or slow | Slow: waited up to five minutes, then recorded undelivered. Failed: notice recorded undelivered, shown in `status`, resent on the collection's next run; the sync still succeeds (§spec:durable-handoff) |
 | API sync requested while a run holds the lock | `409` at once; nothing queued (§spec:api-sync-runs) |
 | Best available copy is unplayable (SHN) | Kept archive-only; the best playable copy also mirrored and staged; with no playable copy, the SHN is staged and the show listed as not playable in `status` (§spec:quality-selection) |
 
