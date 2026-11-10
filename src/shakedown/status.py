@@ -32,10 +32,7 @@ def _collection_summary(
     last = runs.latest(source_name, collection_name)
     # Only a sync lists the source, so only a sync can leave the collection stale or
     # clear it; a later single-show run does neither (§spec:failure-behavior).
-    last_sync = (
-        last if last is None or last.kind == RunKind.SYNC
-        else runs.latest(source_name, collection_name, kind=RunKind.SYNC)
-    )
+    last_sync = runs.latest(source_name, collection_name, kind=RunKind.SYNC)
     recovery = outcomes.latest_actionable(source_name, collection_name)
     bytes_on_disk = items.archived_bytes(source_name, collection_name)
 

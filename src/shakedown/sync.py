@@ -1818,7 +1818,6 @@ def run_single_shows(
     ]
     if not work:
         return 0
-    connect(config.state_db).close()  # type: ignore[arg-type]
     budgets = source_budgets(config, [(s, p) for s, _, p, _ in work])
     failed = 0
     for source, collection, plugin, shows in work:
