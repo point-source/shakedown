@@ -882,6 +882,67 @@ def test_source_budget_bounds_fetches_across_collections(
             assert (archive / "fake-src" / coll / f"gd-show-{i}" / f"gd-show-{i}.flac").is_file()
 
 
+def test_sources_on_one_host_share_one_budget(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """SPEC §spec:source-budget: two configured sources that talk to the same host
+    (e.g. an `ia` and an `etree` source, both archive.org) draw on one budget, sized
+    to the smallest ceiling either sets."""
+    import time as _time
+
+    archive, library = tmp_roots
+    monkeypatch.setattr(FakePlugin, "upstream_host", "archive.example", raising=False)
+    config = Config(
+        archive_root=archive,
+        library_root=library,
+        max_concurrent_downloads=4,
+        max_concurrent_collections=2,
+        sources=[
+            SourceConfig(
+                name="fake-a", type="fake", max_concurrent_requests=3,
+                collections=[CollectionConfig(name="c1", query="*")],
+            ),
+            SourceConfig(
+                name="fake-b", type="fake", max_concurrent_requests=2,
+                collections=[CollectionConfig(name="c2", query="*")],
+            ),
+        ],
+    )
+    for i in range(6):
+        _seed_item(f"gd-show-{i}")
+
+    lock = threading.Lock()
+    state = {"in_flight": 0, "max": 0}
+    real_fetch = FakePlugin.fetch
+
+    def instrumented_fetch(self, item, dest_dir, format_filters, exclude_filters):
+        with lock:
+            state["in_flight"] += 1
+            state["max"] = max(state["max"], state["in_flight"])
+        try:
+            _time.sleep(0.02)  # hold the slot so overlap is real
+            return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+        finally:
+            with lock:
+                state["in_flight"] -= 1
+
+    monkeypatch.setattr(FakePlugin, "fetch", instrumented_fetch)
+
+    assert run_sync(config) == 0
+    assert state["max"] <= 2, (
+        f"per-host budget breached: observed {state['max']} simultaneous fetches (cap 2)"
+    )
+    assert (archive / "fake-a" / "c1" / "gd-show-0" / "gd-show-0.flac").is_file()
+    assert (archive / "fake-b" / "c2" / "gd-show-0" / "gd-show-0.flac").is_file()
+
+
+def test_archive_org_plugins_declare_their_host() -> None:
+    from shakedown.plugins.etree.plugin import EtreePlugin
+    from shakedown.plugins.ia.plugin import IAPlugin
+
+    assert IAPlugin.upstream_host == EtreePlugin.upstream_host == "archive.org"
+
+
 def test_traversal_identifier_is_rejected(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
     """A remote source must not escape the archive tree via a `..`/absolute identifier.
     The core rejects it before any download, rename, or rmtree runs."""

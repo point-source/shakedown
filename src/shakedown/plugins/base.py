@@ -120,6 +120,11 @@ class SourcePlugin(ABC):
     #: Identifier used in `type:` config keys (e.g., "ia").
     type_name: str
 
+    #: The host this plugin's requests go to. Sources whose plugins name the same
+    #: host share one concurrency budget (SPEC §spec:source-budget). None: the
+    #: source gets a budget of its own.
+    upstream_host: str | None = None
+
     def __init__(self, source_config: SourceConfig) -> None:
         self.source_config = source_config
 

@@ -141,6 +141,7 @@ class EtreePlugin(SourcePlugin):
     """Talks to the etree Live Music Archive via archive.org's public JSON API."""
 
     type_name = "etree"
+    upstream_host = "archive.org"
     #: HTTP client, a plain instance attribute so tests may substitute one backed
     #: by httpx.MockTransport.
     _client: httpx.Client

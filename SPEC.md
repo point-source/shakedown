@@ -258,6 +258,14 @@ risking throttling or a blacklist — the exact failure
 per-source budget spanning discovery and fetch is the only bound that
 holds regardless of internal parallelism.
 
+**Shared across sources on one host.** Two configured sources can reach
+the same host — an `ia` source and an `etree` source both talk to
+archive.org. A plugin names its upstream host; every source whose plugin
+names the same host draws from one budget, sized to the smallest
+`max_concurrent_requests` among them, so configuring a second source never
+doubles the connections a host sees. A plugin that names no host gets a
+budget per source.
+
 **Tradeoff accepted.** Collections of the same source no longer get
 independent throughput — one collection's downloads and another's
 discovery compete for the same slots. This is correct: the protected
@@ -733,7 +741,8 @@ Structure: top-level roots (`archive_root`, `library_root`,
 `on_complete`); and global `notifications`.
 
 The discovery-performance increment added a per-source politeness ceiling
-(the shared concurrency budget of §spec:source-budget) and a
+(`max_concurrent_requests`; sources on one host share the smallest — the
+shared concurrency budget of §spec:source-budget) and a
 per-collection `incremental_discovery` opt-in
 (§spec:incremental-discovery). The mirror-integrity increment adds a
 per-collection `preserve_source_metadata` opt-in

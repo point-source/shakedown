@@ -166,6 +166,7 @@ def _combine_change_signal(hit: dict[str, Any]) -> str | None:
 @register
 class IAPlugin(SourcePlugin):
     type_name = "ia"
+    upstream_host = "archive.org"
     template_fields = ("identifier", "title", "creator", "date", "year", "venue", "coverage")
     # `identifier` is the item's IA identifier — globally unique, the composite key
     # (§spec:layout-collision-safety); no other surfaced field is guaranteed distinct.

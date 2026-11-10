@@ -82,6 +82,32 @@ def _source_budget_size(config: Config, source: SourceConfig) -> int:
     return source.max_concurrent_requests or config.max_concurrent_downloads
 
 
+def _source_budgets(
+    config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
+) -> dict[str, SourceBudget]:
+    """One shared concurrency budget per upstream host, keyed by source name.
+
+    All collections of a source — and every source whose plugin names the same host
+    (an `ia` and an `etree` source both reach archive.org) — draw on one bounded
+    pool, so the ceiling on simultaneous connections to a host holds even with
+    max_concurrent_collections > 1. A shared budget takes the smallest ceiling its
+    sources set (SPEC §spec:source-budget).
+    """
+    groups: dict[str, list[SourceConfig]] = {}
+    group_of: dict[str, str] = {}
+    for source, _collection, plugin in work:
+        if source.name in group_of:
+            continue
+        key = f"host:{plugin.upstream_host}" if plugin.upstream_host else f"source:{source.name}"
+        groups.setdefault(key, []).append(source)
+        group_of[source.name] = key
+    shared = {
+        key: SourceBudget(min(_source_budget_size(config, s) for s in sources))
+        for key, sources in groups.items()
+    }
+    return {name: shared[key] for name, key in group_of.items()}
+
+
 def _describe_one(
     plugin: SourcePlugin,
     identifier: str,
@@ -252,14 +278,7 @@ def _run_sync(
     # already-migrated DB). SPEC §spec:sync-workflow.
     connect(config.state_db).close()  # type: ignore[arg-type]
 
-    # One shared concurrency budget per distinct source, so all of that source's
-    # collections (and their discovery + download workers) draw on a single
-    # bounded pool — the hard ceiling on simultaneous upstream connections holds
-    # even with max_concurrent_collections > 1 (SPEC §spec:source-budget).
-    budgets: dict[str, SourceBudget] = {}
-    for source, _collection, _plugin in work:
-        if source.name not in budgets:
-            budgets[source.name] = SourceBudget(_source_budget_size(config, source))
+    budgets = _source_budgets(config, work)
 
     if refresh_metadata:
         return _run_refresh(config, work, budgets)
