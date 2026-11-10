@@ -734,11 +734,8 @@ def _sync_collection_phases(
             if stage_result is not None:
                 _record_collision(stats, source.name, collection.name, stage_result)
 
-    # Persist new state for unavailable / disappeared in one shot.
+    # Persist the disappeared set in one shot (unavailable shows were recorded as listed).
     with transaction(conn):
-        for p in deferred:
-            if p.action == PlanAction.UNAVAILABLE and p.descriptor is not None:
-                _record_unavailable(items, source.name, collection.name, p.descriptor)
         for p in disappeared:
             assert p.existing is not None
             existing = items.get(source.name, collection.name, p.existing.identifier)
@@ -850,7 +847,17 @@ def _pipelined_discover_and_fetch(
                 # Re-staging needs only the record: drop the listed details now.
                 deferred.append(PlannedItem(None, planned.existing, PlanAction.UNCHANGED))
             else:
-                deferred.append(planned)
+                # Unavailable is this show's own fact, safe to record the moment it is
+                # listed (SPEC §spec:discovery-pipeline); keep only its identifier.
+                assert planned.descriptor is not None
+                _record_unavailable(items, source.name, collection.name, planned.descriptor)
+                deferred.append(
+                    PlannedItem(
+                        replace(planned.descriptor, manifest=Manifest(files=()), metadata={}),
+                        planned.existing,
+                        PlanAction.UNAVAILABLE,
+                    )
+                )
 
         def on_skip(identifier: str, existing: Item) -> None:
             # Signal-unchanged: classify UNCHANGED without a metadata fetch. The identifier

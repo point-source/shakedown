@@ -115,3 +115,20 @@ def test_recurring_sync_does_not_hold_every_show(
     assert run_sync(config) == 0  # everything on record, with its metadata
 
     assert _peak_mb(config) < 5
+
+
+def test_restricted_shows_are_not_held_until_the_listing_ends(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Stream-only shows are flagged from their metadata on every run; their details
+    must not be kept for the whole listing either."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _warm_up(config)
+    _seed()
+    for item in FakePlugin.items.values():
+        item.is_restricted = True
+        item.restriction_reason = "stream-only"
+    _fresh_metadata(monkeypatch)
+
+    assert _peak_mb(config) < 5
