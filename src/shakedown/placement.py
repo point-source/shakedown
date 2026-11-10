@@ -226,11 +226,13 @@ class LibraryPlacement:
     # --- desired placement ---------------------------------------------------------
 
     def _desired_names(self, item: Item) -> list[str]:
-        """The file names the show places in its folder: every recorded file (whether
-        or not its archive copy is on disk — a missing archive file must not take the
-        library copy with it), plus the metadata sidecar when preserved."""
+        """The file names the show places in its folder: every recorded file the
+        library stages (whether or not its archive copy is on disk — a missing archive
+        file must not take the library copy with it), plus the metadata sidecar when
+        preserved. An archive-only copy, such as SHN beside a playable copy, is not
+        placed (§spec:quality-selection)."""
         assert item.recorded_manifest is not None
-        names = [mf.name for mf in item.recorded_manifest.files]
+        names = [mf.name for mf in item.recorded_manifest.files if mf.library]
         probe = self.base / "probe"
         for name in names:
             if not is_within(probe, probe / name):

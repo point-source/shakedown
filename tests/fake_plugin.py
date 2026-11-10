@@ -25,6 +25,7 @@ class FakeFile:
     format: str | None = None
     refused: bool = False
     derived_from: str | None = None
+    bitrate: int | None = None
 
     @property
     def size(self) -> int:
@@ -56,6 +57,8 @@ class FakePlugin(SourcePlugin):
     # Class-level state so tests can mutate the source between sync runs.
     items: ClassVar[dict[str, FakeItem]] = {}
     fetch_count: ClassVar[dict[str, int]] = {}
+    # Every file name each fetch was asked for, per identifier, in call order.
+    fetched_files: ClassVar[dict[str, list[str]]] = {}
     # Source names whose enumeration should raise, simulating an unreachable source —
     # exactly as a real source fault would — to exercise the readiness reachability probe.
     unreachable_sources: ClassVar[set[str]] = set()
@@ -95,6 +98,7 @@ class FakePlugin(SourcePlugin):
                     "format": f.format,
                     "refused": f.refused,
                     "derived_from": f.derived_from,
+                    "bitrate": f.bitrate,
                 }
                 for f in it.files
             ],
@@ -105,6 +109,7 @@ class FakePlugin(SourcePlugin):
         self, identifier: str, files: Sequence[ManifestFile], dest_dir: Path
     ) -> FetchResult:
         self.fetch_count[identifier] = self.fetch_count.get(identifier, 0) + 1
+        self.fetched_files.setdefault(identifier, []).extend(mf.name for mf in files)
         content = {f.name: f.content for f in self.items[identifier].files}
         dest_dir.mkdir(parents=True, exist_ok=True)
         bytes_total = 0
@@ -121,6 +126,7 @@ class FakePlugin(SourcePlugin):
 def reset_fake() -> None:
     FakePlugin.items.clear()
     FakePlugin.fetch_count.clear()
+    FakePlugin.fetched_files.clear()
     FakePlugin.unreachable_sources.clear()
     FakePlugin.lookup_calls.clear()
     FakePlugin.lookup_faults.clear()

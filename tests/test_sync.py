@@ -219,10 +219,10 @@ def test_refetch_of_a_refused_show_exits_nonzero(
     assert refetch_item(config, "gd-sbd") == 1
 
 
-def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
+def test_lossless_refused_copy_is_complete_and_listed_until_lossless_returns(
     tmp_roots: tuple[Path, Path]
 ) -> None:
-    """A show mirrored as its fallback (e.g. MP3 when archive.org refuses the lossless
+    """A show mirrored as its best lossy copy (e.g. MP3 when archive.org refuses the lossless
     files) is complete, and `status` lists it with the reason. When the lossless files
     are served again, the next sync fetches them and the show leaves the list."""
     from shakedown.state import DriftRepo
@@ -254,10 +254,10 @@ def test_fallback_copy_is_complete_and_listed_until_lossless_returns(
 
 
 @pytest.mark.parametrize("incremental", [False, True])
-def test_fallback_copy_stays_listed_after_dropping_out_of_one_listing(
+def test_lossless_refused_copy_stays_listed_after_dropping_out_of_one_listing(
     tmp_roots: tuple[Path, Path], incremental: bool
 ) -> None:
-    """A fallback show that drops out of one listing and returns unchanged is complete
+    """A lossless-refused show that drops out of one listing and returns unchanged is complete
     again and still listed in `status` with its reason."""
     archive, library = tmp_roots
     config = make_config(

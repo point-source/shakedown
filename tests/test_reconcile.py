@@ -166,8 +166,8 @@ def test_reconcile_looks_up_only_shows_on_disk(tmp_roots: tuple[Path, Path]) -> 
     assert [identifier for identifier, _ in FakePlugin.lookup_calls] == ["a"]
 
 
-def test_reconcile_keeps_a_fallback_shows_reason(tmp_roots: tuple[Path, Path]) -> None:
-    """A show mirrored as its fallback copy stays listed in `status` with its reason
+def test_reconcile_keeps_a_lossless_refused_shows_reason(tmp_roots: tuple[Path, Path]) -> None:
+    """A show mirrored as its best lossy copy stays listed in `status` with its reason
     after a rebuild (§spec:item-lifecycle: restricted shows appear with their reason)."""
     from shakedown.selection import LOSSLESS_REFUSED_REASON
 

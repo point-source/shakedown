@@ -255,7 +255,7 @@ def test_refused_lossless_show_mirrors_its_best_lossy_copy(
     source: FakeSource, tmp_roots: tuple[Path, Path]
 ) -> None:
     """A stream-only show: archive.org flags the item and marks the lossless files
-    `private`; the MP3s stay public. Both sources mirror the fallback."""
+    `private`; the MP3s stay public. Both sources mirror the best lossy copy."""
     archive, library = tmp_roots
     config = source.config(
         archive, library

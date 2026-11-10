@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
@@ -24,10 +25,19 @@ from shakedown.discovery import (
     stream_items,
 )
 from shakedown.lock import run_exclusive
-from shakedown.models import Item, ItemStatus, OperationStatus, OperationType
+from shakedown.models import (
+    Item,
+    ItemStatus,
+    Manifest,
+    ManifestFile,
+    OperationStatus,
+    OperationType,
+)
 from shakedown.plugins import registry
 from shakedown.plugins.base import SourcePlugin
+from shakedown.staging import METADATA_SIDECAR
 from shakedown.state import ItemRepo, OperationOutcomeRepo
+from shakedown.sync import plan_files
 
 log = logging.getLogger(__name__)
 
@@ -135,10 +145,11 @@ def _reconcile_collection(
                     discovered_at=existing.discovered_at if existing else now,
                     downloaded_at=existing.downloaded_at if existing else now,
                     last_verified_at=now,
-                    # Set for a fallback copy, so `status` keeps listing it.
+                    # Set for a lossless-refused copy, so `status` keeps listing it.
                     restriction_reason=desc.restriction_reason,
                     source_metadata=desc.metadata,
-                    recorded_manifest=desc.manifest,
+                    recorded_manifest=_with_files_on_disk(desc.manifest, archive_path, existing),
+                    not_playable_reason=desc.not_playable_reason,
                 )
             else:
                 # On disk, but no description this run. Prior manifest/metadata are
@@ -166,6 +177,7 @@ def _reconcile_collection(
                     source_metadata=existing.source_metadata if existing else {},
                     recorded_manifest=existing.recorded_manifest if existing else None,
                     change_signal=existing.change_signal if existing else None,
+                    not_playable_reason=existing.not_playable_reason if existing else None,
                 )
             items.upsert(item)
 
@@ -217,3 +229,22 @@ def _reconcile_collection(
         OperationType.RECONCILE, source.name, collection.name, finished
     )
     return 0
+
+
+def _with_files_on_disk(selected: Manifest, archive_path: Path, existing: Item | None) -> Manifest:
+    """The selection plus every other file in the show's archive copy, recorded as
+    archive-only so a later download keeps it: a rebuild never turns files the rule
+    no longer selects into files the next fetch deletes (§spec:quality-selection).
+    Files the record already knows keep their recorded size and checksum; others get
+    their size from disk and no checksum (reading the bytes is `verify --deep`'s job).
+    """
+    merged, _ = plan_files(selected, existing)
+    known = {f.name for f in merged.files} | {METADATA_SIDECAR}
+    extra = tuple(
+        ManifestFile(rel, path.stat().st_size, None, library=False)
+        for path in sorted(archive_path.rglob("*"))
+        if path.is_file()
+        and not path.is_symlink()
+        and (rel := path.relative_to(archive_path).as_posix()) not in known
+    )
+    return Manifest(files=tuple(sorted(merged.files + extra, key=lambda f: f.name)))

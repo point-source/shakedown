@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +27,7 @@ from shakedown.sync import (
     PlannedItem,
     _apply_placement_report,
     _execute_fetch_and_stage,
+    plan_files,
 )
 from shakedown.trigger import announce_started
 
@@ -238,7 +239,15 @@ def _reconform(config: Config, items: ItemRepo, drifts: list[DriftRecord]) -> in
                 if desc is None or existing is None:
                     log.warning("reconform: %s no longer in source — skipped", identifier)
                     continue
-                targets.append(PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM))
+                manifest, fetch = plan_files(desc.manifest, existing, refetch=True)
+                targets.append(
+                    PlannedItem(
+                        replace(desc, manifest=manifest),
+                        existing,
+                        PlanAction.CHANGED_UPSTREAM,
+                        fetch,
+                    )
+                )
 
             stats = CollectionSyncStats()
             # Re-fetched shows get new inodes: relink them so the library serves the

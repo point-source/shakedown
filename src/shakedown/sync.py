@@ -12,6 +12,7 @@ import os
 import queue
 import shutil
 import time
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import closing
 from dataclasses import dataclass, field, replace
@@ -35,6 +36,7 @@ from shakedown.models import (
     Item,
     ItemStatus,
     Manifest,
+    ManifestFile,
     OperationOutcome,
     OperationStatus,
     OperationType,
@@ -82,6 +84,52 @@ class PlannedItem:
     descriptor: ItemDescriptor | None  # None for disappeared (no longer in source)
     existing: Item | None
     action: PlanAction
+    # The descriptor's files to download; None downloads all of them. The rest are
+    # kept from the archive copy (§spec:quality-selection: an upgrade downloads only
+    # what is missing).
+    fetch: tuple[ManifestFile, ...] | None = None
+
+
+def plan_files(
+    selected: Manifest, existing: Item | None, *, refetch: bool = False
+) -> tuple[Manifest, tuple[ManifestFile, ...]]:
+    """The manifest to record for a show and the files to download for it.
+
+    Selected files the archive already holds — same name, size, and checksum as
+    recorded, and on disk (a stat, never a hash) — are kept; ``refetch`` downloads
+    every selected file instead. Recorded files the rule no longer selects stay in the
+    archive copy, recorded as archive-only, while they are on disk: a selection change
+    never deletes archive audio (§spec:quality-selection).
+    """
+    if (
+        not selected.files
+        or existing is None
+        or existing.recorded_manifest is None
+        or existing.archive_path is None
+    ):
+        return selected, selected.files
+    folder = existing.archive_path
+    recorded = existing.recorded_manifest.fingerprint()
+    chosen = {f.name for f in selected.files}
+    fetch = tuple(
+        f
+        for f in selected.files
+        if refetch
+        or (f.name, f.size, f.md5) not in recorded
+        or not (folder / f.name).is_file()
+    )
+    retained = tuple(
+        replace(f, library=False)
+        for f in existing.recorded_manifest.files
+        if f.name not in chosen and (folder / f.name).is_file()
+    )
+    merged = Manifest(files=tuple(sorted(selected.files + retained, key=lambda f: f.name)))
+    return merged, fetch
+
+
+def _entries(manifest: Manifest) -> frozenset[tuple[str, int | None, str | None, bool]]:
+    """A manifest's files with their library flag: what staging reads."""
+    return frozenset((f.name, f.size, f.md5, f.library) for f in manifest.files)
 
 
 @dataclass
@@ -611,19 +659,27 @@ def _sync_collection_phases(
             existing = items.get(source.name, collection.name, p.existing.identifier)
             if existing is None or existing.recorded_manifest is None:
                 continue
-            # A looked-up show brings its current reason (set for a fallback copy); a
-            # show skipped on an unchanged signal is complete and keeps its own.
-            reason = (
-                p.descriptor.restriction_reason
-                if p.descriptor is not None
-                else existing.restriction_reason
-            )
+            # A looked-up show brings its current reasons and, when the rule now
+            # stages different files, its new manifest; a show skipped on an
+            # unchanged signal is complete and keeps its own.
+            desc = p.descriptor
+            reason = desc.restriction_reason if desc else existing.restriction_reason
+            not_playable = desc.not_playable_reason if desc else existing.not_playable_reason
+            manifest = desc.manifest if desc and desc.manifest.files else None
             if existing.status != ItemStatus.COMPLETE:
                 # Back upstream with the files we already hold (e.g. after an empty
                 # answer or a lifted restriction): the archive copy is complete again.
+                existing.recorded_manifest = manifest or existing.recorded_manifest
+                existing.not_playable_reason = not_playable
                 _record_back_to_complete(items, existing, reason)
-            elif reason != existing.restriction_reason:
+            elif (
+                manifest is not None
+                or reason != existing.restriction_reason
+                or not_playable != existing.not_playable_reason
+            ):
+                existing.recorded_manifest = manifest or existing.recorded_manifest
                 existing.restriction_reason = reason
+                existing.not_playable_reason = not_playable
                 items.upsert(existing)
 
     # Persist the disappeared set in one shot (unavailable shows were recorded as listed).
@@ -740,11 +796,17 @@ def _pipelined_discover_and_fetch(
                 fetch_futures[fut] = planned
                 fut.add_done_callback(finished.put)
             elif planned.action == PlanAction.UNCHANGED:
-                # Re-staging needs only the record and the current reason (set for a
-                # fallback copy): drop the rest of the listed details now.
+                # Re-staging needs only the record and the current reasons: drop the
+                # rest of the listed details now, keeping the manifest only when the
+                # record must take it (files the rule no longer selects, new flags).
+                assert planned.descriptor is not None and planned.existing is not None
+                manifest = planned.descriptor.manifest
+                recorded = planned.existing.recorded_manifest
+                if recorded is not None and _entries(manifest) == _entries(recorded):
+                    manifest = Manifest(files=())
                 deferred.append(
                     PlannedItem(
-                        replace(desc, manifest=Manifest(files=()), metadata={}),
+                        replace(planned.descriptor, manifest=manifest, metadata={}),
                         planned.existing,
                         PlanAction.UNCHANGED,
                     )
@@ -965,7 +1027,8 @@ def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> Plann
     Never hashes bytes: the comparison is between the source's *current* manifest and
     the manifest recorded at fetch time. PRD §5 also requires the expected file paths
     still exist on disk — manifest-equality alone isn't enough; vanished files trigger
-    a re-fetch. This decision needs only *this* item's state, so it is safe to make the
+    a re-fetch. Only the selected files that are missing are downloaded (plan_files).
+    This decision needs only *this* item's state, so it is safe to make the
     moment the item is discovered, before the rest of the enumeration
     (SPEC §spec:discovery-pipeline).
     """
@@ -981,11 +1044,11 @@ def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> Plann
         )
     if existing is None or existing.recorded_manifest is None:
         return PlannedItem(desc, existing, PlanAction.NEW)
-    if existing.recorded_manifest == desc.manifest:
-        if _files_missing(existing):
-            return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
-        return PlannedItem(desc, existing, PlanAction.UNCHANGED)
-    return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
+    manifest, fetch = plan_files(desc.manifest, existing)
+    desc = replace(desc, manifest=manifest)
+    if fetch:
+        return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM, fetch)
+    return PlannedItem(desc, existing, PlanAction.UNCHANGED)
 
 
 def _signal_unchanged(signal: str | None, existing: Item | None) -> bool:
@@ -1215,6 +1278,7 @@ def _fetch_with_retries(
     desc: ItemDescriptor,
     tmp_dir: Path,
     *,
+    files: Sequence[ManifestFile] | None = None,
     max_attempts: int = _MAX_FETCH_ATTEMPTS,
 ) -> FetchResult:
     """Call plugin.fetch with bounded retries and backoff (SPEC §spec:failure-behavior).
@@ -1227,14 +1291,17 @@ def _fetch_with_retries(
     The temp dir is kept between attempts (and runs), so one late error does not
     re-download a whole show: plugins keep a leftover file only once it matches the
     manifest's size and md5, and fetch the rest. Anything in the temp dir that is not
-    a manifest file is removed before each attempt.
-    """
-    for attempt in range(1, max_attempts + 1):
-        _prepare_tmp_dir(desc, tmp_dir)
+    a file to fetch is removed before each attempt.
 
-        result = plugin.fetch(desc.identifier, desc.manifest.files, tmp_dir)
+    ``files`` are the files to download (default: the whole manifest).
+    """
+    wanted = desc.manifest.files if files is None else tuple(files)
+    for attempt in range(1, max_attempts + 1):
+        _prepare_tmp_dir(wanted, tmp_dir)
+
+        result = plugin.fetch(desc.identifier, wanted, tmp_dir)
         if result.success:
-            short = _size_mismatches(desc, tmp_dir)
+            short = _size_mismatches(wanted, tmp_dir)
             if short:
                 # A plugin can report success over a short file (dropped connection,
                 # truncated write). Sizes are a stat, not a hash; retry like any
@@ -1264,11 +1331,11 @@ def _fetch_with_retries(
     raise AssertionError("unreachable: max_attempts must be >= 1")
 
 
-def _prepare_tmp_dir(desc: ItemDescriptor, tmp_dir: Path) -> None:
-    """Create the temp dir, keeping files a previous attempt left for the manifest's
-    names (the plugin re-checks them before reuse) and removing everything else."""
+def _prepare_tmp_dir(files: Sequence[ManifestFile], tmp_dir: Path) -> None:
+    """Create the temp dir, keeping files a previous attempt left for the names to
+    fetch (the plugin re-checks them before reuse) and removing everything else."""
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    wanted = {os.path.normpath(mf.name) for mf in desc.manifest.files}
+    wanted = {os.path.normpath(mf.name) for mf in files}
     wanted_dirs = {os.path.dirname(name) for name in wanted}
     for dirpath, dirnames, filenames in os.walk(tmp_dir, topdown=False):
         rel_dir = os.path.relpath(dirpath, tmp_dir)
@@ -1285,11 +1352,11 @@ def _prepare_tmp_dir(desc: ItemDescriptor, tmp_dir: Path) -> None:
                 shutil.rmtree(path)
 
 
-def _size_mismatches(desc: ItemDescriptor, tmp_dir: Path) -> list[str]:
-    """Manifest files present in the temp dir whose size differs from the source's.
+def _size_mismatches(files: Sequence[ManifestFile], tmp_dir: Path) -> list[str]:
+    """Fetched files present in the temp dir whose size differs from the source's.
     Missing files are left to the plugin's verify() guard."""
     short: list[str] = []
-    for mf in desc.manifest.files:
+    for mf in files:
         path = tmp_dir / mf.name
         if mf.size is not None and path.is_file() and path.stat().st_size != mf.size:
             short.append(mf.name)
@@ -1412,7 +1479,8 @@ def _fetch_one(
             error=f"{NO_FILES_REASON}; archive copy left untouched",
         )
 
-    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir)
+    fetch = desc.manifest.files if target.fetch is None else target.fetch
+    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, files=fetch)
     if fetch_result.unavailable:
         # Nothing will resume a download the source refuses; the archive copy (if
         # any) is untouched.
@@ -1429,6 +1497,11 @@ def _fetch_one(
             bytes_downloaded=fetch_result.bytes_downloaded,
             error=fetch_result.error,
         )
+
+    # The files the archive copy already holds join the download by hardlink: no
+    # bytes are read or hashed, and the swap below keeps them (§spec:quality-selection).
+    fetched = {mf.name for mf in fetch}
+    _link_kept(dest, tmp_dir, [mf for mf in desc.manifest.files if mf.name not in fetched])
 
     # Core-owned completeness guard before promotion: route the existence-only
     # check through the plugin's own verify() contract (no byte hashing —
@@ -1467,6 +1540,18 @@ def _fetch_one(
         archive_path=dest,
         bytes_downloaded=fetch_result.bytes_downloaded,
     )
+
+
+def _link_kept(dest: Path, tmp_dir: Path, kept: Sequence[ManifestFile]) -> None:
+    """Hardlink the archive copy's kept files into the temp dir before promotion. A
+    kept file missing from the archive is left for verify() to report."""
+    for mf in kept:
+        src, link = dest / mf.name, tmp_dir / mf.name
+        if not src.is_file():
+            continue
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.unlink(missing_ok=True)
+        os.link(src, link)
 
 
 _STALE_PREFIX = ".stale-"
@@ -1560,11 +1645,12 @@ def _record_complete(
         discovered_at=now,
         downloaded_at=now,
         last_verified_at=now,
-        # Set when the copy is a fallback (e.g. MP3 for refused lossless files).
+        # Set when the copy is the best lossy one because lossless files are refused.
         restriction_reason=desc.restriction_reason,
         source_metadata=desc.metadata,
         recorded_manifest=desc.manifest,
         change_signal=desc.change_signal,
+        not_playable_reason=desc.not_playable_reason,
     )
     items.upsert(item)
     return item
@@ -1716,7 +1802,10 @@ def _refetch_item(config: Config, identifier: str) -> int:
                 if isinstance(found, LookupFailure):
                     log.warning("%s: %s", found.identifier, found.reason)
                     return 1
-                target = PlannedItem(found, existing, PlanAction.CHANGED_UPSTREAM)
+                manifest, fetch = plan_files(found.manifest, existing, refetch=True)
+                target = PlannedItem(
+                    replace(found, manifest=manifest), existing, PlanAction.CHANGED_UPSTREAM, fetch
+                )
                 stats = CollectionSyncStats()
                 placement = LibraryPlacement(config, collection, source.name, items)
                 placement.begin()
