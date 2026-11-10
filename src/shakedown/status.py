@@ -205,12 +205,9 @@ def print_status(config: Config, *, as_json: bool) -> None:
             click.echo(
                 f"  shared folder names ({len(separations)} shows, each labelled by identifier):"
             )
-            for sep in separations[:10]:
-                # `!r`: folder names come from source metadata via the layout template and
-                # may carry control characters — repr neutralizes terminal escapes.
-                click.echo(f"    - {sep['identifier']} → {sep['folder']!r}")
-            if len(separations) > 10:
-                click.echo(f"    ... and {len(separations) - 10} more")
+            # `!r`: folder names come from source metadata via the layout template and
+            # may carry control characters — repr neutralizes terminal escapes.
+            _echo_capped([f"{sep['identifier']} → {sep['folder']!r}" for sep in separations])
         if s["unplaced_files"]:
             click.echo(
                 f"  library files not placed by shakedown: {len(s['unplaced_files'])} "
@@ -220,17 +217,19 @@ def print_status(config: Config, *, as_json: bool) -> None:
             click.echo(f"  drift: {s['drift_files']} files (run `verify --deep --list` for paths)")
         if s["restricted"]:
             click.echo(f"  restricted ({len(s['restricted'])}):")
-            for r in s["restricted"][:10]:
-                click.echo(f"    - {r['identifier']}: {r['reason']}")
-            if len(s["restricted"]) > 10:
-                click.echo(f"    ... and {len(s['restricted']) - 10} more")
+            _echo_capped([f"{r['identifier']}: {r['reason']}" for r in s["restricted"]])
         if s["not_playable"]:
             click.echo(f"  not playable ({len(s['not_playable'])}):")
-            for r in s["not_playable"][:10]:
-                click.echo(f"    - {r['identifier']}: {r['reason']}")
-            if len(s["not_playable"]) > 10:
-                click.echo(f"    ... and {len(s['not_playable']) - 10} more")
+            _echo_capped([f"{r['identifier']}: {r['reason']}" for r in s["not_playable"]])
         click.echo("")
+
+
+def _echo_capped(rows: list[str], cap: int = 10) -> None:
+    """One status list: the first ``cap`` rows, then how many more there are."""
+    for row in rows[:cap]:
+        click.echo(f"    - {row}")
+    if len(rows) > cap:
+        click.echo(f"    ... and {len(rows) - cap} more")
 
 
 def show_item(config: Config, identifier: str) -> None:
