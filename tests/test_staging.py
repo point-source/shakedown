@@ -241,6 +241,15 @@ def test_template_render_sanitizes_every_field_by_default() -> None:
     assert out == ".._.._x/1977_05_08 - _"
 
 
+def test_template_render_keeps_distinct_safe_values_distinct() -> None:
+    # The automatic cleaning only makes a value path-safe. Two different identifiers
+    # must not render to the same folder, or their recordings merge.
+    assert render("{identifier}", {"identifier": "show__one"}) == "show__one"
+    assert render("{identifier}", {"identifier": "show_one"}) == "show_one"
+    # An explicit |sanitize keeps its full behavior, so existing folder names hold.
+    assert render("{venue|sanitize}", {"venue": "a__b. "}) == "a_b"
+
+
 def test_template_render_joins_list_values() -> None:
     # A repeated metadata field arrives as a list; it renders as one readable segment,
     # not as Python's `['a', 'b']`.

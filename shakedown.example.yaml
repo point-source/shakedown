@@ -33,7 +33,8 @@ sources:
         # Template renders the staging *directory*; original filenames are appended
         # automatically (SPEC.md §spec:library-staging). Available IA fields: identifier, title, creator,
         # date, year, venue, coverage. Filters: sanitize, short, lower, upper. Every field
-        # is sanitized even without `|sanitize`. End the layout with {identifier}: one show
+        # has path-unsafe characters replaced even without `|sanitize`. End the layout
+        # with {identifier}: one show
         # often has several recordings, and each needs its own folder.
         library_layout: '{year}/{date} - {venue}/{identifier}'
         # Opt-in metadata preservation (SPEC.md §spec:metadata-preservation): write the

@@ -98,7 +98,7 @@ shakedown serve      [--host HOST] [--port PORT]    # optional HTTP control plan
 
 ### Upgrading
 
-- **Library folder names (this release):** every `library_layout` field is now sanitized, even without `|sanitize`, so a folder built from a raw field that held a `/`, `:` or a list may get a new name. Run `shakedown restage --collection <name>` once per collection after upgrading to rebuild a clean library tree. The archive is untouched.
+- **Library folder names (this release):** every `library_layout` field now has path-unsafe characters replaced, even without `|sanitize`, so a folder built from a raw field that held a `/`, `:` or a list may get a new name. Run `shakedown restage --collection <name>` once per collection after upgrading to rebuild a clean library tree. The archive is untouched.
 
 ## Writing a source plugin
 

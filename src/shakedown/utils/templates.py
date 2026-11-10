@@ -8,8 +8,10 @@ Example:
   "{year}/{date} - {venue}/{identifier}"
 
 Every field value comes from source metadata that uploaders control, so each one is
-sanitized after its filters run, whether or not the template asks for `|sanitize`: a
-field can never add a path separator or a `..` segment (§spec:library-staging).
+made path-safe after its filters run, whether or not the template asks for
+`|sanitize`: a field can never add a path separator or a `..` segment
+(§spec:library-staging). `|sanitize` additionally collapses underscores and trims
+trailing dots and spaces.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from shakedown.utils.sanitize import sanitize
+from shakedown.utils.sanitize import path_safe, sanitize
 
 
 class TemplateError(Exception):
@@ -64,7 +66,7 @@ def render(template: str, fields: dict[str, Any]) -> str:
             if fname not in _FILTERS:
                 raise TemplateError(f"unknown filter: {fname!r}")
             out = _FILTERS[fname](out)
-        return sanitize(out)
+        return path_safe(out)
 
     return _PLACEHOLDER_RE.sub(_sub, template)
 
