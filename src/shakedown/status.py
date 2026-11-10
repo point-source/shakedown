@@ -185,8 +185,10 @@ def print_status(config: Config, *, as_json: bool) -> None:
             click.echo("  STALE: source enumeration failed last run; existing items retained")
         last = s["last_run"]
         if last:
+            # A single-show run names its kind; a sync's line stays as it was.
+            kind = "" if last["kind"] == RunKind.SYNC else f" ({last['kind']})"
             click.echo(
-                f"  last run: {last['started_at']} → "
+                f"  last run: {last['started_at']}{kind} → "
                 f"new={last['items_new']} updated={last['items_updated']} "
                 f"failed={last['items_failed']} bytes={last['bytes_downloaded']}"
             )

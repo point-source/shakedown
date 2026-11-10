@@ -55,7 +55,7 @@ def test_item_refetch_of_an_unrecorded_show_exits_two(tmp_path: Path, tmp_roots)
     cfg = _write_config(tmp_path, archive, library)
     result = CliRunner().invoke(main, ["--config", str(cfg), "item", "refetch", "gd-nope"])
     assert result.exit_code == 2
-    assert "gd-nope" in result.output
+    assert "Error: no recorded show named 'gd-nope'" in result.output
     assert FakePlugin.lookup_calls == []
 
 

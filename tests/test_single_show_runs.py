@@ -21,7 +21,7 @@ from shakedown.db import connect
 from shakedown.models import ItemStatus, RunKind
 from shakedown.plugins.base import FetchResult, ItemLookup
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, PendingHandoffRepo, RunRepo
-from shakedown.status import _collection_summary
+from shakedown.status import _collection_summary, print_status
 from shakedown.sync import NO_FILES_REASON, refetch_item, run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -380,3 +380,36 @@ def test_refetch_of_a_show_the_source_refuses_fails_the_run(
     assert row is not None and row.status == ItemStatus.UNAVAILABLE
     assert _show_paths(config, "gd-a")[0].read_bytes() == b"audio"
 
+
+def test_status_text_names_a_single_show_run_and_how_to_retry_it(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _add_show("gd-a")
+    assert run_sync(config) == 0
+    FakePlugin.lookup_faults["gd-a"] = [ConnectionResetError("connection reset")]
+    assert refetch_item(config, "gd-a") == 1
+    capsys.readouterr()
+
+    print_status(config, as_json=False)
+
+    out = capsys.readouterr().out
+    started = _summary(config)["last_run"]["started_at"]
+    assert f"  last run: {started} (refetch) → new=0 updated=0 failed=1 " in out
+    assert "    action: fix failed item issues and rerun item refetch" in out
+
+
+def test_status_text_after_a_sync_names_no_kind(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _add_show("gd-a")
+    assert run_sync(config) == 0
+    capsys.readouterr()
+
+    print_status(config, as_json=False)
+
+    started = _summary(config)["last_run"]["started_at"]
+    assert f"  last run: {started} → new=1 " in capsys.readouterr().out
