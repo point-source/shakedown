@@ -660,27 +660,28 @@ def _sync_collection_phases(
             existing = items.get(source.name, collection.name, p.existing.identifier)
             if existing is None or existing.recorded_manifest is None:
                 continue
-            # A looked-up show brings its current reasons and, when the rule now
-            # stages different files, its new manifest; a show skipped on an
-            # unchanged signal is complete and keeps its own.
+            # A looked-up show brings its current reasons, its change signal (the full
+            # comparison just proved it unchanged) and, when the rule now stages
+            # different files, its new manifest; a show skipped on an unchanged signal
+            # is complete and keeps its own.
             desc = p.descriptor
-            reason = desc.restriction_reason if desc else existing.restriction_reason
-            not_playable = desc.not_playable_reason if desc else existing.not_playable_reason
-            manifest = desc.manifest if desc and desc.manifest.files else None
+            update = desc is not None and (
+                bool(desc.manifest.files)
+                or desc.restriction_reason != existing.restriction_reason
+                or desc.not_playable_reason != existing.not_playable_reason
+                or (desc.change_signal or existing.change_signal) != existing.change_signal
+            )
+            if desc is not None:
+                if desc.manifest.files:
+                    existing.recorded_manifest = desc.manifest
+                existing.restriction_reason = desc.restriction_reason
+                existing.not_playable_reason = desc.not_playable_reason
+                existing.change_signal = desc.change_signal or existing.change_signal
             if existing.status != ItemStatus.COMPLETE:
                 # Back upstream with the files we already hold (e.g. after an empty
                 # answer or a lifted restriction): the archive copy is complete again.
-                existing.recorded_manifest = manifest or existing.recorded_manifest
-                existing.not_playable_reason = not_playable
-                _record_back_to_complete(items, existing, reason)
-            elif (
-                manifest is not None
-                or reason != existing.restriction_reason
-                or not_playable != existing.not_playable_reason
-            ):
-                existing.recorded_manifest = manifest or existing.recorded_manifest
-                existing.restriction_reason = reason
-                existing.not_playable_reason = not_playable
+                _record_back_to_complete(items, existing, existing.restriction_reason)
+            elif update:
                 items.upsert(existing)
 
     # Persist the disappeared set in one shot (unavailable shows were recorded as listed).

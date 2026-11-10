@@ -379,3 +379,24 @@ def test_status_is_quiet_when_every_show_plays(tmp_roots: tuple[Path, Path]) -> 
     _show("gd-flac", _flac())
     assert run_sync(config) == 0
     assert "not playable" not in _status(config, as_json=False)
+
+
+def test_an_unchanged_show_regains_its_change_signal_after_the_upgrade(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """The upgrade clears every change signal so each show is looked up once; an
+    unchanged show must store the signal again, or an incremental collection would
+    look it up on every run (§spec:incremental-discovery)."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, incremental_discovery=True)
+    show = _show("gd-flac", _flac(), NOTES)
+    show.change_signal = "v1"
+    assert run_sync(config) == 0
+    connect(config.state_db).execute("UPDATE items SET change_signal = NULL").connection.commit()
+
+    assert run_sync(config) == 0  # the one lookup after the upgrade
+    looked_up = FakePlugin.lookups("gd-flac")
+    assert run_sync(config) == 0
+
+    assert FakePlugin.lookups("gd-flac") == looked_up
+    assert _item(config, "gd-flac").change_signal == "v1"
