@@ -463,6 +463,25 @@ def test_reason_never_carries_the_webhook_url() -> None:
     assert "s3cret" not in err
 
 
+def test_exec_that_starts_work_in_the_background_and_returns_is_delivered(
+    tmp_path: Path, short_wait: float
+) -> None:
+    """The documented pattern — start the import and return — delivers at once, and
+    the work it started keeps running (§spec:durable-handoff: a trigger, not a wait)."""
+    done = tmp_path / "import-finished"
+    coll = _make_collection(ExecHandoff(exec=f"sh -c '(sleep 1; touch {done}) & exit 0'"))
+
+    started = time.monotonic()
+    err = fire_complete(coll, _complete())
+
+    assert err is None
+    assert time.monotonic() - started < short_wait
+    deadline = time.monotonic() + 5
+    while not done.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert done.exists(), "the background work must not be stopped"
+
+
 def test_exec_that_never_exits_is_stopped_after_the_wait(short_wait: float) -> None:
     """Past the wait the command is stopped — including anything it started, so a
     shell wrapper's child holding the error output cannot hold the run."""

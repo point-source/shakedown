@@ -26,6 +26,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -261,34 +262,39 @@ def _post(url: str, body: dict[str, Any]) -> str | None:
 
 def _run(cmd: str, body: dict[str, Any]) -> str | None:
     """Run the command with the body on stdin; delivered only when it exits 0 within
-    the wait. Past the wait the command and everything it started are stopped."""
+    the wait. Work it starts in the background keeps running. Past the wait the
+    command and everything it started are stopped."""
     try:
         argv = shlex.split(cmd)
         if not argv:
             return "command could not start: the command is empty"
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            start_new_session=True,  # its own process group, so a stop reaches children
-        )
-    except (ValueError, OSError) as e:
+    except ValueError as e:
         return f"command could not start: {e}"
-    try:
-        _, stderr = proc.communicate(json.dumps(body).encode(), timeout=HANDOFF_WAIT_SECONDS)
-    except subprocess.TimeoutExpired:
-        _stop(proc)
-        return NO_ANSWER
-    if proc.returncode != 0:
-        return f"command exited with status {proc.returncode}: {_error_tail(stderr)}"
+    # Error output goes to a file, not a pipe: a background child that inherits a
+    # pipe holds it open, and reading to its end would wait on that child instead of
+    # on the command's own exit.
+    with tempfile.TemporaryFile() as stderr:
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+                start_new_session=True,  # its own process group, so a stop reaches children
+            )
+        except OSError as e:
+            return f"command could not start: {e}"
+        try:
+            proc.communicate(json.dumps(body).encode(), timeout=HANDOFF_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):  # already gone
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            return NO_ANSWER
+        if proc.returncode != 0:
+            stderr.seek(0)
+            return f"command exited with status {proc.returncode}: {_error_tail(stderr.read())}"
     return None
-
-
-def _stop(proc: subprocess.Popen[bytes]) -> None:
-    with contextlib.suppress(ProcessLookupError):  # already gone
-        os.killpg(proc.pid, signal.SIGKILL)
-    proc.communicate()
 
 
 def _error_tail(stderr: bytes) -> str:
