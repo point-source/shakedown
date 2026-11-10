@@ -1175,10 +1175,10 @@ It is never scheduled by default (§req:constraints).
   (§req:success-criteria #5). Each reconformed show is fetched as a
   single-show run (§spec:single-show-runs) and, on a `fill_tags`
   collection, has its missing tags filled again afterwards. Only the
-  drifted files are downloaded: any the source still lists, a picked
+  drifted files are downloaded: any the source still serves, a picked
   copy or an archive-only one alike. A drifted file the source no
-  longer lists is reported in the run as not repaired and causes no
-  other download.
+  longer serves (dropped or refused) is reported in the run as not
+  repaired and causes no other download.
 
 ## CLI surface §spec:cli
 
