@@ -9,12 +9,13 @@ import logging
 import shutil
 from datetime import datetime
 
-from shakedown.config import Config
+from shakedown.config import CollectionConfig, Config
 from shakedown.db import connect
 from shakedown.lock import run_exclusive
-from shakedown.models import ItemStatus, OperationStatus, OperationType
-from shakedown.staging import UnsafeLibraryPathError, stage_item
+from shakedown.models import Item, ItemStatus, OperationStatus, OperationType
+from shakedown.staging import UnsafeLibraryPathError, stage_item, staging_dir_for
 from shakedown.state import ItemRepo, OperationOutcomeRepo
+from shakedown.utils.templates import TemplateError
 
 log = logging.getLogger(__name__)
 
@@ -52,9 +53,37 @@ def _run_restage(
                 source.name,
                 collection.name,
                 started,
-                phase="clear-library",
+                phase="plan",
                 safe_next_action="fix storage/path/layout and rerun restage",
             )
+            to_stage = [
+                item for item in items.list_for_collection(source.name, collection.name)
+                if item.status == ItemStatus.COMPLETE
+                and item.recorded_manifest is not None
+                and item.archive_path is not None
+            ]
+            render_error = _first_render_error(config, collection, source.name, to_stage)
+            if render_error is not None:
+                identifier, err = render_error
+                failed += 1
+                outcomes.finish(
+                    outcome,
+                    OperationStatus.FAILED_BEFORE_COMPLETION,
+                    datetime.now(),
+                    phase="plan",
+                    affected_item=identifier,
+                    completed_work={"items_staged": 0, "links_created": 0, "collisions": 0},
+                    preservation_context="archive recordings and library tree retained",
+                    deletion_context="nothing deleted",
+                    safe_next_action="fix library layout and rerun restage",
+                    errors=[str(err)],
+                )
+                log.warning(
+                    "[%s/%s] restage stopped before clearing the library: %s: %s",
+                    source.name, collection.name, identifier, err,
+                )
+                continue
+
             scope = config.library_root / source.name / collection.name
             if scope.exists():
                 try:
@@ -82,9 +111,8 @@ def _run_restage(
             refused: list[str] = []
             staged_paths: set = set()
             stage_failed = False
-            for item in items.list_for_collection(source.name, collection.name):
-                if item.status != ItemStatus.COMPLETE or item.recorded_manifest is None:
-                    continue
+            for item in to_stage:
+                assert item.recorded_manifest is not None  # filtered into to_stage
                 try:
                     result = stage_item(
                         config, collection, source.name, item, item.recorded_manifest,
@@ -167,3 +195,21 @@ def _run_restage(
                     OperationType.RESTAGE, source.name, collection.name, finished
                 )
     return 0 if failed == 0 else 1
+
+
+def _first_render_error(
+    config: Config, collection: CollectionConfig, source_name: str, to_stage: list[Item]
+) -> tuple[str, TemplateError] | None:
+    """Render every item's library folder before the library is cleared, so a layout
+    that cannot render leaves the existing tree in place. Returns the first failure."""
+    for item in to_stage:
+        assert item.archive_path is not None  # filtered into to_stage
+        try:
+            staging_dir_for(
+                config, collection, source_name, item.source_metadata, item.archive_path
+            )
+        except TemplateError as e:
+            return item.identifier, e
+        except UnsafeLibraryPathError:
+            continue  # refused per item while staging; the other items still link
+    return None

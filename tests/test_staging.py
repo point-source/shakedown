@@ -168,6 +168,31 @@ def test_restage_records_recovery_on_storage_failure(
     assert '"safe_next_action": "fix storage/path/layout and rerun restage"' in status_json
 
 
+def test_restage_leaves_library_untouched_when_layout_cannot_render(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Restage works out every library path before it clears anything."""
+    archive, library = tmp_roots
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"audio")]
+    )
+    assert run_sync(make_config(archive, library, library_layout="{identifier}")) == 0
+    staged = library / "fake-src" / "coll1" / "gd-x" / "x.flac"
+    assert staged.is_file()
+
+    broken = make_config(archive, library, library_layout="{identifier|sanitise}")
+    assert run_restage(broken) == 1
+
+    assert staged.is_file()
+    conn = connect(broken.state_db)  # type: ignore[arg-type]
+    recovery = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
+    assert recovery is not None
+    assert recovery.operation == OperationType.RESTAGE
+    assert recovery.status == OperationStatus.FAILED_BEFORE_COMPLETION
+    assert recovery.phase == "plan"
+    assert "sanitise" in recovery.errors[0]
+
+
 def test_passthrough_layout_mirrors_archive(tmp_roots: tuple[Path, Path]) -> None:
     archive, library = tmp_roots
     config = make_config(archive, library, library_layout="passthrough")
