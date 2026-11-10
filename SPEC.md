@@ -1147,9 +1147,9 @@ another tool; `verify --deep` reports exactly that file.
 
 ## Verification and drift §spec:verify-drift
 
-*Status: implemented, except comparison against post-tag checksums
-(§spec:tag-filling) and reconform as single-show runs
-(§spec:single-show-runs) — not started.*
+*Status: implemented, including reconform as single-show runs
+(§spec:single-show-runs), except comparison against post-tag checksums
+and refilling tags after a reconform (§spec:tag-filling) — not started.*
 
 `shakedown verify` is the explicit, operator-invoked integrity tool.
 It is never scheduled by default (§req:constraints).
@@ -1179,9 +1179,9 @@ It is never scheduled by default (§req:constraints).
 ## CLI surface §spec:cli
 
 *Status: implemented, including `validate`
-(§spec:setup-readiness-validation) and the removal of `release-validate`
-(§spec:release-validation-gate), except single-show operations as runs
-(§spec:single-show-runs) — not started.*
+(§spec:setup-readiness-validation), the removal of `release-validate`
+(§spec:release-validation-gate), and single-show operations as runs
+(§spec:single-show-runs).*
 
 Shakedown is a one-shot CLI; every command runs to completion and
 exits (§req:constraints). The command surface:
@@ -1189,12 +1189,12 @@ exits (§req:constraints). The command surface:
 | Command | Behavior |
 | --- | --- |
 | `sync [--source S] [--collection C] [--dry-run] [--refresh-metadata]` | Run a sync now; defaults to all configured collections. What the scheduler invokes. `--refresh-metadata` re-resolves and rewrites `metadata.json` sidecars for preserve-opted collections without re-downloading media (§spec:metadata-preservation). |
-| `status [--json]` | Last run per collection, item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, disappeared items, known drift, library separations in effect (§spec:library-ownership), library files shakedown did not place (§spec:library-cleanup), undelivered handoff notices (§spec:durable-handoff), and shows not playable (§spec:quality-selection). |
+| `status [--json]` | Last run per collection with its kind (sync, refetch, or reconform), item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, disappeared items, known drift, library separations in effect (§spec:library-ownership), library files shakedown did not place (§spec:library-cleanup), undelivered handoff notices (§spec:durable-handoff), and shows not playable (§spec:quality-selection). |
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
 | `validate [--source S] [--collection C] [--live-handoff] [--json]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
-| `item show \| refetch \| forget <identifier>` | Single-item inspection and surgery; `refetch` is a single-show run (§spec:single-show-runs) and `forget` also removes the show's library placement (§spec:library-cleanup). |
+| `item show \| refetch <identifier>` | Single-item inspection and refetch; `refetch` is a single-show run (§spec:single-show-runs). |
 | `serve [--host] [--port]` | Optional HTTP control plane (§spec:serve). |
 
 - Commands shall exit non-zero on failure so failures surface at the
@@ -1223,7 +1223,8 @@ already works. Scheduling is deliberately someone else's job
 
 ## Single-show operations as runs §spec:single-show-runs
 
-*Status: not started*
+*Status: implemented, except filling tags after a fetch on a `fill_tags`
+collection (§spec:tag-filling) — not started.*
 
 Refetching one show, or reconforming drifted shows, behaves like a sync
 of exactly those shows (§req:success-criteria #23).
@@ -1353,8 +1354,8 @@ Sync state lives in a single-file embedded SQLite database at
   For collections using incremental discovery it also records the
   item's last-seen source change signal (§spec:incremental-discovery),
   the token a later sync matches against to skip a metadata fetch.
-  Per run: counts, bytes downloaded, errors, and timing — the raw
-  material for `status`.
+  Per run: its kind (a sync, refetch, or reconform), counts, bytes
+  downloaded, errors, and timing — the raw material for `status`.
 - The ownership, handoff, and discovery increment adds: each show's
   library placement — its folder and the files shakedown placed there
   (§spec:library-ownership, §spec:library-cleanup); per file shakedown
@@ -1426,8 +1427,7 @@ paths and counts only, never credentials.
 
 ## Durable handoff §spec:durable-handoff
 
-*Status: implemented, except resending from single-show runs
-(§spec:single-show-runs) — not started.*
+*Status: implemented*
 
 A handoff notice is either delivered or visibly pending and resent; a
 handoff only triggers the library tool's work and never waits for that
