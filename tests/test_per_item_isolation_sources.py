@@ -257,9 +257,7 @@ def test_refused_lossless_show_mirrors_its_best_lossy_copy(
     """A stream-only show: archive.org flags the item and marks the lossless files
     `private`; the MP3s stay public. Both sources mirror the best lossy copy."""
     archive, library = tmp_roots
-    config = source.config(
-        archive, library
-    )
+    config = source.config(archive, library)
     show = "gd69-12-26.sbd"
     source.add_show(show, [("d1t01.shn", b"lossless", {"private": "true"})])
     source.metadata[show]["metadata"]["access-restricted-item"] = "true"
@@ -275,6 +273,73 @@ def test_refused_lossless_show_mirrors_its_best_lossy_copy(
     assert (archive / "src" / "coll" / show / "d1t01.mp3").read_bytes() == b"mp3"
     assert not (archive / "src" / "coll" / show / "d1t01.shn").exists()
     assert _status_json(config)["restricted"] == [{"identifier": show, "reason": LOSSLESS_REFUSED_REASON}]
+
+
+def _gd77_05_08(source: FakeSource, show: str, *, derivatives: bool = True) -> None:
+    """Shaped like archive.org's gd77-05-08.sbd.hicks.4982.sbeok.shnf answer: SHN
+    originals; VBR MP3 derivatives that list a bitrate and Ogg Vorbis ones that don't
+    (8.8 MB vs 4.3 MB per track there); spectrogram images; checksums and notes;
+    archive.org's own metadata files, whose `_files.xml` lists a checksum it never
+    matches; and a ZIP of the MP3s."""
+    files: list[dict[str, Any]] = []
+
+    def add(name: str, content: bytes, fmt: str, **extra: Any) -> None:
+        files.append(_file(name, content, fmt, **extra))
+        source.content[(show, name)] = content
+
+    for t in ("d1t01", "d1t02"):
+        add(f"{t}.shn", b"S" * 400, "Shorten")
+        if derivatives:
+            add(f"{t}.mp3", b"M" * 88, "VBR MP3", bitrate="185", original=f"{t}.shn")
+            add(f"{t}.ogg", b"O" * 43, "Ogg Vorbis", original=f"{t}.shn")
+            add(f"{t}.png", b"P", "PNG", original=f"{t}.shn")
+    add("gd1977-05-08.md5", b"checksums", "Checksums")
+    add("gd1977-05-08.txt", b"lineage", "Text")
+    add(f"{show}_meta.xml", b"<meta/>", "Metadata")
+    add("__ia_thumb.jpg", b"jpg", "Item Tile")
+    files.append({"name": f"{show}_files.xml", "md5": "0" * 32, "format": "Metadata"})
+    source.content[(show, f"{show}_files.xml")] = b"<files/>"
+    if derivatives:
+        add(f"{show}_vbr_mp3.zip", b"Z" * 176, "VBR ZIP")
+    source.listing.append(show)
+    source.metadata[show] = {"metadata": {"title": show, "date": "1977-05-08"}, "files": files}
+
+
+def test_real_shaped_shn_show_keeps_shn_archive_only_and_stages_the_mp3(
+    source: FakeSource, tmp_roots: tuple[Path, Path]
+) -> None:
+    """§spec:quality-selection through each shipped archive.org source: the archive
+    holds the SHN, the VBR MP3, and the non-audio files; the library holds the MP3 and
+    the non-audio files. An SHN show with no derivative is staged as is and listed as
+    not playable."""
+    archive, library = tmp_roots
+    config = source.config(archive, library)
+    show, bare = "gd77-05-08.sbd.hicks", "gd77-05-09.sbd.shn-only"
+    _gd77_05_08(source, show)
+    _gd77_05_08(source, bare, derivatives=False)
+
+    with source.serving():
+        assert run_sync(config) == 0
+
+    non_audio = [
+        f"{show}_files.xml", f"{show}_meta.xml", "__ia_thumb.jpg", "d1t01.png", "d1t02.png",
+        "gd1977-05-08.md5", "gd1977-05-08.txt",
+    ]
+
+    def names(root: Path, identifier: str) -> list[str]:
+        return sorted(p.name for p in (root / "src" / "coll" / identifier).iterdir())
+
+    assert names(archive, show) == sorted(
+        ["d1t01.mp3", "d1t01.shn", "d1t02.mp3", "d1t02.shn", *non_audio]
+    )
+    assert names(library, show) == sorted(["d1t01.mp3", "d1t02.mp3", *non_audio])
+    assert names(library, bare) == names(archive, bare)
+    assert "d1t01.shn" in names(library, bare)
+    status = _status_json(config)
+    assert status["not_playable"] == [
+        {"identifier": bare, "reason": "only in SHN; archive.org offers no playable copy"}
+    ]
+    assert status["counts"]["complete"] == 2
 
 
 def test_listing_failure_marks_the_collection_stale_and_prunes_nothing(
