@@ -644,12 +644,11 @@ Observable behavior:
   the collection (after its own retries) still marks it stale and
   prunes nothing (§spec:discovery-pipeline).
 - **One file-selection rule for every source.** The core, not the
-  plugin, decides which listed files to mirror: `format_filters`,
-  `exclude_filters`, refused files left out, `fallback_format_filters`
-  when every wanted file is refused (§spec:failure-behavior), and the
-  playable alternative for unplayable-only shows
-  (§spec:playable-alternatives). An etree collection therefore honors
-  `fallback_format_filters` exactly as an `ia` collection does.
+  plugin, decides which listed files to mirror: the best available and
+  best playable copy plus every non-audio file
+  (§spec:quality-selection). An etree collection therefore gets exactly
+  the same selection, including the refused-lossless case, as an `ia`
+  collection.
 - **Every listing operation follows the same rules:** sync, the
   explicit metadata refresh, single-show operations
   (§spec:single-show-runs), `reconcile`, and `validate`'s source check.
@@ -672,7 +671,7 @@ change: no third-party plugins exist (§req:constraints).
 `discover` generator* — a generator that has raised cannot resume, so
 the rest of the listing is lost anyway. *Keep file selection in each
 plugin behind a shared helper* — parity by convention, which already
-drifted (etree ignores `fallback_format_filters`). *A retry layer per
+drifted (etree ignored the refused-lossless fallback). *A retry layer per
 plugin* — two retry layers multiply requests against the politeness
 budget, the failure the review found in the IA library's hidden
 retries.
@@ -687,73 +686,111 @@ item's lookup return a server error on every attempt and another's
 return a file list with a nameless entry, on an `ia` collection and on
 an `etree` collection. Sync: only those two items are listed failed
 with reasons, the rest sync, `status` shows the collection current (not
-stale), and the next run retries the two. Enable
-`fallback_format_filters` on the etree collection with a show whose
-lossless files are refused: its fallback copy is mirrored.
+stale), and the next run retries the two. On the etree collection, a
+show whose lossless files are refused gets its best lossy copy
+mirrored.
 
-## Playable alternatives for unplayable formats §spec:playable-alternatives
+## Best available and best playable copy §spec:quality-selection
 
 *Status: not started*
 
-When a show's audio exists only in a format common players cannot read,
-the original is still mirrored to the archive, and the source's own
-playable alternative is mirrored too and is what appears in the library.
-Shakedown never converts audio (§req:success-criteria #26,
-§req:constraints: the bounded alternate-format exception).
+For every show, the system keeps the highest-quality version the source
+offers and the highest-quality version a common player can play: one
+copy when those are the same files, both when they differ. Every
+non-audio file the source lists is kept too. Shakedown never converts
+audio. (§req:problem-statement; §req:success-criteria #26;
+§req:constraints: the bounded alternate-format exception. Operator
+decisions, 2026-11-10: the product's two goals are a local playable copy
+of every configured collection and an archival-quality copy of the
+music and its associated data in case the source is lost.)
 
 Observable behavior:
 
-- **Which formats are unplayable.** The product treats Shorten (SHN) as
-  unplayable; the list is part of the product, not configuration, and
-  grows only when another format is found that Navidrome and common
-  players cannot read.
-- **When an alternative is mirrored.** After file selection
-  (§spec:per-item-isolation), if every selected audio file of a show is
-  in an unplayable format, the core also selects the source's
-  derivatives of those files in the first format that covers all of
-  them, trying in order: the collection's `fallback_format_filters`
-  when set; otherwise VBR MP3, then Ogg Vorbis. `exclude_filters` apply
-  to the alternative as to every file. A show with some playable and
-  some unplayable audio gets no alternative.
-- **Where files land.** The archive holds the originals and the
-  alternative; both are part of the recorded manifest, so change
-  detection covers them. The library holds the alternative and the
-  show's non-audio files (text, checksums, artwork); the unplayable
-  originals stay archive-only.
-- **No alternative offered.** The show is mirrored as usual (originals
-  in archive and library) and `shakedown status` lists it as not
-  playable, with the reason "only in SHN; archive.org offers no
-  playable copy". It stays `complete` — nothing failed.
-- Applies on every source, because selection is core-owned. Tag filling
-  (§spec:tag-filling) applies to the alternative's files.
+- **The system chooses the audio; the operator doesn't.** Per show, the
+  core ranks the source's audio files by format (§spec:per-item-isolation
+  owns selection for every source): lossless (FLAC, SHN, WAV, AIFF,
+  Apple Lossless) ranks above lossy; lossy copies rank by bitrate, taken
+  from the source's per-file bitrate when it lists one and from file
+  size per track otherwise. A format counts only when it covers every
+  track of the show and the source serves it (files the source refuses
+  are not available). Audio in a format the product does not recognise
+  ranks below every recognised one.
+- **Best available, best playable.** The *best available* copy is the
+  top-ranked format; the *best playable* copy is the top-ranked format a
+  common player reads (everything above except SHN). If they are the
+  same format — e.g. a show with FLAC originals — only that copy is
+  kept. If they differ — e.g. an SHN-only show, whose playable copies
+  on archive.org are VBR MP3 and Ogg Vorbis derivatives — both are kept.
+  Measured on archive.org, VBR MP3 copies run about twice the bitrate of
+  Ogg Vorbis copies (`gd77-05-08.sbd.hicks.4982.sbeok.shnf`: 8.8 MB vs
+  4.3 MB per track), so the ranking picks the MP3 there.
+- **Refused lossless files are handled automatically.** When the source
+  refuses every lossless file (stream-only soundboards), the best
+  available copy is the best lossy one, so it is mirrored as `complete`
+  and `status` lists the show with the reason "lossless refused by
+  archive.org; best lossy copy mirrored instead". When the lossless
+  files are served again, the next sync mirrors them and drops the
+  lossy copy if it is no longer the best playable one.
+- **Every non-audio file is kept.** Text notes, checksum files, the
+  source's metadata files, artwork, and generated images are mirrored
+  to the archive and staged into the library.
+- **Where files land.** The archive holds the best available copy, the
+  best playable copy when different, and the non-audio files; all are
+  part of the recorded manifest, so change detection covers them. The
+  library holds the best playable copy and the non-audio files; an
+  unplayable best-available copy stays archive-only.
+- **No playable copy.** A show whose only audio is unplayable is
+  mirrored and staged as is, and `status` lists it as not playable,
+  with the reason "only in SHN; archive.org offers no playable copy".
+  It stays `complete`.
+- **Configuration.** `format_filters`, `exclude_filters`, and
+  `fallback_format_filters` are removed. A config that still sets them
+  fails to load, naming the key (§spec:configuration); the operator
+  deletes them once on upgrade.
+- **Upgrading downloads only what is missing.** When a show's selection
+  changes — on upgrade (non-audio files and playable copies added) or
+  later (lossless served again) — only files not already recorded in
+  the archive are downloaded; files whose recorded name, size, and
+  checksum are unchanged are kept without re-downloading or hashing
+  (§spec:sync-identity, §req:constraints: an upgrade never forces
+  re-downloading the bulk of the archive).
+- **Files the rule no longer selects stay.** Audio already in the
+  archive that the new rule would not select (e.g. a show mirrored with
+  both FLAC and SHN under the old filters) is kept in the archive and
+  left out of the library; the rule governs what is downloaded from now
+  on. *(Pending operator confirmation, 2026-11-10.)*
 
-**Decision and constraint.** Mirror the source's own derivative beside
-the original: REQUIREMENTS forbids transcoding but accepts this one
-storage duplication (§req:quality-attributes: storage efficiency), and
-891 Grateful Dead files on the NAS are SHN that Navidrome cannot play.
-The default order follows the operator's rule — use the configured
-fallback formats, otherwise the higher-quality copy — and archive.org's
-VBR MP3 copies run about twice the bitrate of its Ogg Vorbis copies
-(measured on `gd77-05-08.sbd.hicks.4982.sbeok.shnf`: 8.8 MB vs 4.3 MB
-for the same track); its SHN items offer no lossless derivative.
-(Operator decision, 2026-11-10.)
+**Decision and constraint.** Selection follows the two product goals
+directly instead of per-collection format lists, because hand-written
+filters can only approximate them and already failed in practice: an
+exclude pattern can block the only playable copy, and the refused-
+lossless fallback had to be added as a separate opt-in. "Quality" is
+decidable from what the source reports (format class, bitrate, size), so
+the rule needs no operator judgement per show. Keeping every non-audio
+file serves the archival goal: notes and lineage are part of what would
+be lost with the source.
 
-**Alternatives rejected.** *Transcode SHN to FLAC* — out of charter.
-*Flag SHN-only shows in status and nothing more* — those shows stay
-dead weight in the player. *Replace the SHN with the alternative* —
-loses the preservation original. *Stage SHN beside the alternative* —
-players list unplayable tracks next to the playable ones. *A
-per-collection list of unplayable formats* — configuration for a fact
-about players that is the same for every collection.
+**Alternatives rejected.** *Keep the format settings and choose only the
+extra playable copy by quality* — the rule then holds only where each
+collection's settings allow it. *Transcode SHN to FLAC* — out of charter.
+*Replace SHN with its playable copy* — loses the preservation original.
+*Stage SHN beside the playable copy* — players list unplayable tracks.
+*Mirror only text and checksums* — the operator chose every non-audio
+file.
 
-**Tradeoffs.** A lossy copy is what plays, and it costs extra disk
-(roughly 150 MB per show). If the source re-derives the alternative,
-its checksums change and the show is treated as changed upstream.
+**Tradeoffs.** The operator gives up per-collection control (for
+example, mirroring only MP3 to save space). Shows with unplayable best
+copies cost the extra playable copy (roughly 150 MB per show). Generated
+images add folder clutter in the library. If the source re-derives a
+playable copy, its checksums change and only that copy is re-fetched.
 
-**User-level test path.** Sync a Grateful Dead show that exists only as
-SHN: the archive holds the SHN files and the MP3 copy; the library holds
-the MP3 copy and the text files; Navidrome plays it. Sync a fixture show
-with SHN and no derivative: `status` lists it as not playable.
+**User-level test path.** Sync a FLAC show: archive and library hold
+the FLAC files and every non-audio file, and no MP3. Sync an SHN-only
+Grateful Dead show: the archive holds SHN and the VBR MP3 copy; the
+library holds the MP3 and the non-audio files; Navidrome plays it. Sync a
+stream-only soundboard: the best MP3 is mirrored and `status` gives the
+reason. Upgrade a collection mirrored under `[flac, shn]` filters: the
+first sync downloads only the added non-audio files and playable copies.
 
 ## Library staging §spec:library-staging
 
@@ -926,7 +963,7 @@ Observable behavior:
 - **Triggers.** Any operation that stages a show reconciles its
   library placement against its current one: sync (layout changed
   without a restage, a re-fetch that brings new metadata or a changed
-  file list, a fallback copy replaced by the wanted files), the explicit
+  file list, a lossy copy replaced by lossless files), the explicit
   metadata refresh, single-show operations (§spec:single-show-runs),
   `restage`, and prune. A previously placed file that is not part of
   the show's current placement is removed; a folder left empty by
@@ -1136,7 +1173,7 @@ exits (§req:constraints). The command surface:
 | Command | Behavior |
 | --- | --- |
 | `sync [--source S] [--collection C] [--dry-run] [--refresh-metadata]` | Run a sync now; defaults to all configured collections. What the scheduler invokes. `--refresh-metadata` re-resolves and rewrites `metadata.json` sidecars for preserve-opted collections without re-downloading media (§spec:metadata-preservation). |
-| `status [--json]` | Last run per collection, item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, disappeared items, known drift, library separations in effect (§spec:library-ownership), library files shakedown did not place (§spec:library-cleanup), undelivered handoff notices (§spec:durable-handoff), and shows not playable (§spec:playable-alternatives). |
+| `status [--json]` | Last run per collection, item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, disappeared items, known drift, library separations in effect (§spec:library-ownership), library files shakedown did not place (§spec:library-cleanup), undelivered handoff notices (§spec:durable-handoff), and shows not playable (§spec:quality-selection). |
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
@@ -1227,7 +1264,8 @@ notice sent, both shows' bytes restored.
 
 ## Configuration §spec:configuration
 
-*Status: implemented, except `fill_tags` (§spec:tag-filling) — not
+*Status: implemented, except `fill_tags` (§spec:tag-filling) and the
+removal of the format settings (§spec:quality-selection) — not
 started.*
 
 All configuration lives in a single YAML file mounted at
@@ -1241,13 +1279,12 @@ Structure: top-level roots (`archive_root`, `library_root`,
 `state_db`) and global concurrency caps (`max_concurrent_downloads`,
 `max_concurrent_collections`); a list of `sources` (name, plugin
 `type`, optional auth) each containing `collections` (name, `query`,
-`format_filters`, `exclude_filters`, `fallback_format_filters`, `library_layout`,
-`prune_disappeared`, `incremental_discovery`, `preserve_source_metadata`,
-`fill_tags`, `on_complete`); and global `notifications`. The ownership,
-handoff, and discovery increment adds the per-collection `fill_tags`
-opt-in (§spec:tag-filling); `fallback_format_filters` now applies to
-every source and also orders the playable alternative
-(§spec:playable-alternatives).
+`library_layout`, `prune_disappeared`, `incremental_discovery`,
+`preserve_source_metadata`, `fill_tags`, `on_complete`); and global
+`notifications`. The ownership, handoff, and discovery increment adds
+the per-collection `fill_tags` opt-in (§spec:tag-filling) and removes
+`format_filters`, `exclude_filters`, and `fallback_format_filters`:
+which files to mirror follows the product rule (§spec:quality-selection).
 
 The discovery-performance increment added a per-source politeness ceiling
 (`max_concurrent_requests`; sources on one host share the smallest — the
@@ -1378,21 +1415,22 @@ paths and counts only, never credentials.
 *Status: not started*
 
 A handoff notice is either delivered or visibly pending and resent; a
-slow but working target gets the time it needs; and every handoff
-recipe the project ships works when followed literally
+handoff only triggers the library tool's work and never waits for that
+work to finish; and every handoff recipe the project ships works when
+followed literally
 (§req:success-criteria #21, §req:quality-attributes: durable handoff,
 §req:constraints: library handoff).
 
 Observable behavior:
 
-- **No cutoff on a working target.** An exec handoff runs until the
-  command exits; shakedown imposes no time limit. A webhook is
-  delivered when the receiver answers with a success status; failing
-  to connect fails promptly, but once the receiver has the request,
-  shakedown waits for its answer without a short cutoff. While a
-  handoff runs, the run is still in progress and holds the writer lock,
-  so `status` shows it and a scheduled tick that arrives meanwhile is
-  refused cleanly (§spec:cli).
+- **A trigger, not a wait.** A handoff tells the library tool that new
+  shows are ready; the tool's own work (an import, a scan) runs on its
+  own time. A receiver is expected to acknowledge within minutes.
+  Shakedown waits up to five minutes for a webhook's answer or an exec
+  command's exit; past that, the notice is undelivered (reason:
+  "no answer within 5 minutes") and the command is stopped. What the
+  library tool does after acknowledging — whether its import succeeded —
+  is outside shakedown and not tracked. (Operator decision, 2026-11-10.)
 - **Delivered means success.** An exec that exits 0, or a webhook
   answered 2xx, delivers the notice. Anything else — a non-zero exit, a
   failure to start the command, a connection failure, a non-2xx answer —
@@ -1438,16 +1476,20 @@ Observable behavior:
 merged into the next notice, because §req:quality-attributes requires
 a notice to be delivered or visibly pending and never silently lost,
 and library imports are batch operations that gain nothing from
-replaying old notices one by one. No exec time limit, because a real
-`beet import`-style job takes minutes and the old 30-second kill was
-the defect. Navidrome's watcher is the recipe because it is the stock
+replaying old notices one by one. A handoff is a trigger with a
+bounded wait, because a webhook-style receiver acknowledges quickly and
+does the slow work afterwards; the old 30-second limit was the defect
+only because it was applied to a command doing the whole import inline,
+which a trigger never does. Navidrome's watcher is the recipe because it is the stock
 mechanism the operator already uses (principle: don't rebuild what
 others maintain); the Beets webhook in the old example was observed to
 404 on the NAS.
 
-**Alternatives rejected.** *Configurable or larger exec timeout* —
-any fixed cutoff still kills a long import; operators who want a limit
-can wrap the command. *Replay each failed notice separately* — floods
+**Alternatives rejected.** *No time limit, so an inline import can
+finish* — a stuck receiver would hold the run and the writer lock
+indefinitely, and waiting on the library tool's own work is not
+shakedown's job. *Track whether the downstream import succeeded* — out
+of scope; shakedown reports only whether the trigger was acknowledged. *Replay each failed notice separately* — floods
 the receiver after an outage. *Fail the run on undelivered notices* —
 the mirror's integrity doesn't depend on the listener
 (§spec:handoff), and every scheduled run would fail while Beets is
@@ -1455,15 +1497,16 @@ down. *Ship Beets inside the shakedown image* or *a receiver sidecar
 container* — both make shakedown maintain a Beets integration; the
 operator chose neither.
 
-**Tradeoffs.** A hung handoff command holds the run, and therefore the
-writer lock, until it exits; later ticks are refused and `status` shows
-the run in progress. Resent notices can repeat a show a receiver
+**Tradeoffs.** A command that does a whole import inline and takes
+longer than five minutes is stopped and counted undelivered; such a
+command should start the import and return. Resent notices can repeat a show a receiver
 partly processed; receivers must tolerate a show they already have
 (`beet import` does).
 
-**User-level test path.** Configure an exec handoff that sleeps several
-minutes and then succeeds; sync; it finishes and `status` shows no
-pending notice. Point the webhook at an unreachable host; sync; `status`
+**User-level test path.** Configure a webhook receiver that answers
+after a few seconds; sync; `status` shows no pending notice. Configure
+one that never answers; sync; after five minutes the notice is
+undelivered with the reason shown, and the run ends. Point the webhook at an unreachable host; sync; `status`
 shows the undelivered notice with its shows and reason, and the run
 exits 0. Fix the target; sync again with nothing new upstream; the
 receiver gets one notice listing the pending shows, and `status` clears.
@@ -1912,7 +1955,7 @@ degrade a single item or a single run, never the archive.
 | Library tool deletes staging links | Restored on next sync or `restage` |
 | User wipes library tree | Rebuilt by `restage` with zero downloads |
 | User wipes archive tree | DB and library invalidated; full re-download — working as intended (§spec:state) |
-| Item restricted upstream | Only the files the source refuses are left out (archive.org marks each one `private`); a file it serves is always mirrored. When every file the collection wants is refused: if the collection opted into `fallback_format_filters` and the source serves those, the fallback copy is mirrored as `complete` and listed in `status` with its reason (a later sync replaces it once the wanted files are served); otherwise the local copy is retained and the status flips to `unavailable` with reason |
+| Item restricted upstream | Only the files the source refuses are left out (archive.org marks each one `private`); a file it serves is always eligible. When every lossless file is refused, the best lossy copy is mirrored as `complete` and listed in `status` with its reason (a later sync mirrors the lossless files once served); when the source serves no audio at all, the local copy is retained and the status flips to `unavailable` with reason (§spec:quality-selection) |
 | Source refuses a download (archive.org's 403 on a stream-only show with no restriction flag in its metadata) | Not a failure and not retried within the run: the item flips to `unavailable` with reason, the local copy (if any) is retained, and its temp directory is removed |
 | Restriction lifted upstream | Detected on next discover; fetched as new |
 | Source lists zero files for an item (darked, glitch, filter matches nothing) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
@@ -1922,7 +1965,7 @@ degrade a single item or a single run, never the archive.
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
 | Handoff target down, failing, or slow | Slow: waited for. Failed: notice recorded undelivered, shown in `status`, resent on the collection's next run; the sync still succeeds (§spec:durable-handoff) |
 | API sync requested while a run holds the lock | `409` at once; nothing queued (§spec:api-sync-runs) |
-| Show exists only in an unplayable format | Original archived; the source's playable copy also mirrored and staged; with no playable copy, listed as not playable in `status` (§spec:playable-alternatives) |
+| Best available copy is unplayable (SHN) | Kept archive-only; the best playable copy also mirrored and staged; with no playable copy, the SHN is staged and the show listed as not playable in `status` (§spec:quality-selection) |
 
 ## Real-source end-to-end check §spec:e2e-real-source
 
