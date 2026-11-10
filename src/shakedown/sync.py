@@ -1523,6 +1523,15 @@ def _fetch_one(
     # inside _fetch_with_retries.
     _recover_swap(stale_dir, dest)
 
+    # A show the source refuses (flagged at lookup) stays unavailable with its reason;
+    # only `item refetch` reaches here with one, since classification routes it away.
+    if desc.is_restricted:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        return _FetchOutcome(
+            success=False, archive_path=dest, error=desc.restriction_reason, unavailable=True
+        )
+
     # Never promote an empty fetch: it would replace the archive copy with an empty
     # folder. Classification already routes an empty manifest to `unavailable`; this
     # guards the paths that skip classification (`item refetch`).

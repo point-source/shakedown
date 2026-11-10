@@ -339,6 +339,29 @@ def test_incremental_sync_rechecks_a_show_left_unavailable_by_a_refused_refetch(
     assert row.restriction_reason is None
 
 
+def test_refetch_of_a_show_flagged_restricted_keeps_it_unavailable(
+    tmp_roots: tuple[Path, Path]
+) -> None:
+    from shakedown.sync import refetch_item
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed_item("gd-sbd")
+    item.is_restricted = True
+    item.restriction_reason = "stream-only"
+    item.files = []
+    assert run_sync(config) == 0
+
+    assert refetch_item(config, "gd-sbd") == 1
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None
+    assert row.status == ItemStatus.UNAVAILABLE
+    assert row.restriction_reason == "stream-only"
+    assert not (archive / "fake-src" / "coll1" / ".tmp-gd-sbd").exists()
+
+
 def test_refused_redownload_keeps_the_archive_copy(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
