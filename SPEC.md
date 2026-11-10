@@ -779,7 +779,10 @@ Sync state lives in a single-file embedded SQLite database at
   (§spec:system-shape), the walk recovers each item's identity; a
   corrupted or reset database therefore never forces a re-download
   (§req:quality-attributes: durability). This is also the migration
-  path from a pre-existing manual mirror.
+  path from a pre-existing manual mirror. A known item missing from a
+  complete source listing is marked `disappeared`; when the source
+  cannot be reached, every known item keeps its prior status — an
+  outage is not a takedown.
 
 The one deliberately unrecoverable case: the user wipes the archive
 tree itself. Then database and library are both invalidated and a full
