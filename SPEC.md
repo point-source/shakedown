@@ -1529,7 +1529,7 @@ appears in Navidrome with no handoff configured.
 
 ## Serve control plane §spec:serve
 
-*Status: implemented*
+*Status: complete*
 
 An optional `shakedown serve` command exposes a small HTTP API for
 users who want ad-hoc triggers and monitoring without `docker exec`
@@ -1563,7 +1563,7 @@ all; it is not required for any success criterion.
 
 ## API-triggered runs §spec:api-sync-runs
 
-*Status: implemented*
+*Status: complete*
 
 A sync triggered through `serve` runs with the configuration as it is
 at the moment of the request, and never overlaps another run
@@ -1577,10 +1577,13 @@ Observable behavior:
   shakedown run — the same one-shot run the scheduler launches — which
   reads the config file at start. A config edit therefore takes effect
   on the next trigger without restarting `serve`.
-- **Answers at once.** When the new run has taken the writer lock,
-  `serve` answers `202 Accepted` with the scope it started. Progress and
-  the result are read from `GET /status` like any run's; the run record
-  always closes, even if the run crashes (§spec:failure-behavior).
+- **Answers at once.** When the new run has taken the writer lock and
+  opened its run records, `serve` answers `202 Accepted` with the scope
+  it started and those records' ids — one per collection the sync
+  covers; a verify opens none (operator decision, 2026-11-10). Progress
+  and the result are read from `GET /status` like any run's, where each
+  collection's latest run carries its id; the run record always closes,
+  even if the run crashes or is killed (§spec:failure-behavior).
 - **Refuses immediately when busy.** If another run holds the writer
   lock, the request is refused with `409 Conflict` and the message "a
   run is in progress; try again when it finishes". Nothing is queued.
