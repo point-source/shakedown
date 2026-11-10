@@ -195,6 +195,25 @@ def test_refused_download_records_the_show_unavailable(
     assert ItemRepo(conn).get("fake-src", "coll1", "gd-aud").status == ItemStatus.COMPLETE  # type: ignore[union-attr]
 
 
+def test_refused_show_is_rechecked_next_run_without_failing(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Restricted shows are re-checked on each discover (SPEC §spec:item-lifecycle):
+    one attempt per run, never counted as a failure."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-sbd")
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+    assert run_sync(config) == 0
+
+    assert run_sync(config) == 0
+
+    assert FakePlugin.fetch_count["gd-sbd"] == 2
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None and row.status == ItemStatus.UNAVAILABLE
+
+
 def test_refused_redownload_keeps_the_archive_copy(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
