@@ -86,6 +86,9 @@ services:
   #   curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" \
   #     "http://host:8080/sync?collection=grateful-dead"
   #
+  # serve starts each triggered sync/verify as its own run, so it needs the
+  # same image, mounts, and user as the ofelia job (and the IA credentials env
+  # if a collection needs them).
   # shakedown-serve:
   #   image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
   #   container_name: shakedown-serve

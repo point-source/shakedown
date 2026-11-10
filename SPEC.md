@@ -1529,8 +1529,7 @@ appears in Navidrome with no handoff configured.
 
 ## Serve control plane §spec:serve
 
-*Status: implemented, except triggered runs as fresh runs on current
-config with immediate refusal (§spec:api-sync-runs) — not started.*
+*Status: implemented*
 
 An optional `shakedown serve` command exposes a small HTTP API for
 users who want ad-hoc triggers and monitoring without `docker exec`
@@ -1564,7 +1563,7 @@ all; it is not required for any success criterion.
 
 ## API-triggered runs §spec:api-sync-runs
 
-*Status: not started*
+*Status: implemented*
 
 A sync triggered through `serve` runs with the configuration as it is
 at the moment of the request, and never overlaps another run
