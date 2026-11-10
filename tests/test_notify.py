@@ -253,6 +253,7 @@ def test_sync_fires_one_complete_per_run(tmp_roots: tuple[Path, Path]) -> None:
     bodies: list[dict] = []
 
     def fake_post(url, json=None, timeout=None):
+        assert json is not None
         bodies.append(json)
         return httpx.Response(200)
 
@@ -283,6 +284,7 @@ def test_sync_fires_failure_on_unreachable_source(tmp_roots: tuple[Path, Path]) 
     bodies: list[dict] = []
 
     def fake_post(url, json=None, timeout=None):
+        assert json is not None
         bodies.append(json)
         return httpx.Response(200)
 

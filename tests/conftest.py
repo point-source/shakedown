@@ -22,7 +22,7 @@ def _no_lookup_backoff() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _fake_registered() -> None:
+def _fake_registered() -> Iterator[None]:
     install_fake()
     reset_fake()
     yield

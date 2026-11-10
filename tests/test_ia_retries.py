@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 import requests
+from requests.adapters import HTTPAdapter
 
 import shakedown.sync as sync_module
 from shakedown.config import CollectionConfig, SourceConfig
@@ -133,8 +134,9 @@ def test_session_used_for_metadata_and_downloads_keeps_retries_off(archive, tmp_
     assert isinstance(desc, ItemDescriptor)
     assert plugin.fetch(desc.identifier, desc.manifest.files, tmp_path / ".tmp-gd1").success
 
-    retry = plugin._session.get_adapter("https://archive.org/download/gd1/x").max_retries
-    assert retry.total == 0
+    adapter = plugin._session.get_adapter("https://archive.org/download/gd1/x")
+    assert isinstance(adapter, HTTPAdapter)
+    assert adapter.max_retries.total == 0
 
 
 def test_403_on_a_download_reports_the_show_unavailable(archive, tmp_path: Path) -> None:
