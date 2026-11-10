@@ -41,6 +41,7 @@ _FILTERS: dict[str, Filter] = {
     "lower": str.lower,
     "upper": str.upper,
 }
+FILTER_NAMES: tuple[str, ...] = tuple(sorted(_FILTERS))
 
 
 def render(template: str, fields: dict[str, Any]) -> str:
@@ -71,3 +72,13 @@ def render(template: str, fields: dict[str, Any]) -> str:
 def fields_in(template: str) -> set[str]:
     """Return the set of placeholder field names referenced in the template."""
     return {m.group(1).split("|", 1)[0].strip() for m in _PLACEHOLDER_RE.finditer(template)}
+
+
+def unknown_filters(template: str) -> set[str]:
+    """Return the filter names the template uses that the engine does not define."""
+    used = {
+        f.strip()
+        for m in _PLACEHOLDER_RE.finditer(template)
+        for f in m.group(1).split("|")[1:]
+    }
+    return used - _FILTERS.keys()

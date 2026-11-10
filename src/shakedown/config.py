@@ -136,8 +136,10 @@ def _validate_layouts(config: Config) -> None:
     """Guard `library_layout` templates against fields the plugin can't surface and
     against layouts that cannot distinguish two items (§spec:layout-collision-safety).
 
-    Three checks on every non-passthrough layout, in order of certainty:
+    Four checks on every non-passthrough layout, in order of certainty:
 
+    - **Unknown filter → hard error.** A misspelled filter (`|sanitise`) would otherwise
+      raise TemplateError mid-sync, or mid-restage after the library was cleared.
     - **Unknown field → hard error.** A placeholder the plugin doesn't expose (the
       first-run `{filename}` footgun) would otherwise raise TemplateError mid-sync.
     - **No plugin field at all → hard error.** A constant template renders every item
@@ -150,7 +152,7 @@ def _validate_layouts(config: Config) -> None:
       backstop that fires only on actual loss.
     """
     from shakedown.plugins import registry
-    from shakedown.utils.templates import fields_in
+    from shakedown.utils.templates import FILTER_NAMES, fields_in, unknown_filters
 
     for source in config.sources:
         try:
@@ -162,6 +164,13 @@ def _validate_layouts(config: Config) -> None:
         for collection in source.collections:
             if collection.library_layout == "passthrough":
                 continue
+            bad_filters = unknown_filters(collection.library_layout)
+            if bad_filters:
+                raise ConfigError(
+                    f"{source.name}/{collection.name}: library_layout uses unknown "
+                    f"filter(s) {sorted(bad_filters)!r}; valid filters: "
+                    f"{', '.join(FILTER_NAMES)}"
+                )
             referenced = fields_in(collection.library_layout)
             unknown = referenced - allowed
             if unknown:

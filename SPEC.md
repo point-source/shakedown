@@ -456,7 +456,10 @@ Two defenses, one proactive and one at runtime:
   `{identifier}` in the leaf). A non-passthrough template that references
   **no plugin field at all** — one constant path for every item, a
   guaranteed total collapse — is a hard config error, consistent with the
-  fail-fast config contract (§spec:configuration).
+  fail-fast config contract (§spec:configuration). So is a filter name
+  the template engine does not define (valid: `sanitize`, `short`,
+  `lower`, `upper`); a typo like `|sanitise` would otherwise fail
+  mid-sync, or mid-restage after the library was cleared.
 - **Runtime summary.** Recordings dropped to same-run template collisions
   are aggregated into one consolidated per-run line — how many were
   dropped and to which colliding paths — surfaced in the run summary and
