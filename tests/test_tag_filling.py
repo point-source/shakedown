@@ -853,3 +853,24 @@ def test_two_recordings_fetched_in_one_run_are_both_labelled(tmp_roots) -> None:
     assert _album(config, "gd77.aud") == [f"{ALBUM} [gd77.aud]"]
     assert _album(config, "gd77.sbd") == [f"{ALBUM} [gd77.sbd]"]
     assert _verify(config) == []
+
+
+def test_reconform_restores_a_crash_backup_before_hashing(tmp_roots) -> None:
+    """verify --reconform holds the writer lock, so it undoes an interrupted tag write
+    before its hash pass: the file is the original again, not drift to re-download."""
+    config = make_config(*tmp_roots, fill_tags=True)
+    _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(config) == 0
+    archive_file = _archive_file(config, "gd77", "d1t01.flac")
+    tagged = archive_file.read_bytes()
+    backup = config.archive_root / "fake-src" / "coll1" / ".tagging" / "gd77" / "d1t01.flac"
+    backup.parent.mkdir(parents=True)
+    backup.write_bytes(tagged)
+    with archive_file.open("r+b") as torn:
+        torn.write(b"\x00" * 64)
+    downloads = dict(FakePlugin.fetch_count)
+
+    assert _verify(config, reconform=True) == []
+    assert archive_file.read_bytes() == tagged
+    assert FakePlugin.fetch_count == downloads
+    assert not backup.parent.parent.exists()

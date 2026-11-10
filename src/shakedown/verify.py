@@ -20,6 +20,7 @@ from shakedown.models import Item, ItemStatus, RunKind
 from shakedown.plugins import registry
 from shakedown.state import DriftRepo, ItemRepo, TagRepo
 from shakedown.sync import run_single_shows
+from shakedown.tagging import recover_interrupted_tagging
 from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
@@ -131,6 +132,12 @@ def _run_verify(
         for collection in source.collections:
             if collection_filter and collection.name != collection_filter:
                 continue
+            if reconform:
+                # Holding the writer lock, undo a tag write a crash cut short before
+                # hashing: the file is its original again, not drift to re-download
+                # (§spec:tag-filling). A plain verify holds no lock, so a backup may
+                # belong to a sync still writing; it only reports what it finds.
+                recover_interrupted_tagging(config.archive_root / source.name / collection.name)
 
             for item in items.list_for_collection(source.name, collection.name):
                 if item.status != ItemStatus.COMPLETE:
