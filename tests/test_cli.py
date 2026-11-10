@@ -30,6 +30,8 @@ def test_help_exits_zero() -> None:
     result = CliRunner().invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "sync" in result.output and "verify" in result.output
+    # Release checks live in CI, not in the shipped product (§spec:release-validation-gate).
+    assert "release-validate" not in result.output
 
 
 def test_missing_config_exits_two(tmp_path: Path) -> None:
