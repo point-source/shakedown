@@ -281,23 +281,23 @@ retrying:
   retry cannot fix.
 
 When the source hands you an explicit wait (an HTTP `Retry-After` delta-seconds
-header), put it in `retry_after` so the core waits exactly that long. A helper
-to classify a requests-style exception:
+header), put it in `retry_after` so the core waits exactly that long. Two helpers
+in `shakedown.plugins.base` read both requests- and httpx-style errors:
+`http_status(exc)` gives the response's status (or `None`), and
+`retry_after_seconds(exc)` gives a usable `Retry-After` (or `None` for a missing,
+date-form, negative, or non-finite value):
 
 ```python
+from shakedown.plugins.base import http_status, retry_after_seconds
+
 def _classify(exc: Exception) -> tuple[bool, float | None]:
-    resp = getattr(exc, "response", None)
-    status = getattr(resp, "status_code", None) if resp is not None else None
+    status = http_status(exc)
     retriable = status == 429 or (status is not None and 500 <= status < 600)
-    retry_after = None
-    if resp is not None:
-        raw = (getattr(resp, "headers", None) or {}).get("Retry-After")
-        try:
-            retry_after = float(raw) if raw is not None else None
-        except (TypeError, ValueError):
-            retry_after = None
-    return retriable, retry_after
+    return retriable, retry_after_seconds(exc)
 ```
+
+A 403 on a download usually means the source refuses to serve the item: report
+`unavailable=True` rather than a failure.
 
 ### `verify(files, archive_path)`
 
@@ -441,6 +441,8 @@ from shakedown.plugins.base import (
     ListedItem,
     SourcePlugin,
     VerifyResult,
+    http_status,
+    retry_after_seconds,
     reusable_leftover,
 )
 from shakedown.plugins.registry import register
@@ -524,15 +526,16 @@ class ExamplePlugin(SourcePlugin):
                 r = self._http.get(f"{API}/items/{identifier}/{mf.name}", timeout=60)
                 r.raise_for_status()
             except requests.HTTPError as e:
-                status = e.response.status_code if e.response is not None else None
-                retriable = status == 429 or (status is not None and 500 <= status < 600)
-                retry_after = None
-                if e.response is not None:
-                    raw = e.response.headers.get("Retry-After")
-                    retry_after = float(raw) if raw and raw.isdigit() else None
+                status = http_status(e)
+                if status == 403:
+                    return FetchResult(
+                        success=False, bytes_downloaded=total,
+                        error="download refused by the source", unavailable=True,
+                    )
                 return FetchResult(
                     success=False, bytes_downloaded=total, error=str(e),
-                    retriable=retriable, retry_after=retry_after,
+                    retriable=status == 429 or (status is not None and 500 <= status < 600),
+                    retry_after=retry_after_seconds(e),
                 )
             except requests.RequestException as e:
                 # Connection reset / timeout: transient.
