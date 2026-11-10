@@ -159,9 +159,11 @@ def plan_files(
     return merged, fetch
 
 
-def _entries(manifest: Manifest) -> frozenset[tuple[str, int | None, str | None, bool]]:
-    """A manifest's files with their library flag: what staging reads."""
-    return frozenset((f.name, f.size, f.md5, f.library) for f in manifest.files)
+def _entries(manifest: Manifest) -> frozenset[ManifestFile]:
+    """A manifest's files with everything the record keeps beyond identity: the
+    library flag staging reads, and the per-file title and track tag filling reads
+    (§spec:tag-filling)."""
+    return frozenset(manifest.files)
 
 
 @dataclass

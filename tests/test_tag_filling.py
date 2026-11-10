@@ -877,3 +877,25 @@ def test_reconform_restores_a_crash_backup_before_hashing(tmp_roots) -> None:
     assert archive_file.read_bytes() == tagged
     assert FakePlugin.fetch_count == downloads
     assert not backup.parent.parent.exists()
+
+
+def test_shows_mirrored_before_the_upgrade_gain_track_titles(tmp_roots) -> None:
+    """A record written before per-file titles were kept gets them on the next sync's
+    lookup (the upgrade looks every show up once), without a download, so opting in
+    fills track titles too (§spec:tag-filling)."""
+    root = tmp_roots[0].parent
+    item = _fake_show("gd77", root)
+    titles = [(f.title, f.track) for f in item.files]
+    for f in item.files:
+        f.title = f.track = None  # what an old record holds: no per-file values
+    assert run_sync(make_config(*tmp_roots)) == 0
+    for f, (title, track) in zip(item.files, titles, strict=True):
+        f.title, f.track = title, track
+    downloads = dict(FakePlugin.fetch_count)
+
+    assert run_sync(make_config(*tmp_roots)) == 0
+    config = make_config(*tmp_roots, fill_tags=True)
+    assert run_sync(config) == 0
+    assert FakePlugin.fetch_count == downloads
+    tags = read_tags(_archive_file(config, "gd77", "d1t01.flac"))
+    assert (tags["title"], tags["tracknumber"]) == (["Track 1"], ["1"])
