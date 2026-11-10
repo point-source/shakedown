@@ -1192,46 +1192,6 @@ def _log_pipeline_plan(
     log.info("[%s/%s] plan: %s", source_name, collection_name, counts)
 
 
-def _execute_fetch_and_stage(
-    config: Config,
-    source: SourceConfig,
-    collection: CollectionConfig,
-    plugin: SourcePlugin,
-    items: ItemRepo,
-    targets: list[PlannedItem],
-    stats: CollectionSyncStats,
-    placement: LibraryPlacement,
-    budget: SourceBudget | None = None,
-) -> None:
-    """Concurrent fetch (capped by max_concurrent_downloads); sequential staging.
-
-    Each item is its own atomic unit: fetch into temp, persist row + create
-    hardlinks once the bytes are on disk and the manifest is recorded.
-
-    When a per-source ``budget`` is supplied, each fetch acquires a slot from it
-    around the whole ``_fetch_one`` call, so simultaneous connections to the
-    source's upstream host never exceed the shared per-source ceiling — the pool's
-    worker count is only the per-collection parallelism (SPEC §spec:source-budget).
-    """
-    if not targets:
-        return
-
-    archive_root = config.archive_root / source.name / collection.name
-    archive_root.mkdir(parents=True, exist_ok=True)
-
-    with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as pool:
-        futures = {
-            pool.submit(
-                _fetch_one_budgeted, budget, plugin, target, archive_root, collection
-            ): target
-            for target in targets
-        }
-        for fut in as_completed(futures):
-            _process_fetch_result(
-                fut, futures[fut], source, collection, items, stats, placement
-            )
-
-
 def _process_fetch_result(
     fut: Future[_FetchOutcome],
     target: PlannedItem,
@@ -1423,7 +1383,7 @@ def _is_single_folder_name(name: str) -> bool:
 
 
 def _fetch_one_budgeted(
-    budget: SourceBudget | None,
+    budget: SourceBudget,
     plugin: SourcePlugin,
     target: PlannedItem,
     archive_root: Path,
@@ -1432,11 +1392,8 @@ def _fetch_one_budgeted(
     """Acquire a per-source budget slot around the whole fetch (SPEC §spec:source-budget).
 
     The slot is held for the entire ``_fetch_one`` call so it counts as one live
-    upstream connection; with no budget (e.g. a single-item refetch) the fetch runs
-    unbounded.
+    upstream connection.
     """
-    if budget is None:
-        return _fetch_one(plugin, target, archive_root, collection)
     with budget.slot():
         return _fetch_one(plugin, target, archive_root, collection)
 

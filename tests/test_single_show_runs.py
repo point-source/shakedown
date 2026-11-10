@@ -244,3 +244,72 @@ def test_a_refetch_clears_its_own_warning_but_never_a_syncs(
     recovery = _summary(config)["recovery"]
     assert recovery["operation"] == "sync"
     assert recovery["status"] == "stale_enumeration"
+
+
+def _runs(config: Config) -> list[tuple[str, str]]:
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    return [
+        (row["collection_name"], row["kind"])
+        for row in conn.execute("SELECT collection_name, kind FROM runs ORDER BY id")
+    ]
+
+
+def test_reconform_of_two_drifted_shows_is_one_run_with_one_notice(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """§spec:single-show-runs test path: reconform two drifted shows — one run recorded,
+    one notice sent, both shows' bytes restored, and the collection never listed."""
+    from shakedown.verify import run_verify
+
+    archive, library = tmp_roots
+    config = _hooked(archive, library)
+    for identifier in ("gd-a", "gd-b", "gd-c"):
+        _add_show(identifier)
+    hooks = _Webhooks()
+    with patch("shakedown.notify.httpx.post", side_effect=hooks):
+        assert run_sync(config) == 0
+        for identifier in ("gd-a", "gd-b"):
+            _show_paths(config, identifier)[0].write_bytes(b"retagged")
+        FakePlugin.lookup_calls.clear()
+        FakePlugin.list_calls = 0
+        hooks.calls.clear()
+
+        assert run_verify(
+            config, source_filter=None, collection_filter=None,
+            deep=True, reconform=True, list_drift=False, assume_yes=True,
+        ) == 0
+
+    assert _runs(config) == [("coll1", "sync"), ("coll1", "reconform")]
+    assert hooks.staged() == [["gd-a", "gd-b"]]
+    for identifier in ("gd-a", "gd-b"):
+        archived, staged = _show_paths(config, identifier)
+        assert archived.read_bytes() == b"audio"
+        assert staged.stat().st_ino == archived.stat().st_ino
+    assert sorted(identifier for identifier, _ in FakePlugin.lookup_calls) == ["gd-a", "gd-b"]
+    assert FakePlugin.list_calls == 0
+    last = _summary(config)["last_run"]
+    assert (last["kind"], last["items_updated"]) == ("reconform", 2)
+
+
+def test_reconform_fails_a_drifted_show_the_source_no_longer_holds(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """The drift is not repaired, so the run records the show failed with the reason."""
+    from shakedown.verify import run_verify
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _add_show("gd-a")
+    assert run_sync(config) == 0
+    archived, _ = _show_paths(config, "gd-a")
+    archived.write_bytes(b"retagged")
+    FakePlugin.lookup_faults["gd-a"] = [ItemLookup(metadata={}, files=[])]
+
+    assert run_verify(
+        config, source_filter=None, collection_filter=None,
+        deep=True, reconform=True, list_drift=False, assume_yes=True,
+    ) == 1
+
+    last = _summary(config)["last_run"]
+    assert (last["kind"], last["items_failed"]) == ("reconform", 1)
+    assert archived.read_bytes() == b"retagged"

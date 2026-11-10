@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -15,20 +15,11 @@ import click
 
 from shakedown.config import Config
 from shakedown.db import connect, transaction
-from shakedown.discovery import ItemDescriptor, LookupFailure, source_budgets, stream_items
 from shakedown.lock import run_exclusive
-from shakedown.models import Item, ItemStatus
-from shakedown.placement import LibraryPlacement
+from shakedown.models import Item, ItemStatus, RunKind
 from shakedown.plugins import registry
 from shakedown.state import DriftRepo, ItemRepo
-from shakedown.sync import (
-    CollectionSyncStats,
-    PlanAction,
-    PlannedItem,
-    _apply_placement_report,
-    _execute_fetch_and_stage,
-    plan_files,
-)
+from shakedown.sync import run_single_shows
 from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
@@ -119,8 +110,9 @@ def _run_verify(
     list_drift: bool,
     assume_yes: bool,
 ) -> int:
-    # A verify opens no run record; serve learns only that it started (and, for a
-    # reconform, that it holds the writer lock) (§spec:api-sync-runs).
+    # A verify opens no run record up front; serve learns only that it started (and,
+    # for a reconform, that it holds the writer lock) (§spec:api-sync-runs). A
+    # reconform's runs are opened once the hash pass knows what drifted.
     announce_started([])
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
@@ -196,68 +188,19 @@ def _run_verify(
             click.echo("aborted")
             return 0
 
-    return _reconform(config, items, all_drift)
+    return _reconform(config, all_drift)
 
 
-def _reconform(config: Config, items: ItemRepo, drifts: list[DriftRecord]) -> int:
-    """Re-fetch items that have any drifted file. Whole item, not per-file."""
-    by_collection: dict[tuple[str, str], set[str]] = {}
+def _reconform(config: Config, drifts: list[DriftRecord]) -> int:
+    """Re-fetch every show with a drifted file — the whole show, not the file — as one
+    single-show run per collection (§spec:verify-drift, §spec:single-show-runs). On a
+    `fill_tags` collection, tags are refilled on the single-show run's shared fetch
+    and staging path (§spec:tag-filling)."""
+    by_collection: dict[tuple[str, str], list[str]] = {}
     for d in drifts:
-        by_collection.setdefault((d.source, d.collection), set()).add(d.identifier)
-
-    failed = 0
-    for source in config.sources:
-        plugin = registry.for_source(source)
-        for collection in source.collections:
-            ids = by_collection.get((source.name, collection.name))
-            if not ids:
-                continue
-            log.info(
-                "reconform: re-fetching %d items in %s/%s",
-                len(ids), source.name, collection.name,
-            )
-            descriptors_by_id: dict[str, ItemDescriptor] = {}
-            lookup_failed: set[str] = set()
-            budget = source_budgets(config, [(source, plugin)])[source.name]
-            wanted: set[str] = ids
-            for found in stream_items(
-                plugin, collection, budget, set(),
-                look_up=lambda row, wanted=wanted: row.identifier in wanted,
-            ):
-                if isinstance(found, LookupFailure):
-                    # The drift stays unrepaired: a failure, not a skip.
-                    log.warning("reconform: %s: %s", found.identifier, found.reason)
-                    lookup_failed.add(found.identifier)
-                else:
-                    descriptors_by_id[found.identifier] = found
-
-            failed += len(lookup_failed)
-            targets: list[PlannedItem] = []
-            for identifier in ids - lookup_failed:
-                desc = descriptors_by_id.get(identifier)
-                existing = items.get(source.name, collection.name, identifier)
-                if desc is None or existing is None:
-                    log.warning("reconform: %s no longer in source — skipped", identifier)
-                    continue
-                manifest, fetch = plan_files(desc.manifest, existing, refetch=True)
-                targets.append(
-                    PlannedItem(
-                        replace(desc, manifest=manifest),
-                        existing,
-                        PlanAction.CHANGED_UPSTREAM,
-                        fetch,
-                    )
-                )
-
-            stats = CollectionSyncStats()
-            # Re-fetched shows get new inodes: relink them so the library serves the
-            # restored bytes, not the drifted ones.
-            placement = LibraryPlacement(config, collection, source.name, items)
-            placement.begin()
-            _execute_fetch_and_stage(
-                config, source, collection, plugin, items, targets, stats, placement
-            )
-            _apply_placement_report(stats, placement.finish())
-            if stats.failed:
-                failed += stats.failed
-    return 0 if failed == 0 else 1
+        shows = by_collection.setdefault((d.source, d.collection), [])
+        if d.identifier not in shows:
+            shows.append(d.identifier)
+    for (source, collection), shows in by_collection.items():
+        log.info("reconform: re-fetching %d shows in %s/%s", len(shows), source, collection)
+    return run_single_shows(config, by_collection, RunKind.RECONFORM)
