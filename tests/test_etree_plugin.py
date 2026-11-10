@@ -340,6 +340,41 @@ def test_fetch_non_retriable_on_404(tmp_path: Path) -> None:
     assert result.retriable is False
 
 
+def test_fetch_reports_a_refused_download_unavailable(tmp_path: Path) -> None:
+    """archive.org answers 403 for stream-only shows whose metadata carries no
+    restriction flag; that is a refusal, not a failure (§spec:failure-behavior)."""
+    from shakedown.selection import DOWNLOAD_REFUSED_REASON
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Forbidden")
+
+    plugin = _make_plugin(handler)
+    item = _item_with_files([ManifestFile("sbd.flac", None, None)])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
+
+    assert result.success is False
+    assert result.unavailable is True
+    assert result.retriable is False
+    assert result.error == DOWNLOAD_REFUSED_REASON
+
+
+def test_remote_names_are_quoted_in_request_urls(tmp_path: Path) -> None:
+    """A '#' or '?' in a name must reach archive.org as part of the path."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.raw_path.decode())
+        if request.url.path.startswith("/metadata/"):
+            return _metadata_response({"date": "1977"}, [])
+        return httpx.Response(200, content=b"x")
+
+    plugin = _make_plugin(handler)
+    plugin.lookup_item("gd#1", 30.0)
+    plugin.fetch("gd77", [ManifestFile("disc 1/t#1?.flac", 1, None)], tmp_path)
+
+    assert seen == ["/metadata/gd%231", "/download/gd77/disc%201/t%231%3F.flac"]
+
+
 def test_fetch_parses_numeric_retry_after(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, headers={"Retry-After": "42"}, text="slow down")

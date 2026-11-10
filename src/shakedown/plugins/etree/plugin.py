@@ -19,6 +19,7 @@ import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -30,10 +31,12 @@ from shakedown.plugins.base import (
     ListedItem,
     SourcePlugin,
     VerifyResult,
+    http_status,
     retry_after_seconds,
     reusable_leftover,
 )
 from shakedown.plugins.registry import register
+from shakedown.selection import DOWNLOAD_REFUSED_REASON
 
 _BASE_URL = "https://archive.org"
 _PAGE_SIZE = 100
@@ -138,7 +141,7 @@ class EtreePlugin(SourcePlugin):
             yield ListedItem(identifier)
 
     def lookup_item(self, identifier: str, timeout: float) -> ItemLookup:
-        resp = self._client.get(f"/metadata/{identifier}", timeout=timeout)
+        resp = self._client.get(f"/metadata/{quote(identifier)}", timeout=timeout)
         resp.raise_for_status()
         doc = resp.json()
         meta = doc.get("metadata", {}) or {}
@@ -257,7 +260,7 @@ class EtreePlugin(SourcePlugin):
             written = 0
             try:
                 with self._client.stream(
-                    "GET", f"/download/{identifier}/{mf.name}"
+                    "GET", f"/download/{quote(identifier)}/{quote(mf.name)}"
                 ) as resp:
                     resp.raise_for_status()
                     with out.open("wb") as fh:
@@ -266,6 +269,15 @@ class EtreePlugin(SourcePlugin):
                             hasher.update(chunk)
                             written += len(chunk)
             except httpx.HTTPError as exc:
+                if http_status(exc) == 403:
+                    # archive.org serves some shows stream-only with no restriction
+                    # flag in their metadata; the refusal is the only signal.
+                    return FetchResult(
+                        success=False,
+                        bytes_downloaded=total,
+                        error=DOWNLOAD_REFUSED_REASON,
+                        unavailable=True,
+                    )
                 retriable, retry_after, message = _classify(exc)
                 return FetchResult(
                     success=False,
