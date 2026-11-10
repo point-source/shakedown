@@ -1,4 +1,4 @@
-"""Readiness validation and durable recovery reporting surfaces."""
+"""Restage recovery after a library-layout collision: the warning shows, and a retry clears it."""
 from __future__ import annotations
 
 from pathlib import Path
