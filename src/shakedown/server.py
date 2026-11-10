@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from contextlib import closing
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -24,7 +25,7 @@ from prometheus_client import (
 )
 
 from shakedown import __version__
-from shakedown.config import Config, UnknownScopeError, check_scope
+from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope, load
 from shakedown.db import connect
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
@@ -37,7 +38,11 @@ log = logging.getLogger(__name__)
 TOKEN_ENV = "SHAKEDOWN_API_TOKEN"
 
 
-def build_app(config: Config) -> FastAPI:
+def build_app(config_path: Path) -> FastAPI:
+    """The control plane over the config file at ``config_path``. Every endpoint
+    that needs the config reads the file as it is at the request, so an edit takes
+    effect without a restart, and a broken file is a 503 naming the problem rather
+    than a crash (§spec:api-sync-runs)."""
     app = FastAPI(title="shakedown", version=__version__)
     registry = CollectorRegistry()
     g_items = Gauge(
@@ -79,7 +84,13 @@ def build_app(config: Config) -> FastAPI:
         ):
             raise HTTPException(401, "invalid or missing bearer token")
 
-    def require_scope(source: str | None, collection: str | None) -> None:
+    def current_config() -> Config:
+        try:
+            return load(config_path)
+        except ConfigError as e:
+            raise HTTPException(503, str(e)) from e
+
+    def require_scope(config: Config, source: str | None, collection: str | None) -> None:
         try:
             check_scope(config, source, collection)
         except UnknownScopeError as e:
@@ -91,6 +102,7 @@ def build_app(config: Config) -> FastAPI:
 
     @app.get("/status")
     def status() -> JSONResponse:
+        config = current_config()
         with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
             items = ItemRepo(conn)
             runs = RunRepo(conn)
@@ -108,7 +120,11 @@ def build_app(config: Config) -> FastAPI:
 
     @app.get("/metrics")
     def metrics() -> PlainTextResponse:
-        # Refresh gauges from current DB state on each scrape.
+        config = current_config()
+        # Refresh gauges from current DB state on each scrape. Clear them first so a
+        # collection removed from the config stops reporting.
+        for gauge in (g_items, g_bytes, g_drift):
+            gauge.clear()
         with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
             items = ItemRepo(conn)
             drift = DriftRepo(conn)
@@ -134,7 +150,8 @@ def build_app(config: Config) -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_token(authorization)
-        require_scope(source, collection)
+        config = current_config()
+        require_scope(config, source, collection)
         rc = do_sync(config, source_filter=source, collection_filter=collection)
         c_sync.labels("ok" if rc == 0 else "fail").inc()
         return {"exit_code": rc}
@@ -148,7 +165,8 @@ def build_app(config: Config) -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_token(authorization)
-        require_scope(source, collection)
+        config = current_config()
+        require_scope(config, source, collection)
         rc = do_verify(
             config,
             source_filter=source,
@@ -173,7 +191,8 @@ def build_app(config: Config) -> FastAPI:
         # sync and verify (§spec:serve, §spec:setup-readiness-validation).
         if live_handoff:
             require_token(authorization)
-        require_scope(source, collection)
+        config = current_config()
+        require_scope(config, source, collection)
         report = validate_config(
             config,
             source_filter=source,
@@ -185,8 +204,8 @@ def build_app(config: Config) -> FastAPI:
     return app
 
 
-def serve(config: Config, *, host: str, port: int) -> None:
+def serve(config_path: Path, *, host: str, port: int) -> None:
     import uvicorn
 
-    app = build_app(config)
+    app = build_app(config_path)
     uvicorn.run(app, host=host, port=port)

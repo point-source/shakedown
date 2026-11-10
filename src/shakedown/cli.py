@@ -263,14 +263,20 @@ def item_forget(ctx: click.Context, identifier: str) -> None:
 @click.pass_context
 def serve(ctx: click.Context, host: str, port: int) -> None:
     """Start the optional HTTP control plane (PRD §10)."""
-    cfg = _load_config(ctx)
+    config_path: Path = ctx.obj["config_path"]
+    # serve reads the config at each request, so a broken file is an answer from
+    # each endpoint, not a reason to refuse to start (§spec:api-sync-runs).
+    try:
+        config_module.load(config_path)
+    except config_module.ConfigError as e:
+        log.warning("config is not valid yet; endpoints answer 503 until it is: %s", e)
     try:
         from shakedown.server import serve as run_server
     except ImportError as e:
         click.echo(f"error: serve dependencies not installed: {e}", err=True)
         click.echo("install with: pip install 'shakedown[serve]'", err=True)
         ctx.exit(2)
-    run_server(cfg, host=host, port=port)
+    run_server(config_path, host=host, port=port)
 
 
 if __name__ == "__main__":  # pragma: no cover

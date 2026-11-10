@@ -295,3 +295,21 @@ def test_read_only_commands_skip_the_hardlink_probe(tmp_path: Path, tmp_roots) -
         show = CliRunner().invoke(main, ["--config", str(cfg), "item", "show", "nope"])
     assert status.exit_code == 0, status.output
     assert show.exit_code == 0, show.output
+
+
+def test_serve_starts_with_a_broken_config(tmp_path: Path, monkeypatch) -> None:
+    """serve reads the config per request, so a broken file must not stop it from
+    starting; the endpoints answer 503 until the file is fixed (§spec:api-sync-runs)."""
+    pytest.importorskip("fastapi")
+    import shakedown.server as server_module
+
+    cfg = tmp_path / "shakedown.yaml"
+    cfg.write_text("sources: [")
+    started: list[tuple[Path, str, int]] = []
+    monkeypatch.setattr(
+        server_module, "serve",
+        lambda path, *, host, port: started.append((path, host, port)),
+    )
+    result = CliRunner().invoke(main, ["--config", str(cfg), "serve", "--port", "9999"])
+    assert result.exit_code == 0, result.output
+    assert started == [(cfg, "0.0.0.0", 9999)]

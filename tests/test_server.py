@@ -10,8 +10,13 @@ pytest.importorskip("fastapi")
 
 from shakedown.server import TOKEN_ENV, build_app
 from shakedown.sync import run_sync
-from tests.conftest import make_config
+from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
+
+
+def _app(config):  # type: ignore[no-untyped-def]
+    """serve over a config file holding ``config`` (written beside the archive root)."""
+    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config))
 
 
 @pytest.mark.asyncio
@@ -25,7 +30,7 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
     assert run_sync(config) == 0
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=build_app(config)),
+        transport=httpx.ASGITransport(app=_app(config)),
         base_url="http://testserver",
     ) as client:
 
@@ -82,7 +87,7 @@ async def test_serve_validate_endpoint(tmp_roots: tuple[Path, Path], monkeypatch
         identifier="gd-x", files=[FakeFile(name="x.flac", content=b"audio")]
     )
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=build_app(config)),
+        transport=httpx.ASGITransport(app=_app(config)),
         base_url="http://testserver",
     ) as client:
         # default validation is read-only: no token, same posture as /status
@@ -115,7 +120,7 @@ async def test_serve_mutating_disabled_without_token(
     archive, library = tmp_roots
     config = make_config(archive, library)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=build_app(config)),
+        transport=httpx.ASGITransport(app=_app(config)),
         base_url="http://testserver",
     ) as client:
 
@@ -145,7 +150,7 @@ async def test_serve_unknown_collection_is_404(tmp_roots: tuple[Path, Path], mon
     config = make_config(archive, library)
     auth = {"Authorization": "Bearer test-token"}
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=build_app(config)),
+        transport=httpx.ASGITransport(app=_app(config)),
         base_url="http://testserver",
     ) as client:
         for route in ("/sync", "/verify"):
@@ -165,7 +170,8 @@ def test_api_reports_installed_package_version(tmp_roots: tuple[Path, Path]) -> 
     from importlib.metadata import version
 
     archive, library = tmp_roots
-    assert build_app(make_config(archive, library)).version == version("shakedown")
+    app = _app(make_config(archive, library))
+    assert app.version == version("shakedown")
 
 
 @pytest.mark.asyncio
@@ -215,7 +221,7 @@ async def test_status_and_metrics_read_sizes_from_the_db(
     monkeypatch.setattr(server_module, "connect", tracking_connect)
 
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=build_app(config)),
+        transport=httpx.ASGITransport(app=_app(config)),
         base_url="http://testserver",
     ) as client:
         r = await client.get("/status")
@@ -230,3 +236,71 @@ async def test_status_and_metrics_read_sizes_from_the_db(
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_endpoints_read_the_config_as_it_is_at_each_request(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A config edit takes effect on the next request; a broken config is an answer
+    naming the key, not a crash; fixing the file restores the endpoints without a
+    restart (§spec:api-sync-runs)."""
+    from shakedown.config import CollectionConfig
+
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    cfg_path = write_config(archive.parent / "cfg.yaml", config)
+    auth = {"Authorization": "Bearer test-token"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(cfg_path)),
+        base_url="http://testserver",
+    ) as client:
+        assert [s["collection"] for s in (await client.get("/status")).json()] == ["coll1"]
+
+        config.sources[0].collections.append(CollectionConfig(name="coll2", query="*"))
+        write_config(cfg_path, config)
+        r = await client.get("/status")
+        assert [s["collection"] for s in r.json()] == ["coll1", "coll2"]
+        r = await client.post("/validate", params={"collection": "coll2"})
+        assert r.status_code == 200  # the scope check sees the new collection too
+
+        good = cfg_path.read_text()
+        cfg_path.write_text(good + "max_concurrent_collections: 0\n")
+        for method, route, headers in (
+            ("GET", "/status", {}),
+            ("GET", "/metrics", {}),
+            ("POST", "/validate", {}),
+            ("POST", "/sync", auth),
+            ("POST", "/verify", auth),
+        ):
+            r = await client.request(method, route, headers=headers)
+            assert r.status_code == 503, route
+            assert "max_concurrent_collections" in r.json()["detail"], route
+        assert (await client.get("/healthz")).status_code == 200  # serve stays up
+        # auth still comes first: no token, no config error
+        assert (await client.post("/sync")).status_code == 401
+
+        cfg_path.write_text(good)
+        assert (await client.get("/status")).status_code == 200
+        assert (await client.get("/metrics")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_metrics_drop_a_collection_removed_from_the_config(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    from shakedown.config import CollectionConfig
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    config.sources[0].collections.append(CollectionConfig(name="coll2", query="*"))
+    cfg_path = write_config(archive.parent / "cfg.yaml", config)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(cfg_path)),
+        base_url="http://testserver",
+    ) as client:
+        assert 'collection="coll2"' in (await client.get("/metrics")).text
+        config.sources[0].collections.pop()
+        write_config(cfg_path, config)
+        assert 'collection="coll2"' not in (await client.get("/metrics")).text
