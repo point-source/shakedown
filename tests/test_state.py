@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from shakedown.db import connect
+from shakedown.db import SCHEMA_VERSION, connect
 from shakedown.models import (
     Item,
     ItemStatus,
@@ -13,7 +13,13 @@ from shakedown.models import (
     OperationType,
     Run,
 )
-from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
+from shakedown.state import (
+    DriftRepo,
+    ItemRepo,
+    OperationOutcomeRepo,
+    PlacementRepo,
+    RunRepo,
+)
 
 
 def _make_item(identifier: str = "x") -> Item:
@@ -215,7 +221,7 @@ def test_v1_db_migrates_to_current_schema(tmp_path: Path) -> None:
 
     conn = connect(db_path)  # triggers migration
     version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
-    assert version == 5
+    assert version == SCHEMA_VERSION
     latest = RunRepo(conn).latest("s", "c")
     assert latest is not None and latest.stale is False
     # The collision columns added in later migrations default cleanly for old runs.
@@ -259,7 +265,7 @@ def test_v2_db_migrates_change_signal_column(tmp_path: Path) -> None:
 
     conn = connect(db_path)  # triggers migration
     version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
-    assert version == 5
+    assert version == SCHEMA_VERSION
     cols = [row["name"] for row in conn.execute("PRAGMA table_info(items)").fetchall()]
     assert "change_signal" in cols
     run_cols = [row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()]
@@ -310,7 +316,7 @@ def test_v4_db_migrates_operation_outcomes_table(tmp_path: Path) -> None:
 
     conn = connect(db_path)
     version = conn.execute("SELECT version FROM schema_version").fetchone()["version"]
-    assert version == 5
+    assert version == SCHEMA_VERSION
     tables = [
         row["name"]
         for row in conn.execute(
@@ -339,3 +345,144 @@ def test_drift_repo(tmp_path: Path) -> None:
     assert drift.count("s", "c") == 2
     drift.clear("s", "c", "x", "a.flac")
     assert drift.count("s", "c") == 1
+
+
+_V5_RUNS = """
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_name TEXT NOT NULL,
+            collection_name TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            items_discovered INTEGER NOT NULL DEFAULT 0,
+            items_new INTEGER NOT NULL DEFAULT 0,
+            items_updated INTEGER NOT NULL DEFAULT 0,
+            items_failed INTEGER NOT NULL DEFAULT 0,
+            bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+            errors TEXT NOT NULL DEFAULT '[]',
+            stale INTEGER NOT NULL DEFAULT 0,
+            collisions_dropped INTEGER NOT NULL DEFAULT 0,
+            collision_paths TEXT NOT NULL DEFAULT '[]'
+        );
+"""
+
+
+def _tables(conn) -> set[str]:
+    return {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+
+def _columns(conn, table: str) -> list[str]:
+    return [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def _legacy_v5(db_path: Path, extra_sql: str = "") -> None:
+    import sqlite3
+
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);"
+        "INSERT INTO schema_version (version) VALUES (5);" + _V5_RUNS + extra_sql
+    )
+    legacy.commit()
+    legacy.close()
+
+
+def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
+    """§spec:state: the increment moves the schema forward by one migration. A v5
+    database gains the library placement record and keeps its runs."""
+    db_path = tmp_path / "legacy_v5.db"
+    _legacy_v5(
+        db_path,
+        "INSERT INTO runs (source_name, collection_name, started_at, collisions_dropped)"
+        " VALUES ('s', 'c', '2026-01-01T00:00:00', 2);",
+    )
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 6
+    assert {
+        "library_placements", "library_folders", "library_unplaced", "library_adoption"
+    } <= _tables(conn)
+    assert RunRepo(conn).latest("s", "c") is not None
+
+
+def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
+    fresh = connect(tmp_path / "fresh.db")
+    db_path = tmp_path / "legacy_v5.db"
+    _legacy_v5(db_path)
+    migrated = connect(db_path)
+    for table in ("runs", "library_placements", "library_folders", "library_unplaced",
+                  "library_adoption"):
+        assert _columns(fresh, table) == _columns(migrated, table), table
+
+
+def test_placement_repo_round_trip(tmp_path: Path) -> None:
+    repo = PlacementRepo(connect(tmp_path / "s.db"))
+    repo.add_placement("s", "c", "show-a", "A/a.flac")
+    repo.add_placement("s", "c", "show-a", "A/a.flac")  # idempotent
+    repo.add_placement("s", "c", "show-a", "A/metadata.json")
+    repo.add_placement("s", "c", "show-b", "B/b.flac")
+    repo.add_placement("s", "other", "show-a", "A/a.flac")  # other collection
+
+    assert repo.placements_for("s", "c", "show-a") == {"A/a.flac", "A/metadata.json"}
+    assert repo.owner_of("s", "c", "B/b.flac") == "show-b"
+    assert repo.owner_of("s", "c", "nope") is None
+    assert list(repo.iter_placements("s", "c")) == [
+        ("show-a", "A/a.flac"), ("show-a", "A/metadata.json"), ("show-b", "B/b.flac"),
+    ]
+    repo.remove_placement("s", "c", "A/a.flac")
+    assert repo.placements_for("s", "c", "show-a") == {"A/metadata.json"}
+
+
+def test_placement_repo_one_owner_per_path(tmp_path: Path) -> None:
+    """The record is the sole authority for who owns a library path
+    (§spec:library-ownership): a second show cannot claim a recorded path."""
+    import sqlite3
+
+    import pytest
+
+    repo = PlacementRepo(connect(tmp_path / "s.db"))
+    repo.add_placement("s", "c", "show-a", "X/track.flac")
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.add_placement("s", "c", "show-b", "X/track.flac")
+
+
+def test_placement_repo_folders_unplaced_adoption(tmp_path: Path) -> None:
+    repo = PlacementRepo(connect(tmp_path / "s.db"))
+    repo.set_folder("s", "c", "show-b", "1977 [show-b]", separated=True)
+    repo.set_folder("s", "c", "show-a", "1977 [show-a]", separated=True)
+    repo.set_folder("s", "c", "show-c", "1978", separated=False)
+    repo.set_folder("s", "c", "show-c", "1979", separated=False)  # moves
+    assert repo.list_separated("s", "c") == [
+        ("show-a", "1977 [show-a]"), ("show-b", "1977 [show-b]"),
+    ]
+    assert repo.folders("s", "c") == {
+        "show-a": "1977 [show-a]", "show-b": "1977 [show-b]", "show-c": "1979",
+    }
+    repo.delete_folder("s", "c", "show-a")
+    assert [i for i, _ in repo.list_separated("s", "c")] == ["show-b"]
+
+    repo.add_unplaced("s", "c", "X/mine.flac")
+    repo.add_unplaced("s", "c", "X/mine.flac")
+    repo.add_unplaced("s", "c", "Y/stray.mp3")
+    assert repo.list_unplaced("s", "c") == ["X/mine.flac", "Y/stray.mp3"]
+    repo.remove_unplaced("s", "c", "X/mine.flac")
+    assert repo.list_unplaced("s", "c") == ["Y/stray.mp3"]
+
+    assert repo.is_adopted("s", "c") is False
+    repo.mark_adopted("s", "c", datetime(2026, 11, 10))
+    assert repo.is_adopted("s", "c") is True
+    assert repo.is_adopted("s", "other") is False
+
+
+def test_placement_repo_delete_show(tmp_path: Path) -> None:
+    repo = PlacementRepo(connect(tmp_path / "s.db"))
+    repo.add_placement("s", "c", "show-a", "A/a.flac")
+    repo.set_folder("s", "c", "show-a", "A", separated=False)
+    repo.add_placement("s", "c", "show-b", "B/b.flac")
+    repo.delete_show("s", "c", "show-a")
+    assert repo.placements_for("s", "c", "show-a") == set()
+    assert repo.folders("s", "c") == {}
+    assert repo.owner_of("s", "c", "B/b.flac") == "show-b"

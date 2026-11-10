@@ -1,4 +1,4 @@
-"""DB-backed repositories for items, runs, and drift records."""
+"""DB-backed repositories for items, runs, drift, and library placement records."""
 from __future__ import annotations
 
 import json
@@ -523,3 +523,169 @@ class DriftRepo:
             (source, collection),
         )
         yield from cur
+
+
+class PlacementRepo:
+    """The library placement record (§spec:library-ownership, §spec:library-cleanup):
+    which show owns each library file shakedown placed, each show's folder, files found
+    in the library that shakedown did not place, and which collections have adopted
+    their pre-existing links. Paths are relative to the collection's library folder."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    # --- placed files ---
+
+    def placements_for(self, source: str, collection: str, identifier: str) -> set[str]:
+        cur = self.conn.execute(
+            """
+            SELECT path FROM library_placements
+            WHERE source_name=? AND collection_name=? AND identifier=?
+            """,
+            (source, collection, identifier),
+        )
+        return {row["path"] for row in cur}
+
+    def iter_placements(self, source: str, collection: str) -> Iterator[tuple[str, str]]:
+        """(identifier, path) for every placed file in the collection, by identifier."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier, path FROM library_placements
+            WHERE source_name=? AND collection_name=? ORDER BY identifier, path
+            """,
+            (source, collection),
+        )
+        for row in cur:
+            yield row["identifier"], row["path"]
+
+    def owner_of(self, source: str, collection: str, path: str) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT identifier FROM library_placements
+            WHERE source_name=? AND collection_name=? AND path=?
+            """,
+            (source, collection, path),
+        ).fetchone()
+        return row["identifier"] if row else None
+
+    def add_placement(self, source: str, collection: str, identifier: str, path: str) -> None:
+        """Record a placed file. Re-recording the same owner is a no-op; another show
+        claiming a recorded path raises IntegrityError (one owner per path)."""
+        if self.owner_of(source, collection, path) == identifier:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO library_placements (source_name, collection_name, identifier, path)
+            VALUES (?, ?, ?, ?)
+            """,
+            (source, collection, identifier, path),
+        )
+
+    def remove_placement(self, source: str, collection: str, path: str) -> None:
+        self.conn.execute(
+            """
+            DELETE FROM library_placements
+            WHERE source_name=? AND collection_name=? AND path=?
+            """,
+            (source, collection, path),
+        )
+
+    # --- show folders ---
+
+    def set_folder(
+        self, source: str, collection: str, identifier: str, folder: str, *, separated: bool
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO library_folders
+                (source_name, collection_name, identifier, folder, separated)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(source_name, collection_name, identifier) DO UPDATE SET
+                folder=excluded.folder, separated=excluded.separated
+            """,
+            (source, collection, identifier, folder, int(separated)),
+        )
+
+    def delete_folder(self, source: str, collection: str, identifier: str) -> None:
+        self.conn.execute(
+            """
+            DELETE FROM library_folders
+            WHERE source_name=? AND collection_name=? AND identifier=?
+            """,
+            (source, collection, identifier),
+        )
+
+    def folders(self, source: str, collection: str) -> dict[str, str]:
+        cur = self.conn.execute(
+            """
+            SELECT identifier, folder FROM library_folders
+            WHERE source_name=? AND collection_name=?
+            """,
+            (source, collection),
+        )
+        return {row["identifier"]: row["folder"] for row in cur}
+
+    def list_separated(self, source: str, collection: str) -> list[tuple[str, str]]:
+        """(identifier, folder) of every separation in effect, by folder."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier, folder FROM library_folders
+            WHERE source_name=? AND collection_name=? AND separated=1
+            ORDER BY folder, identifier
+            """,
+            (source, collection),
+        )
+        return [(row["identifier"], row["folder"]) for row in cur]
+
+    def delete_show(self, source: str, collection: str, identifier: str) -> None:
+        """Drop a show's whole placement record (its files and its folder)."""
+        for table in ("library_placements", "library_folders"):
+            self.conn.execute(
+                f"DELETE FROM {table} WHERE source_name=? AND collection_name=? AND identifier=?",
+                (source, collection, identifier),
+            )
+
+    # --- files shakedown did not place ---
+
+    def add_unplaced(self, source: str, collection: str, path: str) -> None:
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO library_unplaced (source_name, collection_name, path)
+            VALUES (?, ?, ?)
+            """,
+            (source, collection, path),
+        )
+
+    def remove_unplaced(self, source: str, collection: str, path: str) -> None:
+        self.conn.execute(
+            "DELETE FROM library_unplaced WHERE source_name=? AND collection_name=? AND path=?",
+            (source, collection, path),
+        )
+
+    def list_unplaced(self, source: str, collection: str) -> list[str]:
+        cur = self.conn.execute(
+            """
+            SELECT path FROM library_unplaced
+            WHERE source_name=? AND collection_name=? ORDER BY path
+            """,
+            (source, collection),
+        )
+        return [row["path"] for row in cur]
+
+    # --- one-time adoption of pre-existing links ---
+
+    def is_adopted(self, source: str, collection: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM library_adoption WHERE source_name=? AND collection_name=?",
+            (source, collection),
+        ).fetchone()
+        return row is not None
+
+    def mark_adopted(self, source: str, collection: str, at: datetime) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO library_adoption (source_name, collection_name, adopted_at)
+            VALUES (?, ?, ?)
+            """,
+            (source, collection, _iso(at)),
+        )

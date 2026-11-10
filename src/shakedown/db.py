@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = [
     """
@@ -97,6 +97,60 @@ _SCHEMA = [
         )
     """,
 ]
+
+
+# The library placement record (§spec:library-ownership, §spec:library-cleanup). Paths
+# are relative to the collection's library folder (<library_root>/<source>/<collection>).
+_PLACEMENT_SCHEMA = [
+    # Every file shakedown placed in the library. The primary key on the path makes
+    # "one owner per library path" a database invariant.
+    """
+    CREATE TABLE IF NOT EXISTS library_placements (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        path             TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name, path)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS library_placements_show_idx
+        ON library_placements (source_name, collection_name, identifier)
+    """,
+    # Each staged show's library folder, and whether it was separated (labelled with
+    # its identifier) because another show renders the same folder.
+    """
+    CREATE TABLE IF NOT EXISTS library_folders (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        folder           TEXT NOT NULL,
+        separated        INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_name, collection_name, identifier)
+    )
+    """,
+    # Library files found where shakedown stages that it did not place; left alone and
+    # reported by `status`.
+    """
+    CREATE TABLE IF NOT EXISTS library_unplaced (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        path             TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name, path)
+    )
+    """,
+    # Collections whose existing library links were adopted into the record (once
+    # after the upgrade, or after a database rebuilt from scratch).
+    """
+    CREATE TABLE IF NOT EXISTS library_adoption (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        adopted_at       TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name)
+    )
+    """,
+]
+_SCHEMA += _PLACEMENT_SCHEMA
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -198,12 +252,20 @@ def _migrate_to_5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_6(conn: sqlite3.Connection) -> None:
+    """v5 → v6, the one migration of the ownership, handoff, and discovery increment
+    (§spec:state): add the library placement record (§spec:library-ownership)."""
+    for stmt in _PLACEMENT_SCHEMA:
+        conn.execute(stmt)
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
     3: _migrate_to_3,
     4: _migrate_to_4,
     5: _migrate_to_5,
+    6: _migrate_to_6,
 }
 
 
