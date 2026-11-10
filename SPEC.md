@@ -465,16 +465,13 @@ discovery-performance increment bought (§spec:discovery-pipeline).
 (§spec:library-ownership).*
 
 A `library_layout` that cannot distinguish two items in the same
-collection renders them to the same staging path; when their filenames
-also match, the later items lose the collision and are skipped
-(§spec:library-staging). A live-music collection with multiple recordings
-of one show (different tapers or sources, same date and venue) hits this
-whenever the layout keys on date/venue with no per-item-unique component
-— and left unguarded it surfaces only as a buried per-file `WARNING` and
-an incremented `failed` count, easily read as a transient glitch rather
-than "recordings are missing from the library."
-(§req:success-criteria #14, §req:quality-attributes: no silent library
-data loss)
+collection renders them to the same library folder. A live-music
+collection with multiple recordings of one show (different tapers or
+sources, same date and venue) hits this whenever the layout keys on
+date/venue with no per-item-unique component. Before separation, the
+later recordings were silently dropped from the library behind a buried
+per-file `WARNING`. (§req:success-criteria #14, §req:quality-attributes:
+no silent library data loss)
 
 Two defenses, one proactive and one at runtime:
 
@@ -915,7 +912,9 @@ Observable behavior:
   placement nor the same file as the archive copy, the system leaves it
   in place, skips that one link, and reports the conflict for the show
   (a per-item issue in the run summary and `status`); the rest of the
-  show still stages.
+  show still stages. The record names the exact file placed, so a file
+  swapped in later at a placed path counts as one shakedown did not
+  place: it is neither replaced nor removed by cleanup.
 - **Separations are reported, not failures.** The run summary lists the
   separations made in that run; `shakedown status` (text and JSON) lists
   every separation currently in effect, naming each clashing show and
