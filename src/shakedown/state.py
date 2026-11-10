@@ -232,6 +232,20 @@ class RunRepo:
             ),
         )
 
+    def close_abandoned(self, run_id: int, reason: str, finished_at: datetime) -> None:
+        """Close a run its process left open (it was killed), adding ``reason`` to
+        its errors. A run that is already closed is left as it is."""
+        row = self.conn.execute(
+            "SELECT errors, finished_at FROM runs WHERE id=?", (run_id,)
+        ).fetchone()
+        if row is None or row["finished_at"] is not None:
+            return
+        errors = [*json.loads(row["errors"] or "[]"), reason]
+        self.conn.execute(
+            "UPDATE runs SET finished_at=?, errors=? WHERE id=? AND finished_at IS NULL",
+            (_iso(finished_at), json.dumps(errors), run_id),
+        )
+
     def latest(self, source: str, collection: str) -> Run | None:
         cur = self.conn.execute(
             """
@@ -370,6 +384,26 @@ class OperationOutcomeRepo:
                 json.dumps(outcome.errors),
                 outcome.id,
             ),
+        )
+
+    def close_abandoned(self, outcome_id: int, reason: str, finished_at: datetime) -> None:
+        """Mark an outcome its process left in progress (it was killed) as failed
+        before completion. An outcome that is already finished is left as it is."""
+        outcome = self.get(outcome_id)
+        if outcome is None or outcome.finished_at is not None:
+            return
+        self.finish(
+            outcome,
+            OperationStatus.FAILED_BEFORE_COMPLETION,
+            finished_at,
+            phase=outcome.phase,
+            affected_item=outcome.affected_item,
+            affected_path=outcome.affected_path,
+            completed_work=outcome.completed_work,
+            preservation_context="completed archive work retained",
+            deletion_context=outcome.deletion_context,
+            safe_next_action="check the logged error and rerun sync",
+            errors=[*outcome.errors, reason],
         )
 
     def resolve_actionable(

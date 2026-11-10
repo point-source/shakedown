@@ -131,3 +131,113 @@ def test_child_opens_every_collection_run_up_front_and_times_each_from_its_start
         for r in line["runs"]
     )
     assert released <= starts[1] <= starts[2]
+
+
+# --- serve side: launch a run, wait for its line, watch it to the end -------------
+
+def _launch(tmp_path: Path, config, args: list[str], *, items=None, gate=None, on_exit=None):
+    from shakedown import trigger
+
+    spec = tmp_path / "fake-spec.json"
+    spec.write_text(json.dumps({"items": items or {}, "gate": str(gate) if gate else None}))
+    return trigger.launch(
+        write_config(tmp_path / "cfg.yaml", config),
+        args,
+        state_db=config.state_db,
+        on_exit=on_exit,
+        argv_prefix=CHILD_PREFIX,
+        env={SPEC_ENV: str(spec), "PYTHONPATH": str(REPO_ROOT)},
+    )
+
+
+CHILD_PREFIX = (sys.executable, "-m", "tests.serve_child")
+
+
+def test_launch_reports_busy_and_reaps_the_child(
+    tmp_roots: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from shakedown.trigger import Busy
+
+    config = make_config(*tmp_roots)
+    with writer_lock(config):
+        result = _launch(tmp_path, config, ["sync"], items={"gd-x": {"x.flac": "a"}})
+    assert isinstance(result, Busy)
+
+
+def test_launch_reports_a_config_failure(tmp_roots: tuple[Path, Path], tmp_path: Path) -> None:
+    from shakedown import trigger
+
+    (tmp_path / "cfg.yaml").write_text("archive_root: /a\nlibrary_root: /b\nsources: nope\n")
+    result = trigger.launch(
+        tmp_path / "cfg.yaml", ["sync"], state_db=tmp_path / "state.db",
+        argv_prefix=CHILD_PREFIX, env={"PYTHONPATH": str(REPO_ROOT)},
+    )
+    assert isinstance(result, trigger.Failed)
+    assert "sources" in result.error
+
+
+def test_watcher_reports_a_clean_exit_and_leaves_the_runs_as_the_child_closed_them(
+    tmp_roots: tuple[Path, Path], tmp_path: Path
+) -> None:
+    from shakedown.trigger import Started
+
+    config = make_config(*tmp_roots)
+    exits: list[int] = []
+    gate = tmp_path / "go"
+    result = _launch(
+        tmp_path, config, ["sync"], items={"gd-x": {"x.flac": "a"}}, gate=gate,
+        on_exit=exits.append,
+    )
+    assert isinstance(result, Started)
+    gate.touch()
+    assert result.run.done.wait(timeout=30)
+    assert exits == [0]
+    row = _run_row(config.state_db, result.run.runs[0]["run_id"])
+    assert row["finished_at"] is not None
+    assert "ended unexpectedly" not in row["errors"]
+
+
+def test_watcher_closes_the_runs_of_a_killed_child(
+    tmp_roots: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The run record always closes, even when the run is killed (§spec:failure-behavior)."""
+    import signal
+
+    from shakedown import trigger
+
+    config = make_config(*tmp_roots)
+    exits: list[int] = []
+    gate = tmp_path / "go"
+    result = _launch(
+        tmp_path, config, ["sync"], items={"gd-x": {"x.flac": "a"}}, gate=gate,
+        on_exit=exits.append,
+    )
+    assert isinstance(result, trigger.Started)
+    result.run.process.send_signal(signal.SIGKILL)
+    assert result.run.done.wait(timeout=30)
+    assert exits == [-signal.SIGKILL]
+    [opened] = result.run.runs
+    row = _run_row(config.state_db, opened["run_id"])
+    assert row["finished_at"] is not None
+    assert "run ended unexpectedly (killed by SIGKILL)" in json.loads(row["errors"])
+    conn = sqlite3.connect(config.state_db)
+    try:
+        status = conn.execute(
+            "SELECT status, finished_at FROM operation_outcomes WHERE id=?",
+            (opened["outcome_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert status[0] == "failed_before_completion" and status[1] is not None
+
+    # Closing is by exact id: a later run of the same collection keeps its open record.
+    later = _launch(
+        tmp_path, config, ["sync"], items={"gd-x": {"x.flac": "a"}}, gate=gate.with_name("g2")
+    )
+    assert isinstance(later, trigger.Started)
+    try:
+        trigger.close_abandoned(config.state_db, result.run.runs, -signal.SIGKILL)
+        assert _run_row(config.state_db, later.run.runs[0]["run_id"])["finished_at"] is None
+    finally:
+        gate.with_name("g2").touch()
+        assert later.run.done.wait(timeout=30)
