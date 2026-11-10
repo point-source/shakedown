@@ -557,3 +557,23 @@ def test_stream_only_show_falls_back_through_the_core(archive) -> None:
     assert desc.is_restricted is False
     assert [f.name for f in desc.manifest.files] == ["d1t01.mp3"]
     assert desc.restriction_reason == FALLBACK_REASON
+
+
+def test_credentials_from_an_env_file_with_line_endings_are_trimmed(monkeypatch) -> None:
+    """A trailing CR/LF (an env file saved on Windows) would make the auth header
+    invalid, and the error raised then quotes the header — secret included — into
+    run errors and logs."""
+    from shakedown.config import IAAuth
+    from shakedown.plugins.ia.plugin import _get_ia_session
+
+    monkeypatch.setenv("IA_EMAIL_T", "me@example.org\r\n")
+    monkeypatch.setenv("IA_PASSWORD_T", "s3cret\r\n")
+    src = SourceConfig(
+        name="ia", type="ia",
+        auth=IAAuth(email_env="IA_EMAIL_T", password_env="IA_PASSWORD_T"),
+        collections=[CollectionConfig(name="dead", query="x")],
+    )
+
+    session = _get_ia_session(src)
+
+    assert (session.access_key, session.secret_key) == ("me@example.org", "s3cret")

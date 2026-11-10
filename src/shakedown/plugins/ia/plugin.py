@@ -67,13 +67,15 @@ def _get_ia_session(source_config: SourceConfig) -> ia.ArchiveSession:
     urllib3 retries on its archive.org adapter turned off."""
     config: dict[str, Any] = {}
     if source_config.auth:
+        # Trimmed: a line ending left by an env file would break the auth header,
+        # and the resulting error quotes the header, secret included.
         email = (
-            os.environ.get(source_config.auth.email_env)
+            os.environ.get(source_config.auth.email_env, "").strip()
             if source_config.auth.email_env
             else None
         )
         password = (
-            os.environ.get(source_config.auth.password_env)
+            os.environ.get(source_config.auth.password_env, "").strip()
             if source_config.auth.password_env
             else None
         )
