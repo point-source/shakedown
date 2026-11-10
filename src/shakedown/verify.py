@@ -18,7 +18,7 @@ from shakedown.db import connect, transaction
 from shakedown.lock import run_exclusive
 from shakedown.models import Item, ItemStatus, RunKind
 from shakedown.plugins import registry
-from shakedown.state import DriftRepo, ItemRepo
+from shakedown.state import DriftRepo, ItemRepo, TagRepo
 from shakedown.sync import run_single_shows
 from shakedown.trigger import announce_started
 
@@ -45,12 +45,15 @@ def _md5_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _scan_drift(item: Item) -> list[DriftRecord]:
-    """Hash every recorded-manifest file; report mismatches and missing files."""
+def _scan_drift(item: Item, post_tag: dict[str, str]) -> list[DriftRecord]:
+    """Hash every recorded-manifest file; report mismatches and missing files. A file
+    shakedown tagged is compared against its recorded post-tag checksum, so its own
+    tagging is not drift while any later change is (§spec:tag-filling)."""
     drifts: list[DriftRecord] = []
     if item.recorded_manifest is None or item.archive_path is None:
         return drifts
     for mf in item.recorded_manifest.files:
+        expected = post_tag.get(mf.name, mf.md5)
         on_disk = item.archive_path / mf.name
         if not on_disk.is_file():
             drifts.append(
@@ -59,22 +62,22 @@ def _scan_drift(item: Item) -> list[DriftRecord]:
                     collection=item.collection_name,
                     identifier=item.identifier,
                     file_name=mf.name,
-                    expected_md5=mf.md5,
+                    expected_md5=expected,
                     observed_md5=None,
                 )
             )
             continue
-        if mf.md5 is None:
+        if expected is None:
             continue  # source didn't publish a checksum; nothing to compare
         observed = _md5_file(on_disk)
-        if observed != mf.md5:
+        if observed != expected:
             drifts.append(
                 DriftRecord(
                     source=item.source_name,
                     collection=item.collection_name,
                     identifier=item.identifier,
                     file_name=mf.name,
-                    expected_md5=mf.md5,
+                    expected_md5=expected,
                     observed_md5=observed,
                 )
             )
@@ -117,6 +120,7 @@ def _run_verify(
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     drift_repo = DriftRepo(conn)
+    tags = TagRepo(conn)
 
     all_drift: list[DriftRecord] = []
     missing_summary: dict[tuple[str, str], int] = {}
@@ -142,7 +146,13 @@ def _run_verify(
                             + len(result.missing_files)
                         )
                 else:
-                    drifts = _scan_drift(item)
+                    post_tag = {
+                        name: record.post_tag_md5
+                        for name, record in tags.file_records(
+                            item.source_name, item.collection_name, item.identifier
+                        ).items()
+                    }
+                    drifts = _scan_drift(item, post_tag)
                     all_drift.extend(drifts)
                     with transaction(conn):
                         # Refresh drift table for this item.

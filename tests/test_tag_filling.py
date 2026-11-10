@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from mutagen.flac import FLAC
 from mutagen.id3 import ID3
 from mutagen.oggvorbis import OggVorbis
 
@@ -14,7 +15,8 @@ from shakedown import tagging
 from shakedown.config import CollectionConfig
 from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
-from shakedown.state import ItemRepo, RunRepo, TagRecord, TagRepo
+from shakedown.reconcile import run_reconcile
+from shakedown.state import DriftRepo, ItemRepo, RunRepo, TagRecord, TagRepo
 from shakedown.sync import _record_disappeared, run_sync
 from shakedown.tagging import (
     TagIndex,
@@ -24,6 +26,7 @@ from shakedown.tagging import (
     fingerprint,
     recover_interrupted_tagging,
 )
+from shakedown.verify import run_verify
 from tests.audio_fixtures import make_audio, read_tags
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -528,3 +531,90 @@ def test_a_disk_error_tagging_a_download_fails_the_show_for_a_retry(
     monkeypatch.undo()
     assert run_sync(config) == 0
     assert read_tags(_archive_file(config, "gd77", "d1t01.flac"))["album"]
+
+
+# --- verify --deep: shakedown's own tagging is not drift ------------------------------
+
+def _verify(config, *, reconform: bool = False) -> list[tuple[str, str]]:
+    """Run verify --deep (and reconform, confirmed) and return the drift it found."""
+    code = run_verify(config, source_filter=None, collection_filter=None, deep=True,
+                      reconform=reconform, list_drift=True, assume_yes=True)
+    assert code == 0
+    return sorted(
+        (row["identifier"], row["file_name"])
+        for row in DriftRepo(connect(config.state_db)).list("fake-src", "coll1")
+    )
+
+
+def _retag(path: Path) -> None:
+    """Another tool edits a tag in place."""
+    f = FLAC(path)
+    assert f.tags is not None
+    f.tags["GENRE"] = ["Rock"]
+    f.save()
+
+
+def test_files_shakedown_tagged_are_not_drift(tmp_roots) -> None:
+    config = make_config(*tmp_roots, fill_tags=True)
+    _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(config) == 0
+    assert _verify(config) == []
+
+
+def test_a_file_another_tool_retagged_is_reported_alone(tmp_roots) -> None:
+    config = make_config(*tmp_roots, fill_tags=True)
+    _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(config) == 0
+    _retag(_library_file(config, "d1t02.flac"))
+    assert _verify(config) == [("gd77", "d1t02.flac")]
+
+
+def test_reconform_restores_source_bytes_then_refills_on_fill_tags(tmp_roots) -> None:
+    config = make_config(*tmp_roots, fill_tags=True)
+    item = _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(config) == 0
+    flac = _archive_file(config, "gd77", "d1t02.flac")
+    tagged = flac.read_bytes()
+    _retag(flac)
+    assert _verify(config, reconform=True) == [("gd77", "d1t02.flac")]
+
+    refilled = _archive_file(config, "gd77", "d1t02.flac")
+    assert refilled.read_bytes() == tagged  # source bytes, gaps filled again
+    assert "genre" not in read_tags(refilled)
+    assert refilled.read_bytes() != item.files[1].content
+    assert _verify(config) == []
+
+
+def test_reconform_without_fill_tags_restores_source_bytes_only(tmp_roots) -> None:
+    item = _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(make_config(*tmp_roots, fill_tags=True)) == 0
+    config = make_config(*tmp_roots)  # fill_tags turned off
+    _retag(_archive_file(config, "gd77", "d1t02.flac"))
+    assert _verify(config, reconform=True) == [("gd77", "d1t02.flac")]
+
+    assert _archive_file(config, "gd77", "d1t02.flac").read_bytes() == item.files[1].content
+    assert set(_tag_repo(config).file_records("fake-src", "coll1", "gd77")) == {"d1t01.flac"}
+    assert _verify(config) == []
+
+
+def test_turning_fill_tags_off_keeps_tags_and_records(tmp_roots) -> None:
+    _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(make_config(*tmp_roots, fill_tags=True)) == 0
+    config = make_config(*tmp_roots)
+    assert run_sync(config) == 0
+    assert read_tags(_archive_file(config, "gd77", "d1t01.flac"))["venue"] == ["Barton Hall"]
+    assert len(_tag_repo(config).file_records("fake-src", "coll1", "gd77")) == 2
+    assert _verify(config) == []
+
+
+def test_after_a_rebuilt_database_tagged_files_report_drift(tmp_roots) -> None:
+    """Tag records are not recoverable from disk; guessing would hide other tools'
+    changes (§spec:state)."""
+    config = make_config(*tmp_roots, fill_tags=True)
+    _fake_show("gd77", tmp_roots[0].parent)
+    assert run_sync(config) == 0
+    assert config.state_db is not None
+    for leftover in config.state_db.parent.glob(config.state_db.name + "*"):
+        leftover.unlink()
+    assert run_reconcile(config) == 0
+    assert _verify(config) == [("gd77", "d1t01.flac"), ("gd77", "d1t02.flac")]

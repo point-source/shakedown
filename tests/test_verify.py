@@ -40,7 +40,7 @@ def test_verify_deep_detects_drift(tmp_roots: tuple[Path, Path]) -> None:
     items = ItemRepo(conn)
     item = items.get("fake-src", "coll1", "gd-x")
     assert item is not None
-    drifts = _scan_drift(item)
+    drifts = _scan_drift(item, {})
     assert len(drifts) == 1
     assert drifts[0].file_name == "gd-x.flac"
     assert drifts[0].observed_md5 != drifts[0].expected_md5
