@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-import shakedown.restage as restage_module
+import shakedown.placement as placement_module
 from shakedown.cli import main
 from shakedown.config import (
     CollectionConfig,
@@ -29,7 +29,7 @@ from shakedown.config import (
 from shakedown.db import connect
 from shakedown.models import ItemStatus, OperationStatus, OperationType
 from shakedown.reconcile import run_reconcile
-from shakedown.restage import run_restage
+from shakedown.restage import RESTAGE_ISSUES_ACTION, run_restage
 from shakedown.state import ItemRepo, OperationOutcomeRepo
 from shakedown.status import print_status
 from shakedown.sync import run_sync
@@ -243,39 +243,49 @@ def test_partial_failure_recovery_restage(
 ) -> None:
     archive, library = tmp_roots
     config = make_config(archive, library)
-    FakePlugin.items["gd-x"] = FakeItem(
-        identifier="gd-x",
-        files=[FakeFile(name="x.flac", content=b"audio")],
-    )
+    for ident in ("gd-x", "gd-y"):
+        FakePlugin.items[ident] = FakeItem(
+            identifier=ident,
+            files=[FakeFile(name=f"{ident[-1]}.flac", content=b"audio")],
+        )
     assert run_sync(config) == 0
     archived = archive / "fake-src" / "coll1" / "gd-x" / "x.flac"
     staged = library / "fake-src" / "coll1" / "gd-x" / "x.flac"
+    import shutil
 
-    def fail_stage(*args, **kwargs):
-        raise OSError("storage unavailable")
+    shutil.rmtree(library / "fake-src")  # library wiped; restage rebuilds it
+    real_hardlink = placement_module.hardlink
 
-    monkeypatch.setattr(restage_module, "stage_item", fail_stage)
+    def fail_link(src, dst):
+        if "gd-x" in str(src):
+            raise OSError("storage unavailable")
+        return real_hardlink(src, dst)
+
+    monkeypatch.setattr(placement_module, "hardlink", fail_link)
 
     assert run_restage(config) == 1
     assert archived.read_bytes() == b"audio"  # the recording itself is never at risk
+    # A disk error while linking fails that show; the rest of the collection stages
+    # (§spec:failure-behavior).
+    assert (library / "fake-src" / "coll1" / "gd-y" / "y.flac").is_file()
 
     conn = connect(config.state_db)  # type: ignore[arg-type]
     recovery = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
     assert recovery is not None
     assert recovery.operation == OperationType.RESTAGE
-    assert recovery.status == OperationStatus.FAILED_BEFORE_COMPLETION
+    assert recovery.status == OperationStatus.COMPLETED_WITH_ITEM_ISSUES
     assert recovery.phase == "stage"
     assert recovery.affected_item == "gd-x"
-    assert recovery.completed_work["items_staged"] == 0
-    assert recovery.safe_next_action == "fix storage/path/layout and rerun restage"
+    assert recovery.completed_work["items_staged"] == 2
+    assert any("storage unavailable" in e for e in recovery.errors)
+    assert recovery.safe_next_action == RESTAGE_ISSUES_ACTION
 
     print_status(config, as_json=True)
     status_json = capsys.readouterr().out
     assert '"recovery": {' in status_json
     assert '"operation": "restage"' in status_json
-    assert '"status": "failed_before_completion"' in status_json
+    assert '"status": "completed_with_item_issues"' in status_json
     assert '"affected_item": "gd-x"' in status_json
-    assert '"safe_next_action": "fix storage/path/layout and rerun restage"' in status_json
 
     monkeypatch.undo()
     assert run_restage(config) == 0

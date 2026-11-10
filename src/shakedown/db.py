@@ -48,9 +48,7 @@ _SCHEMA = [
         items_failed       INTEGER NOT NULL DEFAULT 0,
         bytes_downloaded   INTEGER NOT NULL DEFAULT 0,
         errors             TEXT NOT NULL DEFAULT '[]',
-        stale              INTEGER NOT NULL DEFAULT 0,
-        collisions_dropped INTEGER NOT NULL DEFAULT 0,
-        collision_paths    TEXT NOT NULL DEFAULT '[]'
+        stale              INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -102,14 +100,16 @@ _SCHEMA = [
 # The library placement record (§spec:library-ownership, §spec:library-cleanup). Paths
 # are relative to the collection's library folder (<library_root>/<source>/<collection>).
 _PLACEMENT_SCHEMA = [
-    # Every file shakedown placed in the library. The primary key on the path makes
-    # "one owner per library path" a database invariant.
+    # Every file shakedown placed in the library, with the inode it placed there: a
+    # different file later found at that path is not shakedown's. The primary key on
+    # the path makes "one owner per library path" a database invariant.
     """
     CREATE TABLE IF NOT EXISTS library_placements (
         source_name      TEXT NOT NULL,
         collection_name  TEXT NOT NULL,
         identifier       TEXT NOT NULL,
         path             TEXT NOT NULL,
+        inode            INTEGER NOT NULL,
         PRIMARY KEY (source_name, collection_name, path)
     )
     """,
@@ -209,12 +209,9 @@ def _migrate_to_3(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_4(conn: sqlite3.Connection) -> None:
-    """v3 → v4: add runs.collisions_dropped / runs.collision_paths so `status` can report
-    recordings dropped to layout collisions (§spec:layout-collision-safety)."""
-    if not _has_column(conn, "runs", "collisions_dropped"):
-        conn.execute("ALTER TABLE runs ADD COLUMN collisions_dropped INTEGER NOT NULL DEFAULT 0")
-    if not _has_column(conn, "runs", "collision_paths"):
-        conn.execute("ALTER TABLE runs ADD COLUMN collision_paths TEXT NOT NULL DEFAULT '[]'")
+    """v3 → v4 added runs.collisions_dropped / runs.collision_paths for the skip-the-loser
+    collision summary. Clash separation superseded it and v6 drops them, so there is
+    nothing to add on the way through."""
 
 
 def _migrate_to_5(conn: sqlite3.Connection) -> None:
@@ -254,9 +251,13 @@ def _migrate_to_5(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_6(conn: sqlite3.Connection) -> None:
     """v5 → v6, the one migration of the ownership, handoff, and discovery increment
-    (§spec:state): add the library placement record (§spec:library-ownership)."""
+    (§spec:state): add the library placement record and drop the skip-the-loser
+    collision columns, superseded by clash separation (§spec:library-ownership)."""
     for stmt in _PLACEMENT_SCHEMA:
         conn.execute(stmt)
+    for column in ("collisions_dropped", "collision_paths"):
+        if _has_column(conn, "runs", column):
+            conn.execute(f"ALTER TABLE runs DROP COLUMN {column}")
 
 
 # Version-gated, forward-only upgrade steps keyed by the version they produce.

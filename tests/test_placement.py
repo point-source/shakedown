@@ -170,10 +170,13 @@ def test_repeated_passes_change_nothing(tmp_path: Path) -> None:
     lib.finish()
     inodes = {p: (lib.base / p).stat().st_ino for p in lib.tree()}
 
+    writes = lib.items.conn.total_changes
     report = lib.finish()
 
     assert {p: (lib.base / p).stat().st_ino for p in lib.tree()} == inodes
     assert report.links_created == 0 and report.files_removed == 0
+    # A pass over an up-to-date library writes nothing (it runs on every sync).
+    assert lib.items.conn.total_changes == writes
 
 
 def test_passthrough_mirrors_archive(tmp_path: Path) -> None:
@@ -336,6 +339,42 @@ def test_foreign_file_keeps_its_folder_when_show_moves(tmp_path: Path) -> None:
     cover.unlink()  # the operator deletes it
     lib.finish()
     assert lib.repo.list_unplaced(SRC, COLL) == []
+
+
+def test_file_replaced_at_a_placed_path_is_not_removed(tmp_path: Path) -> None:
+    """The operator swapped a placed link for their own file: when the show moves, that
+    file is not shakedown's to remove — it stays and is reported."""
+    lib = Lib(tmp_path)
+    item = lib.show("gd-a", {"a.flac": b"a"}, title="Old")
+    lib.finish()
+    edited = lib.base / "Old" / "a.flac"
+    edited.unlink()
+    edited.write_bytes(b"my edit")
+    item.source_metadata["title"] = "New"
+    lib.items.upsert(item)
+
+    report = lib.finish()
+
+    assert edited.read_bytes() == b"my edit"
+    assert lib.tree() == ["New/a.flac", "Old/a.flac"]
+    assert lib.repo.list_unplaced(SRC, COLL) == ["Old/a.flac"]
+    assert lib.repo.placements_for(SRC, COLL, "gd-a") == {"New/a.flac"}
+    assert report.issues == {}
+
+
+def test_file_replaced_at_a_current_path_is_not_relinked(tmp_path: Path) -> None:
+    lib = Lib(tmp_path)
+    lib.show("gd-a", {"a.flac": b"a"}, title="X")
+    lib.finish()
+    edited = lib.base / "X" / "a.flac"
+    edited.unlink()
+    edited.write_bytes(b"my edit")
+
+    report = lib.finish()
+
+    assert edited.read_bytes() == b"my edit"
+    assert report.issues == {"gd-a": [foreign_file_issue("gd-a", edited)]}
+    assert lib.repo.list_unplaced(SRC, COLL) == ["X/a.flac"]
 
 
 def test_show_without_archive_copy_loses_its_placement(tmp_path: Path) -> None:

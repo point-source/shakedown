@@ -213,8 +213,7 @@ class RunRepo:
             """
             UPDATE runs SET
                 finished_at=?, items_discovered=?, items_new=?, items_updated=?,
-                items_failed=?, bytes_downloaded=?, errors=?, stale=?,
-                collisions_dropped=?, collision_paths=?
+                items_failed=?, bytes_downloaded=?, errors=?, stale=?
             WHERE id=?
             """,
             (
@@ -226,8 +225,6 @@ class RunRepo:
                 run.bytes_downloaded,
                 json.dumps(run.errors),
                 int(run.stale),
-                run.collisions_dropped,
-                json.dumps(run.collision_paths),
                 run.id,
             ),
         )
@@ -271,8 +268,6 @@ class RunRepo:
             bytes_downloaded=row["bytes_downloaded"],
             errors=json.loads(row["errors"]),
             stale=bool(row["stale"]),
-            collisions_dropped=row["collisions_dropped"],
-            collision_paths=json.loads(row["collision_paths"]),
         )
 
 
@@ -537,14 +532,18 @@ class PlacementRepo:
     # --- placed files ---
 
     def placements_for(self, source: str, collection: str, identifier: str) -> set[str]:
+        return set(self.placed_inodes(source, collection, identifier))
+
+    def placed_inodes(self, source: str, collection: str, identifier: str) -> dict[str, int]:
+        """path -> placed inode for every file the show has placed."""
         cur = self.conn.execute(
             """
-            SELECT path FROM library_placements
+            SELECT path, inode FROM library_placements
             WHERE source_name=? AND collection_name=? AND identifier=?
             """,
             (source, collection, identifier),
         )
-        return {row["path"] for row in cur}
+        return {row["path"]: row["inode"] for row in cur}
 
     def iter_placements(self, source: str, collection: str) -> Iterator[tuple[str, str]]:
         """(identifier, path) for every placed file in the collection, by identifier."""
@@ -558,27 +557,42 @@ class PlacementRepo:
         for row in cur:
             yield row["identifier"], row["path"]
 
-    def owner_of(self, source: str, collection: str, path: str) -> str | None:
+    def placement(self, source: str, collection: str, path: str) -> tuple[str, int] | None:
+        """(owning identifier, placed inode) for a recorded path, else None."""
         row = self.conn.execute(
             """
-            SELECT identifier FROM library_placements
+            SELECT identifier, inode FROM library_placements
             WHERE source_name=? AND collection_name=? AND path=?
             """,
             (source, collection, path),
         ).fetchone()
-        return row["identifier"] if row else None
+        return (row["identifier"], row["inode"]) if row else None
 
-    def add_placement(self, source: str, collection: str, identifier: str, path: str) -> None:
-        """Record a placed file. Re-recording the same owner is a no-op; another show
-        claiming a recorded path raises IntegrityError (one owner per path)."""
+    def owner_of(self, source: str, collection: str, path: str) -> str | None:
+        record = self.placement(source, collection, path)
+        return record[0] if record else None
+
+    def add_placement(
+        self, source: str, collection: str, identifier: str, path: str, inode: int
+    ) -> None:
+        """Record a placed file (re-recording the same owner updates the inode). Another
+        show claiming a recorded path raises IntegrityError (one owner per path)."""
         if self.owner_of(source, collection, path) == identifier:
+            self.conn.execute(
+                """
+                UPDATE library_placements SET inode=?
+                WHERE source_name=? AND collection_name=? AND path=?
+                """,
+                (inode, source, collection, path),
+            )
             return
         self.conn.execute(
             """
-            INSERT INTO library_placements (source_name, collection_name, identifier, path)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO library_placements
+                (source_name, collection_name, identifier, path, inode)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (source, collection, identifier, path),
+            (source, collection, identifier, path, inode),
         )
 
     def remove_placement(self, source: str, collection: str, path: str) -> None:

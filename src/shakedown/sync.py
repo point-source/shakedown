@@ -40,15 +40,12 @@ from shakedown.notify import (
     fire_complete,
     fire_failure,
 )
+from shakedown.placement import LibraryPlacement, PlacementReport, log_separations
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
 from shakedown.staging import (
     METADATA_SIDECAR,
-    StageResult,
-    UnsafeLibraryPathError,
     manifest_reserves_sidecar_name,
-    stage_item,
-    unstage_item,
     write_sidecar,
 )
 from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
@@ -244,15 +241,16 @@ class CollectionSyncStats:
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items left untouched
-    # Recordings dropped this run because their library_layout rendered onto a path
-    # another item already staged (§spec:layout-collision-safety). Counted once per
-    # dropped recording and kept distinct from `failed` — the item's archive copy is
-    # intact, only its library link was dropped. `collision_paths` holds the colliding
-    # staging directories for the consolidated run/status summary.
-    collisions_dropped: int = 0
-    collision_paths: list[str] = field(default_factory=list)
     # Fetches the source refused (recorded unavailable, not failed).
     unavailable: int = 0
+    # Shows counted in `failed` because staging them left an issue (a foreign file at a
+    # target, a failed removal, a refused path, a disk error), not because of a fetch.
+    staging_issues: int = 0
+    # Separations in effect after the run's staging pass (§spec:library-ownership):
+    # reported, never a failure.
+    separated: int = 0
+    # Archive path of each show fetched this run, for the handoff payload.
+    fetched: dict[str, Path] = field(default_factory=dict)
     # Items fetched and staged this run, for the sync.complete batch payload
     # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
     staged: list[dict[str, str]] = field(default_factory=list)
@@ -349,26 +347,14 @@ def _run_sync(
                 log.warning("%s/%s: STALE (source enumeration failed)", source.name, collection.name)
             else:
                 log.info(
-                    "%s/%s: discovered=%d new=%d updated=%d failed=%d collisions=%d bytes=%d",
+                    "%s/%s: discovered=%d new=%d updated=%d failed=%d separated=%d bytes=%d",
                     source.name, collection.name,
                     stats.discovered, stats.new, stats.updated, stats.failed,
-                    stats.collisions_dropped, stats.bytes_downloaded,
+                    stats.separated, stats.bytes_downloaded,
                 )
-                if stats.collisions_dropped:
-                    # Consolidated per-run collision summary (§spec:layout-collision-safety):
-                    # one line naming how many recordings were dropped and to which paths,
-                    # not a WARNING buried per file. Paths are rendered with `!r` because
-                    # they derive from remote metadata via the layout template and may hold
-                    # control characters — repr neutralizes terminal-escape injection.
-                    log.warning(
-                        "%s/%s: %d recording(s) dropped to layout collisions; "
-                        "colliding paths: %s",
-                        source.name, collection.name, stats.collisions_dropped,
-                        ", ".join(repr(p) for p in stats.collision_paths),
-                    )
-            # A same-run layout collision is a loud non-zero exit like any other loss —
-            # the run still completes and the rest of the collection stages normally.
-            if stats.failed > 0 or stats.stale or stats.collisions_dropped > 0:
+            # A separation is reported but never fails the run: no recording was lost.
+            log_separations(source.name, collection.name, stats.separated)
+            if stats.failed > 0 or stats.stale:
                 overall_failed += 1
     return 0 if overall_failed == 0 else 1
 
@@ -449,8 +435,9 @@ def _refresh_collection(
     Re-resolution reuses the budgeted descriptor stream, so it honors the shared per-source
     politeness ceiling (§spec:source-budget). For each mirrored item still enumerated
     upstream, the fresh metadata is written to `metadata.json` (in place, so the library
-    hardlink tracks it) and to the recorded `source_metadata`, then the item is restaged —
-    media is never re-downloaded. Returns 1 if any item hit a staging collision, else 0.
+    hardlink tracks it) and to the recorded `source_metadata`, then the collection is
+    restaged, so a show whose folder renders differently moves — media is never
+    re-downloaded. Returns 1 if staging left a per-show issue, else 0.
     """
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
@@ -476,9 +463,7 @@ def _refresh_collection(
         )
         return 1
 
-    staged_paths: set[Path] = set()
     refreshed = 0
-    failed = 0
     for item in mirrored:
         desc = fresh.get(item.identifier)
         if desc is None:
@@ -486,62 +471,49 @@ def _refresh_collection(
         assert item.archive_path is not None and item.recorded_manifest is not None
         item.source_metadata = desc.metadata
         # Rewrite the DB record always, but skip the sidecar when a media file claims its
-        # reserved name (stage_item applies the same guard, §spec:sync-identity).
+        # reserved name (staging applies the same guard, §spec:sync-identity).
         if not manifest_reserves_sidecar_name(item.recorded_manifest):
             write_sidecar(item.archive_path / METADATA_SIDECAR, desc.metadata)
         items.upsert(item)
-        try:
-            result = stage_item(
-                config, collection, source.name, item, item.recorded_manifest,
-                staged_paths=staged_paths,
-            )
-        except UnsafeLibraryPathError as e:
-            failed += 1
-            log.warning("[%s/%s] %s", source.name, collection.name, e)
-            continue
-        if result.collisions:
-            failed += 1
-            for c in result.collisions:
-                log.warning("[%s/%s] %s", source.name, collection.name, c)
         refreshed += 1
+    report = LibraryPlacement(config, collection, source.name, items).finish()
     log.info(
         "[%s/%s] metadata refresh: refreshed=%d of %d mirrored",
         source.name, collection.name, refreshed, len(mirrored),
     )
-    return 1 if failed else 0
+    log_separations(source.name, collection.name, len(report.separated))
+    if report.render_error is not None:
+        log.warning("[%s/%s] %s: %s", source.name, collection.name, *report.render_error)
+        return 1
+    return 1 if report.issues else 0
 
 
-# Upper bound on the colliding-path *sample* retained per run. The count
-# (`collisions_dropped`) is always exact; this only caps the illustrative path list
-# that lands in the DB, the notification payload, and the summary line.
-_MAX_COLLISION_PATHS = 100
-
-
-def _record_collision(
-    stats: CollectionSyncStats,
-    source_name: str,
-    collection_name: str,
-    stage_result: StageResult,
-) -> None:
-    """Record one recording dropped to a same-run layout collision, counted once per
-    recording (not per colliding file) into ``collisions_dropped``
-    (§spec:layout-collision-safety).
-
-    No-op when the stage had no collision. The per-file detail is logged at DEBUG; the
-    single consolidated WARNING is emitted once per collection by ``run_sync``.
-
-    ``collisions_dropped`` stays exact, but the retained path *sample* is capped
-    (``_MAX_COLLISION_PATHS``): a lossy layout over a large source can drop tens of
-    thousands of recordings, and an unbounded list would bloat the DB blob, the
-    notification payload, and the summary line without adding signal.
-    """
-    if not stage_result.collisions:
-        return
-    stats.collisions_dropped += 1
-    if len(stats.collision_paths) < _MAX_COLLISION_PATHS:
-        stats.collision_paths.append(str(stage_result.staging_dir))
-    for c in stage_result.collisions:
-        log.debug("[%s/%s] layout collision detail: %s", source_name, collection_name, c)
+def _apply_placement_report(stats: CollectionSyncStats, report: PlacementReport) -> None:
+    """Fold a staging pass into the run: each show with an issue counts once as failed
+    (a disk error while linking already did, §spec:failure-behavior), separations are
+    counted for the summary, and shows fetched this run join the handoff payload with
+    the folder they ended up in."""
+    if report.render_error is not None:
+        identifier, message = report.render_error
+        stats.failed += 1
+        stats.staging_issues += 1
+        stats.errors.append(f"{identifier}: {message}")
+    for lines in report.issues.values():
+        stats.failed += 1
+        stats.staging_issues += 1
+        stats.errors.extend(lines)
+    stats.separated = len(report.separated)
+    for identifier, archive_path in stats.fetched.items():
+        folder = report.folder_of.get(identifier)
+        if folder is None:
+            continue  # refused: nothing of it is in the library
+        stats.staged.append(
+            {
+                "identifier": identifier,
+                "archive_path": str(archive_path),
+                "staging_path": str(folder),
+            }
+        )
 
 
 def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: datetime) -> None:
@@ -553,8 +525,6 @@ def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: d
     run.bytes_downloaded = stats.bytes_downloaded
     run.stale = stats.stale
     run.errors = stats.errors
-    run.collisions_dropped = stats.collisions_dropped
-    run.collision_paths = stats.collision_paths
     run.finished_at = finished
     runs.finish(run)
 
@@ -566,7 +536,6 @@ def _completed_work(stats: CollectionSyncStats) -> dict[str, int]:
         "items_updated": stats.updated,
         "items_failed": stats.failed,
         "bytes_downloaded": stats.bytes_downloaded,
-        "collisions_dropped": stats.collisions_dropped,
     }
 
 
@@ -663,7 +632,6 @@ def _sync_collection_phases(
 ) -> CollectionSyncStats:
     """The phases of `_sync_collection`, run inside its crash guard."""
     conn = items.conn
-    staged_paths: set[Path] = set()
 
     log.info("[%s/%s] discovering...", source.name, collection.name)
 
@@ -703,11 +671,15 @@ def _sync_collection_phases(
         item.identifier: item
         for item in items.list_for_planning(source.name, collection.name)
     }
+    # Every show's library folder, so each download is linked as soon as it lands
+    # (§spec:discovery-pipeline) at the folder a full pass would give it.
+    placement = LibraryPlacement(config, collection, source.name, items)
+    placement.begin()
 
     # Phases 1-4, pipelined: discover -> classify -> fetch + stage, overlapping downloads
     # with the remaining enumeration (SPEC §spec:discovery-pipeline, overlap lever).
     enumerated_identifiers, deferred, enum_error = _pipelined_discover_and_fetch(
-        config, source, collection, plugin, items, stats, staged_paths, budget, by_identifier,
+        config, source, collection, plugin, items, stats, placement, budget, by_identifier,
     )
     stats.discovered = len(enumerated_identifiers)
 
@@ -722,6 +694,8 @@ def _sync_collection_phases(
         )
         stats.stale = True
         stats.errors.append(f"source enumeration failed: {enum_error}")
+        # Shows fetched before the failure are valid; stage them. Nothing is pruned.
+        _apply_placement_report(stats, placement.finish())
         finished = datetime.now()
         _fire_notifications(config, source, collection, stats, started, finished)
         if run is not None:
@@ -754,8 +728,8 @@ def _sync_collection_phases(
         settled={_planned_identifier(p) for p in deferred},
     )
 
-    # Re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
-    # stage_item is idempotent — already-linked files share an inode and are skipped.
+    # Bring UNCHANGED shows back to complete or refresh their reason; the staging pass
+    # below relinks any of their files a library tool deleted (PRD §13).
     for p in deferred:
         if (
             p.action == PlanAction.UNCHANGED
@@ -779,12 +753,6 @@ def _sync_collection_phases(
             elif reason != existing.restriction_reason:
                 existing.restriction_reason = reason
                 items.upsert(existing)
-            stage_result = _stage_or_fail(
-                config, collection, source.name, existing, existing.recorded_manifest,
-                stats, staged_paths,
-            )
-            if stage_result is not None:
-                _record_collision(stats, source.name, collection.name, stage_result)
 
     # Persist the disappeared set in one shot (unavailable shows were recorded as listed).
     with transaction(conn):
@@ -792,7 +760,12 @@ def _sync_collection_phases(
             assert p.existing is not None
             existing = items.get(source.name, collection.name, p.existing.identifier)
             if existing is not None:
-                _record_disappeared(items, config, source.name, collection, existing)
+                _record_disappeared(items, source.name, collection, existing)
+
+    # Stage: every show with an archive copy at its current folder, and every file
+    # no longer placed (a pruned show, an old layout or name) removed
+    # (§spec:library-ownership, §spec:library-cleanup).
+    _apply_placement_report(stats, placement.finish())
 
     # Phase 5: notify. Fire before recording so any delivery failure is captured
     # in the run's errors (visible in `status`) but never aborts the sync.
@@ -803,13 +776,9 @@ def _sync_collection_phases(
     if run is not None:
         _finish_run(runs, run, stats, finished)
     if outcome is not None:
-        if stats.failed > 0 or stats.collisions_dropped > 0:
-            phase = "fetch" if stats.failed > 0 else "stage"
-            action = (
-                "fix failed item issues and rerun sync"
-                if stats.failed > 0
-                else "fix library layout and rerun sync"
-            )
+        if stats.failed > 0:
+            phase = "stage" if stats.failed == stats.staging_issues else "fetch"
+            action = "fix failed item issues and rerun sync"
             outcomes.finish(
                 outcome,
                 OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
@@ -845,7 +814,7 @@ def _pipelined_discover_and_fetch(
     plugin: SourcePlugin,
     items: ItemRepo,
     stats: CollectionSyncStats,
-    staged_paths: set[Path],
+    placement: LibraryPlacement,
     budget: SourceBudget,
     by_identifier: dict[str, Item],
 ) -> tuple[set[str], list[PlannedItem], Exception | None]:
@@ -934,8 +903,7 @@ def _pipelined_discover_and_fetch(
         )
         def process(fut: Future[_FetchOutcome]) -> None:
             _process_fetch_result(
-                fut, fetch_futures.pop(fut), config, source, collection, items, stats,
-                staged_paths,
+                fut, fetch_futures.pop(fut), source, collection, items, stats, placement,
             )
 
         descriptors = iter(descriptor_stream)
@@ -983,17 +951,11 @@ def _fire_notifications(
     (SPEC §spec:handoff).
 
     ``sync.complete`` fires when the run staged at least one item; ``sync.failed``
-    fires when the run failed (source enumeration stale, one or more items failed, or
-    recordings were dropped to layout collisions, §spec:layout-collision-safety). Both
-    are best-effort: a delivery failure is appended to ``stats.errors`` (recorded in the
+    fires when the run failed (source enumeration stale, or one or more items failed).
+    Both are best-effort: a delivery failure is appended to ``stats.errors`` (recorded in the
     run, surfaced by `status`) and never raises.
     """
     run_errors = list(stats.errors)  # substantive errors, before any delivery attempt
-    if stats.collisions_dropped:
-        run_errors.append(
-            f"{stats.collisions_dropped} recording(s) dropped to layout collisions: "
-            f"{', '.join(stats.collision_paths)}"
-        )
     staging_root = str(config.library_root / source.name / collection.name)
     run_obj = {
         "started_at": started.isoformat(),
@@ -1001,7 +963,6 @@ def _fire_notifications(
         "items_new": stats.new,
         "items_updated": stats.updated,
         "items_failed": stats.failed,
-        "collisions_dropped": stats.collisions_dropped,
         "bytes_downloaded": stats.bytes_downloaded,
     }
 
@@ -1019,7 +980,7 @@ def _fire_notifications(
         if err:
             stats.errors.append(err)
 
-    if stats.stale or stats.failed > 0 or stats.collisions_dropped > 0:
+    if stats.stale or stats.failed > 0:
         err = fire_failure(
             config.notifications,
             SyncFailedPayload(
@@ -1227,7 +1188,7 @@ def _execute_fetch_and_stage(
     items: ItemRepo,
     targets: list[PlannedItem],
     stats: CollectionSyncStats,
-    staged_paths: set[Path] | None = None,
+    placement: LibraryPlacement | None = None,
     budget: SourceBudget | None = None,
 ) -> None:
     """Concurrent fetch (capped by max_concurrent_downloads); sequential staging.
@@ -1255,21 +1216,21 @@ def _execute_fetch_and_stage(
         }
         for fut in as_completed(futures):
             _process_fetch_result(
-                fut, futures[fut], config, source, collection, items, stats, staged_paths
+                fut, futures[fut], source, collection, items, stats, placement
             )
 
 
 def _process_fetch_result(
     fut: Future[_FetchOutcome],
     target: PlannedItem,
-    config: Config,
     source: SourceConfig,
     collection: CollectionConfig,
     items: ItemRepo,
     stats: CollectionSyncStats,
-    staged_paths: set[Path] | None,
+    placement: LibraryPlacement | None,
 ) -> None:
-    """Apply one completed fetch: record the row, stage hardlinks, accumulate stats.
+    """Apply one completed fetch: record the row, link it into the library, accumulate
+    stats.
 
     Called only on the orchestrating thread (never a fetch worker), so the DB writes
     and the per-run counters it mutates are serialized and exact even though the
@@ -1309,56 +1270,12 @@ def _process_fetch_result(
     else:
         stats.updated += 1
 
-    new_item = _record_complete(items, source.name, collection, desc, outcome.archive_path)
-    stage_result = _stage_or_fail(
-        config, collection, source.name, new_item, desc.manifest, stats, staged_paths,
-    )
-    if stage_result is None:
-        return  # archive copy recorded; the next sync or restage relinks it
-    if stage_result.collisions:
-        # Layout collision: this recording lost its staging path to another item this
-        # run. The archive copy is intact; only the library link was dropped
-        # (§spec:layout-collision-safety). Skip the handoff entry — nothing landed in
-        # the library for this item.
-        _record_collision(stats, source.name, collection.name, stage_result)
-        return
-
-    # Collect for the once-per-run sync.complete batch payload; the handoff
-    # fires once after the run, not per item (SPEC §spec:handoff).
-    stats.staged.append(
-        {
-            "identifier": desc.identifier,
-            "archive_path": str(new_item.archive_path),
-            "staging_path": str(stage_result.staging_dir),
-        }
-    )
-
-
-def _stage_or_fail(
-    config: Config,
-    collection: CollectionConfig,
-    source_name: str,
-    item: Item,
-    manifest: Manifest,
-    stats: CollectionSyncStats,
-    staged_paths: set[Path] | None,
-) -> StageResult | None:
-    """Stage one item, turning a disk error (permission denied, disk full, name too
-    long, EXDEV) into a per-item failure so the rest of the collection still links,
-    records, and notifies. A library path that would leave the collection's library
-    folder fails the item the same way. Returns None when staging failed."""
-    try:
-        return stage_item(
-            config, collection, source_name, item, manifest, staged_paths=staged_paths,
-        )
-    except (OSError, UnsafeLibraryPathError) as e:
-        log.warning(
-            "[%s/%s] %s: linking into the library failed: %s",
-            source_name, collection.name, item.identifier, e,
-        )
-        stats.failed += 1
-        stats.errors.append(f"{item.identifier}: linking into the library failed: {e}")
-        return None
+    _record_complete(items, source.name, collection, desc, outcome.archive_path)
+    stats.fetched[desc.identifier] = outcome.archive_path
+    # Linked now, not at the end of the run, so a run that dies later keeps it staged.
+    # Issues are reported by the run's full staging pass, which meets them again.
+    if placement is not None:
+        placement.update(desc.identifier)
 
 
 @dataclass
@@ -1796,7 +1713,6 @@ def _record_failed(
 
 def _record_disappeared(
     items: ItemRepo,
-    config: Config,
     source_name: str,
     collection: CollectionConfig,
     existing: Item,
@@ -1805,13 +1721,13 @@ def _record_disappeared(
 
     Default: retain the local files and flag the item `disappeared` — an upstream
     takedown never deletes the user's copy. With `prune_disappeared: true`: delete
-    the archive files and staging links but *retain the DB record* marked `pruned`,
-    so `shakedown status` can still report the takedown.
+    the archive files but *retain the DB record* marked `pruned`, so `shakedown status`
+    can still report the takedown; the run's staging pass then removes its library
+    links, so its bytes are freed (§spec:library-cleanup).
     """
     if collection.prune_disappeared:
         if existing.archive_path and existing.archive_path.exists():
             shutil.rmtree(existing.archive_path)
-        unstage_item(config, collection, source_name, existing)
         existing.status = ItemStatus.PRUNED
         existing.archive_path = None
         existing.last_verified_at = datetime.now()
@@ -1844,23 +1760,28 @@ def _refetch_item(config: Config, identifier: str) -> int:
                     continue
                 target = PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
                 stats = CollectionSyncStats()
+                placement = LibraryPlacement(config, collection, source.name, items)
+                placement.begin()
                 _execute_fetch_and_stage(
-                    config, source, collection, plugin, items, [target], stats
+                    config, source, collection, plugin, items, [target], stats, placement
                 )
-                ok = stats.failed == 0 and stats.collisions_dropped == 0 and stats.unavailable == 0
+                _apply_placement_report(stats, placement.finish())
+                ok = stats.failed == 0 and stats.unavailable == 0
                 return 0 if ok else 1
     log.warning("identifier %s not found in any configured collection", identifier)
     return 1
 
 
 def forget_item(config: Config, identifier: str) -> None:
-    """Drop an item from the DB (does not delete files)."""
+    """Drop an item from the DB and remove its library placement; its archive copy
+    stays (§spec:library-cleanup)."""
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     outcomes = OperationOutcomeRepo(conn)
     for source in config.sources:
         for collection in source.collections:
             if items.get(source.name, collection.name, identifier):
+                LibraryPlacement(config, collection, source.name, items).forget(identifier)
                 items.delete(source.name, collection.name, identifier)
                 now = datetime.now()
                 for operation in OperationType:

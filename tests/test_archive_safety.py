@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import shakedown.staging as staging_module
+import shakedown.placement as placement_module
 import shakedown.sync as sync_module
 from shakedown.db import connect
 from shakedown.models import ItemStatus, OperationStatus
@@ -113,14 +113,14 @@ def test_refetch_with_empty_upstream_manifest_keeps_archive_copy(
 
 
 def _flaky_hardlink(monkeypatch, bad_identifier: str, exc: OSError) -> None:
-    real = staging_module.hardlink
+    real = placement_module.hardlink
 
     def hardlink(src, dst):
         if bad_identifier in str(src):
             raise exc
         return real(src, dst)
 
-    monkeypatch.setattr(staging_module, "hardlink", hardlink)
+    monkeypatch.setattr(placement_module, "hardlink", hardlink)
 
 
 def test_link_oserror_fails_only_that_show(tmp_roots: tuple[Path, Path], monkeypatch) -> None:

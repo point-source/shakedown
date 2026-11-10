@@ -680,11 +680,12 @@ def test_unchanged_with_missing_staging_link_is_restored(tmp_roots: tuple[Path, 
     assert staged.stat().st_ino == archived.stat().st_ino
 
 
-def test_staging_collision_returns_nonzero(tmp_roots: tuple[Path, Path]) -> None:
-    """PRD §8 / §spec:layout-collision-safety: same-run template collisions are an
-    error, not a silent overwrite. The run completes, exits non-zero, and the losing
-    recording is aggregated into a per-run collision summary — distinct from an
-    ordinary fetch failure (the archive copy survives)."""
+def test_shows_rendering_one_folder_are_separated_not_dropped(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """§spec:library-ownership (supersedes skip-the-loser): two shows rendering the same
+    folder and file name both reach the library, each in a folder labelled with its
+    identifier. A separation is not a failure: the run exits 0."""
     archive, library = tmp_roots
     config = make_config(
         archive, library, library_layout="{year}/same-folder",
@@ -697,44 +698,15 @@ def test_staging_collision_returns_nonzero(tmp_roots: tuple[Path, Path]) -> None
             metadata={"year": "1977"},
         )
 
-    rc = run_sync(config)
-    assert rc == 1, "staging collisions must escalate to nonzero exit"
+    assert run_sync(config) == 0
 
-    # The collision is aggregated into the persisted run record, kept apart from
-    # items_failed, with the colliding path retained for the summary.
     conn = connect(config.state_db)  # type: ignore[arg-type]
     run = RunRepo(conn).latest("fake-src", "coll1")
-    assert run is not None
-    assert run.collisions_dropped == 1, "exactly one recording lost the collision"
-    assert run.items_failed == 0, "a collision is not an ordinary fetch failure"
-    assert any("same-folder" in p for p in run.collision_paths)
-
-    # Both items are still archived — only the loser's library link was dropped.
-    assert (archive / "fake-src" / "coll1" / "show-A" / "track.flac").is_file()
-    assert (archive / "fake-src" / "coll1" / "show-B" / "track.flac").is_file()
-
-
-def test_collision_summary_surfaced_in_status(
-    tmp_roots: tuple[Path, Path], capsys
-) -> None:
-    """§spec:layout-collision-safety: `shakedown status` reports the recordings dropped
-    to layout collisions on the last run, with the colliding path."""
-    from shakedown.status import print_status
-
-    archive, library = tmp_roots
-    config = make_config(archive, library, library_layout="{year}/same-folder")
+    assert run is not None and run.items_failed == 0
     for ident in ("show-A", "show-B"):
-        FakePlugin.items[ident] = FakeItem(
-            identifier=ident,
-            files=[FakeFile(name="track.flac", content=ident.encode())],
-            metadata={"year": "1977"},
-        )
-    assert run_sync(config) == 1
-
-    print_status(config, as_json=False)
-    out = capsys.readouterr().out
-    assert "layout collisions: 1 recording(s)" in out
-    assert "same-folder" in out
+        staged = library / "fake-src" / "coll1" / "1977" / f"same-folder [{ident}]" / "track.flac"
+        assert staged.read_bytes() == ident.encode()
+    assert not (library / "fake-src" / "coll1" / "1977" / "same-folder").exists()
 
 
 def test_changed_upstream_preserves_old_bytes_on_fetch_failure(

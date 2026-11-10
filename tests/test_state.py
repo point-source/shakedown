@@ -224,9 +224,6 @@ def test_v1_db_migrates_to_current_schema(tmp_path: Path) -> None:
     assert version == SCHEMA_VERSION
     latest = RunRepo(conn).latest("s", "c")
     assert latest is not None and latest.stale is False
-    # The collision columns added in later migrations default cleanly for old runs.
-    assert latest.collisions_dropped == 0
-    assert latest.collision_paths == []
     tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master").fetchall()]
     assert "operation_outcomes" in tables
 
@@ -269,8 +266,9 @@ def test_v2_db_migrates_change_signal_column(tmp_path: Path) -> None:
     cols = [row["name"] for row in conn.execute("PRAGMA table_info(items)").fetchall()]
     assert "change_signal" in cols
     run_cols = [row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()]
-    assert "collisions_dropped" in run_cols
-    assert "collision_paths" in run_cols
+    # Added in v4 for skip-the-loser, dropped in v6 with clash separation.
+    assert "collisions_dropped" not in run_cols
+    assert "collision_paths" not in run_cols
     tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master").fetchall()]
     assert "operation_outcomes" in tables
 
@@ -392,7 +390,8 @@ def _legacy_v5(db_path: Path, extra_sql: str = "") -> None:
 
 def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
     """§spec:state: the increment moves the schema forward by one migration. A v5
-    database gains the library placement record and keeps its runs."""
+    database gains the library placement record, keeps its runs, and loses the
+    skip-the-loser collision columns (§spec:layout-collision-safety, superseded)."""
     db_path = tmp_path / "legacy_v5.db"
     _legacy_v5(
         db_path,
@@ -405,6 +404,9 @@ def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
     assert {
         "library_placements", "library_folders", "library_unplaced", "library_adoption"
     } <= _tables(conn)
+    run_cols = _columns(conn, "runs")
+    assert "collisions_dropped" not in run_cols
+    assert "collision_paths" not in run_cols
     assert RunRepo(conn).latest("s", "c") is not None
 
 
@@ -420,15 +422,16 @@ def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
 
 def test_placement_repo_round_trip(tmp_path: Path) -> None:
     repo = PlacementRepo(connect(tmp_path / "s.db"))
-    repo.add_placement("s", "c", "show-a", "A/a.flac")
-    repo.add_placement("s", "c", "show-a", "A/a.flac")  # idempotent
-    repo.add_placement("s", "c", "show-a", "A/metadata.json")
-    repo.add_placement("s", "c", "show-b", "B/b.flac")
-    repo.add_placement("s", "other", "show-a", "A/a.flac")  # other collection
+    repo.add_placement("s", "c", "show-a", "A/a.flac", 1)
+    repo.add_placement("s", "c", "show-a", "A/a.flac", 2)  # same owner: updates the inode
+    repo.add_placement("s", "c", "show-a", "A/metadata.json", 3)
+    repo.add_placement("s", "c", "show-b", "B/b.flac", 4)
+    repo.add_placement("s", "other", "show-a", "A/a.flac", 5)  # other collection
 
     assert repo.placements_for("s", "c", "show-a") == {"A/a.flac", "A/metadata.json"}
     assert repo.owner_of("s", "c", "B/b.flac") == "show-b"
     assert repo.owner_of("s", "c", "nope") is None
+    assert repo.placement("s", "c", "A/a.flac") == ("show-a", 2)  # last recorded inode
     assert list(repo.iter_placements("s", "c")) == [
         ("show-a", "A/a.flac"), ("show-a", "A/metadata.json"), ("show-b", "B/b.flac"),
     ]
@@ -444,9 +447,9 @@ def test_placement_repo_one_owner_per_path(tmp_path: Path) -> None:
     import pytest
 
     repo = PlacementRepo(connect(tmp_path / "s.db"))
-    repo.add_placement("s", "c", "show-a", "X/track.flac")
+    repo.add_placement("s", "c", "show-a", "X/track.flac", 6)
     with pytest.raises(sqlite3.IntegrityError):
-        repo.add_placement("s", "c", "show-b", "X/track.flac")
+        repo.add_placement("s", "c", "show-b", "X/track.flac", 7)
 
 
 def test_placement_repo_folders_unplaced_adoption(tmp_path: Path) -> None:
@@ -479,9 +482,9 @@ def test_placement_repo_folders_unplaced_adoption(tmp_path: Path) -> None:
 
 def test_placement_repo_delete_show(tmp_path: Path) -> None:
     repo = PlacementRepo(connect(tmp_path / "s.db"))
-    repo.add_placement("s", "c", "show-a", "A/a.flac")
+    repo.add_placement("s", "c", "show-a", "A/a.flac", 8)
     repo.set_folder("s", "c", "show-a", "A", separated=False)
-    repo.add_placement("s", "c", "show-b", "B/b.flac")
+    repo.add_placement("s", "c", "show-b", "B/b.flac", 9)
     repo.delete_show("s", "c", "show-a")
     assert repo.placements_for("s", "c", "show-a") == set()
     assert repo.folders("s", "c") == {}

@@ -62,6 +62,16 @@ def removal_issue(identifier: str, path: Path, error: OSError) -> str:
     return f"{identifier}: could not remove {path} ({error}); will retry on the next run"
 
 
+def log_separations(source_name: str, collection_name: str, count: int) -> None:
+    """The run-summary line for separations in effect; not a failure."""
+    if count:
+        log.info(
+            "%s/%s: %d shows render the same library folder; each was staged into its own "
+            "folder labelled with its identifier",
+            source_name, collection_name, count,
+        )
+
+
 def has_archive_copy(item: Item) -> bool:
     """A show stages when its archive copy is on disk, whatever its status: a show
     marked disappeared or unavailable keeps its files, so it keeps its folder."""
@@ -173,10 +183,10 @@ class LibraryPlacement:
         self._ensure_adopted()
         self._report = PlacementReport()
         touched: set[Path] = set()
+        placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
         with transaction(self.items.conn):
-            for rel in sorted(self.repo.placements_for(self.source, self.collection.name,
-                                                       identifier)):
-                self._remove(identifier, rel, touched)
+            for rel in sorted(placed):
+                self._remove(identifier, rel, placed[rel], touched)
             self.repo.delete_folder(self.source, self.collection.name, identifier)
         self._prune_dirs(touched)
         return self._report.issues.get(identifier, [])
@@ -262,35 +272,35 @@ class LibraryPlacement:
 
     def _apply(self, identifiers: list[str], *, full: bool) -> None:
         """Remove what no longer belongs, then link what is missing, for `identifiers`
-        (and, in a full pass, for every show that no longer stages)."""
+        (and, in a full pass, for every show that no longer stages). Writes only what
+        changed: a pass over an up-to-date library reads and stats, nothing more."""
         touched: set[Path] = set()
-        staged = set(identifiers)
         for identifier in identifiers:
             item = self.items.get(self.source, self.collection.name, identifier)
             if item is None:
                 continue
             desired = self._desired(item)
-            with transaction(self.items.conn):
-                for rel in sorted(
-                    self.repo.placements_for(self.source, self.collection.name, identifier)
-                ):
-                    if rel not in desired:
-                        self._remove(identifier, rel, touched)
-        if full:
-            for identifier in self._orphans(staged):
+            placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
+            stale = sorted(rel for rel in placed if rel not in desired)
+            if stale:
                 with transaction(self.items.conn):
-                    for rel in sorted(self.repo.placements_for(
-                        self.source, self.collection.name, identifier
-                    )):
-                        self._remove(identifier, rel, touched)
+                    for rel in stale:
+                        self._remove(identifier, rel, placed[rel], touched)
+        if full:
+            for identifier in self._orphans(set(identifiers)):
+                placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
+                with transaction(self.items.conn):
+                    for rel in sorted(placed):
+                        self._remove(identifier, rel, placed[rel], touched)
                     self.repo.delete_folder(self.source, self.collection.name, identifier)
         self._prune_dirs(touched)
 
+        folders = self.repo.folders(self.source, self.collection.name)
         for identifier in identifiers:
             item = self.items.get(self.source, self.collection.name, identifier)
             if item is None:
                 continue
-            self._link_show(item)
+            self._link_show(item, folders.get(identifier))
 
     def _orphans(self, staged: set[str]) -> list[str]:
         """Shows with a placement or folder record that no longer stage (pruned,
@@ -301,16 +311,29 @@ class LibraryPlacement:
         recorded |= set(self.repo.folders(self.source, self.collection.name))
         return sorted(recorded - staged - set(self._refused))
 
-    def _remove(self, identifier: str, rel: str, touched: set[Path]) -> None:
+    def _remove(self, identifier: str, rel: str, inode: int, touched: set[Path]) -> None:
+        """Remove one placed file. A different file now at that path is not
+        shakedown's: it stays, is reported, and the record lets go of the path."""
         path = self.base / rel
         try:
-            path.unlink(missing_ok=True)
+            if path.lstat().st_ino != inode:
+                self._let_go(rel)
+                return
+            path.unlink()
+        except FileNotFoundError:
+            pass  # already gone: only the record is left to drop
         except OSError as e:
             self._issue(identifier, removal_issue(identifier, path, e))
-            return
+            return  # stays recorded; retried by the next staging operation
+        else:
+            self._report.files_removed += 1
+            touched.add(path.parent)
         self.repo.remove_placement(self.source, self.collection.name, rel)
-        self._report.files_removed += 1
-        touched.add(path.parent)
+
+    def _let_go(self, rel: str) -> None:
+        """Stop owning a recorded path that now holds someone else's file; report it."""
+        self.repo.remove_placement(self.source, self.collection.name, rel)
+        self.repo.add_unplaced(self.source, self.collection.name, rel)
 
     def _prune_dirs(self, touched: set[Path]) -> None:
         """Remove folders left empty, up to the collection's library folder. A folder
@@ -341,10 +364,11 @@ class LibraryPlacement:
             if self.repo.owner_of(self.source, self.collection.name, rel) is None:
                 self.repo.add_unplaced(self.source, self.collection.name, rel)
 
-    def _link_show(self, item: Item) -> None:
+    def _link_show(self, item: Item, recorded_folder: str | None) -> None:
         assert item.archive_path is not None
         identifier = item.identifier
         desired = self._desired(item)
+        placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
         sidecar = None
         if METADATA_SIDECAR in desired.values():
             sidecar = ensure_archive_sidecar(item)
@@ -357,31 +381,43 @@ class LibraryPlacement:
                     )
                     continue
                 try:
-                    self._link_file(identifier, src, rel)
+                    self._link_file(identifier, src, rel, placed.get(rel))
                 except (OSError, FilesystemError) as e:
                     self._issue(identifier, f"{identifier}: linking into the library failed: {e}")
                     break
-            self.repo.set_folder(
-                self.source, self.collection.name, identifier, self._folder(identifier),
-                separated=self._separated(identifier),
-            )
+            folder = self._folder(identifier)
+            if folder != recorded_folder:
+                self.repo.set_folder(
+                    self.source, self.collection.name, identifier, folder,
+                    separated=self._separated(identifier),
+                )
 
-    def _link_file(self, identifier: str, src: Path, rel: str) -> None:
+    def _link_file(self, identifier: str, src: Path, rel: str, placed: int | None) -> None:
+        """Link one archive file at `rel`. `placed` is the inode this show recorded
+        there, if any."""
         dst = self.base / rel
-        if dst.exists() or dst.is_symlink():
-            if _same_file(src, dst):
-                self.repo.add_placement(self.source, self.collection.name, identifier, rel)
-                return
+        src_ino = src.stat().st_ino
+        try:
+            dst_ino: int | None = dst.lstat().st_ino
+        except FileNotFoundError:
+            dst_ino = None
+        if dst_ino == src_ino:
+            if placed != src_ino:  # adopt an unrecorded link to the archive copy
+                self.repo.add_placement(
+                    self.source, self.collection.name, identifier, rel, src_ino
+                )
+            return
+        if dst_ino is not None and dst_ino != placed:
+            # Never replace a file shakedown did not place (§spec:library-ownership).
+            self._issue(identifier, foreign_file_issue(identifier, dst))
             owner = self.repo.owner_of(self.source, self.collection.name, rel)
-            if owner != identifier:
-                # Never replace a file shakedown did not place (§spec:library-ownership).
-                self._issue(identifier, foreign_file_issue(identifier, dst))
-                if owner is None:
-                    self.repo.add_unplaced(self.source, self.collection.name, rel)
-                return
+            if owner is None or owner == identifier:
+                self._let_go(rel)
+            return
+        if dst_ino is not None:
             dst.unlink()  # our stale link: the archive copy was replaced by a re-fetch
         hardlink(src, dst)
-        self.repo.add_placement(self.source, self.collection.name, identifier, rel)
+        self.repo.add_placement(self.source, self.collection.name, identifier, rel, src_ino)
         self._report.links_created += 1
 
     def _refresh_unplaced(self) -> None:
@@ -405,7 +441,7 @@ class LibraryPlacement:
         that match no archive file are reported as not placed by shakedown."""
         if self.repo.is_adopted(self.source, self.collection.name):
             return
-        linked: dict[tuple[int, int], list[str]] = {}
+        linked: dict[tuple[int, int], list[str]] = {}  # (st_dev, st_ino) -> library paths
         unplaced: list[str] = []
         for path in self._library_files():
             rel = PurePosixPath(path.relative_to(self.base)).as_posix()
@@ -417,7 +453,7 @@ class LibraryPlacement:
                 linked.setdefault((st.st_dev, st.st_ino), []).append(rel)
             else:
                 unplaced.append(rel)
-        adopted: list[tuple[str, str]] = []
+        adopted: list[tuple[str, str, int]] = []
         if linked:
             for identifier, src in self._archive_files():
                 try:
@@ -425,12 +461,14 @@ class LibraryPlacement:
                 except OSError:
                     continue
                 for rel in linked.pop((st.st_dev, st.st_ino), []):
-                    adopted.append((identifier, rel))
+                    adopted.append((identifier, rel, st.st_ino))
         unplaced.extend(rel for rels in linked.values() for rel in rels)
         with transaction(self.items.conn):
-            for identifier, rel in adopted:
+            for identifier, rel, inode in adopted:
                 if self.repo.owner_of(self.source, self.collection.name, rel) is None:
-                    self.repo.add_placement(self.source, self.collection.name, identifier, rel)
+                    self.repo.add_placement(
+                        self.source, self.collection.name, identifier, rel, inode
+                    )
             for rel in unplaced:
                 if self.repo.owner_of(self.source, self.collection.name, rel) is None:
                     self.repo.add_unplaced(self.source, self.collection.name, rel)
@@ -457,10 +495,3 @@ class LibraryPlacement:
                 yield item.identifier, item.archive_path / mf.name
             yield item.identifier, item.archive_path / METADATA_SIDECAR
 
-
-def _same_file(a: Path, b: Path) -> bool:
-    try:
-        sa, sb = a.stat(), b.lstat()
-    except OSError:
-        return False
-    return sa.st_dev == sb.st_dev and sa.st_ino == sb.st_ino
