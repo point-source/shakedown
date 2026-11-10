@@ -51,8 +51,13 @@ sources:
         # excluded from change detection — an upstream notes edit never re-fetches media;
         # run `shakedown sync --refresh-metadata` to explicitly re-pull and rewrite it.
         preserve_source_metadata: false
-        on_complete:
-          webhook: http://beets:8337/import?path={staging_root}
+        # No handoff is needed to listen: Navidrome in the example compose stack
+        # watches the library tree and picks up new shows on its own. To tell
+        # your own receiver about new shows instead, set one of these (both are
+        # placeholders — point them at a receiver you run). See docs/handoff.md.
+        # on_complete:
+        #   webhook: http://your-receiver.example/shakedown?collection={collection}
+        #   # or: exec: /path/to/your-command {staging_root}
 
       - name: phish
         query: 'collection:Phish'
@@ -82,6 +87,8 @@ sources:
         # venue, coverage. Filters: sanitize, short, lower, upper.
         library_layout: '{year}/{date} - {venue}/{identifier}'
 
-notifications:
-  on_failure:
-    webhook: http://ntfy:80/shakedown
+# Optional alert when a run fails. Placeholder: point it at a receiver you run
+# (for example an ntfy topic URL). See docs/handoff.md.
+# notifications:
+#   on_failure:
+#     webhook: http://your-ntfy.example/shakedown

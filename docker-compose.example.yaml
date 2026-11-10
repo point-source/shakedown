@@ -9,7 +9,7 @@
 # `shakedown validate` to confirm.
 #
 # Setup:
-#   1. File Station: create /share/data/{archive,library,music,shakedown-config}
+#   1. File Station: create /share/data/{archive,library,navidrome,shakedown-config}
 #   2. File Station: upload an initial shakedown.yaml to /share/data/shakedown-config/
 #   3. Container Station → Applications → Create: paste this YAML and your env vars.
 #      SHAKEDOWN_IMAGE is required — Create fails until you set it, e.g. to
@@ -18,7 +18,7 @@
 #      passed CI. To hold a version instead, use a release tag such as 1.1.0.
 #
 # How scheduling works (SPEC.md §spec:deployment): ofelia is the only
-# long-running service. On each cron tick it launches a FRESH shakedown
+# long-running Shakedown service (navidrome, below, is how you listen). On each cron tick it launches a FRESH shakedown
 # container (ofelia job-run), which runs one `sync` and exits — matching
 # shakedown's one-shot, stateless-between-runs design. There is no idle
 # shakedown service to attach to. Change a schedule by editing the ofelia
@@ -104,28 +104,16 @@ services:
   #     - "8080:8080"
   #   command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
 
-  # Optional: library tool. Beets reads /data/library, manages /data/music.
-  # These separate mounts suit beets' default `copy` import. To have beets
-  # hardlink or move instead, mount /share/data once here too — separate
-  # mounts refuse hardlinks, as for Shakedown above.
-  #
-  # beets:
-  #   image: lscr.io/linuxserver/beets:latest
-  #   container_name: beets
-  #   restart: unless-stopped
-  #   volumes:
-  #     - /share/data/library:/data/library:ro
-  #     - /share/data/music:/music
-  #     - /share/data/beets-config:/config
-
-  # Optional: streaming server. Reads /data/music read-only.
-  #
-  # navidrome:
-  #   image: deluan/navidrome:latest
-  #   container_name: navidrome
-  #   restart: unless-stopped
-  #   ports:
-  #     - "4533:4533"
-  #   volumes:
-  #     - /share/data/music:/music:ro
-  #     - /share/data/navidrome:/data
+  # Listening: Navidrome reads Shakedown's library tree directly. Its folder
+  # watcher (on by default) picks up each newly synced show on its own, so no
+  # handoff is configured. Open http://host:4533 and create the admin user on
+  # first visit. The library is mounted read-only: Navidrome never changes it.
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    volumes:
+      - /share/data/library:/music:ro
+      - /share/data/navidrome:/data

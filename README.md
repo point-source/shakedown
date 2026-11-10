@@ -10,7 +10,7 @@ See [`REQUIREMENTS.md`](REQUIREMENTS.md) for the problem space and [`SPEC.md`](S
 
 - Maintains a local mirror of one or more remote source collections, refreshed on a schedule.
 - Records the source's manifest at fetch time so "do I already have this?" is a property of the database, not the bytes on disk. Library tools that retag files in place do not trigger re-downloads.
-- Materializes a clean, library-ready directory tree as **hardlinks** under `/data/library/`. Beets, Lidarr, Picard, etc. can consume this tree without modification.
+- Materializes a clean, library-ready directory tree as **hardlinks** under `/data/library/`. Point a music server such as Navidrome at it to listen; Beets, Lidarr, Picard, etc. can also read it without modification.
 
 ## Architecture in one paragraph
 
@@ -68,14 +68,15 @@ The workflow runs on `GITHUB_TOKEN` and needs no extra secrets, but two manual s
 
 ## QNAP / Container Station setup (no SSH required)
 
-1. **File Station:** create `/share/data/{archive,library,music,shakedown-config}` — all under one share. The compose file mounts `/share/data` into the container once, as `/data`: hardlinks need archive and library on one filesystem *and* one mount (SPEC.md §spec:system-shape). Keep it that way if you edit the volumes.
+1. **File Station:** create `/share/data/{archive,library,navidrome,shakedown-config}` — all under one share. The compose file mounts `/share/data` into the container once, as `/data`: hardlinks need archive and library on one filesystem *and* one mount (SPEC.md §spec:system-shape). Keep it that way if you edit the volumes.
 2. **Ownership (one time):** every Shakedown container runs as one user, `SHAKEDOWN_USER` (`uid:gid`, default `1000:1000`, the image's built-in user). That user must own the archive and library folders, or runs fail with permission errors. Over SSH: `chown -R 1000:1000 /share/data/archive /share/data/library`. Without SSH: in Container Station, run a one-off `busybox` container as root with `/share/data` mounted at `/data` and command `chown -R 1000:1000 /data/archive /data/library`. Use your own `uid:gid` instead if you set `SHAKEDOWN_USER`.
 3. **File Station:** upload an initial `shakedown.yaml` (start from [`shakedown.example.yaml`](shakedown.example.yaml)) to `/share/data/shakedown-config/`.
 4. **Container Station → Applications → Create:** paste [`docker-compose.example.yaml`](docker-compose.example.yaml) and set `SHAKEDOWN_IMAGE` to your fork's image, e.g. `ghcr.io/<owner>/shakedown:latest` — Create fails until it is set. With `latest`, Shakedown updates itself: ofelia pulls before each tick, and CI publishes a release only after its tests pass. To hold a version instead, use a release tag such as `1.1.0`. For a download-restricted collection, uncomment that job's `environment` label and set `IA_EMAIL` / `IA_PASSWORD`. Click Create.
-5. **How syncs run:** ofelia is the only long-running service. On each scheduled tick it launches a *fresh* shakedown container that runs one `sync` and exits — matching shakedown's one-shot design, so there is no idle service to attach to. Nothing syncs on first `up`; each collection syncs only on its own schedule.
-6. **Sync now (without waiting for a tick):** either uncomment the `shakedown-serve` control plane and `POST /sync` — `curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" "http://host:8080/sync?collection=grateful-dead"` (no SSH); it answers `202` at once and the sync runs in the background (see "The serve control plane" below) — or start a one-off container from Container Station → Create with command `sync --collection <name>`, the same mounts, and the same user as `SHAKEDOWN_USER`. Over SSH the equivalent is `docker run --rm` with the same mounts/env; SSH stays supported, it's just never required.
-7. **Confirm the schedule works:** open Container Station → `shakedown-ofelia` → *Logs*. Expect one `New job registered` line per collection. A missing job or a registration error means that job's labels are wrong: every label of a job must start with the same `ofelia.job-run.<name>.` prefix. To see a tick end to end, set one job's `schedule` a few minutes ahead (e.g. `0 30 14 * * *` runs daily at 14:30), wait for that job's `Started` line, its `StdOut:` output, and a `Finished in … failed: false` line. This runs a real sync. Then restore the schedule.
-8. **Day-to-day operation:** edit `shakedown.yaml` via File Station for source/collection changes; edit the ofelia labels in the compose YAML (Container Station) for schedule changes. For logs, read the `shakedown-ofelia` container's log: each tick's container is deleted when it finishes, so ofelia's log is the record of every run — when it started, its output, and whether it failed.
+5. **How syncs run:** ofelia is the only long-running Shakedown service. On each scheduled tick it launches a *fresh* shakedown container that runs one `sync` and exits — matching shakedown's one-shot design, so there is no idle service to attach to. Nothing syncs on first `up`; each collection syncs only on its own schedule.
+6. **Listen:** the stack also runs Navidrome on the library tree. Open `http://host:4533` and create the admin user on first visit. Navidrome's folder watcher picks up each newly synced show by itself, so no handoff is configured.
+7. **Sync now (without waiting for a tick):** either uncomment the `shakedown-serve` control plane and `POST /sync` — `curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" "http://host:8080/sync?collection=grateful-dead"` (no SSH); it answers `202` at once and the sync runs in the background (see "The serve control plane" below) — or start a one-off container from Container Station → Create with command `sync --collection <name>`, the same mounts, and the same user as `SHAKEDOWN_USER`. Over SSH the equivalent is `docker run --rm` with the same mounts/env; SSH stays supported, it's just never required.
+8. **Confirm the schedule works:** open Container Station → `shakedown-ofelia` → *Logs*. Expect one `New job registered` line per collection. A missing job or a registration error means that job's labels are wrong: every label of a job must start with the same `ofelia.job-run.<name>.` prefix. To see a tick end to end, set one job's `schedule` a few minutes ahead (e.g. `0 30 14 * * *` runs daily at 14:30), wait for that job's `Started` line, its `StdOut:` output, and a `Finished in … failed: false` line. This runs a real sync. Then restore the schedule.
+9. **Day-to-day operation:** edit `shakedown.yaml` via File Station for source/collection changes; edit the ofelia labels in the compose YAML (Container Station) for schedule changes. For logs, read the `shakedown-ofelia` container's log: each tick's container is deleted when it finishes, so ofelia's log is the record of every run — when it started, its output, and whether it failed.
 
 ## CLI
 
@@ -106,6 +107,10 @@ shakedown serve      [--host HOST] [--port PORT]    # optional HTTP control plan
 - `shakedown_sync_runs_total{result="ok"|"fail"}` counts triggered syncs when they exit.
 
 The serve container starts runs itself, so it needs the same image, mounts, user, and credentials env as the scheduled job.
+
+### Library handoff (optional)
+
+A collection's `on_complete` can call a webhook or run a command after each sync that stages new shows, for a tool of your own that should hear about them. Listening needs none: Navidrome's folder watcher finds new shows by itself. A handoff that is not delivered never fails the sync; its shows show in `status` and go out again with the next sync. See [docs/handoff.md](docs/handoff.md) for the delivery rules and the payload.
 
 ### Upgrading
 

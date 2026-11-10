@@ -282,3 +282,28 @@ def test_pending_show_missing_from_the_library_stays_pending(
     assert reason is None
     assert hooks.calls == []
     assert _pending(config) == ["gd-a"]
+
+
+# --- the shipped recipe works when followed literally -------------------------
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def test_example_config_ships_no_active_handoff() -> None:
+    """The listening path needs no handoff; every example target is a placeholder
+    (commented out), never a receiver missing from the example stack."""
+    from shakedown.config import load
+
+    config = load(REPO / "shakedown.example.yaml")
+    assert all(c.on_complete is None for s in config.sources for c in s.collections)
+    assert config.notifications is None or config.notifications.on_failure is None
+    assert "beet" not in (REPO / "shakedown.example.yaml").read_text().lower()
+
+
+def test_example_compose_runs_navidrome_on_the_library_tree() -> None:
+    import yaml
+
+    compose = yaml.safe_load((REPO / "docker-compose.example.yaml").read_text())
+    navidrome = compose["services"]["navidrome"]
+    assert "/share/data/library:/music:ro" in navidrome["volumes"]
+    assert "beets" not in compose["services"]
