@@ -121,7 +121,7 @@ Every discovered item carries a persistent status:
 | `downloading` | Fetch in progress |
 | `complete` | Fetched successfully; manifest recorded |
 | `failed` | Fetch attempted and failed; retried on the next run |
-| `unavailable` | Source explicitly disallows download (e.g. stream-only, flagged in its metadata or refused when downloading) or lists no files matching the collection's filters; a human-readable `restriction_reason` is recorded and shown in `status` |
+| `unavailable` | Source explicitly disallows download (e.g. stream-only, flagged in its metadata or refused when downloading) or lists no audio files; a human-readable `restriction_reason` is recorded and shown in `status` |
 | `disappeared` | Previously `complete`, no longer in the source's enumeration; local files retained |
 | `pruned` | Vanished from a `prune_disappeared`-opted collection: archive files and staging links removed, DB record retained so `status` still reports the takedown |
 
@@ -616,10 +616,8 @@ documented interface" — not "installable third-party ecosystem."
 
 ## Per-item isolation on every source §spec:per-item-isolation
 
-*Status: implemented, except the file-selection rule itself: the core
-applies the collection's `format_filters`, `exclude_filters`, and
-`fallback_format_filters` to every source until the quality rule replaces
-them (§spec:quality-selection).*
+*Status: implemented, including the core's file-selection rule
+(§spec:quality-selection).*
 
 A server error, timeout, or malformed file listing for one item marks
 only that item failed for the run; every other item still syncs and the
@@ -706,7 +704,7 @@ mirrored.
 
 ## Best available and best playable copy §spec:quality-selection
 
-*Status: not started*
+*Status: complete*
 
 For every show, the system keeps the highest-quality version the source
 offers and the highest-quality version a common player can play: one
@@ -1280,8 +1278,8 @@ notice sent, both shows' bytes restored.
 
 ## Configuration §spec:configuration
 
-*Status: implemented, except `fill_tags` (§spec:tag-filling) and the
-removal of the format settings (§spec:quality-selection) — not
+*Status: implemented, including the removal of the format settings
+(§spec:quality-selection), except `fill_tags` (§spec:tag-filling) — not
 started.*
 
 All configuration lives in a single YAML file mounted at
@@ -1949,8 +1947,9 @@ listed.
 
 *Status: complete, including the library ownership and cleanup rows
 (§spec:library-ownership, §spec:library-cleanup), the per-item lookup
-row (§spec:per-item-isolation), and the handoff row
-(§spec:durable-handoff); the other rows citing sections of the
+row (§spec:per-item-isolation), the handoff row (§spec:durable-handoff),
+and the restricted-upstream and unplayable-copy rows
+(§spec:quality-selection); the other rows citing sections of the
 ownership, handoff, and discovery increment — not started.*
 
 The resilience contract (§req:quality-attributes): single failures
@@ -1979,7 +1978,7 @@ degrade a single item or a single run, never the archive.
 | Item restricted upstream | Only the files the source refuses are left out (archive.org marks each one `private`); a file it serves is always eligible. When every lossless file is refused, the best lossy copy is mirrored as `complete` and listed in `status` with its reason (a later sync mirrors the lossless files once served); when the source serves no audio at all, the local copy is retained and the status flips to `unavailable` with reason (§spec:quality-selection) |
 | Source refuses a download (archive.org's 403 on a stream-only show with no restriction flag in its metadata) | Not a failure and not retried within the run: the item flips to `unavailable` with reason, the local copy (if any) is retained, and its temp directory is removed |
 | Restriction lifted upstream | Detected on next discover; fetched as new |
-| Source lists zero files for an item (darked, glitch, filter matches nothing) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
+| Source lists no audio files for an item (darked, glitch) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
 | Item disappears upstream | Files retained by default; flagged `disappeared` (§spec:item-lifecycle) |
 | Source permanently gone | Existing items retained; collection reported stale in `status` |
 | Two writing commands overlap (scheduler tick, API trigger, manual run) | The second exits non-zero naming the writer lock; the first continues untouched (§spec:cli) |
