@@ -368,3 +368,22 @@ def test_archive_and_library_on_separate_mounts_fails(tmp_path: Path, tmp_roots)
     assert check.action
     assert list(archive.iterdir()) == []
     assert list(library.iterdir()) == []
+
+
+def test_shipped_example_config_layouts_are_collision_safe() -> None:
+    """The example config is what operators copy; it must pass validate's layout check."""
+    from shakedown import config as config_module
+    from shakedown.validate import _layout_check
+
+    example = Path(__file__).resolve().parent.parent / "shakedown.example.yaml"
+    cfg = config_module.load(example)
+    layouts = [
+        (source.type, collection)
+        for source in cfg.sources
+        for collection in source.collections
+        if collection.library_layout != "passthrough"
+    ]
+    assert layouts, "the example should demonstrate a custom layout"
+    for source_type, collection in layouts:
+        check = _layout_check(source_type, collection)
+        assert check.ok, f"{collection.name}: {check.consequence}"

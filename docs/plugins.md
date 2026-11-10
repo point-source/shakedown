@@ -583,7 +583,7 @@ sources:
         exclude_filters: ['*_64kb.mp3']
         # Renders the staging directory; original filenames are appended.
         # Only fields in the plugin's template_fields may be referenced.
-        library_layout: '{year}/{date} - {venue|sanitize}'
+        library_layout: '{year}/{date} - {venue}/{identifier}'
 ```
 
 With that in place, `shakedown sync --source example-archive` will discover,

@@ -589,7 +589,7 @@ documented interface" — not "installable third-party ecosystem."
 Per collection, the user provides a `library_layout` template that
 renders each item's **staging directory** under the library tree, from
 fields the source plugin surfaces (e.g.
-`{year}/{date} - {venue|sanitize}`). The item's original archive
+`{year}/{date} - {venue}/{identifier}`). The item's original archive
 filenames are then hardlinked into that directory unchanged.
 
 - **Templates produce directories, never renamed or retagged files.**
