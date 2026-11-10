@@ -186,6 +186,10 @@ async def test_status_and_metrics_read_sizes_from_the_db(
         identifier="gd-x",
         files=[FakeFile(name="x.flac", content=b"audio"), FakeFile(name="y.flac", content=b"ab")],
     )
+    FakePlugin.items["gd-sbd"] = FakeItem(
+        identifier="gd-sbd", files=[FakeFile(name="s.flac", content=b"s")],
+        is_restricted=True, restriction_reason="stream-only",
+    )
     assert run_sync(config) == 0
 
     def no_walk(*_args, **_kwargs):
@@ -194,6 +198,12 @@ async def test_status_and_metrics_read_sizes_from_the_db(
     monkeypatch.setattr(Path, "rglob", no_walk)
     monkeypatch.setattr(os, "walk", no_walk)
     monkeypatch.setattr(os, "scandir", no_walk)
+    from shakedown.state import ItemRepo
+
+    def no_full_rows(*_args, **_kwargs):
+        raise AssertionError("a scrape must not load every item's metadata")
+
+    monkeypatch.setattr(ItemRepo, "list_for_collection", no_full_rows)
     opened: list[sqlite3.Connection] = []
     real_connect = server_module.connect
 
@@ -211,6 +221,7 @@ async def test_status_and_metrics_read_sizes_from_the_db(
         r = await client.get("/status")
         assert r.status_code == 200
         assert r.json()[0]["bytes_on_disk"] == 7
+        assert r.json()[0]["restricted"] == [{"identifier": "gd-sbd", "reason": "stream-only"}]
         r = await client.get("/metrics")
         assert r.status_code == 200
         assert 'shakedown_bytes_on_disk{collection="coll1",source="fake-src"} 7.0' in r.text

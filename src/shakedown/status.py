@@ -26,13 +26,10 @@ def _collection_summary(
     recovery = outcomes.latest_actionable(source_name, collection_name)
     bytes_on_disk = items.archived_bytes(source_name, collection_name)
 
-    restricted = []
-    if counts.get(ItemStatus.UNAVAILABLE, 0):
-        for item in items.list_for_collection(source_name, collection_name):
-            if item.status == ItemStatus.UNAVAILABLE:
-                restricted.append(
-                    {"identifier": item.identifier, "reason": item.restriction_reason}
-                )
+    restricted = [
+        {"identifier": identifier, "reason": reason}
+        for identifier, reason in items.list_unavailable(source_name, collection_name)
+    ]
 
     return {
         "source": source_name,

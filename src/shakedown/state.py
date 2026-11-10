@@ -140,6 +140,18 @@ class ItemRepo:
         for row in cur:
             yield _row_to_item(row)
 
+    def list_unavailable(self, source: str, collection: str) -> list[tuple[str, str | None]]:
+        """(identifier, restriction_reason) of the collection's unavailable items."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier, restriction_reason FROM items
+            WHERE source_name=? AND collection_name=? AND status=?
+            ORDER BY identifier
+            """,
+            (source, collection, ItemStatus.UNAVAILABLE.value),
+        )
+        return [(row["identifier"], row["restriction_reason"]) for row in cur]
+
     def count_by_status(self, source: str, collection: str) -> dict[ItemStatus, int]:
         cur = self.conn.execute(
             """
