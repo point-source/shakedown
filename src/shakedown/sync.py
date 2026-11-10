@@ -444,7 +444,7 @@ def _refresh_collection(
 def _apply_placement_report(
     stats: CollectionSyncStats,
     report: PlacementReport,
-    tag_issues: dict[str, list[str]] | None = None,
+    tag_issues: dict[str, list[str]],
 ) -> None:
     """Fold a staging pass, and the tag filling before it, into the run: each show
     with an issue counts once as failed (a disk error while linking already did,
@@ -455,7 +455,6 @@ def _apply_placement_report(
         stats.failed += 1
         stats.staging_issues += 1
         stats.errors.append(f"{identifier}: {message}")
-    tag_issues = tag_issues or {}
     for identifier in sorted(tag_issues.keys() | report.issues.keys()):
         stats.failed += 1
         stats.staging_issues += 1
@@ -854,7 +853,7 @@ def _pipelined_discover_and_fetch(
     placement: LibraryPlacement,
     budget: SourceBudget,
     by_identifier: dict[str, Item],
-    planner: TagPlanner | None = None,
+    planner: TagPlanner | None,
 ) -> tuple[set[str], list[PlannedItem], Exception | None]:
     """Overlap discover → classify → fetch (SPEC §spec:discovery-pipeline, overlap lever).
 

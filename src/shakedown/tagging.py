@@ -28,7 +28,7 @@ from mutagen.mp3 import MP3
 from mutagen.oggvorbis import OggVorbis
 
 from shakedown.db import transaction
-from shakedown.models import Manifest
+from shakedown.models import Item, Manifest
 from shakedown.placement import has_archive_copy
 from shakedown.state import ItemRepo, TagRecord, TagRepo
 
@@ -141,6 +141,17 @@ class TagIndex:
         return key is not None and len(self._members[key]) > 1
 
 
+def _mirrored(items: ItemRepo, source: str, collection: str) -> tuple[list[Item], TagIndex]:
+    """The collection's shows with an archive copy, and their clash index."""
+    shows = [item for item in items.list_for_collection(source, collection)
+             if has_archive_copy(item)]
+    index = TagIndex()
+    for item in shows:
+        assert item.recorded_manifest is not None
+        index.add(item.identifier, item.source_metadata, item.recorded_manifest)
+    return shows, index
+
+
 class TagPlanner:
     """One collection run's clash index, seeded from every show with an archive copy
     and fed each show the run fetches, so a download is tagged with the album it gets
@@ -148,11 +159,7 @@ class TagPlanner:
     is corrected by the run's pass over mirrored shows."""
 
     def __init__(self, items: ItemRepo, source: str, collection: str) -> None:
-        self.index = TagIndex()
-        for item in items.list_for_collection(source, collection):
-            if has_archive_copy(item):
-                assert item.recorded_manifest is not None
-                self.index.add(item.identifier, item.source_metadata, item.recorded_manifest)
+        _, self.index = _mirrored(items, source, collection)
 
     def plan(self, identifier: str, metadata: Mapping[str, Any], manifest: Manifest) -> Desired:
         self.index.add(identifier, metadata, manifest)
@@ -414,12 +421,7 @@ def fill_collection_tags(
     run that stops partway picks the show up again. Returns, per show, the issues of
     tag writes that failed on the disk; such a show is retried on the next run."""
     repo = TagRepo(items.conn)
-    shows = [item for item in items.list_for_collection(source, collection)
-             if has_archive_copy(item)]
-    index = TagIndex()
-    for item in shows:
-        assert item.recorded_manifest is not None
-        index.add(item.identifier, item.source_metadata, item.recorded_manifest)
+    shows, index = _mirrored(items, source, collection)
     done = repo.fingerprints(source, collection)
     issues: dict[str, list[str]] = {}
     for item in shows:
