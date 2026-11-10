@@ -242,7 +242,9 @@ class EtreePlugin(SourcePlugin):
             resp.raise_for_status()
             body = resp.json()
             response = body.get("response", {}) or {}
-            num_found = int(response.get("numFound", 0) or 0)
+            # Keep the largest total seen: a total that falls mid-listing (an item
+            # removed upstream) must not lower the completeness bar.
+            num_found = max(num_found, int(response.get("numFound", 0) or 0))
             docs = response.get("docs", []) or []
             if not docs:
                 break

@@ -482,3 +482,19 @@ def test_fetch_refetches_leftover_file_it_cannot_check(tmp_path: Path) -> None:
     assert plugin.fetch(item, tmp_path, [], []).success is True
     assert requests == ["/download/gd77/show.flac"]
     assert (tmp_path / "show.flac").read_bytes() == b"complete"
+
+
+def test_discover_raises_when_num_found_falls_mid_listing() -> None:
+    """A total that drops between pages must not lower the completeness bar."""
+    pages = {"1": (["a", "b"], 3), "2": ([], 2)}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/advancedsearch.php":
+            ids, total = pages.get(request.url.params.get("page", "1"), ([], 0))
+            return _search_response(ids, total)
+        ident = request.url.path.rsplit("/", 1)[-1]
+        return _metadata_response({"identifier": ident}, [])
+
+    plugin = _make_plugin(handler)
+    with pytest.raises(RuntimeError, match="2 of 3"):
+        list(plugin.discover(_collection()))
