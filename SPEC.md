@@ -1177,9 +1177,9 @@ It is never scheduled by default (§req:constraints).
 ## CLI surface §spec:cli
 
 *Status: implemented, including `validate`
-(§spec:setup-readiness-validation), except single-show operations as
-runs (§spec:single-show-runs) and the removal of `release-validate`
-(§spec:release-validation-gate) — not started.*
+(§spec:setup-readiness-validation) and the removal of `release-validate`
+(§spec:release-validation-gate), except single-show operations as runs
+(§spec:single-show-runs) — not started.*
 
 Shakedown is a one-shot CLI; every command runs to completion and
 exits (§req:constraints). The command surface:
@@ -1884,7 +1884,9 @@ completed, and once it completes the stale warning is gone.
 
 ## Release validation gate §spec:release-validation-gate
 
-*Status: not started — replaces the opt-in `release-validate` command.*
+*Status: implemented — `tests/test_release_workflows.py`, run by CI's
+`test` job, which the image-publishing `docker` job needs; the
+`release-validate` command is removed.*
 
 A bounded validation of the workflows users rely on runs in CI and must
 pass before any release image is published; the shipped product carries

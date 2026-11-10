@@ -125,32 +125,18 @@ Dependencies are pinned in `uv.lock`; CI and the Docker image install from it wi
 The default `pytest` run is fully offline (real archive.org HTTP is mocked), so
 it is safe to run anywhere and is the run CI executes.
 
-### Release validation gate
+### Release workflow tests
 
-Before publishing a release, run the opt-in gate:
+`tests/test_release_workflows.py` holds the workflows a release must not break:
+first-setup readiness, unsafe config rejection, partial-failure recovery, and
+the ordinary sync-to-library path. They run on synthetic sources in throwaway
+paths, as part of the default `pytest` run. CI runs them on every pull request
+and release tag, and publishes the image only after they pass. Each test is
+named for its workflow, so a failure names what broke (for example
+`test_partial_failure_recovery_restage`).
 
-```bash
-.venv/bin/shakedown release-validate
-```
-
-The full gate runs deterministic fake-source workflows in throwaway archive,
-library, config, and state paths, then runs the pinned real Internet Archive
-seam. Its final summary names every user workflow it exercised: setup readiness,
-unsafe config rejection, handoff failure, partial-failure recovery,
-sync-to-library staging, and the real-source IA seam. A risky scenario that
-cannot run is a failure, not a silent skip.
-
-Narrower modes are explicit:
-
-```bash
-.venv/bin/shakedown release-validate --deterministic-only
-.venv/bin/shakedown release-validate --real-source-only
-```
-
-Use `--deterministic-only` when network access is intentionally unavailable.
-Use `--real-source-only` when rechecking archive.org behavior after deterministic
-coverage already passed. The release gate is not part of the default developer
-test run or routine pull-request CI.
+Before tagging a release, also run the real-source check below. CI does not run
+it.
 
 ### Real-source end-to-end check
 
@@ -159,8 +145,8 @@ One opt-in test (`tests/test_e2e_real_source.py`, marked `network`) drives the
 sync → hardlink staging → no-op re-sync → restage after a layout change →
 disappeared retention → prune → forget. It exists to catch what the offline
 suite can't: archive.org's real API drifting from the fixtures, and integration
-seams that only misbehave with real files. The full release gate runs this check;
-it can also be reached directly when investigating the real-source seam.
+seams that only misbehave with real files. Run it before tagging a release; CI
+never runs it.
 
 ```bash
 .venv/bin/pytest -m network        # runs only the network check
