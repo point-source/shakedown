@@ -120,7 +120,7 @@ Every discovered item carries a persistent status:
 | `downloading` | Fetch in progress |
 | `complete` | Fetched successfully; manifest recorded |
 | `failed` | Fetch attempted and failed; retried on the next run |
-| `unavailable` | Source explicitly disallows download (e.g. stream-only) or lists no files matching the collection's filters; a human-readable `restriction_reason` is recorded and shown in `status` |
+| `unavailable` | Source explicitly disallows download (e.g. stream-only, flagged in its metadata or refused when downloading) or lists no files matching the collection's filters; a human-readable `restriction_reason` is recorded and shown in `status` |
 | `disappeared` | Previously `complete`, no longer in the source's enumeration; local files retained |
 | `pruned` | Vanished from a `prune_disappeared`-opted collection: archive files and staging links removed, DB record retained so `status` still reports the takedown |
 
@@ -1243,6 +1243,7 @@ degrade a single item or a single run, never the archive.
 | User wipes library tree | Rebuilt by `restage` with zero downloads |
 | User wipes archive tree | DB and library invalidated; full re-download — working as intended (§spec:state) |
 | Item restricted upstream | Local copy retained; status flips to `unavailable` with reason |
+| Source refuses a download (archive.org's 403 on a stream-only show with no restriction flag in its metadata) | Not a failure and not retried within the run: the item flips to `unavailable` with reason, the local copy (if any) is retained, and its temp directory is removed |
 | Restriction lifted upstream | Detected on next discover; fetched as new |
 | Source lists zero files for an item (darked, glitch, filter matches nothing) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
 | Item disappears upstream | Files retained by default; flagged `disappeared` (§spec:item-lifecycle) |

@@ -133,3 +133,23 @@ def test_session_used_for_metadata_and_downloads_keeps_retries_off(archive, tmp_
 
     retry = plugin._session.get_adapter("https://archive.org/download/gd1/x").max_retries
     assert retry.total == 0
+
+
+def test_403_on_a_download_reports_the_show_unavailable(archive, tmp_path: Path) -> None:
+    """archive.org answers 403 for stream-only shows (often soundboards) whose
+    metadata carries no restriction flag."""
+    plugin = _plugin()
+    files = [*FILES, {"name": "d1t02.flac", "size": "5", "md5": AUDIO_MD5, "format": "Flac"}]
+    archive.item("gd1", files)
+    archive.file("gd1", "d1t01.flac", Reply(403, b"Forbidden"))
+    archive.file("gd1", "d1t02.flac", Reply(200, AUDIO))
+    desc = _search_then_describe(archive, plugin)
+    assert desc is not None
+
+    result = plugin.fetch(desc, tmp_path / ".tmp-gd1", [], [])
+
+    assert result.success is False
+    assert result.unavailable is True
+    assert result.retriable is False
+    assert result.error == ia_plugin.DOWNLOAD_REFUSED_REASON
+    assert archive.calls_to("/download/gd1/d1t02.flac") == [], "stop at the first refusal"

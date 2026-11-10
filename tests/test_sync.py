@@ -155,6 +155,66 @@ def test_restricted_item_recorded_as_unavailable(tmp_roots: tuple[Path, Path]) -
     assert "soundboard" in (row.restriction_reason or "")
 
 
+def _refuse_downloads_of(monkeypatch, *identifiers: str) -> None:
+    """The source refuses these downloads outright (archive.org's 403 on a
+    stream-only show whose metadata carries no restriction flag)."""
+    real_fetch = FakePlugin.fetch
+
+    def fetch(self, item, dest_dir, format_filters, exclude_filters):
+        if item.identifier in identifiers:
+            FakePlugin.fetch_count[item.identifier] = FakePlugin.fetch_count.get(item.identifier, 0) + 1
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            return FetchResult(
+                success=False, bytes_downloaded=0, error="refused", unavailable=True
+            )
+        return real_fetch(self, item, dest_dir, format_filters, exclude_filters)
+
+    monkeypatch.setattr(FakePlugin, "fetch", fetch)
+
+
+def test_refused_download_records_the_show_unavailable(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _seed_item("gd-sbd")
+    _seed_item("gd-aud")
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+
+    assert run_sync(config) == 0, "a show the source won't serve is not a run failure"
+
+    assert FakePlugin.fetch_count["gd-sbd"] == 1, "a refusal is not retried within the run"
+    assert not (archive / "fake-src" / "coll1" / ".tmp-gd-sbd").exists()
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None
+    assert row.status == ItemStatus.UNAVAILABLE
+    assert row.restriction_reason == "refused"
+    run = RunRepo(conn).latest("fake-src", "coll1")
+    assert run is not None and run.items_failed == 0
+    assert ItemRepo(conn).get("fake-src", "coll1", "gd-aud").status == ItemStatus.COMPLETE  # type: ignore[union-attr]
+
+
+def test_refused_redownload_keeps_the_archive_copy(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed_item("gd-sbd", content=b"v1")
+    assert run_sync(config) == 0
+    item.files = [FakeFile(name="gd-sbd.flac", content=b"v2-remastered")]
+    _refuse_downloads_of(monkeypatch, "gd-sbd")
+
+    assert run_sync(config) == 0
+
+    assert (archive / "fake-src" / "coll1" / "gd-sbd" / "gd-sbd.flac").read_bytes() == b"v1"
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "gd-sbd")
+    assert row is not None
+    assert row.status == ItemStatus.UNAVAILABLE
+    assert row.archive_path == archive / "fake-src" / "coll1" / "gd-sbd"
+
+
 def test_disappeared_items_retained_by_default(tmp_roots: tuple[Path, Path]) -> None:
     archive, library = tmp_roots
     config = make_config(archive, library)

@@ -67,6 +67,10 @@ def _search_retry() -> Retry:
     )
 
 
+# Recorded as the item's restriction_reason when archive.org refuses a download.
+DOWNLOAD_REFUSED_REASON = "download refused by archive.org (stream-only or restricted)"
+
+
 def _metadata_backoff_seconds(attempt: int) -> float:
     """Exponential backoff (seconds) for the Nth (1-based) metadata retry, capped."""
     return min(_METADATA_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), _METADATA_MAX_BACKOFF_SECONDS)
@@ -322,6 +326,16 @@ class IAPlugin(SourcePlugin):
             for mf in to_fetch:
                 self._download_file(item.identifier, mf.name, dest_dir / mf.name)
         except Exception as e:
+            if _http_status(e) == 403:
+                # archive.org serves some shows stream-only (often soundboards) with no
+                # restriction flag in their metadata; the refusal is the only signal.
+                log.info("IA download refused for %s: %s", item.identifier, e)
+                return FetchResult(
+                    success=False,
+                    bytes_downloaded=0,
+                    error=DOWNLOAD_REFUSED_REASON,
+                    unavailable=True,
+                )
             log.warning("IA download failed for %s: %s", item.identifier, e)
             return FetchResult(
                 success=False,

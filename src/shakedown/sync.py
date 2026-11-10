@@ -1217,6 +1217,16 @@ def _process_fetch_result(
     assert target.descriptor is not None  # NEW/CHANGED_UPSTREAM always have a descriptor
     desc = target.descriptor
 
+    if outcome.unavailable:
+        log.info(
+            "[%s/%s] %s: unavailable: %s",
+            source.name, collection.name, desc.identifier, outcome.error,
+        )
+        _record_unavailable(
+            items, source.name, collection.name, replace(desc, restriction_reason=outcome.error)
+        )
+        return
+
     if not outcome.success:
         stats.failed += 1
         stats.errors.append(f"{desc.identifier}: {outcome.error}")
@@ -1287,6 +1297,7 @@ class _FetchOutcome:
     archive_path: Path
     bytes_downloaded: int = 0
     error: str | None = None
+    unavailable: bool = False  # the source refuses to serve the item
 
 
 # Bounded core-owned retries for transient fetch faults (checksum mismatch,
@@ -1493,6 +1504,14 @@ def _fetch_one(
         )
 
     fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, collection)
+    if fetch_result.unavailable:
+        # Nothing will resume a download the source refuses; the archive copy (if
+        # any) is untouched.
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        return _FetchOutcome(
+            success=False, archive_path=dest, error=fetch_result.error, unavailable=True
+        )
     if not fetch_result.success:
         # Leave tmp_dir for next-run cleanup; the archive copy (if any) is untouched.
         return _FetchOutcome(
