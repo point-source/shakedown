@@ -262,6 +262,7 @@ class LibraryPlacement:
         (and, in a full pass, for every show that no longer stages). Writes only what
         changed: a pass over an up-to-date library reads and stats, nothing more."""
         touched: set[Path] = set()
+        folders = self.repo.folders(self.source, self.collection.name)
         for identifier in identifiers:
             item = self.items.get(self.source, self.collection.name, identifier)
             if item is None:
@@ -270,9 +271,13 @@ class LibraryPlacement:
             placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
             stale = sorted(rel for rel in placed if rel not in desired)
             if stale:
+                moves = self._last_copy_moves(item, desired, stale, folders.get(identifier))
                 with transaction(self.items.conn):
                     for rel in stale:
-                        self._remove(identifier, rel, placed[rel], touched)
+                        if rel in moves:
+                            self._move(identifier, rel, moves[rel], placed[rel], touched)
+                        else:
+                            self._remove(identifier, rel, placed[rel], touched)
         if full:
             for identifier in self._orphans(set(identifiers)):
                 placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
@@ -288,6 +293,51 @@ class LibraryPlacement:
             if item is None:
                 continue
             self._link_show(item, folders.get(identifier))
+
+    def _last_copy_moves(
+        self, item: Item, desired: dict[str, str], stale: list[str], old_folder: str | None
+    ) -> dict[str, str]:
+        """Old library path -> new path for files whose archive copy is gone: when the
+        show's folder changes, the library link is the last copy of those bytes, so it
+        moves with the show instead of being removed."""
+        assert item.archive_path is not None
+        missing = {
+            name: rel
+            for rel, name in desired.items()
+            if name != METADATA_SIDECAR and not (item.archive_path / name).is_file()
+        }
+        if not missing or old_folder is None:
+            return {}
+        moves: dict[str, str] = {}
+        for rel in stale:
+            try:
+                name = PurePosixPath(rel).relative_to(old_folder).as_posix()
+            except ValueError:
+                continue  # not in the show's recorded folder
+            if name in missing:
+                moves[rel] = missing.pop(name)
+        return moves
+
+    def _move(self, identifier: str, rel: str, new_rel: str, inode: int,
+              touched: set[Path]) -> None:
+        """Link a placed file at its new path, then remove the old path. If the new path
+        is taken, the old file stays where it is (and stays recorded)."""
+        path = self.base / rel
+        try:
+            if path.lstat().st_ino != inode:
+                self._let_go(rel)
+                return
+            hardlink(path, self.base / new_rel)
+        except FileNotFoundError:
+            self.repo.remove_placement(self.source, self.collection.name, rel)
+            return
+        except FilesystemError:
+            return  # the new path holds another file; the link phase reports it
+        except OSError as e:
+            self._issue(identifier, removal_issue(identifier, path, e))
+            return
+        self.repo.add_placement(self.source, self.collection.name, identifier, new_rel, inode)
+        self._remove(identifier, rel, inode, touched)
 
     def _orphans(self, staged: set[str]) -> list[str]:
         """Shows with a placement or folder record that no longer stage (pruned,

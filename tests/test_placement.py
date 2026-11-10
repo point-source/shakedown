@@ -411,6 +411,26 @@ def test_missing_archive_file_keeps_its_library_copy(tmp_path: Path) -> None:
     assert (lib.base / "X" / "a.flac").read_bytes() == b"a"
 
 
+def test_move_keeps_a_file_whose_archive_copy_is_missing(tmp_path: Path) -> None:
+    """When a show's folder changes and one of its archive files is gone, the library
+    copy is the last copy of those bytes: it moves with the show, never deleted."""
+    lib = Lib(tmp_path)
+    item = lib.show("gd-a", {"a.flac": b"only copy", "b.flac": b"b"}, title="X")
+    lib.finish()
+    assert item.archive_path is not None
+    (item.archive_path / "a.flac").unlink()
+    lib.show("gd-b", {"c.flac": b"c"}, title="X")  # a clash: gd-a's folder moves
+
+    report = lib.finish()
+
+    assert (lib.base / "X [gd-a]" / "a.flac").read_bytes() == b"only copy"
+    assert lib.tree() == ["X [gd-a]/a.flac", "X [gd-a]/b.flac", "X [gd-b]/c.flac"]
+    assert set(lib.repo.placed_inodes(SRC, COLL, "gd-a")) == {"X [gd-a]/a.flac", "X [gd-a]/b.flac"}
+    assert report.issues == {}
+    lib.finish()  # and it stays put on the next pass
+    assert (lib.base / "X [gd-a]" / "a.flac").read_bytes() == b"only copy"
+
+
 def test_update_tolerates_a_refused_show(tmp_path: Path) -> None:
     """A show whose folder would leave the library is refused during a sync too; the
     run carries on and the full pass reports it."""
