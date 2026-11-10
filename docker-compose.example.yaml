@@ -49,7 +49,8 @@ services:
       # mismatched job type or name fails only in that log. After Create,
       # check it shows one "New job registered" line per collection.
       # The mounts mirror a manual run: the whole data share as one volume
-      # (hardlinks need it), plus config at /config (read-only there). The
+      # (hardlinks need it), plus config at /config. The config folder is
+      # also mounted read-only inside /data, so no run can rewrite it. The
       # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`
       # only carries the subcommand. Slice values (volume/environment) are
       # JSON arrays.
@@ -61,7 +62,7 @@ services:
       ofelia.job-run.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
       ofelia.job-run.dead-sync.image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
       ofelia.job-run.dead-sync.command: "sync --collection grateful-dead"
-      ofelia.job-run.dead-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/config:ro"]'
+      ofelia.job-run.dead-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/data/shakedown-config:ro", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.dead-sync.delete: "true"
       ofelia.job-run.dead-sync.user: "${SHAKEDOWN_USER:-1000:1000}"
       # Download-restricted collections only: uncomment to pass IA credentials
@@ -73,7 +74,7 @@ services:
       ofelia.job-run.phish-sync.schedule: "0 0 4 * * 0"  # Sunday 04:00
       ofelia.job-run.phish-sync.image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
       ofelia.job-run.phish-sync.command: "sync --collection phish"
-      ofelia.job-run.phish-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/config:ro"]'
+      ofelia.job-run.phish-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/data/shakedown-config:ro", "/share/data/shakedown-config:/config:ro"]'
       ofelia.job-run.phish-sync.delete: "true"
       ofelia.job-run.phish-sync.user: "${SHAKEDOWN_USER:-1000:1000}"
 
@@ -92,6 +93,7 @@ services:
   #   restart: unless-stopped
   #   volumes:
   #     - /share/data:/data
+  #     - /share/data/shakedown-config:/data/shakedown-config:ro
   #     - /share/data/shakedown-config:/config:ro
   #   environment:
   #     - SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN}
