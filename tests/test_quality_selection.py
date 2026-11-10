@@ -291,3 +291,24 @@ def test_reconcile_records_archive_files_the_rule_no_longer_selects(
     assert FakePlugin.fetched_files == {"gd-both": ["setlist.txt"]}
     assert _names(archive, "gd-both") == ["info.txt", "setlist.txt", "t01.flac", "t01.shn"]
     assert _names(library, "gd-both") == ["info.txt", "setlist.txt", "t01.flac"]
+
+
+def test_a_listing_without_audio_keeps_the_copy_and_says_why(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A darked or glitched listing that shows only archive.org's own files is never
+    read as the show changing: the copy is kept and the show is unavailable with the
+    reason (operator-approved copy, Q-6-3)."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    show = _show("gd-dark", _flac(), NOTES)
+    assert run_sync(config) == 0
+
+    show.files = [FakeFile("gd-dark_meta.xml", b"<meta/>", format="Metadata")]
+    assert run_sync(config) == 0
+
+    item = _item(config, "gd-dark")
+    assert item.status == ItemStatus.UNAVAILABLE
+    assert item.restriction_reason == "source lists no audio files"
+    assert _names(archive, "gd-dark") == ["info.txt", "t01.flac"]
+    assert _names(library, "gd-dark") == ["info.txt", "t01.flac"]

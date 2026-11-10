@@ -67,8 +67,9 @@ from shakedown.trigger import announce_started
 log = logging.getLogger(__name__)
 
 
-# Recorded as an item's restriction_reason when the source lists no files for it.
-NO_FILES_REASON = "source lists no files matching this collection's filters"
+# Recorded as an item's restriction_reason when the source lists no audio for it
+# (operator-approved copy).
+NO_FILES_REASON = "source lists no audio files"
 
 
 class PlanAction(StrEnum):
@@ -1036,9 +1037,9 @@ def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> Plann
     if desc.is_restricted:
         return PlannedItem(desc, existing, PlanAction.UNAVAILABLE)
     if not desc.manifest.files:
-        # An empty file list (darked item, upstream glitch, or a filter that now matches
-        # nothing) is never "the item changed": fetching it would swap an empty folder in
-        # over the archive copy. Record it unavailable and keep the local copy.
+        # No audio listed (darked item, upstream glitch) is never "the item changed":
+        # fetching it would swap an audio-less folder in over the archive copy. Record
+        # it unavailable and keep the local copy.
         return PlannedItem(
             replace(desc, restriction_reason=NO_FILES_REASON), existing, PlanAction.UNAVAILABLE
         )
