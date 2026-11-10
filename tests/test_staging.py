@@ -224,3 +224,32 @@ def test_crafted_metadata_cannot_stage_outside_the_library(tmp_path: Path) -> No
     assert staged[0].is_relative_to(library / "fake-src" / "coll1")
     assert ".." not in staged[0].relative_to(library).parts
 
+
+def test_restage_refuses_manifest_names_that_leave_the_library(tmp_path: Path) -> None:
+    """A recorded file name with `..` must not replace a file outside the library.
+
+    reconcile records the source's manifest without downloading, so file names reach
+    restage unchecked by the fetch path."""
+    archive = tmp_path / "deep" / "archive"
+    library = tmp_path / "library"
+    config = make_config(archive, library)
+    FakePlugin.items["a"] = FakeItem(
+        identifier="a", files=[FakeFile(name="x.flac", content=b"a")]
+    )
+    assert run_sync(config) == 0
+
+    from shakedown.reconcile import run_reconcile
+
+    FakePlugin.items["a"].files = [
+        FakeFile(name="x.flac", content=b"a"),
+        FakeFile(name="../../../../victim", content=b"evil"),
+    ]
+    assert run_reconcile(config) == 0
+    (tmp_path / "deep" / "victim").write_bytes(b"evil")
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"precious")
+
+    assert run_restage(config) == 1
+
+    assert victim.read_bytes() == b"precious"
+    assert victim.stat().st_ino != (tmp_path / "deep" / "victim").stat().st_ino

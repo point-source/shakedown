@@ -23,6 +23,7 @@ from pathlib import Path
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
+from shakedown.filesystem import is_within
 from shakedown.lock import run_exclusive
 from shakedown.models import (
     Item,
@@ -44,6 +45,7 @@ from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
 from shakedown.staging import (
     METADATA_SIDECAR,
     StageResult,
+    UnsafeLibraryPathError,
     manifest_reserves_sidecar_name,
     stage_item,
     unstage_item,
@@ -390,10 +392,15 @@ def _refresh_collection(
         if not manifest_reserves_sidecar_name(item.recorded_manifest):
             write_sidecar(item.archive_path / METADATA_SIDECAR, desc.metadata)
         items.upsert(item)
-        result = stage_item(
-            config, collection, source.name, item, item.recorded_manifest,
-            staged_paths=staged_paths,
-        )
+        try:
+            result = stage_item(
+                config, collection, source.name, item, item.recorded_manifest,
+                staged_paths=staged_paths,
+            )
+        except UnsafeLibraryPathError as e:
+            failed += 1
+            log.warning("[%s/%s] %s", source.name, collection.name, e)
+            continue
         if result.collisions:
             failed += 1
             for c in result.collisions:
@@ -1195,12 +1202,13 @@ def _stage_or_fail(
 ) -> StageResult | None:
     """Stage one item, turning a disk error (permission denied, disk full, name too
     long, EXDEV) into a per-item failure so the rest of the collection still links,
-    records, and notifies. Returns None when staging failed."""
+    records, and notifies. A library path that would leave the collection's library
+    folder fails the item the same way. Returns None when staging failed."""
     try:
         return stage_item(
             config, collection, source_name, item, manifest, staged_paths=staged_paths,
         )
-    except OSError as e:
+    except (OSError, UnsafeLibraryPathError) as e:
         log.warning(
             "[%s/%s] %s: linking into the library failed: %s",
             source_name, collection.name, item.identifier, e,
@@ -1228,18 +1236,6 @@ _MAX_BACKOFF_SECONDS = 60.0
 def _backoff_seconds(attempt: int) -> float:
     """Exponential backoff for the Nth (1-based) attempt, capped."""
     return min(_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), _MAX_BACKOFF_SECONDS)
-
-
-def _within_archive(archive_root: Path, candidate: Path) -> bool:
-    """True iff `candidate` stays inside `archive_root` (no traversal/absolute escape).
-
-    Uses lexical normalization (not `resolve()`) so a symlink already inside the
-    archive tree isn't rejected; the check exists to stop a remote identifier from
-    escaping the tree, not to police the operator's own layout.
-    """
-    root = os.path.normpath(archive_root)
-    cand = os.path.normpath(candidate)
-    return cand == root or cand.startswith(root + os.sep)
 
 
 def _fetch_with_retries(
@@ -1390,7 +1386,7 @@ def _fetch_one(
     # os.rename / shutil.rmtree / plugin downloads below. Reject anything that
     # would escape the archive tree (traversal via `..`, an absolute path, or a
     # separator) before it touches the filesystem.
-    if not _within_archive(archive_root, dest):
+    if not is_within(archive_root, dest):
         log.warning("[%s] rejecting unsafe identifier: %r", desc.identifier, desc.identifier)
         return _FetchOutcome(
             success=False,
@@ -1404,7 +1400,7 @@ def _fetch_one(
     # fetch, so the post-fetch verify() can't catch an escape (it resolves to the
     # same out-of-tree path). This guards every plugin, not just well-behaved ones.
     unsafe_names = [
-        mf.name for mf in desc.manifest.files if not _within_archive(dest, dest / mf.name)
+        mf.name for mf in desc.manifest.files if not is_within(dest, dest / mf.name)
     ]
     if unsafe_names:
         log.warning("[%s] rejecting unsafe manifest file name(s): %r", desc.identifier, unsafe_names[:5])

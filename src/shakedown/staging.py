@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from shakedown.config import CollectionConfig, Config
-from shakedown.filesystem import FilesystemError, hardlink
+from shakedown.filesystem import FilesystemError, hardlink, is_within
 from shakedown.models import Item, Manifest
 from shakedown.utils.templates import render
 
@@ -44,6 +44,13 @@ def write_sidecar(path: Path, metadata: dict[str, Any]) -> None:
     path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False, sort_keys=True))
 
 
+class UnsafeLibraryPathError(ValueError):
+    """A library path would land outside the collection's library folder.
+
+    Layout fields and manifest file names come from the source, so a crafted value
+    must never place, replace, or remove a file outside that folder."""
+
+
 @dataclass
 class StageResult:
     linked: int = 0
@@ -77,10 +84,24 @@ def staging_dir_for(
     if layout == PASSTHROUGH:
         # Mirror /data/archive/<source>/<collection>/<identifier>/ structure 1:1.
         rel = archive_path.relative_to(config.archive_root / source_name / collection.name)
-        return base / rel
+        staging_dir = base / rel
+    else:
+        staging_dir = base / render(layout, item_metadata).strip("/")
+    if not is_within(base, staging_dir):
+        raise UnsafeLibraryPathError(
+            f"refusing library folder {str(staging_dir)!r}: it is outside {str(base)!r}"
+        )
+    return staging_dir
 
-    rendered = render(layout, item_metadata)
-    return base / rendered.strip("/")
+
+def _library_file(staging_dir: Path, name: str) -> Path:
+    """The library path for one archive file name, refused if it leaves the folder."""
+    dst = staging_dir / name
+    if not is_within(staging_dir, dst):
+        raise UnsafeLibraryPathError(
+            f"refusing file name {name!r}: it would land outside {str(staging_dir)!r}"
+        )
+    return dst
 
 
 def stage_item(
@@ -112,14 +133,16 @@ def stage_item(
         config, collection, source_name, item.source_metadata, item.archive_path
     )
 
+    # Check every name before linking any, so a refused item leaves no partial folder.
+    targets = [(mf.name, _library_file(staging_dir, mf.name)) for mf in manifest.files]
+
     result = StageResult(staging_dir=staging_dir)
-    for mf in manifest.files:
-        src = item.archive_path / mf.name
-        dst = staging_dir / mf.name
+    for name, dst in targets:
+        src = item.archive_path / name
         if not src.is_file():
             log.warning(
                 "skipping staging for %s/%s: source missing on disk",
-                item.identifier, mf.name,
+                item.identifier, name,
             )
             continue
         _link_file(
@@ -215,11 +238,16 @@ def unstage_item(
     if item.archive_path is None or item.recorded_manifest is None:
         return
 
-    staging_dir = staging_dir_for(
-        config, collection, source_name, item.source_metadata, item.archive_path
-    )
-    for mf in item.recorded_manifest.files:
-        (staging_dir / mf.name).unlink(missing_ok=True)
+    try:
+        staging_dir = staging_dir_for(
+            config, collection, source_name, item.source_metadata, item.archive_path
+        )
+        targets = [_library_file(staging_dir, mf.name) for mf in item.recorded_manifest.files]
+    except UnsafeLibraryPathError as e:
+        log.warning("not unstaging %s: %s", item.identifier, e)
+        return
+    for dst in targets:
+        dst.unlink(missing_ok=True)
     # Drop the metadata.json sidecar link too, so the staging dir can go empty. Done
     # unconditionally (missing_ok) — idempotent, and it clears a stale link even if the
     # collection later opted out of preservation (§spec:metadata-preservation).

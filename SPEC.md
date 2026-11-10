@@ -603,6 +603,11 @@ filenames are then hardlinked into that directory unchanged.
   (slashes, colons, and similar) are replaced; non-ASCII is preserved.
   Archival metadata is multilingual and lossy transliteration would
   destroy information the library tool may want.
+- **Library paths stay inside the collection's library folder.** A
+  rendered folder or recorded file name that would land outside it is
+  refused and that item fails visibly (sync, restage), so source data
+  can never place, replace, or remove a file elsewhere — the library-side
+  twin of the archive's identifier containment check.
 - **Collisions are an error, not a silent overwrite.** If two items
   render the same staging path — or a hardlink target exists pointing
   at a different inode — the system shall report the collision and

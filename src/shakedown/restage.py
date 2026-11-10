@@ -13,7 +13,7 @@ from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.lock import run_exclusive
 from shakedown.models import ItemStatus, OperationStatus, OperationType
-from shakedown.staging import stage_item
+from shakedown.staging import UnsafeLibraryPathError, stage_item
 from shakedown.state import ItemRepo, OperationOutcomeRepo
 
 log = logging.getLogger(__name__)
@@ -79,6 +79,7 @@ def _run_restage(
 
             linked = 0
             collisions = 0
+            refused: list[str] = []
             staged_paths: set = set()
             stage_failed = False
             for item in items.list_for_collection(source.name, collection.name):
@@ -89,6 +90,11 @@ def _run_restage(
                         config, collection, source.name, item, item.recorded_manifest,
                         staged_paths=staged_paths,
                     )
+                except UnsafeLibraryPathError as e:
+                    # One item's crafted metadata fails only that item.
+                    refused.append(f"{item.identifier}: {e}")
+                    log.warning("[%s/%s] %s: %s", source.name, collection.name, item.identifier, e)
+                    continue
                 except OSError as e:
                     failed += 1
                     stage_failed = True
@@ -122,10 +128,10 @@ def _run_restage(
             if stage_failed:
                 continue
             log.info(
-                "[%s/%s] restage: linked=%d collisions=%d",
-                source.name, collection.name, linked, collisions,
+                "[%s/%s] restage: linked=%d collisions=%d refused=%d",
+                source.name, collection.name, linked, collisions, len(refused),
             )
-            if collisions:
+            if collisions or refused:
                 failed += 1
                 outcomes.finish(
                     outcome,
@@ -136,10 +142,12 @@ def _run_restage(
                         "items_staged": len(staged_paths),
                         "links_created": linked,
                         "collisions": collisions,
+                        "refused_paths": len(refused),
                     },
                     preservation_context="archive recordings retained",
                     deletion_context="library staging tree is disposable",
                     safe_next_action="fix library layout and rerun restage",
+                    errors=refused,
                 )
             else:
                 finished = datetime.now()
