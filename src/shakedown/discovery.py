@@ -336,22 +336,27 @@ def stream_items(
     """
     listing = list(plugin.list_items(collection))
     enumerated.update(row.identifier for row in listing)
-    yield from describe_rows(
-        plugin, [row for row in listing if look_up is None or look_up(row)], collection, budget
+    rows = [row for row in listing if look_up is None or look_up(row)]
+    yield from _windowed(rows, budget, lambda row: look_up_one(plugin, row, budget))
+
+
+def look_up_rows(
+    plugin: SourcePlugin, identifiers: Sequence[str], budget: SourceBudget
+) -> Iterator[tuple[str, ItemDetails | LookupFailure]]:
+    """Look up just these items — no listing — in parallel across the shared budget,
+    yielding each identifier with its validated lookup (every file the source lists,
+    before selection) or its failure. A single-show run acts on the shows it names
+    (§spec:single-show-runs) and a reconform needs files outside the selection."""
+    yield from _windowed(
+        list(identifiers), budget, lambda identifier: (identifier, lookup(plugin, identifier, budget))
     )
 
 
-def describe_rows(
-    plugin: SourcePlugin,
-    rows: Sequence[ListedItem],
-    collection: CollectionConfig,
-    budget: SourceBudget,
-) -> Iterator[ItemDescriptor | LookupFailure]:
-    """Look up the given items in parallel across the shared budget, yielding each
-    description (or lookup failure) as it resolves. No listing: a single-show run
-    passes just the shows it acts on (§spec:single-show-runs).
+def _windowed[T, R](rows: Sequence[T], budget: SourceBudget, work: Callable[[T], R]) -> Iterator[R]:
+    """Run ``work`` over ``rows`` on up to ``budget.size`` workers, yielding each result
+    as it resolves.
 
-    Lookups are submitted only as the consumer takes results, a few ahead of it, so a
+    Work is submitted only as the consumer takes results, a few ahead of it, so a
     show's details live from its lookup until the consumer has handled them — never
     for the whole listing. Memory stays flat however large the collection.
     """
@@ -360,7 +365,7 @@ def describe_rows(
     workers = min(budget.size, len(rows))
     window = 2 * workers
     remaining = iter(rows)
-    pending: set[Future[ItemDescriptor | LookupFailure]] = set()
+    pending: set[Future[R]] = set()
     with ThreadPoolExecutor(max_workers=workers) as pool:
 
         def top_up() -> None:
@@ -368,7 +373,7 @@ def describe_rows(
                 row = next(remaining, None)
                 if row is None:
                     return
-                pending.add(pool.submit(look_up_one, plugin, row, budget))
+                pending.add(pool.submit(work, row))
 
         top_up()
         while pending:

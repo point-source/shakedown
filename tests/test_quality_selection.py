@@ -448,3 +448,112 @@ def test_reconcile_without_a_lookup_records_the_files_on_disk(
 
     assert _names(archive, "gd-both") == ["info.txt", "t01.flac", "t01.shn"]
     assert _names(library, "gd-both") == ["info.txt", "t01.flac"]
+
+
+# --- reconform repairs drifted files, never the whole show (§spec:verify-drift) ---
+
+
+def _reconform(config) -> int:
+    from shakedown.verify import run_verify
+
+    return run_verify(
+        config, source_filter=None, collection_filter=None,
+        deep=True, reconform=True, list_drift=False, assume_yes=True,
+    )
+
+
+def _mirror_flac_and_shn(config, identifier: str = "gd-both") -> FakeItem:
+    _seed_mirrored(config, identifier, [_flac(), _shn()])
+    show = _show(identifier, _flac(), _shn(), NOTES)
+    assert run_sync(config) == 0
+    FakePlugin.fetched_files.clear()
+    return show
+
+
+def _last_run(config) -> dict:
+    from shakedown.state import DriftRepo, OperationOutcomeRepo, RunRepo
+    from shakedown.status import _collection_summary
+
+    conn = connect(config.state_db)
+    return _collection_summary(
+        config, "fake-src", "coll1", ItemRepo(conn), RunRepo(conn), DriftRepo(conn),
+        OperationOutcomeRepo(conn),
+    )["last_run"]
+
+
+def test_reconform_refetches_a_drifted_archive_only_copy_and_nothing_else(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _mirror_flac_and_shn(config)
+    folder = archive / "fake-src" / "coll1" / "gd-both"
+    flac_inode = (folder / "t01.flac").stat().st_ino
+    (folder / "t01.shn").write_bytes(b"retagged")
+
+    assert _reconform(config) == 0
+
+    assert FakePlugin.fetched_files == {"gd-both": ["t01.shn"]}
+    assert (folder / "t01.shn").read_bytes() == _shn().content
+    assert (folder / "t01.flac").stat().st_ino == flac_inode, "the FLAC was not downloaded"
+    assert _names(archive, "gd-both") == ["info.txt", "t01.flac", "t01.shn"]
+    assert _names(library, "gd-both") == ["info.txt", "t01.flac"]
+
+
+def test_reconform_refetches_only_the_drifted_picked_file(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _mirror_flac_and_shn(config)
+    folder = archive / "fake-src" / "coll1" / "gd-both"
+    (folder / "t01.flac").write_bytes(b"retagged")
+
+    assert _reconform(config) == 0
+
+    assert FakePlugin.fetched_files == {"gd-both": ["t01.flac"]}
+    assert (folder / "t01.flac").read_bytes() == _flac().content
+    staged = library / "fake-src" / "coll1" / "gd-both" / "t01.flac"
+    assert staged.stat().st_ino == (folder / "t01.flac").stat().st_ino
+
+
+def test_reconform_reports_a_drifted_file_the_source_no_longer_lists(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Not repairable: listed in the run's item issues, and nothing else downloads."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    show = _mirror_flac_and_shn(config)
+    show.files = [_flac(), NOTES]  # the source dropped the SHN
+    folder = archive / "fake-src" / "coll1" / "gd-both"
+    (folder / "t01.shn").write_bytes(b"retagged")
+
+    assert _reconform(config) == 1
+
+    assert FakePlugin.fetched_files == {}
+    assert (folder / "t01.shn").read_bytes() == b"retagged"
+    last = _last_run(config)
+    assert (last["kind"], last["items_failed"]) == ("reconform", 1)
+    assert any(e.startswith("gd-both: t01.shn ") for e in last["errors"])
+
+
+def test_reconform_repairs_what_the_source_lists_beside_a_lost_file(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A drifted FLAC is repaired while a deleted SHN the source no longer lists is
+    reported; the missing SHN does not stop the FLAC's repair."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    show = _mirror_flac_and_shn(config)
+    show.files = [_flac(), NOTES]
+    folder = archive / "fake-src" / "coll1" / "gd-both"
+    (folder / "t01.flac").write_bytes(b"retagged")
+    (folder / "t01.shn").unlink()
+
+    assert _reconform(config) == 1
+
+    assert FakePlugin.fetched_files == {"gd-both": ["t01.flac"]}
+    assert (folder / "t01.flac").read_bytes() == _flac().content
+    last = _last_run(config)
+    assert (last["items_updated"], last["items_failed"]) == (1, 1)
+    assert any(e.startswith("gd-both: t01.shn ") for e in last["errors"])

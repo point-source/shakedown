@@ -25,9 +25,11 @@ from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
 from shakedown.discovery import (
     ItemDescriptor,
+    ItemDetails,
     LookupFailure,
     SourceBudget,
-    describe_rows,
+    describe,
+    look_up_rows,
     source_budgets,
     stream_items,
 )
@@ -1781,8 +1783,8 @@ def refetch_item(config: Config, identifier: str) -> int:
 def _refetch_item(config: Config, identifier: str) -> int:
     with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
         items = ItemRepo(conn)
-        targets = {
-            (source.name, collection.name): [identifier]
+        targets: dict[tuple[str, str], SingleShows] = {
+            (source.name, collection.name): {identifier: None}
             for source in config.sources
             for collection in source.collections
             if items.get(source.name, collection.name, identifier) is not None
@@ -1792,8 +1794,13 @@ def _refetch_item(config: Config, identifier: str) -> int:
     return run_single_shows(config, targets, RunKind.REFETCH)
 
 
+# The shows a single-show run acts on: identifier -> the archive files to repair, or
+# None to download every selected file again (a refetch).
+SingleShows = dict[str, frozenset[str] | None]
+
+
 def run_single_shows(
-    config: Config, targets: dict[tuple[str, str], list[str]], kind: RunKind
+    config: Config, targets: dict[tuple[str, str], SingleShows], kind: RunKind
 ) -> int:
     """Run the sync pipeline for exactly these shows, keyed by (source, collection):
     one run per collection, marked ``kind`` (§spec:single-show-runs). Each show is
@@ -1811,10 +1818,10 @@ def run_single_shows(
     connect(config.state_db).close()  # type: ignore[arg-type]
     budgets = source_budgets(config, [(s, p) for s, _, p, _ in work])
     failed = 0
-    for source, collection, plugin, identifiers in work:
+    for source, collection, plugin, shows in work:
         try:
             stats = _single_show_collection(
-                config, source, collection, plugin, identifiers, kind, budgets[source.name]
+                config, source, collection, plugin, shows, kind, budgets[source.name]
             )
         except Exception:
             log.exception("%s failed for %s/%s", kind.value, source.name, collection.name)
@@ -1831,6 +1838,52 @@ def run_single_shows(
     return 0 if failed == 0 else 1
 
 
+def _plan_repair(
+    identifier: str,
+    existing: Item | None,
+    details: ItemDetails,
+    drifted: frozenset[str],
+    stats: CollectionSyncStats,
+) -> tuple[Manifest, tuple[ManifestFile, ...]] | None:
+    """A reconform's manifest and downloads for one show: each drifted archive file the
+    source still lists — a picked copy or an archive-only one outside the current
+    selection — and nothing else (§spec:verify-drift). The rest of the archive copy is
+    kept as recorded. A drifted file the source no longer lists cannot be repaired: it
+    fails the show in the run and never causes another download. Returns None when
+    there is nothing to download."""
+    if existing is None or existing.recorded_manifest is None or existing.archive_path is None:
+        return None
+    listed = {f.name: f for f in details.files}
+    folder = existing.archive_path
+    files: list[ManifestFile] = []
+    fetch: list[ManifestFile] = []
+    lost: list[str] = []
+    for mf in existing.recorded_manifest.files:
+        if mf.name not in drifted:
+            files.append(mf)
+            continue
+        source_file = listed.get(mf.name)
+        if source_file is None:
+            lost.append(mf.name)
+            # Kept as recorded while it is on disk; a lost file gone from disk leaves
+            # the record, as any archive-only file does (§spec:quality-selection).
+            if (folder / mf.name).is_file():
+                files.append(mf)
+            continue
+        current = replace(mf, size=source_file.size, md5=source_file.md5)
+        files.append(current)
+        fetch.append(current)
+    if lost:
+        stats.failed += 1
+        stats.errors.extend(
+            f"{identifier}: {name} drifted and the source no longer lists it; not repaired"
+            for name in lost
+        )
+    if not fetch:
+        return None
+    return Manifest(files=tuple(files)), tuple(fetch)
+
+
 def _fail_refused(stats: CollectionSyncStats, identifier: str, reason: str | None) -> None:
     """A show the source refuses in a single-show run: recorded unavailable, as a sync
     would, and failed in the run — it was asked for and nothing was fetched
@@ -1844,7 +1897,7 @@ def _single_show_collection(
     source: SourceConfig,
     collection: CollectionConfig,
     plugin: SourcePlugin,
-    identifiers: list[str],
+    shows: SingleShows,
     kind: RunKind,
     budget: SourceBudget,
 ) -> CollectionSyncStats:
@@ -1867,7 +1920,7 @@ def _single_show_collection(
     stats = CollectionSyncStats()
     try:
         _single_show_phases(
-            config, source, collection, plugin, identifiers, kind, budget,
+            config, source, collection, plugin, shows, kind, budget,
             items, runs, run, outcomes, outcome, stats, started,
         )
     except Exception as e:
@@ -1881,7 +1934,7 @@ def _single_show_phases(
     source: SourceConfig,
     collection: CollectionConfig,
     plugin: SourcePlugin,
-    identifiers: list[str],
+    shows: SingleShows,
     kind: RunKind,
     budget: SourceBudget,
     items: ItemRepo,
@@ -1893,25 +1946,26 @@ def _single_show_phases(
     started: datetime,
 ) -> None:
     """Look up, fetch, stage, hand off, and record — the sync's phases for just these
-    shows. Every show found is fetched again, even with an unchanged manifest: that is
-    what a refetch or reconform asks for. A show whose lookup fails, or that the
-    source's answer does not hold, is failed with the reason and left exactly as it
-    was — record, archive copy, and library placement."""
+    shows, downloading even what the manifest says is unchanged: that is what a
+    refetch or reconform asks for. A refetch downloads every selected file; a
+    reconform only the drifted files (§spec:verify-drift). A show whose lookup fails,
+    or that the source's answer does not hold, is failed with the reason and left
+    exactly as it was — record, archive copy, and library placement."""
     archive_root = config.archive_root / source.name / collection.name
     # Finish any swap a crashed run left half done, so each show's archive copy is
     # back in place even when this run does not fetch it.
     _recover_interrupted_swaps(archive_root)
-    stats.discovered = len(identifiers)
+    stats.discovered = len(shows)
     placement = LibraryPlacement(config, collection, source.name, items)
     placement.begin()
 
-    rows = [ListedItem(identifier) for identifier in identifiers]
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetches: dict[Future[_FetchOutcome], PlannedItem] = {}
-        for found in describe_rows(plugin, rows, collection, budget):
-            if isinstance(found, LookupFailure):
-                _note_lookup_failure(stats, source.name, collection.name, found)
+        for identifier, details in look_up_rows(plugin, list(shows), budget):
+            if isinstance(details, LookupFailure):
+                _note_lookup_failure(stats, source.name, collection.name, details)
                 continue
+            found = describe(identifier, details)
             if found.is_restricted:
                 # The source refuses the show: recorded unavailable, as a sync would.
                 log.info(
@@ -1922,23 +1976,30 @@ def _single_show_phases(
                 stats.unavailable += 1
                 _fail_refused(stats, found.identifier, found.restriction_reason)
                 continue
-            if not found.manifest.files:
-                _note_lookup_failure(
-                    stats, source.name, collection.name,
-                    LookupFailure(
-                        found.identifier, f"{NO_FILES_REASON}; archive copy left untouched"
-                    ),
-                )
-                continue
-            existing = items.get(source.name, collection.name, found.identifier)
+            existing = items.get(source.name, collection.name, identifier)
+            drifted = shows[identifier]
+            if drifted is None:
+                if not found.manifest.files:
+                    _note_lookup_failure(
+                        stats, source.name, collection.name,
+                        LookupFailure(
+                            identifier, f"{NO_FILES_REASON}; archive copy left untouched"
+                        ),
+                    )
+                    continue
+                # Every selected file is downloaded again; archive-only copies the
+                # rule no longer selects stay (§spec:quality-selection).
+                manifest, fetch = plan_files(found.manifest, existing, refetch=True)
+            else:
+                repair = _plan_repair(identifier, existing, details, drifted, stats)
+                if repair is None:
+                    continue
+                manifest, fetch = repair
             action = (
                 PlanAction.CHANGED_UPSTREAM
                 if existing is not None and has_archive_copy(existing)
                 else PlanAction.NEW
             )
-            # Every selected file is downloaded again; archive-only copies the rule
-            # no longer selects stay (§spec:quality-selection).
-            manifest, fetch = plan_files(found.manifest, existing, refetch=True)
             planned = PlannedItem(replace(found, manifest=manifest), existing, action, fetch)
             archive_root.mkdir(parents=True, exist_ok=True)
             fut = fetch_pool.submit(

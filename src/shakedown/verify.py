@@ -192,15 +192,21 @@ def _run_verify(
 
 
 def _reconform(config: Config, drifts: list[DriftRecord]) -> int:
-    """Re-fetch every show with a drifted file — the whole show, not the file — as one
-    single-show run per collection (§spec:verify-drift, §spec:single-show-runs). On a
+    """Re-fetch the drifted files the source still lists, as one single-show run per
+    collection (§spec:verify-drift, §spec:single-show-runs). On a
     `fill_tags` collection, tags are refilled on the single-show run's shared fetch
     and staging path (§spec:tag-filling)."""
-    by_collection: dict[tuple[str, str], list[str]] = {}
+    drifted: dict[tuple[str, str], dict[str, set[str]]] = {}
     for d in drifts:
-        shows = by_collection.setdefault((d.source, d.collection), [])
-        if d.identifier not in shows:
-            shows.append(d.identifier)
-    for (source, collection), shows in by_collection.items():
-        log.info("reconform: re-fetching %d shows in %s/%s", len(shows), source, collection)
-    return run_single_shows(config, by_collection, RunKind.RECONFORM)
+        shows = drifted.setdefault((d.source, d.collection), {})
+        shows.setdefault(d.identifier, set()).add(d.file_name)
+    for (source, collection), shows in drifted.items():
+        log.info("reconform: repairing %d shows in %s/%s", len(shows), source, collection)
+    return run_single_shows(
+        config,
+        {
+            key: {identifier: frozenset(files) for identifier, files in shows.items()}
+            for key, shows in drifted.items()
+        },
+        RunKind.RECONFORM,
+    )
