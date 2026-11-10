@@ -322,10 +322,14 @@ def test_partial_failure_recovery_reconcile(
     items = ItemRepo(conn)
     row = items.get("fake-src", "coll1", "a")
     assert row is not None, "on-disk items must be reconciled even when source is unreachable"
-    # No prior DB row + no source descriptor → COMPLETE with no manifest;
-    # next sync (when source returns) will refresh the manifest.
+    # No prior DB row + no source descriptor → COMPLETE with the files on disk
+    # (staged, no checksum), so the next sync keeps any copy the quality rule no
+    # longer selects (§spec:quality-selection) and refreshes the manifest.
     assert row.status == ItemStatus.COMPLETE
-    assert row.recorded_manifest is None
+    assert row.recorded_manifest is not None
+    assert [(f.name, f.md5, f.library) for f in row.recorded_manifest.files] == [
+        ("a.flac", None, True)
+    ]
 
     recovery = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
     assert recovery is not None

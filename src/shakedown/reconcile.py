@@ -37,7 +37,7 @@ from shakedown.plugins import registry
 from shakedown.plugins.base import SourcePlugin
 from shakedown.staging import METADATA_SIDECAR
 from shakedown.state import ItemRepo, OperationOutcomeRepo
-from shakedown.sync import plan_files
+from shakedown.sync import NO_FILES_REASON, plan_files
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +134,30 @@ def _reconcile_collection(
             desc = descriptors_by_id.get(identifier)
             now = datetime.now()
 
-            if desc is not None:
+            # What the archive copy holds when the source gives no files to go by:
+            # the record's files, or with no record every file on disk.
+            held = (
+                existing.recorded_manifest
+                if existing is not None and existing.recorded_manifest is not None
+                else Manifest(files=_files_on_disk(archive_path, set(), library=True))
+            )
+            if desc is not None and (desc.is_restricted or not desc.manifest.files):
+                # Refused or no audio listed: unavailable with the copy kept, as sync
+                # records it (§spec:failure-behavior).
+                item = Item(
+                    source_name=source.name,
+                    collection_name=collection.name,
+                    identifier=identifier,
+                    status=ItemStatus.UNAVAILABLE,
+                    archive_path=archive_path,
+                    discovered_at=existing.discovered_at if existing else now,
+                    downloaded_at=existing.downloaded_at if existing else now,
+                    last_verified_at=now,
+                    restriction_reason=desc.restriction_reason or NO_FILES_REASON,
+                    source_metadata=desc.metadata,
+                    recorded_manifest=held,
+                )
+            elif desc is not None:
                 # Source-confirmed: COMPLETE with the source's current manifest.
                 item = Item(
                     source_name=source.name,
@@ -175,7 +198,7 @@ def _reconcile_collection(
                     last_verified_at=now,
                     restriction_reason=existing.restriction_reason if existing else None,
                     source_metadata=existing.source_metadata if existing else {},
-                    recorded_manifest=existing.recorded_manifest if existing else None,
+                    recorded_manifest=held,
                     change_signal=existing.change_signal if existing else None,
                     not_playable_reason=existing.not_playable_reason if existing else None,
                 )
@@ -239,12 +262,20 @@ def _with_files_on_disk(selected: Manifest, archive_path: Path, existing: Item |
     their size from disk and no checksum (reading the bytes is `verify --deep`'s job).
     """
     merged, _ = plan_files(selected, existing)
-    known = {f.name for f in merged.files} | {METADATA_SIDECAR}
-    extra = tuple(
-        ManifestFile(rel, path.stat().st_size, None, library=False)
+    extra = _files_on_disk(archive_path, {f.name for f in merged.files}, library=False)
+    return Manifest(files=tuple(sorted(merged.files + extra, key=lambda f: f.name)))
+
+
+def _files_on_disk(
+    archive_path: Path, known: set[str], *, library: bool
+) -> tuple[ManifestFile, ...]:
+    """Every file in the archive copy not named in ``known`` (nor the metadata
+    sidecar), with its size from disk and no checksum."""
+    skip = known | {METADATA_SIDECAR}
+    return tuple(
+        ManifestFile(rel, path.stat().st_size, None, library=library)
         for path in sorted(archive_path.rglob("*"))
         if path.is_file()
         and not path.is_symlink()
-        and (rel := path.relative_to(archive_path).as_posix()) not in known
+        and (rel := path.relative_to(archive_path).as_posix()) not in skip
     )
-    return Manifest(files=tuple(sorted(merged.files + extra, key=lambda f: f.name)))

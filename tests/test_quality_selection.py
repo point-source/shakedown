@@ -400,3 +400,51 @@ def test_an_unchanged_show_regains_its_change_signal_after_the_upgrade(
 
     assert FakePlugin.lookups("gd-flac") == looked_up
     assert _item(config, "gd-flac").change_signal == "v1"
+
+
+def test_reconcile_keeps_a_refused_shows_copy_and_library(tmp_roots: tuple[Path, Path]) -> None:
+    """A show whose audio the source now refuses is rebuilt `unavailable` with its
+    recorded files, like sync records it — never `complete` with nothing to stage
+    (§spec:failure-behavior: the local copy is retained)."""
+    from shakedown.reconcile import run_reconcile
+    from shakedown.selection import DOWNLOAD_REFUSED_REASON
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    show = _show("gd-dark", _flac(), NOTES)
+    assert run_sync(config) == 0
+    show.files = [_flac(refused=True), NOTES]
+
+    assert run_reconcile(config) == 0
+
+    item = _item(config, "gd-dark")
+    assert item.status == ItemStatus.UNAVAILABLE
+    assert item.restriction_reason == DOWNLOAD_REFUSED_REASON
+    assert item.recorded_manifest is not None
+    assert [f.name for f in item.recorded_manifest.files if f.library] == ["info.txt", "t01.flac"]
+    assert run_restage(config) == 0
+    assert _names(library, "gd-dark") == ["info.txt", "t01.flac"]
+
+
+def test_reconcile_without_a_lookup_records_the_files_on_disk(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A show with no record whose lookup fails is rebuilt from what is on disk, so
+    the next sync keeps the copies the rule no longer selects."""
+    from shakedown.reconcile import run_reconcile
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    folder = archive / "fake-src" / "coll1" / "gd-both"
+    folder.mkdir(parents=True)
+    for f in (_flac(), _shn()):
+        (folder / f.name).write_bytes(f.content)
+    _show("gd-both", _flac(), _shn(), NOTES)
+    FakePlugin.lookup_faults["gd-both"] = [ConnectionResetError("connection reset")]
+
+    assert run_reconcile(config) == 1
+    del FakePlugin.lookup_faults["gd-both"]
+    assert run_sync(config) == 0
+
+    assert _names(archive, "gd-both") == ["info.txt", "t01.flac", "t01.shn"]
+    assert _names(library, "gd-both") == ["info.txt", "t01.flac"]
