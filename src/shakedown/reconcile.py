@@ -135,6 +135,8 @@ def _reconcile_collection(
                     discovered_at=existing.discovered_at if existing else now,
                     downloaded_at=existing.downloaded_at if existing else now,
                     last_verified_at=now,
+                    # Set for a fallback copy, so `status` keeps listing it.
+                    restriction_reason=desc.restriction_reason,
                     source_metadata=desc.metadata,
                     recorded_manifest=desc.manifest,
                 )

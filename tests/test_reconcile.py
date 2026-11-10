@@ -164,3 +164,28 @@ def test_reconcile_looks_up_only_shows_on_disk(tmp_roots: tuple[Path, Path]) -> 
     assert run_reconcile(config) == 0
 
     assert [identifier for identifier, _ in FakePlugin.lookup_calls] == ["a"]
+
+
+def test_reconcile_keeps_a_fallback_shows_reason(tmp_roots: tuple[Path, Path]) -> None:
+    """A show mirrored as its fallback copy stays listed in `status` with its reason
+    after a rebuild (§spec:item-lifecycle: restricted shows appear with their reason)."""
+    from shakedown.selection import FALLBACK_REASON
+
+    archive, library = tmp_roots
+    config = make_config(archive, library, format_filters=["shn"], fallback_format_filters=["mp3"])
+    FakePlugin.items["sbd"] = FakeItem(
+        identifier="sbd",
+        files=[
+            FakeFile(name="t.shn", content=b"lossless", refused=True),
+            FakeFile(name="t.mp3", content=b"mp3"),
+        ],
+    )
+    assert run_sync(config) == 0
+    config.state_db.unlink()  # type: ignore[union-attr]
+
+    assert run_reconcile(config) == 0
+
+    row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "sbd")  # type: ignore[arg-type]
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE
+    assert row.restriction_reason == FALLBACK_REASON
