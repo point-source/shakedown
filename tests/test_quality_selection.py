@@ -557,3 +557,71 @@ def test_reconform_repairs_what_the_source_lists_beside_a_lost_file(
     last = _last_run(config)
     assert (last["items_updated"], last["items_failed"]) == (1, 1)
     assert any(e.startswith("gd-both: t01.shn ") for e in last["errors"])
+
+
+def test_reconform_does_not_download_a_drifted_file_the_source_refuses(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """archive.org made the FLAC private after it was mirrored: the drift cannot be
+    repaired, nothing downloads, and the show keeps its complete archive copy."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    show = _show("gd-flac", _flac(), _vbr(original="t01.flac"))
+    assert run_sync(config) == 0
+    show.files = [_flac(refused=True), _vbr(original="t01.flac")]
+    folder = archive / "fake-src" / "coll1" / "gd-flac"
+    (folder / "t01.flac").write_bytes(b"retagged")
+    FakePlugin.fetched_files.clear()
+
+    assert _reconform(config) == 1
+
+    assert FakePlugin.fetched_files == {}
+    assert (folder / "t01.flac").read_bytes() == b"retagged"
+    assert _item(config, "gd-flac").status == ItemStatus.COMPLETE
+    last = _last_run(config)
+    assert last["items_failed"] == 1
+    assert any(e.startswith("gd-flac: t01.flac ") for e in last["errors"])
+
+
+def test_reconform_drops_a_lost_file_gone_from_disk_from_the_record(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A deleted SHN the source no longer lists is reported once and leaves the record,
+    as any archive-only file gone from disk does, so later checks stop reporting it."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    show = _mirror_flac_and_shn(config)
+    show.files = [_flac(), NOTES]
+    (archive / "fake-src" / "coll1" / "gd-both" / "t01.shn").unlink()
+
+    assert _reconform(config) == 1
+
+    manifest = _item(config, "gd-both").recorded_manifest
+    assert manifest is not None
+    assert [f.name for f in manifest.files] == ["info.txt", "t01.flac"]
+    assert _reconform(config) == 0
+
+
+def test_reconform_counts_a_show_failed_once(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A show with a lost file whose other repair also fails is one failed show."""
+    from shakedown.plugins.base import FetchResult
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    show = _mirror_flac_and_shn(config)
+    show.files = [_flac(), NOTES]
+    folder = archive / "fake-src" / "coll1" / "gd-both"
+    (folder / "t01.flac").write_bytes(b"retagged")
+    (folder / "t01.shn").write_bytes(b"retagged")
+    monkeypatch.setattr(
+        FakePlugin, "fetch",
+        lambda self, identifier, files, dest_dir: FetchResult(
+            success=False, bytes_downloaded=0, error="connection reset"
+        ),
+    )
+
+    assert _reconform(config) == 1
+
+    assert _last_run(config)["items_failed"] == 1

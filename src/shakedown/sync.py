@@ -1846,45 +1846,48 @@ def _plan_repair(
     existing: Item | None,
     details: ItemDetails,
     drifted: frozenset[str],
+    items: ItemRepo,
     stats: CollectionSyncStats,
 ) -> tuple[Manifest, tuple[ManifestFile, ...]] | None:
     """A reconform's manifest and downloads for one show: each drifted archive file the
-    source still lists — a picked copy or an archive-only one outside the current
+    source still serves — a picked copy or an archive-only one outside the current
     selection — and nothing else (§spec:verify-drift). The rest of the archive copy is
-    kept as recorded. A drifted file the source no longer lists cannot be repaired: it
-    fails the show in the run and never causes another download. Returns None when
-    there is nothing to download."""
+    kept as recorded.
+
+    A drifted file the source no longer serves (no longer listed, or refused) cannot
+    be repaired: it is listed in the run's errors and never causes a download. One the
+    archive no longer holds leaves the record, as any archive-only file gone from disk
+    does (§spec:quality-selection). Returns None when there is nothing to download;
+    the caller counts the show failed once if any file was not repaired."""
     if existing is None or existing.recorded_manifest is None or existing.archive_path is None:
         return None
     listed = {f.name: f for f in details.files}
     folder = existing.archive_path
     files: list[ManifestFile] = []
     fetch: list[ManifestFile] = []
-    lost: list[str] = []
     for mf in existing.recorded_manifest.files:
         if mf.name not in drifted:
             files.append(mf)
             continue
         source_file = listed.get(mf.name)
-        if source_file is None:
-            lost.append(mf.name)
-            # Kept as recorded while it is on disk; a lost file gone from disk leaves
-            # the record, as any archive-only file does (§spec:quality-selection).
+        if source_file is None or source_file.refused:
+            stats.errors.append(
+                f"{identifier}: {mf.name} drifted and the source no longer serves it;"
+                " not repaired"
+            )
             if (folder / mf.name).is_file():
                 files.append(mf)
             continue
         current = replace(mf, size=source_file.size, md5=source_file.md5)
         files.append(current)
         fetch.append(current)
-    if lost:
-        stats.failed += 1
-        stats.errors.extend(
-            f"{identifier}: {name} drifted and the source no longer lists it; not repaired"
-            for name in lost
-        )
+    manifest = Manifest(files=tuple(files))
     if not fetch:
+        if manifest != existing.recorded_manifest:
+            existing.recorded_manifest = manifest
+            items.upsert(existing)
         return None
-    return Manifest(files=tuple(files)), tuple(fetch)
+    return manifest, tuple(fetch)
 
 
 def _fail_refused(stats: CollectionSyncStats, identifier: str, reason: str | None) -> None:
@@ -1962,6 +1965,7 @@ def _single_show_phases(
     placement = LibraryPlacement(config, collection, source.name, items)
     placement.begin()
 
+    unrepaired: set[str] = set()
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetches: dict[Future[_FetchOutcome], PlannedItem] = {}
         for identifier, details in look_up_rows(plugin, list(shows), budget):
@@ -1994,7 +1998,10 @@ def _single_show_phases(
                 # rule no longer selects stay (§spec:quality-selection).
                 manifest, fetch = plan_files(found.manifest, existing, refetch=True)
             else:
-                repair = _plan_repair(identifier, existing, details, drifted, stats)
+                errors_before = len(stats.errors)
+                repair = _plan_repair(identifier, existing, details, drifted, items, stats)
+                if len(stats.errors) > errors_before:
+                    unrepaired.add(identifier)
                 if repair is None:
                     continue
                 manifest, fetch = repair
@@ -2011,10 +2018,16 @@ def _single_show_phases(
             fetches[fut] = planned
         for fut in as_completed(fetches):
             # The sync's own fetch handling: record, link into the library, count.
+            failed_before = stats.failed
             _process_fetch_result(
                 fut, fetches[fut], source, collection, items, stats, placement,
                 refused_fails=True,
             )
+            if stats.failed > failed_before:
+                unrepaired.discard(_planned_identifier(fetches[fut]))
+    # A show with a drifted file left unrepaired is failed once, unless its download
+    # already failed it.
+    stats.failed += len(unrepaired)
 
     # Each show fetched here went through the sync's fetch, record, and link path
     # above, and is staged with the same ownership and cleanup pass below
