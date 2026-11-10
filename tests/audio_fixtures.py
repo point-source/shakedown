@@ -67,4 +67,4 @@ def read_tags(path: Path) -> dict[str, list[str]]:
     if path.suffix.lower() == ".mp3":
         return {k: list(v) for k, v in EasyID3(path).items()}
     f = FLAC(path) if path.suffix.lower() == ".flac" else OggVorbis(path)
-    return {k.lower(): list(v) for k, v in (f.tags or {}).items()}
+    return {k.lower(): list(v) for k, v in f.items()}

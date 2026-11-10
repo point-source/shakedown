@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime
@@ -16,7 +17,7 @@ from mutagen.id3 import ID3
 from mutagen.oggvorbis import OggVorbis
 
 from shakedown import tagging
-from shakedown.config import CollectionConfig
+from shakedown.config import CollectionConfig, Config
 from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
 from shakedown.reconcile import run_reconcile
@@ -440,8 +441,13 @@ def _library_file(config, name: str) -> Path:
     return found
 
 
+def _db(config: Config) -> sqlite3.Connection:
+    assert config.state_db is not None
+    return connect(config.state_db)
+
+
 def _tag_repo(config) -> TagRepo:
-    return TagRepo(connect(config.state_db))
+    return TagRepo(_db(config))
 
 
 def test_a_new_show_arrives_tagged_on_a_fill_tags_collection(tmp_roots) -> None:
@@ -465,7 +471,7 @@ def test_a_new_show_arrives_tagged_on_a_fill_tags_collection(tmp_roots) -> None:
     assert records["d1t01.flac"].written["album"] == "1977-05-08 \N{EN DASH} Barton Hall"
     assert "gd77" in _tag_repo(config).fingerprints("fake-src", "coll1")
     # The recorded manifest stays the source's word (§spec:sync-identity).
-    stored = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "gd77")
+    stored = ItemRepo(_db(config)).get("fake-src", "coll1", "gd77")
     assert stored is not None and stored.recorded_manifest is not None
     assert {f.md5 for f in stored.recorded_manifest.files} == {f.md5 for f in item.files}
 
@@ -527,7 +533,7 @@ def test_a_disk_error_tagging_a_download_fails_the_show_for_a_retry(
     monkeypatch.setattr(tagging._Tags, "save", full)
     assert run_sync(config) == 1
     assert not (config.archive_root / "fake-src" / "coll1" / "gd77").exists()
-    latest = RunRepo(connect(config.state_db)).latest("fake-src", "coll1")
+    latest = RunRepo(_db(config)).latest("fake-src", "coll1")
     assert latest is not None
     assert latest.errors == [
         "gd77: could not fill tags in d1t01.flac ([Errno 28] No space left on device);"
@@ -548,15 +554,14 @@ def _verify(config, *, reconform: bool = False) -> list[tuple[str, str]]:
     assert code == 0
     return sorted(
         (row["identifier"], row["file_name"])
-        for row in DriftRepo(connect(config.state_db)).list("fake-src", "coll1")
+        for row in DriftRepo(_db(config)).list("fake-src", "coll1")
     )
 
 
 def _retag(path: Path) -> None:
     """Another tool edits a tag in place."""
     f = FLAC(path)
-    assert f.tags is not None
-    f.tags["GENRE"] = ["Rock"]
+    f["GENRE"] = ["Rock"]
     f.save()
 
 
@@ -650,8 +655,7 @@ def test_opting_in_tags_mirrored_shows_and_labels_both_recordings(tmp_roots) -> 
     mine = _archive_file(make_config(*tmp_roots), "gd77-05-09", "d1t02.flac")
     f = FLAC(mine)
     f.add_tags()
-    assert f.tags is not None
-    f.tags["ALBUM"], f.tags["ARTIST"] = ["Uploader's album"], ["The Dead"]
+    f["ALBUM"], f["ARTIST"] = ["Uploader's album"], ["The Dead"]
     f.save()
     inode = mine.stat().st_ino
     downloads = dict(FakePlugin.fetch_count)
@@ -713,8 +717,7 @@ def test_an_album_someone_else_changed_is_left_alone(tmp_roots) -> None:
     assert run_sync(config) == 0
     mine = _library_file(config, "d1t01.flac")
     f = FLAC(mine)
-    assert f.tags is not None
-    f.tags["ALBUM"] = ["Cornell '77 (my edit)"]
+    f["ALBUM"] = ["Cornell '77 (my edit)"]
     f.save()
 
     _fake_show("gd77.aud", tmp_roots[0].parent)  # a clash appears
@@ -752,7 +755,7 @@ def test_a_disk_error_tagging_a_mirrored_show_is_an_issue_retried_next_run(
     monkeypatch.setattr(tagging.shutil, "copyfile", full)
     assert run_sync(config) == 1
     assert _archive_file(config, "gd77", "d1t01.flac").read_bytes() == original
-    latest = RunRepo(connect(config.state_db)).latest("fake-src", "coll1")
+    latest = RunRepo(_db(config)).latest("fake-src", "coll1")
     assert latest is not None and latest.items_failed == 1
     assert latest.errors == [
         "gd77: could not fill tags in d1t01.flac ([Errno 28] No space left on device);"
