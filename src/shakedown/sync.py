@@ -59,10 +59,10 @@ log = logging.getLogger(__name__)
 class SourceBudget:
     """Shared per-source concurrency ceiling (SPEC §spec:source-budget).
 
-    One instance per source, shared across all of that source's collections and
-    both its discovery and download workers, so the number of simultaneous
-    connections Shakedown opens to the upstream host never exceeds the configured
-    budget — no matter how many collections run concurrently.
+    One instance per upstream host, shared across every collection of the sources
+    on that host and both their discovery and download workers, so the number of
+    simultaneous connections Shakedown opens to the host never exceeds the
+    configured budget — no matter how many collections run concurrently.
     """
 
     def __init__(self, size: int) -> None:
@@ -165,7 +165,7 @@ def _stream_descriptors(
     across the shared per-source budget (SPEC §spec:discovery-pipeline).
 
     Sources exposing `enumerate_items()` get concurrent `describe_item()` resolution
-    bounded by the source budget, yielded via `as_completed` so a consumer can act on
+    bounded by the source budget, yielded by `_describe_paced` so a consumer can act on
     each item the moment it resolves (the overlap lever). Sources without the
     enumerate/describe split fall back to the serial `discover()` stream. A transient
     per-item fault yields None from `describe_item` and is dropped, exactly as the serial

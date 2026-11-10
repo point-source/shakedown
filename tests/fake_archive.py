@@ -1,8 +1,8 @@
 """A fake archive.org below urllib3, for testing the real HTTP stack above it.
 
 Patching at urllib3's per-request hook (instead of mocking the `internetarchive`
-library or `requests`) keeps every retry layer in play: the library's own retry
-loops, the urllib3 `Retry` mounted on the session, and shakedown's retries. Each
+library or `requests`) keeps every retry layer in play: the urllib3 `Retry` the
+library mounts on a session, and shakedown's own retries. Each
 request that would reach the network is recorded, so a test can count exactly how
 many times archive.org was asked.
 """
@@ -105,8 +105,7 @@ def fake_archive() -> Iterator[FakeArchive]:
 
     with (
         patch.object(urllib3.connectionpool.HTTPConnectionPool, "_make_request", make_request),
-        # Retry layers below shakedown sleep between attempts; keep tests instant.
+        # urllib3's Retry sleeps between attempts; record instead of waiting.
         patch("urllib3.util.retry.time.sleep", archive.sleeps.append),
-        patch("internetarchive.files.sleep", lambda _s: None),
     ):
         yield archive

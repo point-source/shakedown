@@ -1,4 +1,4 @@
-"""IA plugin discover/fetch/verify with the internetarchive package mocked.
+"""IA plugin discover/fetch/verify against a fake archive.org below urllib3.
 
 The pure helpers (_build_manifest, _detect_restriction, _file_matches_filters)
 are spot-checked from a different angle: end-to-end via the plugin facade.

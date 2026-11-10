@@ -196,7 +196,7 @@ class IAPlugin(SourcePlugin):
         search = self._search_session.search_items(
             collection.query,
             fields=["identifier", "oai_updatedate", "item_size"],
-            max_retries=_search_retry(),  # type: ignore[arg-type]  # IA accepts a Retry
+            max_retries=_search_retry(),
         )
         for hit in search:
             yield hit["identifier"], _combine_change_signal(hit)
