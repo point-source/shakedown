@@ -117,8 +117,7 @@ handoff, and discovery increment.
     Archive item for real and drives the typical lifecycle against it:
     sync into the archive, hardlink staging into the library tree,
     re-sorting the library by changing the layout template and
-    restaging, and deletion via disappeared-item handling and
-    forgetting an item. It passes on a clean machine with one command
+    restaging, and deletion via disappeared-item handling. It passes on a clean machine with one command
     and is excluded from the default test run and CI, so day-to-day
     development stays offline and deterministic while releases can be
     gated on the real thing.

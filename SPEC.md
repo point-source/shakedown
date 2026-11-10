@@ -153,10 +153,10 @@ Behavior the user can observe:
   JSON: each show with its date) — never as a warning, a recovery item,
   or a cause of a non-zero exit. If the show is listed again, it returns
   to `complete` and the date is cleared. (Operator decision,
-  2026-11-10.) Because a retained show no longer reads as a problem,
-  `item forget` is only for letting go of a show entirely; it removes
-  the show's record and library links and keeps its archive copy
-  (§spec:library-cleanup).
+  2026-11-10.) There is no command to drop a show's record while
+  keeping its archive copy: anything in the archive is also in the
+  library, so a show leaves both only through `prune_disappeared`
+  (operator decision, 2026-11-10; `item forget` was removed).
 
 **Why retention is the default.** Durable mirroring is the product's
 reason to exist; losing content must only ever be the user's explicit
@@ -725,8 +725,15 @@ Observable behavior:
   from the source's per-file bitrate when it lists one and from file
   size per track otherwise. A format counts only when it covers every
   track of the show and the source serves it (files the source refuses
-  are not available). Audio in a format the product does not recognise
-  ranks below every recognised one.
+  are not available). Among lossless copies that each cover every
+  track, FLAC beats Apple Lossless beats WAV beats AIFF, then the larger
+  size per track wins, so a 24-bit FLAC beats a 16-bit one and a WAV is
+  never kept over a FLAC of the same audio; SHN ranks below every
+  playable lossless format (operator decision, 2026-11-10). Audio in a
+  format the product does not recognise ranks below every recognised
+  one. archive.org's ZIP bundles of a show's audio (formats such as
+  "VBR ZIP" or "64Kbps MP3 ZIP") are not audio copies and are left out
+  (operator decision, 2026-11-10).
 - **Best available, best playable.** The *best available* copy is the
   top-ranked format; the *best playable* copy is the top-ranked format a
   common player reads (everything above except SHN). If they are the
@@ -755,8 +762,13 @@ Observable behavior:
   unplayable best-available copy stays archive-only.
 - **No playable copy.** A show whose only audio is unplayable is
   mirrored and staged as is, and `status` lists it as not playable,
-  with the reason "only in SHN; archive.org offers no playable copy".
-  It stays `complete`.
+  with the reason "only in SHN; archive.org offers no playable copy"
+  (or "only in an unrecognised audio format; archive.org offers no
+  playable copy"). It stays `complete`. A show whose listing holds no
+  audio at all (darked, a glitch, or only archive.org's own metadata
+  files) keeps its existing copy and is marked `unavailable` with the
+  reason "source lists no audio files". (Operator decisions,
+  2026-11-10.)
 - **Configuration.** `format_filters`, `exclude_filters`, and
   `fallback_format_filters` are removed. A config that still sets them
   fails to load, naming the key (§spec:configuration); the operator
@@ -908,7 +920,7 @@ Observable behavior:
   reached by incremental syncs, a full `restage`, or after `reconcile`
   rebuilt the database. Consequently, when a second recording of a show
   arrives, the first recording's folder moves once to its labelled
-  name; when the clash ends (a recording pruned or forgotten), the
+  name; when the clash ends (a recording pruned), the
   survivor moves back to the bare name. The old folder is removed by
   cleanup (§spec:library-cleanup).
 - **A file shakedown did not place is never replaced.** If a target
@@ -959,7 +971,7 @@ change and only to shows with multiple recordings.
 collection with two recordings of one show; sync; see two folders, each
 labelled with its identifier, and the separation in the run summary and
 `status`; sync again and `restage`; the folders are identical each
-time. Forget one recording; sync; the survivor's folder returns to the
+time. Prune one recording; sync; the survivor's folder returns to the
 bare name and the labelled folder is gone. Drop a file of your own into
 a show's folder under a name the show also has; sync; your file is
 untouched and the conflict is reported.
@@ -984,10 +996,7 @@ Observable behavior:
   `restage`, and prune. A previously placed file that is not part of
   the show's current placement is removed; a folder left empty by
   that removal is removed, up to the collection's library folder. A
-  pruned show's placement is removed entirely. `item forget` removes the
-  show's library placement too (the archive copy stays): a forgotten
-  show is no longer shakedown's to manage, and leaving its links behind
-  would leave files nobody owns.
+  pruned show's placement is removed entirely.
 - **Only what shakedown placed.** Removal consults the placement record
   only. A file found in a folder shakedown is cleaning that it did not
   place is left alone, its folder stays, and the file is reported:
@@ -1062,10 +1071,13 @@ Observable behavior:
 
 - **What is filled.** For each audio file in a format the system can
   tag (FLAC, MP3, Ogg Vorbis; other files, including SHN, are left
-  untouched), the system fills only tags that are absent:
+  untouched), the system fills only tags that are absent — a tag whose
+  values are all empty or whitespace counts as absent (operator
+  decision, 2026-11-10):
   - artist and album artist ← the show's creator;
-  - album ← `<date> – <venue>` (the show's title when venue is
-    missing; the identifier when both are missing). When two or more
+  - album ← `<date> – <venue>` (the show's title when venue or date
+    is missing; the identifier when the title is missing too — never
+    `unknown`). When two or more
     shows that shakedown tags would end up with the same album artist,
     album, and date — which a tag-driven player merges into one album —
     each of them gets ` [<identifier>]` appended, by the same
@@ -1089,7 +1101,17 @@ Observable behavior:
   collection opts in. After that, a show is revisited only when its
   computed tag values change (clash state, metadata refresh) or after a
   reconform. A crash mid-tagging never leaves a half-written file in the
-  archive or library.
+  archive or library: before writing into a mirrored file, the system
+  keeps a complete backup of it beside the archive (same filesystem,
+  outside the library) and deletes the backup once the write is done;
+  every writing run (sync, refresh, single-show runs, `restage`) first
+  restores any leftover backup over its file. Plain `verify` holds no
+  writer lock and does not restore, so an interrupted file shows as
+  drift until the next writing run. (Operator constraints, 2026-11-10:
+  no corrupt file survives a crash, and no link anywhere keeps stale
+  bytes or a leftover copy — which rules out writing a tagged copy and
+  swapping it in, since hardlinks shakedown did not place would keep
+  the old bytes.)
 - **Recorded state, no false drift.** The source's manifest (what the
   source reported) stays the basis of change detection, unchanged
   (§spec:sync-identity): tagging never causes a re-download, and a sync
@@ -1254,8 +1276,11 @@ Observable behavior:
 - **Failure.** If the lookup fails or the show is not in the source's
   answer, the run records that show as failed with the reason and the
   command exits non-zero; the archive copy and its library placement are
-  untouched. An identifier that names no recorded show is a usage error
-  (exit 2).
+  untouched. A show the source refuses (restricted, or its download
+  refused) is recorded `unavailable` as a sync records it, and also
+  counts as failed in that run, so the exit code, the run record, and
+  the failure alert agree (operator decision, 2026-11-10). An identifier
+  that names no recorded show is a usage error (exit 2).
 - Both hold the writer lock, as today (§spec:cli).
 
 **Decision and constraint.** Single-show operations reuse the sync
@@ -1457,7 +1482,7 @@ Observable behavior:
   (§spec:single-show-runs), whether or not it staged anything new —
   sends one notice whose `staged` list holds the newly staged shows plus
   every pending one, at their current library paths. A delivered notice
-  clears the shows it covered. A show pruned or forgotten meanwhile
+  clears the shows it covered. A show pruned meanwhile
   leaves the pending list. Removing a collection's `on_complete` drops
   its pending list; changing the target sends the pending shows to the
   new target.
@@ -1592,10 +1617,15 @@ Observable behavior:
   a reconform cannot take the lock). `POST /validate`, `GET /status`,
   and `GET /metrics` read the config as it is at the request.
 - **Config errors are answers, not crashes.** If the edited config is
-  invalid, each endpoint that needs it answers with the config error
-  naming the offending key (§spec:configuration); `serve` keeps running
+  invalid, each endpoint that needs it answers `503` with the config
+  error naming the offending key (§spec:configuration; operator
+  decision, 2026-11-10); `serve` keeps running
   so the operator can fix the file and retry. Auth (bearer token) and
   unknown-scope `404` behave as before (§spec:serve).
+- **The run counter keeps its meaning.** `serve` watches each sync it
+  started and counts it in `shakedown_sync_runs_total` as `ok` or
+  `fail` when it exits; a refused (`409`) trigger and a verify are not
+  counted (operator decision, 2026-11-10).
 
 **Decision and constraint.** A triggered sync is a fresh one-shot run,
 not an in-process call, because §req:constraints makes runs one-shot
@@ -1848,8 +1878,7 @@ Observable behavior:
   archive."
 - Interrupted runs are not reported as success merely because the
   process exited. An unfinished operation remains visible until a retry
-  completes it or a targeted user action such as `item forget` removes
-  the affected item from Shakedown's responsibility.
+  completes it.
 
 **Decision and constraint.** Recovery is surfaced through status as the
 operator's durable dashboard, not through transient logs alone. The
@@ -2016,8 +2045,7 @@ Observable behavior:
   `restage` after a `library_layout` change (no network); the item
   leaving enumeration → `disappeared` with files retained by default,
   then pruned once `prune_disappeared` is set, so the retain→prune
-  transition is exercised, not just retain (§spec:item-lifecycle); and
-  finally `item forget` dropping the record.
+  transition is exercised, not just retain (§spec:item-lifecycle).
 - The check runs entirely in throwaway temporary trees (archive,
   library, state DB) on one filesystem; it can never touch a real
   deployment's data.
