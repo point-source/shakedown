@@ -23,6 +23,16 @@ class OperationType(StrEnum):
     RESTAGE = "restage"
     RECONCILE = "reconcile"
     VALIDATE = "validate"
+    REFETCH = "refetch"
+    RECONFORM = "reconform"
+
+
+class RunKind(StrEnum):
+    """What a run did: a sync of the whole collection, or a single-show run that
+    fetched only the shows it acts on (§spec:single-show-runs)."""
+    SYNC = "sync"
+    REFETCH = "refetch"
+    RECONFORM = "reconform"
 
 
 class OperationStatus(StrEnum):
@@ -121,7 +131,7 @@ class Item:
 
 @dataclass
 class Run:
-    """A single sync invocation against a (source, collection)."""
+    """One run against a (source, collection): a sync, or a single-show run."""
     id: int | None
     source_name: str
     collection_name: str
@@ -136,6 +146,7 @@ class Run:
     stale: bool = False  # source enumeration failed; existing items retained
     # Why this run's failure alert was not delivered; not resent (§spec:durable-handoff).
     failure_notice_error: str | None = None
+    kind: RunKind = RunKind.SYNC
 
 
 @dataclass

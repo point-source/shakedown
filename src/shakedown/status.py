@@ -8,7 +8,7 @@ import click
 
 from shakedown.config import Config
 from shakedown.db import connect
-from shakedown.models import ItemStatus, OperationOutcome
+from shakedown.models import ItemStatus, OperationOutcome, RunKind
 from shakedown.state import (
     DriftRepo,
     ItemRepo,
@@ -30,6 +30,12 @@ def _collection_summary(
 ) -> dict[str, Any]:
     counts = items.count_by_status(source_name, collection_name)
     last = runs.latest(source_name, collection_name)
+    # Only a sync lists the source, so only a sync can leave the collection stale or
+    # clear it; a later single-show run does neither (§spec:failure-behavior).
+    last_sync = (
+        last if last is None or last.kind == RunKind.SYNC
+        else runs.latest(source_name, collection_name, kind=RunKind.SYNC)
+    )
     recovery = outcomes.latest_actionable(source_name, collection_name)
     bytes_on_disk = items.archived_bytes(source_name, collection_name)
 
@@ -67,9 +73,9 @@ def _collection_summary(
         ],
         # Shows whose handoff notice was not delivered yet (§spec:durable-handoff).
         "handoff_pending": _handoff_pending(config, source_name, collection_name, items),
-        # Stale = the most recent run failed to enumerate the source; existing
+        # Stale = the most recent sync failed to enumerate the source; existing
         # items are retained (§spec:failure-behavior).
-        "stale": bool(last.stale) if last else False,
+        "stale": bool(last_sync.stale) if last_sync else False,
     }
 
 
@@ -99,6 +105,8 @@ def _summarize_run(run: Any) -> dict[str, Any]:
         # The id a `serve` trigger answers with, so a caller can find its run here
         # (§spec:api-sync-runs).
         "run_id": run.id,
+        # sync, refetch, or reconform (§spec:single-show-runs).
+        "kind": run.kind.value,
         "started_at": run.started_at.isoformat(),
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "items_discovered": run.items_discovered,

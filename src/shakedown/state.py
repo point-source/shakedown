@@ -18,6 +18,7 @@ from shakedown.models import (
     OperationStatus,
     OperationType,
     Run,
+    RunKind,
 )
 
 
@@ -209,16 +210,25 @@ class RunRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def start(self, source: str, collection: str, started_at: datetime) -> Run:
+    def start(
+        self,
+        source: str,
+        collection: str,
+        started_at: datetime,
+        *,
+        kind: RunKind = RunKind.SYNC,
+    ) -> Run:
         cur = self.conn.execute(
-            "INSERT INTO runs (source_name, collection_name, started_at) VALUES (?, ?, ?)",
-            (source, collection, _iso(started_at)),
+            "INSERT INTO runs (source_name, collection_name, started_at, kind)"
+            " VALUES (?, ?, ?, ?)",
+            (source, collection, _iso(started_at), kind.value),
         )
         return Run(
             id=cur.lastrowid,
             source_name=source,
             collection_name=collection,
             started_at=started_at,
+            kind=kind,
         )
 
     def mark_started(self, run: Run, started_at: datetime) -> None:
@@ -265,14 +275,17 @@ class RunRepo:
             (_iso(finished_at), json.dumps(errors), run_id),
         )
 
-    def latest(self, source: str, collection: str) -> Run | None:
+    def latest(
+        self, source: str, collection: str, *, kind: RunKind | None = None
+    ) -> Run | None:
+        """The collection's latest run, or its latest run of ``kind``."""
         cur = self.conn.execute(
             """
             SELECT * FROM runs
-            WHERE source_name=? AND collection_name=?
+            WHERE source_name=? AND collection_name=? AND (? IS NULL OR kind=?)
             ORDER BY started_at DESC LIMIT 1
             """,
-            (source, collection),
+            (source, collection, kind and kind.value, kind and kind.value),
         )
         row = cur.fetchone()
         if not row:
@@ -291,6 +304,7 @@ class RunRepo:
             errors=json.loads(row["errors"]),
             stale=bool(row["stale"]),
             failure_notice_error=row["failure_notice_error"],
+            kind=RunKind(row["kind"]),
         )
 
 

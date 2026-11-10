@@ -12,6 +12,7 @@ from shakedown.models import (
     OperationStatus,
     OperationType,
     Run,
+    RunKind,
 )
 from shakedown.state import (
     DriftRepo,
@@ -118,6 +119,23 @@ def test_run_stale_round_trips(tmp_path: Path) -> None:
     assert latest is not None
     assert latest.stale is True
     assert latest.errors == ["source enumeration failed: unreachable"]
+
+
+def test_run_kind_round_trips_and_latest_filters_by_kind(tmp_path: Path) -> None:
+    """A single-show run is recorded with its kind (§spec:single-show-runs); a run
+    opened without one is a sync."""
+    conn = connect(tmp_path / "s.db")
+    runs = RunRepo(conn)
+    sync = runs.start("s", "c", datetime(2026, 4, 26, 12, 0))
+    refetch = runs.start("s", "c", datetime(2026, 4, 26, 13, 0), kind=RunKind.REFETCH)
+    assert sync.kind == RunKind.SYNC and refetch.kind == RunKind.REFETCH
+
+    latest = runs.latest("s", "c")
+    assert latest is not None and latest.id == refetch.id
+    assert latest.kind == RunKind.REFETCH
+    latest_sync = runs.latest("s", "c", kind=RunKind.SYNC)
+    assert latest_sync is not None and latest_sync.id == sync.id
+    assert latest_sync.kind == RunKind.SYNC
 
 
 def test_operation_outcome_round_trip_and_latest_actionable(tmp_path: Path) -> None:
@@ -430,7 +448,9 @@ def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
     assert "collisions_dropped" not in run_cols
     assert "collision_paths" not in run_cols
     assert "failure_notice_error" in run_cols
-    assert RunRepo(conn).latest("s", "c") is not None
+    assert "kind" in run_cols
+    latest = RunRepo(conn).latest("s", "c")
+    assert latest is not None and latest.kind == RunKind.SYNC
 
 
 def test_v5_db_gains_the_not_playable_reason_and_reselects_every_show(tmp_path: Path) -> None:
