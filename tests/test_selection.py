@@ -270,3 +270,15 @@ def test_lossless_copies_rank_flac_alac_wav_aiff_then_larger_size_per_track() ->
     assert _names(select((*aiff, *wav, *alac), None)) == ["t01.m4a"]
     assert _names(select((*aiff, *wav), None)) == ["t01.wav"]
 
+
+def test_zips_of_the_audio_are_left_out() -> None:
+    """Operator decision (Q-6-5): archive.org's ZIPs of a show's audio repeat the
+    music; other ZIPs are kept like any non-audio file."""
+    files = (
+        _f("t01.mp3", "64Kbps MP3"),
+        _f("show_64kb_mp3.zip", "64Kbps MP3 ZIP"),
+        _f("show_vbr_mp3.zip", "VBR ZIP"),
+        _f("artwork.zip", "ZIP"),
+        _f("info.txt", "Text"),
+    )
+    assert _names(select(files, None)) == ["artwork.zip", "info.txt", "t01.mp3"]

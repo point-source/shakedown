@@ -43,6 +43,10 @@ _OTHER_AUDIO = frozenset({"ape", "wv", "wma", "mpc", "tta", "ra", "mp2", "dsf", 
 # Among lossless copies, this order first, then larger size per track (operator,
 # 2026-11-10): 24-bit FLAC over 16-bit, never WAV over FLAC of the same audio.
 _LOSSLESS_ORDER = {"flac": 0, "m4a": 1, "wav": 2, "aif": 3, "aiff": 3, "shn": 4}
+# Words in an archive.org format name that mark a ZIP of the show's audio
+# ("VBR ZIP", "64Kbps MP3 ZIP"): it repeats the music, so it is left out (operator,
+# 2026-11-10).
+_AUDIO_ZIP_WORDS = ("mp3", "vbr", "ogg", "flac", "shorten", "wav", "aiff", "kbps", "lossless")
 
 
 def _ext(name: str) -> str:
@@ -78,6 +82,11 @@ class _Format:
     @property
     def served(self) -> bool:
         return not any(f.refused for f in self.files)
+
+
+def _is_audio_zip(f: SourceFile) -> bool:
+    fmt = (f.format or "").lower()
+    return fmt.endswith("zip") and any(word in fmt for word in _AUDIO_ZIP_WORDS)
 
 
 def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
@@ -161,7 +170,11 @@ def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selec
     entries = [_entry(f, library=True) for f in files if f in staged.files]
     if best is not staged:
         entries += [_entry(f, library=False) for f in best.files]
-    entries += [_entry(f, library=True) for f in files if f not in audio and not f.refused]
+    entries += [
+        _entry(f, library=True)
+        for f in files
+        if f not in audio and not f.refused and not _is_audio_zip(f)
+    ]
     manifest = Manifest(files=tuple(sorted(entries, key=lambda e: e.name)))
 
     if restriction_reason:
