@@ -8,7 +8,6 @@ import click
 
 from shakedown.config import Config
 from shakedown.db import connect
-from shakedown.filesystem import disk_usage_bytes
 from shakedown.models import ItemStatus, OperationOutcome
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 
@@ -25,8 +24,7 @@ def _collection_summary(
     counts = items.count_by_status(source_name, collection_name)
     last = runs.latest(source_name, collection_name)
     recovery = outcomes.latest_actionable(source_name, collection_name)
-    archive_dir = config.archive_root / source_name / collection_name
-    bytes_on_disk = disk_usage_bytes(archive_dir) if archive_dir.exists() else 0
+    bytes_on_disk = items.archived_bytes(source_name, collection_name)
 
     restricted = []
     if counts.get(ItemStatus.UNAVAILABLE, 0):

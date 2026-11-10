@@ -135,6 +135,19 @@ class ItemRepo:
         )
         return {ItemStatus(row["status"]): row["n"] for row in cur}
 
+    def archived_bytes(self, source: str, collection: str) -> int:
+        """Total size of the archive copies on record, from their manifests: a cheap
+        stand-in for walking the archive tree, which on a NAS takes tens of seconds."""
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(json_extract(f.value, '$.size')), 0) AS total
+            FROM items, json_each(items.recorded_manifest) AS f
+            WHERE source_name=? AND collection_name=? AND archive_path IS NOT NULL
+            """,
+            (source, collection),
+        ).fetchone()
+        return int(row["total"])
+
     def delete(self, source: str, collection: str, identifier: str) -> None:
         self.conn.execute(
             "DELETE FROM items WHERE source_name=? AND collection_name=? AND identifier=?",

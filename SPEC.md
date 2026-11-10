@@ -688,7 +688,7 @@ exits (§req:constraints). The command surface:
 | Command | Behavior |
 | --- | --- |
 | `sync [--source S] [--collection C] [--dry-run] [--refresh-metadata]` | Run a sync now; defaults to all configured collections. What the scheduler invokes. `--refresh-metadata` re-resolves and rewrites `metadata.json` sidecars for preserve-opted collections without re-downloading media (§spec:metadata-preservation). |
-| `status [--json]` | Last run per collection, item counts by status, disk usage, restricted items with reasons, disappeared items, known drift, and recordings dropped to layout collisions (§spec:layout-collision-safety). |
+| `status [--json]` | Last run per collection, item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, disappeared items, known drift, and recordings dropped to layout collisions (§spec:layout-collision-safety). |
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |

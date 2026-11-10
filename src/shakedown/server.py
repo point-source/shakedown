@@ -10,6 +10,7 @@ import hmac
 import json
 import logging
 import os
+from contextlib import closing
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -47,7 +48,7 @@ def build_app(config: Config) -> FastAPI:
     )
     g_bytes = Gauge(
         "shakedown_bytes_on_disk",
-        "Archive disk usage per (source, collection).",
+        "Size of the archived files on record per (source, collection).",
         ["source", "collection"],
         registry=registry,
     )
@@ -90,39 +91,39 @@ def build_app(config: Config) -> FastAPI:
 
     @app.get("/status")
     def status() -> JSONResponse:
-        conn = connect(config.state_db)  # type: ignore[arg-type]
-        items = ItemRepo(conn)
-        runs = RunRepo(conn)
-        drift = DriftRepo(conn)
-        outcomes = OperationOutcomeRepo(conn)
-        summaries: list[dict[str, Any]] = []
-        for source in config.sources:
-            for collection in source.collections:
-                summaries.append(
-                    _collection_summary(
-                        config, source.name, collection.name, items, runs, drift, outcomes
+        with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+            items = ItemRepo(conn)
+            runs = RunRepo(conn)
+            drift = DriftRepo(conn)
+            outcomes = OperationOutcomeRepo(conn)
+            summaries: list[dict[str, Any]] = []
+            for source in config.sources:
+                for collection in source.collections:
+                    summaries.append(
+                        _collection_summary(
+                            config, source.name, collection.name, items, runs, drift, outcomes
+                        )
                     )
-                )
         return JSONResponse(json.loads(json.dumps(summaries, default=str)))
 
     @app.get("/metrics")
     def metrics() -> PlainTextResponse:
         # Refresh gauges from current DB state on each scrape.
-        conn = connect(config.state_db)  # type: ignore[arg-type]
-        items = ItemRepo(conn)
-        drift = DriftRepo(conn)
-        runs = RunRepo(conn)
-        outcomes = OperationOutcomeRepo(conn)
-        for source in config.sources:
-            for collection in source.collections:
-                counts = items.count_by_status(source.name, collection.name)
-                for status_, n in counts.items():
-                    g_items.labels(source.name, collection.name, status_.value).set(n)
-                summary = _collection_summary(
-                    config, source.name, collection.name, items, runs, drift, outcomes
-                )
-                g_bytes.labels(source.name, collection.name).set(summary["bytes_on_disk"])
-                g_drift.labels(source.name, collection.name).set(summary["drift_files"])
+        with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+            items = ItemRepo(conn)
+            drift = DriftRepo(conn)
+            runs = RunRepo(conn)
+            outcomes = OperationOutcomeRepo(conn)
+            for source in config.sources:
+                for collection in source.collections:
+                    counts = items.count_by_status(source.name, collection.name)
+                    for status_, n in counts.items():
+                        g_items.labels(source.name, collection.name, status_.value).set(n)
+                    summary = _collection_summary(
+                        config, source.name, collection.name, items, runs, drift, outcomes
+                    )
+                    g_bytes.labels(source.name, collection.name).set(summary["bytes_on_disk"])
+                    g_drift.labels(source.name, collection.name).set(summary["drift_files"])
         body = generate_latest(registry)
         return PlainTextResponse(body.decode(), media_type=CONTENT_TYPE_LATEST)
 
