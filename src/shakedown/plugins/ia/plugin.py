@@ -22,6 +22,8 @@ from shakedown.plugins.base import (
     SourcePlugin,
     VerifyResult,
     downloaded_file_mismatch,
+    http_status,
+    retry_after_seconds,
     reusable_leftover,
 )
 from shakedown.plugins.registry import register
@@ -207,7 +209,7 @@ class IAPlugin(SourcePlugin):
             for mf in to_fetch:
                 self._download_file(identifier, mf.name, dest_dir / mf.name)
         except Exception as e:
-            if _http_status(e) == 403:
+            if http_status(e) == 403:
                 # archive.org serves some shows stream-only (often soundboards) with no
                 # restriction flag in their metadata; the refusal is the only signal.
                 log.info("IA download refused for %s: %s", identifier, e)
@@ -223,7 +225,7 @@ class IAPlugin(SourcePlugin):
                 bytes_downloaded=0,
                 error=str(e),
                 retriable=_is_retriable(e),
-                retry_after=_retry_after_seconds(e),
+                retry_after=retry_after_seconds(e),
             )
 
         # Every manifest file is now on disk: reused above or just written.
@@ -298,14 +300,6 @@ _RETRIABLE_MARKERS = (
 )
 
 
-def _http_status(exc: BaseException) -> int | None:
-    """Best-effort HTTP status from a requests-style exception (has .response)."""
-    response = getattr(exc, "response", None)
-    if response is None:
-        return None
-    return getattr(response, "status_code", None)
-
-
 def _is_retriable(exc: BaseException) -> bool:
     """Classify a download failure as a transient fault worth a bounded retry.
 
@@ -313,30 +307,11 @@ def _is_retriable(exc: BaseException) -> bool:
     checksum mismatches are transient; anything else fails fast so a permanent
     fault isn't retried needlessly (SPEC §spec:failure-behavior).
     """
-    status = _http_status(exc)
+    status = http_status(exc)
     if status is not None and (status == 429 or 500 <= status < 600):
         return True
     msg = str(exc).lower()
     return any(marker in msg for marker in _RETRIABLE_MARKERS)
-
-
-def _retry_after_seconds(exc: BaseException) -> float | None:
-    """Extract a `Retry-After` delay (seconds) from an HTTP error response, if any.
-
-    Only the delta-seconds form is honored; the HTTP-date form falls back to the
-    core's exponential backoff.
-    """
-    response = getattr(exc, "response", None)
-    if response is None:
-        return None
-    headers = getattr(response, "headers", None) or {}
-    raw = headers.get("Retry-After")
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
 
 
 def _normalize_template_fields(identifier: str, metadata: dict[str, Any]) -> dict[str, Any]:

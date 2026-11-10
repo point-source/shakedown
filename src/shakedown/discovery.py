@@ -21,7 +21,13 @@ import requests
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.models import Manifest, SourceFile
-from shakedown.plugins.base import ItemLookup, ListedItem, SourcePlugin
+from shakedown.plugins.base import (
+    ItemLookup,
+    ListedItem,
+    SourcePlugin,
+    http_status,
+    retry_after_seconds,
+)
 from shakedown.selection import select
 
 # The per-item lookup envelope, matched to archive.org's real latency
@@ -191,13 +197,6 @@ class LookupFailure:
     reason: str
 
 
-def _status(exc: BaseException) -> int | None:
-    """HTTP status of a requests- or httpx-style error (both carry .response)."""
-    response = getattr(exc, "response", None)
-    status = getattr(response, "status_code", None)
-    return status if isinstance(status, int) else None
-
-
 _TIMEOUTS = (requests.Timeout, httpx.TimeoutException, TimeoutError)
 _CONNECTION_ERRORS = (requests.ConnectionError, httpx.TransportError, ConnectionError)
 
@@ -208,7 +207,7 @@ def _describe_fault(exc: BaseException) -> tuple[bool, str]:
     Transient: 429, 5xx, timeouts, connection errors (SPEC §spec:slow-metadata).
     Everything else fails at once.
     """
-    status = _status(exc)
+    status = http_status(exc)
     if status is not None:
         return status == 429 or 500 <= status < 600, f"HTTP {status}"
     # requests.Timeout subclasses requests.ConnectionError: check timeouts first.
@@ -219,21 +218,11 @@ def _describe_fault(exc: BaseException) -> tuple[bool, str]:
     return False, f"{type(exc).__name__}: {exc}"
 
 
-def _retry_after(exc: BaseException) -> float | None:
-    """A numeric `Retry-After` from the error's response, if any."""
-    headers = getattr(getattr(exc, "response", None), "headers", None)
-    raw = headers.get("Retry-After") if headers is not None else None
-    try:
-        return float(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
 def _backoff_seconds(attempt: int, exc: BaseException) -> float:
     """Wait before the next attempt: the source's `Retry-After` when given, else an
     exponential backoff — either way capped. The header is upstream-controlled and
     must never pin a worker for an attacker-chosen time."""
-    retry_after = _retry_after(exc)
+    retry_after = retry_after_seconds(exc)
     delay = (
         _LOOKUP_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
         if retry_after is None
@@ -246,8 +235,6 @@ def lookup(
     plugin: SourcePlugin,
     identifier: str,
     budget: SourceBudget,
-    *,
-    sleep: Callable[[float], None] | None = None,
 ) -> ItemDetails | LookupFailure:
     """Look up one item under the core's envelope (SPEC §spec:per-item-isolation).
 
@@ -271,7 +258,7 @@ def lookup(
                 return LookupFailure(
                     identifier, f"lookup failed after {LOOKUP_ATTEMPTS} attempts: {said}"
                 )
-            (sleep or _sleep)(_backoff_seconds(attempt, e))
+            _sleep(_backoff_seconds(attempt, e))
     raise AssertionError("unreachable: LOOKUP_ATTEMPTS must be >= 1")
 
 

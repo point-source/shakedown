@@ -30,6 +30,7 @@ from shakedown.plugins.base import (
     ListedItem,
     SourcePlugin,
     VerifyResult,
+    retry_after_seconds,
     reusable_leftover,
 )
 from shakedown.plugins.registry import register
@@ -88,14 +89,7 @@ def _classify(exc: httpx.HTTPError) -> tuple[bool, float | None, str]:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         retriable = status == 429 or 500 <= status < 600
-        retry_after: float | None = None
-        raw = exc.response.headers.get("Retry-After")
-        if raw is not None:
-            try:
-                retry_after = float(raw)
-            except (TypeError, ValueError):
-                retry_after = None
-        return retriable, retry_after, f"HTTP {status}"
+        return retriable, retry_after_seconds(exc), f"HTTP {status}"
     if isinstance(exc, httpx.TimeoutException):
         return True, None, f"timeout: {exc}"
     if isinstance(exc, httpx.TransportError):

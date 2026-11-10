@@ -49,7 +49,9 @@ def _answer(*files: dict, metadata: dict | None = None) -> ItemLookup:
 
 def _run(plugin: FakePlugin, identifier: str = "a", budget: SourceBudget | None = None):
     sleeps: list[float] = []
-    result = lookup(plugin, identifier, budget or SourceBudget(2), sleep=sleeps.append)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("shakedown.discovery._sleep", sleeps.append)
+        result = lookup(plugin, identifier, budget or SourceBudget(2))
     return result, sleeps
 
 
@@ -97,6 +99,16 @@ def test_rate_limit_honors_retry_after(make) -> None:
     result, sleeps = _run(_plugin())
     assert isinstance(result, ItemDetails)
     assert sleeps == [7.0]
+
+
+@pytest.mark.parametrize("header", ["-5", "nan", "inf"])
+def test_unusable_retry_after_falls_back_to_backoff(header: str) -> None:
+    """An upstream header the core cannot wait on must not escape as an error: that
+    would stop the whole listing instead of failing (or retrying) one item."""
+    FakePlugin.lookup_faults["a"] = [_requests_error(503, header), _answer({"name": "x"})]
+    result, sleeps = _run(_plugin())
+    assert isinstance(result, ItemDetails)
+    assert sleeps == [1.0]
 
 
 def test_retry_after_is_clamped_to_the_backoff_cap() -> None:
@@ -242,5 +254,7 @@ def test_budget_slot_is_free_while_backing_off() -> None:
         if got:
             budget._sem.release()
 
-    lookup(_plugin(), "a", budget, sleep=sleep)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("shakedown.discovery._sleep", sleep)
+        lookup(_plugin(), "a", budget)
     assert free_during_sleep == [True]

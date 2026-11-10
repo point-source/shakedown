@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
@@ -37,6 +38,29 @@ def downloaded_file_mismatch(path: Path, expected: ManifestFile) -> str | None:
         if digest.hexdigest() != expected.md5.lower():
             return f"checksum mismatch for {expected.name}"
     return None
+
+
+def http_status(exc: BaseException) -> int | None:
+    """The HTTP status of a requests- or httpx-style error (both carry .response)."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """The delta-seconds `Retry-After` an HTTP error response asked for, if any.
+
+    The HTTP-date form, and any value that is not a finite, non-negative number of
+    seconds, count as no header: the core then uses its own backoff.
+    """
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    raw = headers.get("Retry-After") if headers is not None else None
+    try:
+        seconds = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
 
 
 def reusable_leftover(path: Path, expected: ManifestFile) -> bool:

@@ -359,7 +359,7 @@ def test_is_retriable_classifies_transient_faults() -> None:
 
 
 def test_retry_after_seconds_parses_delta_header() -> None:
-    from shakedown.plugins.ia.plugin import _retry_after_seconds
+    from shakedown.plugins.base import retry_after_seconds as _retry_after_seconds
 
     assert _retry_after_seconds(_HTTPError("429", _FakeResponse(429, {"Retry-After": "12"}))) == 12.0
     # HTTP-date form is not delta-seconds → fall back to core backoff (None).
@@ -369,6 +369,9 @@ def test_retry_after_seconds_parses_delta_header() -> None:
     # No response / no header → None.
     assert _retry_after_seconds(RuntimeError("plain error")) is None
     assert _retry_after_seconds(_HTTPError("boom", _FakeResponse(500))) is None
+    # A wait the core cannot honor is no wait at all.
+    for raw in ("-5", "nan", "inf"):
+        assert _retry_after_seconds(_HTTPError("429", _FakeResponse(429, {"Retry-After": raw}))) is None
 
 
 def test_verify_existence_only_does_not_hash(tmp_path: Path) -> None:
