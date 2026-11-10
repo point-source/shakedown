@@ -204,7 +204,10 @@ def _first_render_error(
     config: Config, collection: CollectionConfig, source_name: str, to_stage: list[Item]
 ) -> tuple[str, TemplateError] | None:
     """Render every item's library folder before the library is cleared, so a layout
-    that cannot render leaves the existing tree in place. Returns the first failure."""
+    that cannot render leaves the existing tree in place. Returns the first failure.
+
+    Config load already rejects unknown filters; this backs that up for any render
+    failure it misses, because a failure after the clear would empty the library."""
     for item in to_stage:
         assert item.archive_path is not None  # filtered into to_stage
         try:
