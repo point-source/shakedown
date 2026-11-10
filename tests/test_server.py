@@ -515,3 +515,26 @@ async def test_status_carries_the_pending_handoff(tmp_roots: tuple[Path, Path]) 
     assert pending["shows"] == 1
     assert pending["identifiers"] == ["gd-x"]
     assert pending["last_reason"] == "webhook unreachable: connection refused"
+
+
+@pytest.mark.asyncio
+async def test_status_lists_shows_with_no_playable_copy(tmp_roots: tuple[Path, Path]) -> None:
+    """GET /status carries the same not-playable list as `status --json`
+    (§spec:quality-selection)."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["gd-shn"] = FakeItem(
+        identifier="gd-shn", files=[FakeFile(name="t.shn", content=b"shn", format="Shorten")]
+    )
+    assert run_sync(config) == 0
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(config)),
+        base_url="http://testserver",
+    ) as client:
+        r = await client.get("/status")
+    assert r.status_code == 200
+    assert r.json()[0]["not_playable"] == [
+        {"identifier": "gd-shn", "reason": "only in SHN; archive.org offers no playable copy"}
+    ]
+    assert r.json()[0]["restricted"] == []

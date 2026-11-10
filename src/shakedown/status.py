@@ -49,6 +49,11 @@ def _collection_summary(
         "last_run": _summarize_run(last) if last else None,
         "recovery": _summarize_recovery(recovery) if recovery else None,
         "restricted": restricted,
+        # Complete shows with no copy a common player reads (§spec:quality-selection).
+        "not_playable": [
+            {"identifier": identifier, "reason": reason}
+            for identifier, reason in items.list_not_playable(source_name, collection_name)
+        ],
         # Shows that render the same library folder, each staged into its own folder
         # labelled with its identifier (§spec:library-ownership).
         "separations": [
@@ -212,6 +217,12 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 click.echo(f"    - {r['identifier']}: {r['reason']}")
             if len(s["restricted"]) > 10:
                 click.echo(f"    ... and {len(s['restricted']) - 10} more")
+        if s["not_playable"]:
+            click.echo(f"  not playable ({len(s['not_playable'])}):")
+            for r in s["not_playable"][:10]:
+                click.echo(f"    - {r['identifier']}: {r['reason']}")
+            if len(s["not_playable"]) > 10:
+                click.echo(f"    ... and {len(s['not_playable']) - 10} more")
         click.echo("")
 
 

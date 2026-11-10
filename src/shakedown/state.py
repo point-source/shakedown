@@ -160,6 +160,20 @@ class ItemRepo:
         )
         return [(row["identifier"], row["restriction_reason"]) for row in cur]
 
+    def list_not_playable(self, source: str, collection: str) -> list[tuple[str, str]]:
+        """(identifier, reason) of the collection's complete shows with no copy a
+        common player reads (§spec:quality-selection)."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier, not_playable_reason FROM items
+            WHERE source_name=? AND collection_name=? AND status=?
+              AND not_playable_reason IS NOT NULL
+            ORDER BY identifier
+            """,
+            (source, collection, ItemStatus.COMPLETE.value),
+        )
+        return [(row["identifier"], row["not_playable_reason"]) for row in cur]
+
     def count_by_status(self, source: str, collection: str) -> dict[ItemStatus, int]:
         cur = self.conn.execute(
             """

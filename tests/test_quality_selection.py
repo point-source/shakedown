@@ -312,3 +312,70 @@ def test_a_listing_without_audio_keeps_the_copy_and_says_why(
     assert item.restriction_reason == "source lists no audio files"
     assert _names(archive, "gd-dark") == ["info.txt", "t01.flac"]
     assert _names(library, "gd-dark") == ["info.txt", "t01.flac"]
+
+
+def _status(config, *, as_json: bool) -> str:
+    import io
+    from contextlib import redirect_stdout
+
+    from shakedown.status import print_status
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        print_status(config, as_json=as_json)
+    return buf.getvalue()
+
+
+def test_status_lists_shn_only_shows_under_not_playable(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Its own heading, not under `restricted`; lossless-refused shows stay in the
+    `restricted` list with their reason (operator-approved copy, 2026-11-10)."""
+    import json
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _show("gd-shn-a", _shn())
+    _show("gd-shn-b", _shn(), NOTES)
+    _show("gd-sbd", _flac(refused=True), _vbr(original="t01.flac"))
+    _show("gd-flac", _flac())
+    assert run_sync(config) == 0
+
+    text = _status(config, as_json=False)
+    assert (
+        "  restricted (1):\n"
+        f"    - gd-sbd: {LOSSLESS_REFUSED_REASON}\n"
+        "  not playable (2):\n"
+        "    - gd-shn-a: only in SHN; archive.org offers no playable copy\n"
+        "    - gd-shn-b: only in SHN; archive.org offers no playable copy\n"
+    ) in text
+
+    (summary,) = json.loads(_status(config, as_json=True))
+    assert summary["not_playable"] == [
+        {"identifier": "gd-shn-a", "reason": NOT_PLAYABLE_SHN_REASON},
+        {"identifier": "gd-shn-b", "reason": NOT_PLAYABLE_SHN_REASON},
+    ]
+    assert summary["restricted"] == [{"identifier": "gd-sbd", "reason": LOSSLESS_REFUSED_REASON}]
+    assert summary["counts"]["complete"] == 4
+
+
+def test_status_caps_the_not_playable_list(tmp_roots: tuple[Path, Path]) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    for n in range(12):
+        _show(f"gd-shn-{n:02d}", _shn())
+    assert run_sync(config) == 0
+
+    text = _status(config, as_json=False)
+    assert "  not playable (12):\n" in text
+    assert "    - gd-shn-09: " in text
+    assert "    - gd-shn-10: " not in text
+    assert "    ... and 2 more\n" in text
+
+
+def test_status_is_quiet_when_every_show_plays(tmp_roots: tuple[Path, Path]) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    _show("gd-flac", _flac())
+    assert run_sync(config) == 0
+    assert "not playable" not in _status(config, as_json=False)
