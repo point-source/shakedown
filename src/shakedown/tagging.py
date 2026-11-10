@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from collections.abc import Mapping
@@ -140,6 +141,12 @@ class TagIndex:
 
 # --- writing one file ---------------------------------------------------------------
 
+# Under each collection's archive folder (same filesystem, outside the library, ignored
+# by the archive walk): backups of files being tagged, `<identifier>/<file name>`.
+TAGGING_DIR = ".tagging"
+
+_PART = re.compile(r"^\..*\.[0-9a-f]{32}\.part$")  # a backup still being written
+
 
 class TagWriteError(Exception):
     """Writing a file's tags failed on the disk (no space, permission). The file is
@@ -156,18 +163,21 @@ class FillResult:
 
 
 def _fault_point(stage: str) -> None:
-    """Test seam for crash injection: called after the tagged copy is saved
-    ("saved") and after it replaced the file ("replaced")."""
+    """Test seam for crash injection: called once the backup is complete
+    ("backed_up") and once the tags are written ("saved")."""
 
 
 def _absent(values: list[str] | None) -> bool:
-    return not values
+    """A field with no values, or only empty or blank ones, carries nobody's work and
+    counts as absent (Q-8-3)."""
+    return not values or not any(v.strip() for v in values)
 
 
 class _Tags:
     """One file's tags behind format-neutral names, through mutagen. MP3 goes through
     EasyID3 and is saved in the ID3 version it already had, so nobody else's frames
-    are converted; FLAC and Ogg Vorbis use Vorbis comments."""
+    are converted; FLAC and Ogg Vorbis use Vorbis comments. mutagen writes into the
+    file itself, so every link to it carries the change."""
 
     def __init__(self, path: Path) -> None:
         suffix = path.suffix.lower()
@@ -210,7 +220,7 @@ class _Tags:
             self._vorbis.save(path)
 
 
-def _md5(path: Path) -> str:
+def md5_file(path: Path) -> str:
     h = hashlib.md5()
     with path.open("rb") as f:
         while chunk := f.read(1024 * 1024):
@@ -226,17 +236,63 @@ def _fsync(path: Path) -> None:
         os.close(fd)
 
 
+def backup_path(collection_root: Path, identifier: str, file_name: str) -> Path:
+    """Where the original of an archive file is kept while its tags are written."""
+    return collection_root / TAGGING_DIR / identifier / file_name
+
+
+def _make_backup(path: Path, backup: Path) -> None:
+    """Copy the whole original beside the archive, made durable under a temporary name
+    first: a backup that exists is always complete."""
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    part = backup.parent / f".{backup.name}.{uuid.uuid4().hex}.part"
+    try:
+        shutil.copyfile(path, part)
+        _fsync(part)
+        os.replace(part, backup)
+        _fsync(backup.parent)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _restore(backup: Path, target: Path) -> None:
+    """Put the original bytes back into the file itself (its inode), so every link to
+    it holds them again."""
+    with backup.open("rb") as src, target.open("r+b") as dst:
+        shutil.copyfileobj(src, dst, 1024 * 1024)
+        dst.truncate()
+        dst.flush()
+        os.fsync(dst.fileno())
+
+
+def _discard(backup: Path) -> None:
+    """Drop a backup, then any folders it leaves empty up to the collection's
+    TAGGING_DIR."""
+    backup.unlink(missing_ok=True)
+    for folder in backup.parents:
+        try:
+            folder.rmdir()
+        except OSError:
+            return
+        if folder.name == TAGGING_DIR:
+            return
+
+
 def fill_file(
-    path: Path, desired: Mapping[str, str], record: TagRecord | None, temp_dir: Path
+    path: Path, desired: Mapping[str, str], record: TagRecord | None, backup: Path | None
 ) -> FillResult:
     """Fill the file's absent tags with the desired values (§spec:tag-filling).
 
     A tag already present is never changed — except a value shakedown wrote itself
     (in `record`) whose computed value changed, and only while the file still holds
     exactly that value; one anything else changed is no longer shakedown's. A file
-    with nothing to change is not written. A change is made on a copy in `temp_dir`
-    (same filesystem) that then replaces the file in one rename, so a crash leaves
-    either the old bytes or the new ones, never a half-written file.
+    with nothing to change is not written.
+
+    Tags are written into the file itself, so the archive copy and every link to it
+    carry them and no copy is left. For a file in the archive, `backup` journals the
+    write: the whole original is kept there until the tags are written, and a crash
+    in between is undone by recover_interrupted_tagging at the start of the next run.
+    A file in a fetch's temp folder is linked nowhere yet and takes no backup.
     """
     try:
         tags = _Tags(path)
@@ -251,6 +307,7 @@ def fill_file(
         current = tags.get(key)
         if _absent(current):
             changes[key] = value
+            ours.pop(key, None)
         elif key in ours:
             if current != [ours[key]]:
                 del ours[key]  # someone else's value now
@@ -267,20 +324,49 @@ def fill_file(
 
     for key, value in changes.items():
         tags.set(key, value)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp = temp_dir / f"{uuid.uuid4().hex}{path.suffix}"
+    if backup is not None:
+        try:
+            _make_backup(path, backup)
+        except OSError as e:
+            raise TagWriteError(str(e)) from e
+        _fault_point("backed_up")
     try:
-        shutil.copyfile(path, temp)
-        shutil.copymode(path, temp)
-        tags.save(temp)
-        _fsync(temp)
-        post_tag_md5 = _md5(temp)
-        _fault_point("saved")
-        os.replace(temp, path)
+        tags.save(path)
+        _fsync(path)
     except (OSError, MutagenError) as e:
+        if backup is not None:
+            try:
+                _restore(backup, path)
+                _discard(backup)
+            except OSError:
+                log.exception("could not restore %s; the next run restores it", path)
         raise TagWriteError(str(e)) from e
-    finally:
-        temp.unlink(missing_ok=True)
-    _fsync(path.parent)
-    _fault_point("replaced")
+    post_tag_md5 = md5_file(path)
+    _fault_point("saved")
+    if backup is not None:
+        _discard(backup)
     return FillResult("written", TagRecord(post_tag_md5, {**ours, **changes}))
+
+
+def recover_interrupted_tagging(collection_root: Path) -> list[Path]:
+    """Undo tag writes a crash interrupted, before a run does anything else (Q-8-1):
+    every backup left under the collection's TAGGING_DIR goes back into its archive
+    file, through the inode, so neither the archive nor any library link keeps a
+    half-written file. A backup still being written means its file was not touched
+    yet; it is discarded. Returns the files restored."""
+    root = collection_root / TAGGING_DIR
+    if not root.is_dir():
+        return []
+    restored: list[Path] = []
+    for backup in sorted(p for p in root.rglob("*") if p.is_file()):
+        if _PART.match(backup.name):
+            backup.unlink()
+            continue
+        target = collection_root / backup.relative_to(root)
+        if target.is_file():
+            log.warning("restoring %s after an interrupted tag write", target)
+            _restore(backup, target)
+            restored.append(target)
+        backup.unlink()
+    shutil.rmtree(root)
+    return restored

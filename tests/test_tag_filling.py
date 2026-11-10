@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -15,7 +16,14 @@ from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
 from shakedown.state import ItemRepo, TagRecord, TagRepo
 from shakedown.sync import _record_disappeared
-from shakedown.tagging import TagIndex, TagWriteError, desired_tags, fill_file, fingerprint
+from shakedown.tagging import (
+    TagIndex,
+    TagWriteError,
+    desired_tags,
+    fill_file,
+    fingerprint,
+    recover_interrupted_tagging,
+)
 from tests.audio_fixtures import make_audio, read_tags
 
 
@@ -176,20 +184,49 @@ def _md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
 
 
+def _archived(tmp_path: Path, name: str, tags: dict[str, str] | None = None,
+              **kwargs: int) -> tuple[Path, Path]:
+    """An archive file of show `gd77` in collection folder `tmp_path/coll`, and the
+    backup path shakedown journals it under while tagging."""
+    path = make_audio(tmp_path / "coll" / "gd77" / name, tags, **kwargs)
+    return path, tmp_path / "coll" / ".tagging" / "gd77" / name
+
+
 @pytest.mark.parametrize("name", ["a.flac", "a.mp3", "a.ogg"])
 def test_absent_tags_are_filled_and_recorded(tmp_path: Path, name: str) -> None:
-    path = make_audio(tmp_path / "show" / name)
-    result = fill_file(path, DESIRED, None, tmp_path / ".tagging")
+    path, backup = _archived(tmp_path, name)
+    result = fill_file(path, DESIRED, None, backup)
     assert result.status == "written"
     assert read_tags(path) == {k: [v] for k, v in DESIRED.items()}
     assert result.record == TagRecord(_md5(path), DESIRED)
-    assert list((tmp_path / ".tagging").iterdir()) == []  # no temp copy left behind
+    assert not backup.exists()  # the journal is cleared once the write is done
+
+
+def test_tags_are_written_through_the_shared_inode(tmp_path: Path) -> None:
+    """Every link to the file carries the tags and no copy is left: the library link
+    and any link another tool made (§spec:tag-filling, Q-8-1)."""
+    path, backup = _archived(tmp_path, "a.flac")
+    library = tmp_path / "library" / "a.flac"
+    library.parent.mkdir()
+    os.link(path, library)
+    inode = path.stat().st_ino
+    fill_file(path, DESIRED, None, backup)
+    assert path.stat().st_ino == library.stat().st_ino == inode
+    assert path.stat().st_nlink == 2
+    assert read_tags(library)["album"] == [DESIRED["album"]]
+
+
+def test_a_file_in_the_fetch_folder_is_tagged_without_a_backup(tmp_path: Path) -> None:
+    """A freshly downloaded file is linked nowhere yet, so it needs no journal."""
+    path = make_audio(tmp_path / ".tmp-gd77" / "a.mp3")
+    result = fill_file(path, DESIRED, None, None)
+    assert result.status == "written" and read_tags(path)["venue"] == ["Barton Hall"]
 
 
 @pytest.mark.parametrize("name", ["a.flac", "a.mp3", "a.ogg"])
 def test_a_tag_already_present_is_never_changed(tmp_path: Path, name: str) -> None:
-    path = make_audio(tmp_path / name, {"album": "Cornell '77", "artist": "GD"})
-    result = fill_file(path, DESIRED, None, tmp_path / ".tagging")
+    path, backup = _archived(tmp_path, name, {"album": "Cornell '77", "artist": "GD"})
+    result = fill_file(path, DESIRED, None, backup)
     tags = read_tags(path)
     assert (tags["album"], tags["artist"]) == (["Cornell '77"], ["GD"])
     assert tags["venue"] == ["Barton Hall"]
@@ -198,14 +235,22 @@ def test_a_tag_already_present_is_never_changed(tmp_path: Path, name: str) -> No
     assert result.record.written["venue"] == "Barton Hall"
 
 
+def test_an_empty_tag_counts_as_absent_and_is_filled(tmp_path: Path) -> None:
+    """Q-8-3: a field holding only empty or blank values carries nobody's work."""
+    path, backup = _archived(tmp_path, "a.flac", {"artist": "  ", "album": ""})
+    fill_file(path, DESIRED, None, backup)
+    tags = read_tags(path)
+    assert tags["artist"] == ["Grateful Dead"] and tags["album"] == [DESIRED["album"]]
+
+
 def test_a_value_shakedown_wrote_is_rewritten_when_its_computed_value_changes(
     tmp_path: Path,
 ) -> None:
     """An album gaining its identifier label as a clash appears (§spec:tag-filling)."""
-    path = make_audio(tmp_path / "a.flac")
-    first = fill_file(path, DESIRED, None, tmp_path / ".tagging")
+    path, backup = _archived(tmp_path, "a.flac")
+    first = fill_file(path, DESIRED, None, backup)
     labelled = {**DESIRED, "album": DESIRED["album"] + " [gd77.sbd]"}
-    second = fill_file(path, labelled, first.record, tmp_path / ".tagging")
+    second = fill_file(path, labelled, first.record, backup)
     assert second.status == "written"
     assert read_tags(path)["album"] == [labelled["album"]]
     assert second.record == TagRecord(_md5(path), labelled)
@@ -214,31 +259,33 @@ def test_a_value_shakedown_wrote_is_rewritten_when_its_computed_value_changes(
 def test_a_value_another_tool_changed_is_left_alone_and_no_longer_ours(
     tmp_path: Path,
 ) -> None:
-    path = make_audio(tmp_path / "a.ogg")
-    first = fill_file(path, DESIRED, None, tmp_path / ".tagging")
+    path, backup = _archived(tmp_path, "a.ogg")
+    first = fill_file(path, DESIRED, None, backup)
     f = OggVorbis(path)
     f["ALBUM"] = ["My own album name"]
     f.save()
     changed = {**DESIRED, "album": DESIRED["album"] + " [x]"}
-    second = fill_file(path, changed, first.record, tmp_path / ".tagging")
+    second = fill_file(path, changed, first.record, backup)
     assert read_tags(path)["album"] == ["My own album name"]
     assert second.record is not None and "album" not in second.record.written
 
 
 def test_nothing_to_fill_writes_nothing(tmp_path: Path) -> None:
-    path = make_audio(tmp_path / "a.mp3", DESIRED)
+    path, backup = _archived(tmp_path, "a.mp3", DESIRED)
     before = path.stat()
-    result = fill_file(path, DESIRED, None, tmp_path / ".tagging")
+    result = fill_file(path, DESIRED, None, backup)
     after = path.stat()
     assert result.status == "unchanged" and result.record is None
-    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert not backup.exists()
 
 
 def test_an_id3v23_file_stays_v23_and_keeps_its_other_frames(tmp_path: Path) -> None:
     """mutagen saves v2.4 by default; converting someone's v2.3 tag would rewrite
     their frames."""
-    path = make_audio(tmp_path / "a.mp3", {"artist": "GD", "genre": "Rock"}, id3_version=3)
-    fill_file(path, DESIRED, None, tmp_path / ".tagging")
+    path, backup = _archived(tmp_path, "a.mp3", {"artist": "GD", "genre": "Rock"},
+                             id3_version=3)
+    fill_file(path, DESIRED, None, backup)
     id3 = ID3(path)
     assert id3.version[:2] == (2, 3)
     assert str(id3["TPE1"]) == "GD" and str(id3["TCON"]) == "Rock"
@@ -247,48 +294,100 @@ def test_an_id3v23_file_stays_v23_and_keeps_its_other_frames(tmp_path: Path) -> 
 
 
 def test_a_file_the_library_cannot_parse_is_left_untouched(tmp_path: Path) -> None:
-    path = tmp_path / "broken.flac"
+    path = tmp_path / "coll" / "gd77" / "broken.flac"
+    path.parent.mkdir(parents=True)
     path.write_bytes(b"not really a flac file")
-    result = fill_file(path, DESIRED, None, tmp_path / ".tagging")
+    result = fill_file(path, DESIRED, None, tmp_path / "coll" / ".tagging" / "gd77" / "b")
     assert result.status == "untaggable"
     assert path.read_bytes() == b"not really a flac file"
 
 
-def test_a_crash_before_the_swap_leaves_the_original_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = make_audio(tmp_path / "a.flac")
-    original = path.read_bytes()
+# --- crashes mid-tagging (Q-8-1: the next run restores before anything else) ---------
 
+def _crash_at(monkeypatch: pytest.MonkeyPatch, at: str) -> None:
     def crash(stage: str) -> None:
-        if stage == "saved":
-            raise KeyboardInterrupt
+        if stage == at:
+            raise KeyboardInterrupt  # the process dies here
 
     monkeypatch.setattr(tagging, "_fault_point", crash)
+
+
+@pytest.mark.parametrize("stage", ["backed_up", "saved"])
+def test_a_crash_while_tagging_is_undone_by_the_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    path, backup = _archived(tmp_path, "a.flac")
+    library = tmp_path / "library" / "a.flac"
+    library.parent.mkdir()
+    os.link(path, library)
+    original = path.read_bytes()
+    _crash_at(monkeypatch, stage)
     with pytest.raises(KeyboardInterrupt):
-        fill_file(path, DESIRED, None, tmp_path / ".tagging")
+        fill_file(path, DESIRED, None, backup)
+    assert backup.read_bytes() == original  # the journal holds the whole original
+
+    monkeypatch.undo()
+    assert recover_interrupted_tagging(tmp_path / "coll") == [path]
+    assert path.read_bytes() == library.read_bytes() == original
+    assert path.stat().st_ino == library.stat().st_ino
+    assert not (tmp_path / "coll" / ".tagging").exists()
+
+
+def test_a_half_written_file_is_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process dies partway through mutagen's write: the archive file is torn
+    until the next run puts the original back."""
+    path, backup = _archived(tmp_path, "a.ogg")
+    original = path.read_bytes()
+
+    def torn_save(self: object, target: Path) -> None:
+        with target.open("r+b") as f:
+            f.write(b"\x00" * 100)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(tagging._Tags, "save", torn_save)
+    with pytest.raises(KeyboardInterrupt):
+        fill_file(path, DESIRED, None, backup)
+    assert path.read_bytes() != original
+    recover_interrupted_tagging(tmp_path / "coll")
     assert path.read_bytes() == original
 
 
-def test_a_crash_after_the_swap_leaves_the_whole_tagged_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = make_audio(tmp_path / "a.flac")
-
-    def crash(stage: str) -> None:
-        if stage == "replaced":
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(tagging, "_fault_point", crash)
-    with pytest.raises(KeyboardInterrupt):
-        fill_file(path, DESIRED, None, tmp_path / ".tagging")
-    assert read_tags(path) == {k: [v] for k, v in DESIRED.items()}
+def test_an_unfinished_backup_is_discarded_and_the_file_kept(tmp_path: Path) -> None:
+    """A crash while the backup itself was being written: the file was not touched
+    yet, so it stays as it is."""
+    path, backup = _archived(tmp_path, "a.flac")
+    original = path.read_bytes()
+    backup.parent.mkdir(parents=True)
+    (backup.parent / f".{backup.name}.{'0' * 32}.part").write_bytes(original[:10])
+    assert recover_interrupted_tagging(tmp_path / "coll") == []
+    assert path.read_bytes() == original
+    assert not (tmp_path / "coll" / ".tagging").exists()
 
 
 def test_a_disk_error_while_writing_is_reported_and_leaves_the_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = make_audio(tmp_path / "a.ogg")
+    path, backup = _archived(tmp_path, "a.ogg")
+    original = path.read_bytes()
+
+    def full(self: object, target: Path) -> None:
+        with target.open("r+b") as f:
+            f.write(b"\x00" * 50)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tagging._Tags, "save", full)
+    with pytest.raises(TagWriteError, match="No space left on device"):
+        fill_file(path, DESIRED, None, backup)
+    assert path.read_bytes() == original
+    assert not backup.exists()
+
+
+def test_a_backup_that_cannot_be_made_leaves_the_file_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, backup = _archived(tmp_path, "a.flac")
     original = path.read_bytes()
 
     def full(*_args: object, **_kwargs: object) -> None:
@@ -296,5 +395,5 @@ def test_a_disk_error_while_writing_is_reported_and_leaves_the_file(
 
     monkeypatch.setattr(tagging.shutil, "copyfile", full)
     with pytest.raises(TagWriteError, match="No space left on device"):
-        fill_file(path, DESIRED, None, tmp_path / ".tagging")
+        fill_file(path, DESIRED, None, backup)
     assert path.read_bytes() == original
