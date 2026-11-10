@@ -741,8 +741,10 @@ Observable behavior:
   available copy is the best lossy one, so it is mirrored as `complete`
   and `status` lists the show with the reason "lossless refused by
   archive.org; best lossy copy mirrored instead". When the lossless
-  files are served again, the next sync mirrors them and drops the
-  lossy copy if it is no longer the best playable one.
+  files are served again, the next sync mirrors them and takes the
+  lossy copy out of the library if it is no longer the best playable
+  one; it stays in the archive (see "Files the rule no longer selects
+  stay").
 - **Every non-audio file is kept.** Text notes, checksum files, the
   source's metadata files, artwork, and generated images are mirrored
   to the archive and staged into the library.
