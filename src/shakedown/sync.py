@@ -1409,6 +1409,15 @@ def _fetch_one(
             error=f"unsafe file name(s) escape item directory: {unsafe_names[:5]}",
         )
 
+    tmp_dir = archive_root / f"{_TMP_PREFIX}{desc.identifier}"
+    stale_dir = archive_root / f"{_STALE_PREFIX}{desc.identifier}"
+
+    # Finish a swap a prior crashed promotion left half done (the collection sweep
+    # covers sync; this covers `item refetch`), before any early return, so the
+    # archive copy is always back in place. The temp dir is swept per-attempt
+    # inside _fetch_with_retries.
+    _recover_swap(stale_dir, dest)
+
     # Never promote an empty fetch: it would replace the archive copy with an empty
     # folder. Classification already routes an empty manifest to `unavailable`; this
     # guards the paths that skip classification (`item refetch`).
@@ -1418,14 +1427,6 @@ def _fetch_one(
             archive_path=dest,
             error=f"{NO_FILES_REASON}; archive copy left untouched",
         )
-
-    tmp_dir = archive_root / f"{_TMP_PREFIX}{desc.identifier}"
-    stale_dir = archive_root / f"{_STALE_PREFIX}{desc.identifier}"
-
-    # Finish a swap a prior crashed promotion left half done (the collection sweep
-    # covers sync; this covers `item refetch`). The temp dir is swept per-attempt
-    # inside _fetch_with_retries.
-    _recover_swap(stale_dir, dest)
 
     fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, collection)
     if not fetch_result.success:

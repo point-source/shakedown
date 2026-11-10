@@ -473,3 +473,19 @@ def test_temp_dir_kept_for_show_whose_lookup_failed(
 
     assert (coll / ".tmp-gd-b" / "gd-b.flac").is_file()
 
+
+def test_refetch_restores_interrupted_swap_even_when_upstream_is_empty(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    item = _seed("gd-a")
+    assert run_sync(config) == 0
+    coll = archive / "fake-src" / "coll1"
+    (coll / "gd-a").rename(coll / ".stale-gd-a")
+    item.files = []
+
+    assert refetch_item(config, "gd-a") == 1
+
+    assert (coll / "gd-a" / "gd-a.flac").read_bytes() == b"hello world"
+    assert not (coll / ".stale-gd-a").exists()
