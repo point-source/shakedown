@@ -338,7 +338,6 @@ def _migrate_to_6(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE items SET change_signal = NULL")
 
 
-
 def _migrate_to_7(conn: sqlite3.Connection) -> None:
     """v6 → v7: the quality rule changes (§spec:quality-selection: a lossless copy whose
     tracks the source lists under different format names counts as one copy, and the
