@@ -1,0 +1,95 @@
+{
+ "metadata": {
+  "identifier": "aru1993-08-13.shnf",
+  "creator": "Aquarium Rescue Unit",
+  "date": "1993-08-13",
+  "venue": "Carowinds Paladium Amphitheatre",
+  "title": "Aquarium Rescue Unit Live at Carowinds Paladium Amphitheatre on 1993-08-13"
+ },
+ "files": [
+  {
+   "name": "__ia_thumb.jpg",
+   "source": "original",
+   "format": "Item Tile",
+   "size": "2750",
+   "md5": "b07629790473f5e75b81f670e5ce8808"
+  },
+  {
+   "name": "aru1993-08-13.md5",
+   "source": "original",
+   "format": "Checksums",
+   "size": "55",
+   "md5": "286e7cd923c6563750895629848dabd0"
+  },
+  {
+   "name": "aru1993-08-13.shnf_archive.torrent",
+   "source": "metadata",
+   "format": "Archive BitTorrent",
+   "size": "4664",
+   "md5": "8eeacc43f9b93ac066801a2ef914dd6b"
+  },
+  {
+   "name": "aru1993-08-13.shnf_files.xml",
+   "source": "metadata",
+   "format": "Metadata",
+   "md5": "7ab752973ac4a7d34706889e29586c85"
+  },
+  {
+   "name": "aru1993-08-13.shnf_meta.xml",
+   "source": "metadata",
+   "format": "Metadata",
+   "size": "960",
+   "md5": "b93182339d6728ed869c6884f9aa8130"
+  },
+  {
+   "name": "aru1993-08-13.shnf_reviews.xml",
+   "source": "original",
+   "format": "Metadata",
+   "size": "635",
+   "md5": "f07754990f330ec7e30f64907b2cdbc6"
+  },
+  {
+   "name": "aru1993-08-13.txt",
+   "source": "original",
+   "format": "Text",
+   "size": "746",
+   "md5": "d479e95b55cabb83962218042d3c14be"
+  },
+  {
+   "name": "aru1993-08-13t01.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru1993-08-13t01.shn",
+   "size": "7417891",
+   "md5": "8e1c8dc770f9868cf2d7b11d859846b4",
+   "bitrate": "150",
+   "title": "Payday",
+   "track": "01"
+  },
+  {
+   "name": "aru1993-08-13t01.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru1993-08-13t01.shn",
+   "size": "4998009",
+   "md5": "cac5a1a86f3476afe03bbda927a90381"
+  },
+  {
+   "name": "aru1993-08-13t01.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru1993-08-13t01.shn",
+   "size": "10038",
+   "md5": "80248ba4ad2abfbc8d50324e51fcd512"
+  },
+  {
+   "name": "aru1993-08-13t01.shn",
+   "source": "original",
+   "format": "Shorten",
+   "size": "43880485",
+   "md5": "365c235c8c216acd3e11e03c6c690a4d",
+   "title": "Payday",
+   "track": "01"
+  }
+ ]
+}

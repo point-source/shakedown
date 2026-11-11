@@ -5,7 +5,7 @@ goals (§spec:quality-selection): keep the highest-quality copy the source offer
 (*best available*) and the highest-quality copy a common player reads (*best
 playable*) — one copy when they are the same format, both when they differ — plus
 every non-audio file. The archive holds all of it; the library holds the best
-playable copy and the non-audio files. Shakedown never converts audio.
+playable copy and the uploader's own non-audio files. Shakedown never converts audio.
 """
 from __future__ import annotations
 
@@ -88,12 +88,50 @@ class _Format:
         return not any(f.refused for f in self.files)
 
 
+# archive.org's own files for an item, which it lists without an original: its index
+# and metadata files ("Metadata": `_files.xml`, `_meta.xml`, `_reviews.xml`,
+# `_meta.sqlite`), the item's torrent, and its tile image. archive.org reserves the
+# `__ia_` name prefix for its own files (`__ia_thumb.jpg`, listed as "Item Tile" or
+# "JPEG Thumb").
+_SOURCE_OWN_FORMATS = frozenset({"metadata", "archive bittorrent", "item tile"})
+_SOURCE_OWN_PREFIX = "__ia_"
+
+
+def _uploaders(f: SourceFile) -> bool:
+    """A non-audio file the uploader provided: notes, checksums, artwork, booklet scans.
+    Not one the source derived from another file (spectrograms, waveforms,
+    fingerprints, thumbnails, OCR text) or keeps for itself (operator decision,
+    2026-11-11: those stay in the archive, out of the library)."""
+    return not (
+        f.derived_from
+        or (f.format or "").strip().lower() in _SOURCE_OWN_FORMATS
+        or f.name.rsplit("/", 1)[-1].startswith(_SOURCE_OWN_PREFIX)
+    )
+
+
 def _is_audio_zip(f: SourceFile) -> bool:
     fmt = (f.format or "").lower()
     return fmt.endswith("zip") and any(word in fmt for word in _AUDIO_ZIP_WORDS)
 
 
+def _track(name: str) -> str:
+    """The file's path without its extension: one track of the show."""
+    folder, _, base = name.rpartition("/")
+    return f"{folder}/{base.rsplit('.', 1)[0]}" if "." in base else name
+
+
 def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
+    """The show's audio formats: the files sharing the source's format name, plus one
+    copy per audio class and file type whose tracks the source splits across names.
+
+    archive.org names a FLAC's format by its bit depth, so a show with one 16-bit track
+    among 24-bit ones lists "24bit Flac" for most tracks and "Flac" for the rest
+    (aru2015-08-15.24Bit48khzMS). When no single name covers the show, the uploader's
+    files of the same class and type are one copy, provided together they hold exactly
+    the show's track count and no track twice. Names that each cover the show stay
+    separate copies (a 24-bit and a 16-bit set). Derivatives never merge: the source
+    labels its own consistently, and its MP3s of different bitrates are separate
+    copies of the same tracks."""
     groups: dict[str, list[SourceFile]] = {}
     for f in audio:
         groups.setdefault(f.format or _ext(f.name), []).append(f)
@@ -101,6 +139,19 @@ def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
     for key, members in groups.items():
         classes = {c for c in (_audio_class(f) for f in members) if c is not None}
         out.append(_Format(key, min(classes), tuple(members)))
+
+    tracks = max(len(fmt.files) for fmt in out)
+    families: dict[tuple[_Class, str], list[_Format]] = {}
+    for fmt in out:
+        exts = {_ext(f.name) for f in fmt.files}
+        if len(exts) == 1 and not any(f.derived_from for f in fmt.files):
+            families.setdefault((fmt.cls, exts.pop()), []).append(fmt)
+    for (cls, _), split in families.items():
+        if len(split) < 2 or any(len(fmt.files) == tracks for fmt in split):
+            continue
+        files = tuple(f for fmt in split for f in fmt.files)
+        if len(files) == tracks == len({_track(f.name) for f in files}):
+            out.append(_Format(" + ".join(sorted(fmt.key for fmt in split)), cls, files))
     return out
 
 
@@ -177,7 +228,7 @@ def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selec
     if best is not staged:
         entries += [_entry(f, library=False) for f in best.files]
     entries += [
-        _entry(f, library=True)
+        _entry(f, library=_uploaders(f))
         for f in files
         if _audio_class(f) is None and not f.refused and not _is_audio_zip(f)
     ]

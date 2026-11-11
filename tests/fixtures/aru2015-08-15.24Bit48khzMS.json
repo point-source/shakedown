@@ -1,0 +1,1003 @@
+{
+ "metadata": {
+  "identifier": "aru2015-08-15.24Bit48khzMS",
+  "creator": "Aquarium Rescue Unit",
+  "date": "2015-08-15",
+  "venue": "Capitol Theater",
+  "title": "Aquarium Rescue Unit Live at Capitol Theater on 2015-08-15"
+ },
+ "files": [
+  {
+   "name": "__ia_thumb.jpg",
+   "source": "original",
+   "format": "Item Tile",
+   "size": "9714",
+   "md5": "aeffa206e870db4c86de5a6b04269080"
+  },
+  {
+   "name": "aru2015-08-15.24Bit48khzMS_01.jpg",
+   "source": "original",
+   "format": "JPEG",
+   "size": "364500",
+   "md5": "81571a86c49f6db7635776c94c900fc0"
+  },
+  {
+   "name": "aru2015-08-15.24Bit48khzMS_01_thumb.jpg",
+   "source": "derivative",
+   "format": "JPEG Thumb",
+   "original": "aru2015-08-15.24Bit48khzMS_01.jpg",
+   "size": "5124",
+   "md5": "76837b97417133e80825b336ed1b1b5c"
+  },
+  {
+   "name": "aru2015-08-15.24Bit48khzMS_archive.torrent",
+   "source": "metadata",
+   "format": "Archive BitTorrent",
+   "size": "53593",
+   "md5": "b60b03405d47598e2f26dfcba8183c97"
+  },
+  {
+   "name": "aru2015-08-15.24Bit48khzMS_files.xml",
+   "source": "metadata",
+   "format": "Metadata",
+   "md5": "f45b7de000f3bb0639ff7224c0f4cb82"
+  },
+  {
+   "name": "aru2015-08-15.24Bit48khzMS_meta.xml",
+   "source": "metadata",
+   "format": "Metadata",
+   "size": "2296",
+   "md5": "0ffd101d4238e39dc1180bb18a65e06d"
+  },
+  {
+   "name": "aru2015-08-15.txt",
+   "source": "original",
+   "format": "Text",
+   "size": "1143",
+   "md5": "0f42c46bceae49ad753b0befe0c57084"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t01.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t01.flac",
+   "size": "68784",
+   "md5": "66d1d9e979393150e3d02ed351b539be"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t01.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "67588570",
+   "md5": "039b95a0eb8cf5f5de2cad9b6f39efb1",
+   "title": "Isles of Langerhan",
+   "track": "01"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t01.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t01.flac",
+   "size": "8541184",
+   "md5": "90c1e36cc04cb77397c6d1eee42a5aa6",
+   "bitrate": "186",
+   "title": "Isles of Langerhan",
+   "track": "01"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t01.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t01.flac",
+   "size": "4236758",
+   "md5": "9c5783ed6b95c465a310590c30ad5f53"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t01.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t01.flac",
+   "size": "10736",
+   "md5": "f0da79f3e07c337170066c4713cd4ac0"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t01_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t01.flac",
+   "size": "314286",
+   "md5": "c7ccfffbc1be32ad2e7b3194f05280c1"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t02.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t02.flac",
+   "size": "63352",
+   "md5": "c6c3f7bcecc77c6eba60c21b94e1889d"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t02.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "62759588",
+   "md5": "394afa787a709106c51b4fe22761fad0",
+   "title": "Phantom On The Curb",
+   "track": "02"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t02.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t02.flac",
+   "size": "7697920",
+   "md5": "0753634adc5e5f5e8e5cb53615b625f2",
+   "bitrate": "188",
+   "title": "Phantom On The Curb",
+   "track": "02"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t02.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t02.flac",
+   "size": "3808683",
+   "md5": "e64acc769e48e2209ef37bd4ce3cdd52"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t02.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t02.flac",
+   "size": "11417",
+   "md5": "deb3c543efedab6d774f90fe2e0903a4"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t02_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t02.flac",
+   "size": "305762",
+   "md5": "da5cb7d0a1a6fc59316fc33cba686da3"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t03.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t03.flac",
+   "size": "98456",
+   "md5": "f42e42eec58e2d185b63a6bdcb3c2371"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t03.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "99425467",
+   "md5": "27879b9dcb4573603385e565feefb3a1",
+   "title": "Elevator To The Moon",
+   "track": "03"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t03.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t03.flac",
+   "size": "12551680",
+   "md5": "47dfbcb852faf31b7972d3f9336d8340",
+   "bitrate": "187",
+   "title": "Elevator To The Moon",
+   "track": "03"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t03.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t03.flac",
+   "size": "6282494",
+   "md5": "f66e9bf87efcc5a9e2d08910e34887ac"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t03.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t03.flac",
+   "size": "11168",
+   "md5": "999f745475b3a6d6e6df68df3054bf38"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t03_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t03.flac",
+   "size": "309011",
+   "md5": "15dd3dd7bed6adde37fcdbad34ccfd27"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t04.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t04.flac",
+   "size": "75704",
+   "md5": "66fef00a15147392861fa1faa200cc97"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t04.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "68405279",
+   "md5": "0dc941591ee66cd8e9eb9046a9c8609c",
+   "title": "Spoonful",
+   "track": "04"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t04.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t04.flac",
+   "size": "8686080",
+   "md5": "53f221ddbc0d846451150b2daccf2826",
+   "bitrate": "185",
+   "title": "Spoonful",
+   "track": "04"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t04.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t04.flac",
+   "size": "4349977",
+   "md5": "2cb3f07c18afa91494743ecff3dfe61b"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t04.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t04.flac",
+   "size": "10956",
+   "md5": "f5db7fb391b2720f76ed0c257b5510ba"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t04_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t04.flac",
+   "size": "320225",
+   "md5": "0587023433d72a7bde3726ee02e6620a"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t05.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t05.flac",
+   "size": "58432",
+   "md5": "dd09267b210746cfa7a26792a1641def"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t05.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "56700519",
+   "md5": "d2d6f6f752f5898fc928f9d9e36fd68e",
+   "title": "Give Thanks To Chank >",
+   "track": "05"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t05.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t05.flac",
+   "size": "7125504",
+   "md5": "4efff09a1904fbab1bec94ad9e39ded1",
+   "bitrate": "188",
+   "title": "Give Thanks To Chank >",
+   "track": "05"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t05.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t05.flac",
+   "size": "3482638",
+   "md5": "0a1bd73db1feea29ade77c146b9f992f"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t05.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t05.flac",
+   "size": "10996",
+   "md5": "bfe0de175611a36d66ec46ddd712000a"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t05_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t05.flac",
+   "size": "303091",
+   "md5": "a29c67a18679cf1806cb678953395ed6"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t06.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t06.flac",
+   "size": "55032",
+   "md5": "d302b88b5997575456682de9716e8759"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t06.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "54178059",
+   "md5": "573ce440bd8b5fa42c8f3d8d58b07dd5",
+   "title": "Space Is The Place",
+   "track": "06"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t06.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t06.flac",
+   "size": "6773760",
+   "md5": "4c7616239bf75e26df302bd3418b662d",
+   "bitrate": "189",
+   "title": "Space Is The Place",
+   "track": "06"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t06.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t06.flac",
+   "size": "3393487",
+   "md5": "cb9c865e5453fc9c4f314fb7df37ba56"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t06.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t06.flac",
+   "size": "10940",
+   "md5": "8741bdd925bbd02d132972a67db902f3"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t06_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t06.flac",
+   "size": "315968",
+   "md5": "4335bd2c5b74200469feadba402f1523"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t07.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t07.flac",
+   "size": "76400",
+   "md5": "7751113dcb5e23a1806cf90e71563fe8"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t07.flac",
+   "source": "original",
+   "format": "Flac",
+   "size": "75475169",
+   "md5": "ae3037872403b1632cd7a48c4fc3dc36",
+   "title": "My Brother's House",
+   "track": "07"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t07.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t07.flac",
+   "size": "9267712",
+   "md5": "9098f28b1126036e1890b0adf7dd37c1",
+   "bitrate": "190",
+   "title": "My Brother's House",
+   "track": "07"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t07.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t07.flac",
+   "size": "4565344",
+   "md5": "fe43e1cc1850ab1ef0f5f7e5a122b1e0"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t07.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t07.flac",
+   "size": "11042",
+   "md5": "e54c144508c33aff1c958996c040b6cc"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t07_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t07.flac",
+   "size": "309124",
+   "md5": "5a3a8590f7fb3f2fcd5ad118f580198e"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t08.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t08.flac",
+   "size": "57600",
+   "md5": "f81b92f30ed9dacf3200cc2b0a810854"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t08.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "57823590",
+   "md5": "66e93dce2dd518f15db88bf69051caa5",
+   "title": "Time Flack",
+   "track": "08"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t08.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t08.flac",
+   "size": "7253504",
+   "md5": "11c6e34de1f07fbcf2090bc2f715ffcd",
+   "bitrate": "188",
+   "title": "Time Flack",
+   "track": "08"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t08.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t08.flac",
+   "size": "3619029",
+   "md5": "d2854e4280296f84b32486468e0cb057"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t08.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t08.flac",
+   "size": "10713",
+   "md5": "31dc6a434bbee915261243aa647fc0dc"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t08_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t08.flac",
+   "size": "316536",
+   "md5": "302f6c2ca77a445649ea7c97c81afdcc"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t09.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t09.flac",
+   "size": "106616",
+   "md5": "cad3643a7ce8846448b62d3099d64e29"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t09.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "104261108",
+   "md5": "d9ef90802afcf40235d468063866ebbb",
+   "title": "1911",
+   "track": "09"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t09.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t09.flac",
+   "size": "12893696",
+   "md5": "ad13c2788df1cfe6195cc06ab0103467",
+   "bitrate": "186",
+   "title": "1911",
+   "track": "09"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t09.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t09.flac",
+   "size": "6380491",
+   "md5": "ccb3ccc3ba1d86323af8655285fd6fe9"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t09.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t09.flac",
+   "size": "10952",
+   "md5": "7e0b55dc1a2a6ccc8a8f541f23b65cef"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t09_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t09.flac",
+   "size": "320879",
+   "md5": "d6afdac1f3ae2a43e64783a2265bb18e"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t10.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t10.flac",
+   "size": "87496",
+   "md5": "8cb56cbdf13e05f0eed5ea8d108dccbf"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t10.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "90419864",
+   "md5": "4b147cdced5eab6b5fd9456c8712f94a",
+   "title": "Banjo Jam 6/8 > The Dragon",
+   "track": "10"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t10.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t10.flac",
+   "size": "11287552",
+   "md5": "3bf559ed7fca01df4c0ce39158d37329",
+   "bitrate": "190",
+   "title": "Banjo Jam 6/8 > The Dragon",
+   "track": "10"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t10.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t10.flac",
+   "size": "5665851",
+   "md5": "c1bca9776c6a0c941a04195aadaae7fa"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t10.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t10.flac",
+   "size": "11116",
+   "md5": "4841f1cd9dba517ba6424bc80c8f21e6"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t10_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t10.flac",
+   "size": "302554",
+   "md5": "f272dea84c26c477b4b21291a4e4c535"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t11.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t11.flac",
+   "size": "108448",
+   "md5": "afdfa03288a08fc8d8136426d5911253"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t11.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "108259550",
+   "md5": "d1c0fa38a193c7c562c84b93b7c09e65",
+   "title": "Time is Free",
+   "track": "11"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t11.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t11.flac",
+   "size": "13552128",
+   "md5": "6797a7ea629fc45d4c380e18235c6123",
+   "bitrate": "187",
+   "title": "Time is Free",
+   "track": "11"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t11.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t11.flac",
+   "size": "6714812",
+   "md5": "3b9c2bc695e70bbb72b7bda93cacbe94"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t11.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t11.flac",
+   "size": "10557",
+   "md5": "328f80857da4b9754e9f50ee45d6400b"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t11_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t11.flac",
+   "size": "307279",
+   "md5": "4275a7c26835a3764d613befa4a244dd"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t12.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t12.flac",
+   "size": "119432",
+   "md5": "54e3396a707d3a92b363e176f88067c4"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t12.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "122262091",
+   "md5": "a11fbadb323429bf41d4a6dce81a819d",
+   "title": "Rampage",
+   "track": "12"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t12.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t12.flac",
+   "size": "14942208",
+   "md5": "d9cdbd91db95782e5b93e8ef52675af7",
+   "bitrate": "190",
+   "title": "Rampage",
+   "track": "12"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t12.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t12.flac",
+   "size": "7594421",
+   "md5": "656e53e5f90d304d7337be0bd79a70cb"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t12.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t12.flac",
+   "size": "9666",
+   "md5": "328141bf31d0f94a5ed10f8d72d27e5e"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t12_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t12.flac",
+   "size": "307292",
+   "md5": "86b6cacd93354eec1639a342b4f6669d"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t13.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t13.flac",
+   "size": "72368",
+   "md5": "b57228dee826a7e81a1a5980cd52776c"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t13.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "73350384",
+   "md5": "c8f4ebc61161e5f093d75c594cdab3f1",
+   "title": "Davey Crockett",
+   "track": "13"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t13.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t13.flac",
+   "size": "9102848",
+   "md5": "24f91f2ca914974e8b867af03d192306",
+   "bitrate": "189",
+   "title": "Davey Crockett",
+   "track": "13"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t13.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t13.flac",
+   "size": "4500583",
+   "md5": "f06ff3c809b5e19595a04a4e807a7a2a"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t13.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t13.flac",
+   "size": "11296",
+   "md5": "1d1d8787700ede733d740b0350970515"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t13_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t13.flac",
+   "size": "296411",
+   "md5": "26a8482b1945df48b5a473f0ac054ee9"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t14.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t14.flac",
+   "size": "103896",
+   "md5": "d12d60b63f6b219a69c3f167bfc6f349"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t14.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "102118521",
+   "md5": "b249159480decf18beb57a6d35fecce0",
+   "title": "Compared to What",
+   "track": "14"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t14.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t14.flac",
+   "size": "12475904",
+   "md5": "4a4035bf232b0a396391c71463ba1a32",
+   "bitrate": "188",
+   "title": "Compared to What",
+   "track": "14"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t14.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t14.flac",
+   "size": "6299916",
+   "md5": "f9698277babf6dffb3ee407dd4055192"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t14.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t14.flac",
+   "size": "10392",
+   "md5": "e5aaaa8ee421f3fe7edbe63062486f55"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t14_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t14.flac",
+   "size": "322998",
+   "md5": "f26524a2c8aff50532f78f6d978abd8d"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t15.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t15.flac",
+   "size": "45264",
+   "md5": "8ca3e37dd70cbd3245107c47044ecd51"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t15.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "40554302",
+   "md5": "ac752f5831a1dae5c0e1e175427bb35a",
+   "title": "encore break",
+   "track": "15"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t15.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t15.flac",
+   "size": "5624320",
+   "md5": "e62eeed14d3ea81ca42f2f0ac3a189c4",
+   "bitrate": "194",
+   "title": "encore break",
+   "track": "15"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t15.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t15.flac",
+   "size": "2962167",
+   "md5": "ac433662f39cd5a07739d3944551b97b"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t15.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t15.flac",
+   "size": "8520",
+   "md5": "057fad538a8fd02fd446170abaf5b7ab"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t15_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t15.flac",
+   "size": "305496",
+   "md5": "37fe62e90d938cd71a637d65f46eb4b9"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t16.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t16.flac",
+   "size": "83064",
+   "md5": "880c5de7dbef472d649e94e2063dda1e"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t16.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "80211673",
+   "md5": "5d86bed07bf2e8a579ddf50e04b1df02",
+   "title": "I'm So Glad",
+   "track": "16"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t16.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t16.flac",
+   "size": "10078208",
+   "md5": "c78a1b97bcf1da059d3343b7432cdc2e",
+   "bitrate": "189",
+   "title": "I'm So Glad",
+   "track": "16"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t16.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t16.flac",
+   "size": "5000278",
+   "md5": "38877f433b8c2b58a1c5f39d41fdc033"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t16.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t16.flac",
+   "size": "10674",
+   "md5": "bf4313d5af09b7e6682acf9183be29dd"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t16_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t16.flac",
+   "size": "316683",
+   "md5": "3a11e6db1d60ebdbdbbc9d95a0bc68e5"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t17.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t17.flac",
+   "size": "17288",
+   "md5": "faf6eed21fe9fdeb159a6b31b7037510"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t17.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "14911842",
+   "md5": "c4ce590ecca829d53b95cf3b9006d94b",
+   "title": "encore break",
+   "track": "17"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t17.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t17.flac",
+   "size": "2037248",
+   "md5": "989575f5f0be488e4ec21f9a53853a8d",
+   "bitrate": "195",
+   "title": "encore break",
+   "track": "17"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t17.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t17.flac",
+   "size": "1075448",
+   "md5": "bf09a6b18d3e693819387ae02ac90f54"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t17.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t17.flac",
+   "size": "9278",
+   "md5": "926f82c9841666b35930762431c349c3"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t17_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t17.flac",
+   "size": "297910",
+   "md5": "69e60ba698f91b02b9d76c2c506e8629"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t18.afpk",
+   "source": "derivative",
+   "format": "Columbia Peaks",
+   "original": "aru2015-08-1524Bit48khzMSd1t18.flac",
+   "size": "69064",
+   "md5": "acd290cbf0dda7079c3db8dae4783d94"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t18.flac",
+   "source": "original",
+   "format": "24bit Flac",
+   "size": "66054320",
+   "md5": "ef4a9f443676140c01f0a5d485c8a29a",
+   "title": "Jack the Rabbit",
+   "track": "18"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t18.mp3",
+   "source": "derivative",
+   "format": "VBR MP3",
+   "original": "aru2015-08-1524Bit48khzMSd1t18.flac",
+   "size": "8600064",
+   "md5": "8f1077b7c9ccb27fd10f7566b3419a85",
+   "bitrate": "187",
+   "title": "Jack the Rabbit",
+   "track": "18"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t18.ogg",
+   "source": "derivative",
+   "format": "Ogg Vorbis",
+   "original": "aru2015-08-1524Bit48khzMSd1t18.flac",
+   "size": "4371673",
+   "md5": "4612514ca44c21eac9368d4bbf196682"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t18.png",
+   "source": "derivative",
+   "format": "PNG",
+   "original": "aru2015-08-1524Bit48khzMSd1t18.flac",
+   "size": "10621",
+   "md5": "a0e21cebecc9ef94fc41880c8ffe67c4"
+  },
+  {
+   "name": "aru2015-08-1524Bit48khzMSd1t18_spectrogram.png",
+   "source": "derivative",
+   "format": "Spectrogram",
+   "original": "aru2015-08-1524Bit48khzMSd1t18.flac",
+   "size": "319380",
+   "md5": "751eaaf30d86bea1934c97afd61c3748"
+  },
+  {
+   "name": "aru2015-08-15MS.flac24.ffp",
+   "source": "original",
+   "format": "Flac FingerPrint",
+   "size": "1296",
+   "md5": "b8b7a22d622eb078f231503ef8f3dd06"
+  }
+ ]
+}
