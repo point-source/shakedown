@@ -6,7 +6,13 @@ are the same format), plus every non-audio file; the library stages the best
 playable copy and the non-audio files."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+from shakedown.discovery import validate_lookup
 from shakedown.models import Manifest, ManifestFile, SourceFile
+from shakedown.plugins.archive_org import file_records
+from shakedown.plugins.base import ItemLookup
 from shakedown.selection import (
     DOWNLOAD_REFUSED_REASON,
     LOSSLESS_REFUSED_REASON,
@@ -292,3 +298,55 @@ def test_unrecognised_audio_only_is_staged_as_is_and_not_playable() -> None:
     assert _names(chosen, library=True) == ["info.txt", "t01.ape", "t02.ape"]
     assert chosen.not_playable_reason == NOT_PLAYABLE_UNRECOGNISED_REASON
     assert chosen.is_restricted is False
+
+
+# --- archive.org labels one show's tracks inconsistently -----------------------------
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _real_listing(name: str) -> tuple[SourceFile, ...]:
+    """A real archive.org listing, through the same mapping and validator a sync uses."""
+    raw = json.loads((FIXTURES / name).read_text())
+    identifier = raw["metadata"]["identifier"]
+    lookup = ItemLookup(metadata=raw["metadata"], files=file_records(identifier, raw["files"]))
+    return validate_lookup(lookup, identifier).files
+
+
+def _ext(name: str) -> str:
+    return name.rsplit(".", 1)[-1]
+
+
+def test_flac_tracks_under_two_labels_still_cover_the_show() -> None:
+    """aru2015-08-15.24Bit48khzMS: 17 tracks labelled "24bit Flac" and track 07
+    labelled "Flac". Together they are the show's lossless copy, which beats the
+    VBR MP3 (seen on the NAS, 2026-11-11: the library got the MP3)."""
+    chosen = select(_real_listing("aru2015-08-15.24Bit48khzMS.json"), None)
+    audio = [n for n in _names(chosen) if _ext(n) in {"flac", "mp3", "ogg"}]
+    assert len(audio) == 18 and all(n.endswith(".flac") for n in audio)
+    assert "aru2015-08-1524Bit48khzMSd1t07.flac" in _names(chosen, library=True)
+    assert not [n for n in _names(chosen) if n.endswith(".mp3")]
+
+
+def test_two_complete_lossless_sets_are_not_merged() -> None:
+    """A 24-bit and a 16-bit set that each cover every track stay two copies, and the
+    larger per track wins (Q-6-1)."""
+    files = (
+        _f("t01.flac", "24bit Flac", size=60 * MB),
+        _f("t02.flac", "24bit Flac", size=60 * MB),
+        _f("t01_16.flac", "Flac", size=30 * MB),
+        _f("t02_16.flac", "Flac", size=30 * MB),
+    )
+    assert _names(select(files, None)) == ["t01.flac", "t02.flac"]
+
+
+def test_lossy_copies_of_different_bitrates_are_not_merged() -> None:
+    """Each archive.org lossy derivative covers every track on its own; one track's VBR
+    and 64 kb copies are never mixed into one copy."""
+    chosen = select(_flac_show(), None)
+    assert not [n for n in _names(chosen) if n.endswith(".mp3")]
+    files = tuple(f for f in _flac_show() if not f.name.endswith(".flac"))
+    assert [n for n in _names(select(files, None)) if n.endswith(".mp3")] == [
+        "t01.mp3", "t02.mp3"
+    ]
+
