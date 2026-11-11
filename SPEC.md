@@ -1427,7 +1427,11 @@ Sync state lives in a single-file embedded SQLite database at
   is re-downloaded (§req:constraints: deployment status). A database
   rebuilt by `reconcile` starts with no placement record and adopts the
   existing library links the same way an upgrade does
-  (§spec:library-cleanup). Tag-filling records are not recoverable from
+  (§spec:library-cleanup). A release that changes the quality rule
+  (§spec:quality-selection) clears every stored change signal in its
+  migration, so its first sync looks every show up and applies the new
+  rule, even on an incremental collection; v2.0.0 (schema v6) and
+  v2.0.2 (schema v7) do. Tag-filling records are not recoverable from
   disk: after a rebuild, `verify --deep` reports files shakedown had
   tagged as drift until they are reconformed — a database rebuild loses
   the record of which bytes were shakedown's, and guessing would hide

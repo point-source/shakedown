@@ -441,7 +441,7 @@ def test_v5_db_migrates_to_placement_record(tmp_path: Path) -> None:
     )
 
     conn = connect(db_path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 6
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     assert {
         "library_placements", "library_folders", "library_unplaced", "library_adoption",
         "handoff_pending", "tag_files", "tag_shows",
@@ -693,3 +693,30 @@ def test_manifest_keeps_track_title_and_number_outside_its_identity(tmp_path: Pa
     got = repo.get("s", "c", "x")
     assert got is not None and got.recorded_manifest is not None
     assert got.recorded_manifest.files[0].title == "Intro"
+
+
+def test_v6_db_reselects_every_show_once(tmp_path: Path) -> None:
+    """v2.0.2 changes the quality rule (§spec:quality-selection: a lossless copy split
+    across format names; only the uploader's non-audio files staged), so its one
+    migration clears every stored change signal once: the first sync after the upgrade
+    looks each show up and applies the new rule, even on an incremental collection
+    (§spec:incremental-discovery). Nothing else changes."""
+    db_path = tmp_path / "v6.db"
+    conn = connect(db_path)
+    conn.execute(
+        "INSERT INTO items (source_name, collection_name, identifier, status,"
+        " recorded_manifest, change_signal) VALUES ('s', 'c', 'x', 'complete',"
+        " '[{\"name\": \"a.flac\", \"size\": 1, \"md5\": null, \"library\": false}]',"
+        " 'sig-1')"
+    )
+    conn.execute("UPDATE schema_version SET version = 6")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 7
+    item = ItemRepo(conn).get("s", "c", "x")
+    assert item is not None
+    assert item.change_signal is None
+    assert item.recorded_manifest is not None
+    assert [(f.name, f.library) for f in item.recorded_manifest.files] == [("a.flac", False)]
