@@ -69,7 +69,9 @@ criteria 13–15 defined the mirror-integrity & metadata increment
 (shipped); criteria 16–18 defined the setup, recovery, and
 validation-confidence increment (shipped; criterion 18 revised by the
 current increment); criteria 19–26 define the current ownership,
-handoff, and discovery increment.
+handoff, and discovery increment; criterion 27 (operator decisions,
+2026-11-11) makes a long run delay, rather than cancel, other
+collections' scheduled syncs.
 
 1. **Unattended weekly mirror that actually fires.** A weekly sync of
    the IA Grateful Dead collection runs unattended for a month with no
@@ -78,7 +80,9 @@ handoff, and discovery increment.
    long-lived container being up, and a prior run having completed and
    exited never causes a tick to be silently skipped. "The schedule is
    configured" and "the sync ran on schedule" are the same thing,
-   verifiable from run logs / `status`.
+   verifiable from run logs / `status`. A tick that cannot start
+   because another run holds the writer lock is not silently lost: it
+   is rescheduled and caught up (criterion 27).
 2. **New collections need no code.** Adding a second collection requires
    only YAML edits — no code changes.
 3. **Fast restage.** Wiping `/data/library/` and running
@@ -304,6 +308,39 @@ handoff, and discovery increment.
     show (SHN in the archive, the best playable copy in the archive and
     library, playable in Navidrome), and a show whose lossless files
     archive.org refuses (best lossy copy kept, reason in `status`).
+27. **A long run delays other collections, never cancels them.** When a
+    single-collection sync (`sync --collection X`, whether ofelia
+    started it or the operator typed it) cannot start because another
+    run holds the writer lock, shakedown records that collection as
+    rescheduled. Each collection has at most one rescheduled entry,
+    keeping the time of its oldest skip: a second skip neither adds an
+    entry nor moves the time. The skipped tick still fails at the
+    scheduler, but its log and `status` (text and JSON) say
+    "rescheduled", not an error, and name the collection and the time
+    of its oldest skip — so a skip is easy to tell apart from a real
+    failure, and a collection that is behind is visible.
+    When any sync finishes its own work — whatever that work's result —
+    it runs every rescheduled collection that was outstanding at that
+    moment, oldest skip first, before it exits. Collections rescheduled
+    while that catch-up runs wait for the next sync to finish. Any
+    successful sync that covers a collection clears its entry: its
+    catch-up, its own next tick, an all-collections sync, or an API
+    "sync now". A catch-up that fails also clears the entry; the
+    failure shows in `status` like any failed sync, and the
+    collection's next tick retries it. An entry for a collection no
+    longer in the config is dropped without running anything.
+    Only single-collection syncs are rescheduled: an all-collections
+    sync, an API "sync now" (still refused at once, criterion 24),
+    restage, reconcile, `verify --reconform`, and item refetch refuse
+    as today and leave no entry. Only a finishing sync runs a catch-up;
+    restage, reconcile, reconform, and refetch exit as soon as their
+    own work is done. Verifiable by holding the lock with a long sync
+    of one collection, starting two other collections' syncs while it
+    runs (one of them twice), and seeing: both ticks fail at the
+    scheduler marked rescheduled; one entry per collection in `status`,
+    the twice-skipped one keeping its first skip time; both collections
+    syncing, oldest skip first, when the long sync ends; and both
+    entries gone afterwards.
 
 ## User stories §req:user-stories
 
@@ -457,6 +494,13 @@ criterion and implies a testable path through the product's surface.
   refuse cleanly if a run is already going, so that I never restart
   `serve` to pick up a change or end up with two runs at once.
   *(→ criterion 24)*
+- **A days-long sync doesn't cost the other collections their week.**
+  As a homelab operator whose Grateful Dead sync (18,432 items) can run
+  for days, I want Monday's and Tuesday's collections, blocked while it
+  runs, to be remembered and synced as soon as it finishes — oldest
+  first — and to see in `status` which collections are waiting and
+  since when, so that no collection silently goes unsynced for weeks.
+  *(→ criteria 1, 27)*
 - **Untagged shows still browse well.** As a homelab operator, I want
   shakedown to fill in missing artist, date, venue, and title tags from
   the source metadata it already has, so that Navidrome groups my shows
@@ -554,14 +598,20 @@ constraints that drive architecture.
   attaching to a container that is already running. A tick that fails to
   start at all — image missing, config missing, unknown collection —
   surfaces as a visible error at the scheduler layer, never as a silent
-  no-op. A newly deployed stack does no surprising, unscoped work on
-  first bring-up: each configured collection syncs on its own schedule,
-  never as an implicit "sync everything" at startup.
+  no-op. A tick that starts but finds another run holding the writer
+  lock also fails visibly at the scheduler, and its log says it was
+  rescheduled rather than failed; it is caught up when the running sync
+  finishes (criterion 27). A newly deployed stack does no surprising,
+  unscoped work on first bring-up: each configured collection syncs on
+  its own schedule, never as an implicit "sync everything" at startup.
 - **Truthful visible state.** Setup, validation, sync, restage, and
   recovery surfaces must never report success while important work was
   skipped, stale, incomplete, or unverified. The operator must be able to
   tell from the visible product surface which collection or item is
-  affected and what action is available next.
+  affected and what action is available next. A collection whose
+  scheduled sync was skipped shows as rescheduled, with the time of its
+  oldest skip, until a sync covering it succeeds or its catch-up
+  fails.
 - **Fast feedback for setup and validation.** Mistakes that can be
   detected before a large mirror begins should surface quickly and
   locally, without waiting for a full collection walk or large download.
@@ -605,7 +655,15 @@ Technical, operational, and scope bounds on the solution space.
   Shakedown container running between ticks. An optional `serve` command
   may expose a small auth-protected control plane (health, status,
   metrics, trigger), but never schedules. A triggered sync is an ordinary
-  run under the same one-writer-at-a-time rule as scheduled runs.
+  run under the same one-writer-at-a-time rule as scheduled runs. One
+  bounded exception (operator decision, 2026-11-11): shakedown
+  remembers single-collection syncs that were skipped because the
+  writer lock was held, and a finishing sync catches them up (criterion
+  27). This is not a scheduler — no cron parser, no timing of its own,
+  no runs started on its own initiative, at most one entry per
+  collection, one ordering rule (oldest skip first). The
+  one-writer-at-a-time rule stays: collections never sync side by side
+  in separate runs.
 - **Deploys as one Docker Compose stack.** The whole deployment —
   including scheduling — is one compose file paste-able into Container
   Station.
@@ -681,7 +739,7 @@ in to prove the plugin seam. The discovery-performance increment (items
 13–15), the mirror-integrity & metadata preservation increment (items
 16–18), and the setup, recovery, and validation-confidence increment
 (items 19–21) have shipped; the current increment is ownership,
-handoff, and discovery (items 22–29).
+handoff, and discovery (items 22–30).
 
 **Must have (v1 core):**
 
@@ -793,10 +851,20 @@ library folders directly:
     stale-config gap and gives a clean refusal.
 29. Release gate in CI before publish; no always-failing command in the
     shipped image (→ criterion 18, revised). Small and contained.
+30. Reschedule lock-skipped syncs (→ criteria 1, 27). Escalated from
+    production triage on 2026-11-11: a multi-day Grateful Dead sync
+    makes the Monday and Tuesday collections exit 1 with nothing
+    recorded, so they go unsynced until the next week, and possibly
+    never while long runs keep happening. High impact and high
+    confidence; small, contained effort. It reverses the earlier "no
+    missed-run logic" and "missed schedules are harmless" decisions for
+    this one case only. The operator chose catch-up over letting
+    collections sync side by side: the one-writer rule and the shared
+    archive.org request budget stay as they are.
 
 **Nice to have / out of scope (candidates for later):**
 
-30. Web UI for status and config; push notifications beyond webhooks
+31. Web UI for status and config; push notifications beyond webhooks
     (Pushover, Discord); direct library-tool integrations; multiple
     archive roots / tiered storage; BitTorrent as a source; cross-host
     sync. These are explicitly deferred.
