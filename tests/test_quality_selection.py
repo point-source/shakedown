@@ -233,6 +233,34 @@ def test_a_show_v2_0_1_staged_as_mp3_gets_its_flac_back_without_downloads(
     assert all((staged / n).stat().st_ino == inodes[n] for n in _names(library, "aru"))
 
 
+def test_a_zip_v2_0_2_staged_leaves_the_library_and_stays_archived(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Seen on the NAS (aadam-jacobs, 2026-11-11): v2.0.2 staged the uploader's raw
+    recording zip beside the FLACs. The next sync takes it out of the library,
+    downloads nothing, and the archive keeps the same file."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    flacs = [_flac(1), _flac(2)]
+    rawfile = FakeFile("show_16bit48khz_rawfile.zip", b"Z" * 900, format="ZIP")
+    everything = [*flacs, rawfile, NOTES]
+    inodes = _seed_mirrored(config, "ajc", everything)
+    assert run_restage(config) == 0
+    assert _names(library, "ajc") == [
+        "info.txt", "show_16bit48khz_rawfile.zip", "t01.flac", "t02.flac"
+    ]
+    _show("ajc", *everything)
+
+    assert run_sync(config) == 0
+
+    assert FakePlugin.fetched_files == {}
+    assert _names(library, "ajc") == ["info.txt", "t01.flac", "t02.flac"]
+    folder = archive / "fake-src" / "coll1" / "ajc"
+    assert {n: (folder / n).stat().st_ino for n in inodes} == inodes
+    staged = library / "fake-src" / "coll1" / "ajc"
+    assert all((staged / n).stat().st_ino == inodes[n] for n in _names(library, "ajc"))
+
+
 def test_upgrade_from_format_filters_downloads_only_what_is_missing(
     tmp_roots: tuple[Path, Path],
 ) -> None:

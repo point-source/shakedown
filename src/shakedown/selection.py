@@ -5,7 +5,8 @@ goals (§spec:quality-selection): keep the highest-quality copy the source offer
 (*best available*) and the highest-quality copy a common player reads (*best
 playable*) — one copy when they are the same format, both when they differ — plus
 every non-audio file. The archive holds all of it; the library holds the best
-playable copy and the uploader's own non-audio files. Shakedown never converts audio.
+playable copy and the uploader's own non-audio files, except archive files and
+system or editor leftovers. Shakedown never converts audio.
 """
 from __future__ import annotations
 
@@ -53,13 +54,37 @@ _LOSSLESS_ORDER = {"flac": 0, "m4a": 1, "wav": 2, "aif": 3, "aiff": 3, "shn": 4}
 _AUDIO_ZIP_WORDS = ("mp3", "vbr", "ogg", "flac", "shorten", "wav", "aiff", "kbps", "lossless")
 
 
+# Archive files (`.tar.gz` ends in `gz`) and the leftovers of operating systems and
+# editors that uploaders sometimes include. The archive keeps them; the library never
+# stages them, whoever provided them (operator decisions, 2026-11-11: aadam-jacobs
+# staged 181 `_rawfile.zip` raw recordings, editor backups and `.DS_Store` files).
+_ARCHIVE_EXTS = frozenset({"zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"})
+_JUNK_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+
+
 def _ext(name: str) -> str:
     return name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
 
+def _clutter(name: str) -> bool:
+    """An archive file, a system file (`.DS_Store`, `Thumbs.db`, `desktop.ini`, macOS
+    `._` resource forks), or an editor backup (`~`, `~1~`, `.bak`)."""
+    base = name.rsplit("/", 1)[-1]
+    return (
+        _ext(base) in _ARCHIVE_EXTS
+        or _ext(base) == "bak"
+        or base.lower() in _JUNK_NAMES
+        or base.startswith("._")
+        or base.endswith("~")
+    )
+
+
 def _audio_class(f: SourceFile) -> _Class | None:
     """The file's audio class, or None for a non-audio file. Decided by extension, so
-    archive.org's "Flac FingerPrint" (`.ffp`) stays a non-audio file."""
+    archive.org's "Flac FingerPrint" (`.ffp`) stays a non-audio file, and so does a
+    macOS resource fork named like a track (`._t01.flac`)."""
+    if _clutter(f.name):
+        return None
     ext = _ext(f.name)
     if ext in _LOSSLESS:
         return _Class.LOSSLESS
@@ -228,7 +253,7 @@ def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selec
     if best is not staged:
         entries += [_entry(f, library=False) for f in best.files]
     entries += [
-        _entry(f, library=_uploaders(f))
+        _entry(f, library=_uploaders(f) and not _clutter(f.name))
         for f in files
         if _audio_class(f) is None and not f.refused and not _is_audio_zip(f)
     ]

@@ -709,7 +709,8 @@ For every show, the system keeps the highest-quality version the source
 offers and the highest-quality version a common player can play: one
 copy when those are the same files, both when they differ. Every
 non-audio file the source lists is kept too; the library gets the
-uploader's own non-audio files. Shakedown never converts audio. (§req:problem-statement; §req:success-criteria #26;
+uploader's own non-audio files, except archive files and system or
+editor leftovers. Shakedown never converts audio. (§req:problem-statement; §req:success-criteria #26;
 §req:constraints: the bounded alternate-format exception. Operator
 decisions, 2026-11-10: the product's two goals are a local playable copy
 of every configured collection and an archival-quality copy of the
@@ -776,11 +777,25 @@ Observable behavior:
   archive.org's reserved `__ia_` name prefix. (Operator decision,
   2026-11-11: the generated files cluttered library folders, e.g. 6,784
   spectrogram images in one collection.)
+- **Archive files and leftovers stay archive-only, whoever provided
+  them.** Archive files (`.zip`, `.rar`, `.7z`, `.tar`, `.gz`, `.tgz`,
+  `.bz2`, `.xz`, so also `.tar.gz` and the like), system files
+  (`.DS_Store`, `Thumbs.db`, `desktop.ini`, macOS `._` resource forks)
+  and editor backups (names ending in `~`, such as `~1~`, and `.bak`)
+  are mirrored to the archive and never staged into the library. The
+  rule reads the file name, in any folder and any letter case, so it
+  holds for every source. A resource fork named like a track
+  (`._t01.flac`) is not audio. Rip and recording logs (`.log`) and
+  track-length listings (`.len`) are notes and stay staged. (Operator
+  decisions, 2026-11-11: `aadam-jacobs` staged 181 raw recordings
+  uploaded as `<show>_16bit48khz_rawfile.zip`, 48 GiB that Navidrome
+  cannot play, plus editor backups and `.DS_Store` files.)
 - **Where files land.** The archive holds the best available copy, the
   best playable copy when different, and the non-audio files; all are
   part of the recorded manifest, so change detection covers them. The
   library holds the best playable copy and the uploader's non-audio
-  files; an unplayable best-available copy stays archive-only.
+  files other than archive files and leftovers; an unplayable
+  best-available copy stays archive-only.
 - **No playable copy.** A show whose only audio is unplayable is
   mirrored and staged as is, and `status` lists it as not playable,
   with the reason "only in SHN; archive.org offers no playable copy"
@@ -817,7 +832,9 @@ decidable from what the source reports (format class, bitrate, size), so
 the rule needs no operator judgement per show. Keeping every non-audio
 file serves the archival goal: notes and lineage are part of what would
 be lost with the source. The library is for listening, so it gets what
-the uploader added to the show and not what the source generated.
+the uploader added to the show and not what the source generated, nor
+archives no player opens or files left behind by the uploader's
+computer.
 
 **Alternatives rejected.** *Keep the format settings and choose only the
 extra playable copy by quality* — the rule then holds only where each
@@ -830,7 +847,8 @@ images and data files filled library folders. *Stage a fixed list of
 notes, checksums and images* — drops booklet scans, PDFs and other
 files uploaders add. *Group copies by file type alone* — would merge a
 show's 24-bit and 16-bit sets, or one track's MP3s of different
-bitrates.
+bitrates. *Stage uploaded archive files* (v2.0.2) — players cannot open
+them, and the raw recordings they hold repeat the show's audio.
 
 **Tradeoffs.** The operator gives up per-collection control (for
 example, mirroring only MP3 to save space). Shows with unplayable best
@@ -846,7 +864,10 @@ its checksums change and only that copy is re-fetched.
 files and every non-audio file, the library holds the FLAC files and
 the uploader's notes, checksums and artwork, and neither holds an MP3.
 Sync `aru2015-08-15.24Bit48khzMS` (one track labelled "Flac", the rest
-"24bit Flac"): both hold its 18 FLAC files. Sync an SHN-only
+"24bit Flac"): both hold its 18 FLAC files. Sync
+`ajc00286_eelpie1997-09-11`: the archive holds its
+`_16bit48khz_rawfile.zip`, the library holds the FLACs, notes,
+fingerprints and cover and no zip. Sync an SHN-only
 Grateful Dead show: the archive holds SHN and the VBR MP3 copy; the
 library holds the MP3 and the uploader's non-audio files, and no
 spectrograms; Navidrome plays it. Sync a
