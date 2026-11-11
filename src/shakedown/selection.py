@@ -5,7 +5,7 @@ goals (§spec:quality-selection): keep the highest-quality copy the source offer
 (*best available*) and the highest-quality copy a common player reads (*best
 playable*) — one copy when they are the same format, both when they differ — plus
 every non-audio file. The archive holds all of it; the library holds the best
-playable copy and the non-audio files. Shakedown never converts audio.
+playable copy and the uploader's own non-audio files. Shakedown never converts audio.
 """
 from __future__ import annotations
 
@@ -86,6 +86,27 @@ class _Format:
     @property
     def served(self) -> bool:
         return not any(f.refused for f in self.files)
+
+
+# archive.org's own files for an item, which it lists without an original: its index
+# and metadata files ("Metadata": `_files.xml`, `_meta.xml`, `_reviews.xml`,
+# `_meta.sqlite`), the item's torrent, and its tile image. archive.org reserves the
+# `__ia_` name prefix for its own files (`__ia_thumb.jpg`, listed as "Item Tile" or
+# "JPEG Thumb").
+_SOURCE_OWN_FORMATS = frozenset({"metadata", "archive bittorrent", "item tile"})
+_SOURCE_OWN_PREFIX = "__ia_"
+
+
+def _uploaders(f: SourceFile) -> bool:
+    """A non-audio file the uploader provided: notes, checksums, artwork, booklet scans.
+    Not one the source derived from another file (spectrograms, waveforms,
+    fingerprints, thumbnails, OCR text) or keeps for itself (operator decision,
+    2026-11-11: those stay in the archive, out of the library)."""
+    return not (
+        f.derived_from
+        or (f.format or "").strip().lower() in _SOURCE_OWN_FORMATS
+        or f.name.rsplit("/", 1)[-1].startswith(_SOURCE_OWN_PREFIX)
+    )
 
 
 def _is_audio_zip(f: SourceFile) -> bool:
@@ -203,7 +224,7 @@ def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selec
     if best is not staged:
         entries += [_entry(f, library=False) for f in best.files]
     entries += [
-        _entry(f, library=True)
+        _entry(f, library=_uploaders(f))
         for f in files
         if _audio_class(f) is None and not f.refused and not _is_audio_zip(f)
     ]

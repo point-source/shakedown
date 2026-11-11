@@ -3,7 +3,7 @@ every source's raw listing (§spec:per-item-isolation).
 
 The best available copy and the best playable copy are mirrored (one copy when they
 are the same format), plus every non-audio file; the library stages the best
-playable copy and the non-audio files."""
+playable copy and the uploader's own non-audio files."""
 from __future__ import annotations
 
 import json
@@ -50,9 +50,13 @@ NON_AUDIO = (
     _f("show.ffp", "Flac FingerPrint"),
     _f("show_meta.xml", "Metadata"),
     _f("cover.jpg", "JPEG"),
-    _f("show_spectrogram.png", "PNG"),
+    _f("t01_spectrogram.png", "Spectrogram", original="t01.flac"),
 )
 NON_AUDIO_NAMES = sorted(f.name for f in NON_AUDIO)
+# The uploader's own non-audio files: the library stages these, not what archive.org
+# generates or keeps for itself (operator decision, 2026-11-11).
+STAGED_NON_AUDIO = ["cover.jpg", "info.txt", "show.ffp", "show.md5"]
+ARCHIVE_ONLY_NON_AUDIO = ["show_meta.xml", "t01_spectrogram.png"]
 
 
 def _gd77_shn_show(*, derivatives: bool = True) -> tuple[SourceFile, ...]:
@@ -88,7 +92,7 @@ def _names(selection, *, library: bool | None = None) -> list[str]:
 def test_flac_show_keeps_only_the_flac_and_every_non_audio_file() -> None:
     chosen = select(_flac_show(), None)
     assert _names(chosen) == sorted(["t01.flac", "t02.flac", *NON_AUDIO_NAMES])
-    assert _names(chosen, library=False) == []
+    assert _names(chosen, library=False) == ARCHIVE_ONLY_NON_AUDIO
     assert chosen.restriction_reason is None
     assert chosen.not_playable_reason is None
     assert chosen.is_restricted is False
@@ -98,15 +102,15 @@ def test_shn_show_keeps_shn_archive_only_and_stages_the_vbr_mp3() -> None:
     chosen = select(_gd77_shn_show(), None)
     shn = [f"gd77-05-08d1t0{n}.shn" for n in (1, 2, 3)]
     mp3 = [f"gd77-05-08d1t0{n}_vbr.mp3" for n in (1, 2, 3)]
-    assert _names(chosen, library=False) == shn
-    assert _names(chosen, library=True) == sorted([*mp3, *NON_AUDIO_NAMES])
+    assert _names(chosen, library=False) == sorted([*shn, *ARCHIVE_ONLY_NON_AUDIO])
+    assert _names(chosen, library=True) == sorted([*mp3, *STAGED_NON_AUDIO])
     assert chosen.restriction_reason is None
     assert chosen.not_playable_reason is None
 
 
 def test_shn_show_without_a_playable_copy_is_staged_as_is_and_not_playable() -> None:
     chosen = select(_gd77_shn_show(derivatives=False), None)
-    assert _names(chosen, library=False) == []
+    assert _names(chosen, library=False) == ARCHIVE_ONLY_NON_AUDIO
     assert [n for n in _names(chosen) if n.endswith(".shn")] == [
         f"gd77-05-08d1t0{n}.shn" for n in (1, 2, 3)
     ]
@@ -350,3 +354,66 @@ def test_lossy_copies_of_different_bitrates_are_not_merged() -> None:
         "t01.mp3", "t02.mp3"
     ]
 
+
+
+# --- which non-audio files the library gets ------------------------------------------
+
+
+def test_the_library_gets_the_uploaders_files_and_the_archive_gets_everything() -> None:
+    """Operator decision, 2026-11-11: every non-audio file is mirrored, but only the
+    uploader's own (notes, checksums, artwork) is staged; what archive.org generates
+    (spectrograms, fingerprints, thumbnails, index files, torrents) stays archive-only."""
+    chosen = select(_real_listing("aru2015-08-15.24Bit48khzMS.json"), None)
+    staged_other = sorted(
+        n for n in _names(chosen, library=True) if not n.endswith(".flac")
+    )
+    assert staged_other == [
+        "aru2015-08-15.24Bit48khzMS_01.jpg",
+        "aru2015-08-15.txt",
+        "aru2015-08-15MS.flac24.ffp",
+    ]
+    archive_only = _names(chosen, library=False)
+    for kept in (
+        "__ia_thumb.jpg",
+        "aru2015-08-15.24Bit48khzMS_01_thumb.jpg",
+        "aru2015-08-15.24Bit48khzMS_archive.torrent",
+        "aru2015-08-15.24Bit48khzMS_files.xml",
+        "aru2015-08-15.24Bit48khzMS_meta.xml",
+        "aru2015-08-1524Bit48khzMSd1t01.afpk",
+        "aru2015-08-1524Bit48khzMSd1t01.png",
+    ):
+        assert kept in archive_only
+    assert [n for n in archive_only if "spectrogram" in n]
+
+
+def test_an_shn_show_stages_its_mp3_with_the_notes_and_checksums() -> None:
+    chosen = select(_real_listing("aru1993-08-13.shnf.json"), None)
+    assert _names(chosen, library=True) == [
+        "aru1993-08-13.md5", "aru1993-08-13.txt", "aru1993-08-13t01.mp3"
+    ]
+    assert "aru1993-08-13t01.shn" in _names(chosen, library=False)
+    assert "aru1993-08-13t01.png" in _names(chosen, library=False)
+
+
+def test_uploaded_extras_in_subfolders_are_staged() -> None:
+    """Booklet scans, PDFs and documents an uploader adds are part of the show; the
+    files archive.org derives from them are not."""
+    files = (
+        _f("t01.flac", "Flac"),
+        _f("extras/Booklet/center.jwl", "Unknown"),
+        _f("extras/Covers/cover.pdf", "PDF"),
+        _f("extras/Comments/story.doc", "Word Document"),
+        _f("extras/Comments/story.pdf", "Text PDF", original="extras/Comments/story.doc"),
+        _f("extras/Comments/story_djvu.txt", "DjVuTXT", original="extras/Comments/story.pdf"),
+        _f("show_reviews.xml", "Metadata"),
+        _f("show_meta.sqlite", "Metadata"),
+        _f("show_archive.torrent", "Archive BitTorrent"),
+    )
+    chosen = select(files, None)
+    assert _names(chosen, library=True) == [
+        "extras/Booklet/center.jwl",
+        "extras/Comments/story.doc",
+        "extras/Covers/cover.pdf",
+        "t01.flac",
+    ]
+    assert len(_names(chosen, library=False)) == 5

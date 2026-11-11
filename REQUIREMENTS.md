@@ -294,7 +294,8 @@ handoff, and discovery increment.
     show keeps its SHN and the source's best playable copy). The
     playable copy is what appears in the library; every non-audio file
     the source lists (notes, checksums, metadata, artwork) is kept in
-    both. The operator does not pick formats per collection. Shows with
+    the archive, and the library gets the ones the uploader provided,
+    not those the source generated (operator decision, 2026-11-11). The operator does not pick formats per collection. Shows with
     no playable copy are listed in `status` as not playable. Shakedown
     never converts audio itself, and changing what is selected never
     re-downloads files already in the archive. Verifiable by syncing a
@@ -783,7 +784,7 @@ library folders directly:
     but moderate confidence and effort: it is the first time shakedown
     changes archive bytes, so the recorded-state rules must hold.
 27. Best available and best playable copy, with every non-audio file
-    (→ criterion 26). 891 Grateful Dead files are SHN and unplayable
+    archived and the uploader's staged (→ criterion 26). 891 Grateful Dead files are SHN and unplayable
     today; the same rule replaces per-collection format settings and
     makes the refused-lossless fallback automatic on every source.
 28. API "sync now" as a fresh, non-overlapping run (→ criterion 24).

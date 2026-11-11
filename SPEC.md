@@ -708,8 +708,8 @@ mirrored.
 For every show, the system keeps the highest-quality version the source
 offers and the highest-quality version a common player can play: one
 copy when those are the same files, both when they differ. Every
-non-audio file the source lists is kept too. Shakedown never converts
-audio. (§req:problem-statement; §req:success-criteria #26;
+non-audio file the source lists is kept too; the library gets the
+uploader's own non-audio files. Shakedown never converts audio. (§req:problem-statement; §req:success-criteria #26;
 §req:constraints: the bounded alternate-format exception. Operator
 decisions, 2026-11-10: the product's two goals are a local playable copy
 of every configured collection and an archival-quality copy of the
@@ -724,7 +724,15 @@ Observable behavior:
   from the source's per-file bitrate when it lists one and from file
   size per track otherwise. A format counts only when it covers every
   track of the show and the source serves it (files the source refuses
-  are not available). Among lossless copies that each cover every
+  are not available). A copy is the files sharing the source's format
+  name; when no single name covers the show, the files of one audio
+  class and file type count as one copy as long as no track appears
+  twice. archive.org names a FLAC's format by its bit depth, so a show
+  with one 16-bit track among 24-bit ones lists "24bit Flac" for most
+  tracks and "Flac" for the rest (`aru2015-08-15.24Bit48khzMS`); its
+  FLAC files are still the show's lossless copy. Names that each cover
+  the show stay separate copies, ranked as below (operator report,
+  2026-11-11). Among lossless copies that each cover every
   track, FLAC beats Apple Lossless beats WAV beats AIFF, then the larger
   size per track wins, so a 24-bit FLAC beats a 16-bit one and a WAV is
   never kept over a FLAC of the same audio; SHN ranks below every
@@ -751,14 +759,25 @@ Observable behavior:
   lossy copy out of the library if it is no longer the best playable
   one; it stays in the archive (see "Files the rule no longer selects
   stay").
-- **Every non-audio file is kept.** Text notes, checksum files, the
-  source's metadata files, artwork, and generated images are mirrored
-  to the archive and staged into the library.
+- **Every non-audio file is kept; the library gets the uploader's.**
+  Text notes, checksum files, the source's metadata files, artwork, and
+  generated images are all mirrored to the archive. The library stages
+  only the non-audio files the uploader provided — notes, checksums,
+  cover and setlist images, booklet scans, PDFs and documents. Files
+  the source derived from another file (on archive.org: spectrograms,
+  waveform images, audio fingerprints, analysis data, thumbnails, OCR
+  output, and checksum files it generated) and files it keeps about the
+  item itself (archive.org's index and metadata files, reviews, torrent,
+  and item tile) stay archive-only. A file's origin comes from the
+  source's listing: whether it names an original, its format name, and
+  archive.org's reserved `__ia_` name prefix. (Operator decision,
+  2026-11-11: the generated files cluttered library folders, e.g. 6,784
+  spectrogram images in one collection.)
 - **Where files land.** The archive holds the best available copy, the
   best playable copy when different, and the non-audio files; all are
   part of the recorded manifest, so change detection covers them. The
-  library holds the best playable copy and the non-audio files; an
-  unplayable best-available copy stays archive-only.
+  library holds the best playable copy and the uploader's non-audio
+  files; an unplayable best-available copy stays archive-only.
 - **No playable copy.** A show whose only audio is unplayable is
   mirrored and staged as is, and `status` lists it as not playable,
   with the reason "only in SHN; archive.org offers no playable copy"
@@ -774,8 +793,8 @@ Observable behavior:
   deletes them once on upgrade.
 - **Upgrading downloads only what is missing.** When a show's selection
   changes — on upgrade (non-audio files and playable copies added) or
-  later (lossless served again) — only files not already recorded in
-  the archive are downloaded; files whose recorded name, size, and
+  later (lossless served again, a fixed rule) — only files not already
+  recorded in the archive are downloaded; files whose recorded name, size, and
   checksum are unchanged are kept without re-downloading or hashing
   (§spec:sync-identity, §req:constraints: an upgrade never forces
   re-downloading the bulk of the archive).
@@ -794,7 +813,8 @@ lossless fallback had to be added as a separate opt-in. "Quality" is
 decidable from what the source reports (format class, bitrate, size), so
 the rule needs no operator judgement per show. Keeping every non-audio
 file serves the archival goal: notes and lineage are part of what would
-be lost with the source.
+be lost with the source. The library is for listening, so it gets what
+the uploader added to the show and not what the source generated.
 
 **Alternatives rejected.** *Keep the format settings and choose only the
 extra playable copy by quality* — the rule then holds only where each
@@ -802,18 +822,31 @@ collection's settings allow it. *Transcode SHN to FLAC* — out of charter.
 *Replace SHN with its playable copy* — loses the preservation original.
 *Stage SHN beside the playable copy* — players list unplayable tracks.
 *Mirror only text and checksums* — the operator chose every non-audio
-file.
+file. *Stage every non-audio file* (v2.0.0) — thousands of generated
+images and data files filled library folders. *Stage a fixed list of
+notes, checksums and images* — drops booklet scans, PDFs and other
+files uploaders add. *Group copies by file type alone* — would merge a
+show's 24-bit and 16-bit sets, or one track's MP3s of different
+bitrates.
 
 **Tradeoffs.** The operator gives up per-collection control (for
 example, mirroring only MP3 to save space). Shows with unplayable best
-copies cost the extra playable copy (roughly 150 MB per show). Generated
-images add folder clutter in the library. If the source re-derives a
-playable copy, its checksums change and only that copy is re-fetched.
+copies cost the extra playable copy (roughly 150 MB per show).
+Generated files cost archive space but stay out of the library. A
+show whose only lossless files split across format names and that has
+no derivative yet (a fresh upload) may count the larger name group as
+the whole show until archive.org derives its MP3s; the next sync then
+fetches the missing track. If the source re-derives a playable copy,
+its checksums change and only that copy is re-fetched.
 
-**User-level test path.** Sync a FLAC show: archive and library hold
-the FLAC files and every non-audio file, and no MP3. Sync an SHN-only
+**User-level test path.** Sync a FLAC show: the archive holds the FLAC
+files and every non-audio file, the library holds the FLAC files and
+the uploader's notes, checksums and artwork, and neither holds an MP3.
+Sync `aru2015-08-15.24Bit48khzMS` (one track labelled "Flac", the rest
+"24bit Flac"): both hold its 18 FLAC files. Sync an SHN-only
 Grateful Dead show: the archive holds SHN and the VBR MP3 copy; the
-library holds the MP3 and the non-audio files; Navidrome plays it. Sync a
+library holds the MP3 and the uploader's non-audio files, and no
+spectrograms; Navidrome plays it. Sync a
 stream-only soundboard: the best MP3 is mirrored and `status` gives the
 reason. Upgrade a collection mirrored under `[flac, shn]` filters: the
 first sync downloads only the added non-audio files and playable copies.

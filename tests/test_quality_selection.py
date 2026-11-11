@@ -3,7 +3,7 @@
 
 The archive holds the best available copy, the best playable copy when it is a
 different format, and every non-audio file; the library holds the best playable copy
-and the non-audio files. An upgrade from the old format filters downloads only what
+and the uploader's own non-audio files. An upgrade from the old format filters downloads only what
 is missing, and no archive audio is deleted by a selection change."""
 from __future__ import annotations
 
@@ -72,8 +72,10 @@ def test_flac_show_archive_and_library_hold_the_flac_and_every_non_audio_file(
 def test_show_whose_checksum_files_name_every_track_syncs_complete(
     tmp_roots: tuple[Path, Path],
 ) -> None:
-    """Shaped like ARU1994-03-18: archive.org lists the show's .ffp and .md5 as derived
-    from every FLAC track. The show syncs, and both are kept as non-audio files."""
+    """Shaped like ARU1994-03-18: archive.org lists the .ffp and .md5 it generated as
+    derived from every FLAC track. The show syncs, and both are kept in the archive;
+    being archive.org's, not the uploader's, they stay out of the library (operator
+    decision, 2026-11-11)."""
     archive, library = tmp_roots
     config = make_config(archive, library)
     tracks = ["t01.flac", "t02.flac"]
@@ -86,9 +88,8 @@ def test_show_whose_checksum_files_name_every_track_syncs_complete(
 
     assert run_sync(config) == 0
 
-    expected = ["show.ffp", "show.md5", "t01.flac", "t02.flac"]
-    assert _names(archive, "aru-1994") == expected
-    assert _names(library, "aru-1994") == expected
+    assert _names(archive, "aru-1994") == ["show.ffp", "show.md5", *tracks]
+    assert _names(library, "aru-1994") == tracks
     assert _item(config, "aru-1994").status == ItemStatus.COMPLETE
 
 
@@ -166,9 +167,12 @@ def test_lossless_served_again_is_fetched_alone_and_the_mp3_stays_archive_only(
     assert FakePlugin.fetched_files == {}  # idempotent
 
 
-def _seed_mirrored(config, identifier: str, files: list[FakeFile]) -> dict[str, int]:
+def _seed_mirrored(
+    config, identifier: str, files: list[FakeFile], *, archive_only: frozenset[str] = frozenset()
+) -> dict[str, int]:
     """Archive copy and record of a show mirrored before the quality rule (e.g. under
-    `format_filters: [flac, shn]`): no library flags. Returns each file's inode."""
+    `format_filters: [flac, shn]`): no library flags, unless `archive_only` names the
+    files an earlier rule left out of the library. Returns each file's inode."""
     folder = config.archive_root / "fake-src" / "coll1" / identifier
     folder.mkdir(parents=True)
     for f in files:
@@ -181,11 +185,52 @@ def _seed_mirrored(config, identifier: str, files: list[FakeFile]) -> dict[str, 
             status=ItemStatus.COMPLETE,
             archive_path=folder,
             recorded_manifest=Manifest(
-                files=tuple(ManifestFile(f.name, f.size, f.md5) for f in files)
+                files=tuple(
+                    ManifestFile(f.name, f.size, f.md5, library=f.name not in archive_only)
+                    for f in files
+                )
             ),
         )
     )
     return {f.name: (folder / f.name).stat().st_ino for f in files}
+
+
+def test_a_show_v2_0_1_staged_as_mp3_gets_its_flac_back_without_downloads(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Seen on the NAS (aru2015-08-15.24Bit48khzMS, 2026-11-11): archive.org labels one
+    FLAC track "Flac" and the rest "24bit Flac", and v2.0.1 staged the VBR MP3 and a
+    spectrogram. The next sync stages the archived FLACs and the notes, downloads
+    nothing, and takes the MP3 and the spectrogram out of the library; the archive
+    keeps every file."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    t01 = FakeFile("t01.flac", b"F" * 600, format="24bit Flac")
+    t02 = FakeFile("t02.flac", b"G" * 300, format="Flac")
+    t03 = FakeFile("t03.flac", b"H" * 600, format="24bit Flac")
+    flacs = [t01, t02, t03]
+    mp3s = [_vbr(n, original=f.name) for n, f in enumerate(flacs, start=1)]
+    spectrogram = FakeFile(
+        "t01_spectrogram.png", b"P", format="Spectrogram", derived_from="t01.flac"
+    )
+    everything = [*flacs, *mp3s, spectrogram, NOTES]
+    inodes = _seed_mirrored(
+        config, "aru", everything, archive_only=frozenset(f.name for f in flacs)
+    )
+    assert run_restage(config) == 0
+    assert _names(library, "aru") == [
+        "info.txt", "t01_spectrogram.png", "t01_vbr.mp3", "t02_vbr.mp3", "t03_vbr.mp3"
+    ]
+    _show("aru", *everything)
+
+    assert run_sync(config) == 0
+
+    assert FakePlugin.fetched_files == {}
+    assert _names(library, "aru") == ["info.txt", "t01.flac", "t02.flac", "t03.flac"]
+    folder = archive / "fake-src" / "coll1" / "aru"
+    assert {n: (folder / n).stat().st_ino for n in inodes} == inodes
+    staged = library / "fake-src" / "coll1" / "aru"
+    assert all((staged / n).stat().st_ino == inodes[n] for n in _names(library, "aru"))
 
 
 def test_upgrade_from_format_filters_downloads_only_what_is_missing(

@@ -309,9 +309,10 @@ def test_real_shaped_shn_show_keeps_shn_archive_only_and_stages_the_mp3(
     source: FakeSource, tmp_roots: tuple[Path, Path]
 ) -> None:
     """§spec:quality-selection through each shipped archive.org source: the archive
-    holds the SHN, the VBR MP3, and the non-audio files; the library holds the MP3 and
-    the non-audio files. An SHN show with no derivative is staged as is and listed as
-    not playable."""
+    holds the SHN, the VBR MP3, and every non-audio file; the library holds the MP3 and
+    the uploader's own non-audio files, not what archive.org generates or keeps for
+    itself. An SHN show with no derivative is staged as is and listed as not
+    playable."""
     archive, library = tmp_roots
     config = source.config(archive, library)
     show, bare = "gd77-05-08.sbd.hicks", "gd77-05-09.sbd.shn-only"
@@ -332,8 +333,9 @@ def test_real_shaped_shn_show_keeps_shn_archive_only_and_stages_the_mp3(
     assert names(archive, show) == sorted(
         ["d1t01.mp3", "d1t01.shn", "d1t02.mp3", "d1t02.shn", *non_audio]
     )
-    assert names(library, show) == sorted(["d1t01.mp3", "d1t02.mp3", *non_audio])
-    assert names(library, bare) == names(archive, bare)
+    uploaders = ["gd1977-05-08.md5", "gd1977-05-08.txt"]
+    assert names(library, show) == sorted(["d1t01.mp3", "d1t02.mp3", *uploaders])
+    assert names(library, bare) == sorted(["d1t01.shn", "d1t02.shn", *uploaders])
     assert "d1t01.shn" in names(library, bare)
     status = _status_json(config)
     assert status["not_playable"] == [
