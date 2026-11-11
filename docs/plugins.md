@@ -104,7 +104,7 @@ ItemLookup(
   | `name` | The file's path relative to the item directory. Required. |
   | `size` | Byte size, as an int or a digit string, if the source reports it. |
   | `md5` | The source's MD5 checksum (hex), if it reports one. |
-  | `format` | The source's format name (e.g. `"Flac"`, `"VBR MP3"`), if any. Files sharing a format name form one copy of the show; when no single name covers every track, files of one audio class and file type do. |
+  | `format` | The source's format name (e.g. `"Flac"`, `"VBR MP3"`), if any. Files sharing a format name form one copy of the show; when no single name covers every track, the uploader's files (no `derived_from`) of one audio class and file type do. |
   | `refused` | `True` when the source will not serve this file (e.g. archive.org's per-file `private` flag). |
   | `derived_from` | The original file's name, or a list of names, when this file is a derivative of others (e.g. archive.org lists every track behind a `.ffp` it generated). A non-audio file with an original stays out of the library. |
   | `bitrate` | Bitrate in kbps, when the source lists one. |

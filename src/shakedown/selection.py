@@ -114,9 +114,10 @@ def _is_audio_zip(f: SourceFile) -> bool:
     return fmt.endswith("zip") and any(word in fmt for word in _AUDIO_ZIP_WORDS)
 
 
-def _stem(name: str) -> str:
-    base = name.rsplit("/", 1)[-1]
-    return base.rsplit(".", 1)[0] if "." in base else base
+def _track(name: str) -> str:
+    """The file's path without its extension: one track of the show."""
+    folder, _, base = name.rpartition("/")
+    return f"{folder}/{base.rsplit('.', 1)[0]}" if "." in base else name
 
 
 def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
@@ -125,9 +126,12 @@ def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
 
     archive.org names a FLAC's format by its bit depth, so a show with one 16-bit track
     among 24-bit ones lists "24bit Flac" for most tracks and "Flac" for the rest
-    (aru2015-08-15.24Bit48khzMS). When no single name covers the show, the files of
-    the same class and type are one copy, provided no track appears twice. Names that
-    each cover the show stay separate copies (a 24-bit and a 16-bit set)."""
+    (aru2015-08-15.24Bit48khzMS). When no single name covers the show, the uploader's
+    files of the same class and type are one copy, provided together they hold exactly
+    the show's track count and no track twice. Names that each cover the show stay
+    separate copies (a 24-bit and a 16-bit set). Derivatives never merge: the source
+    labels its own consistently, and its MP3s of different bitrates are separate
+    copies of the same tracks."""
     groups: dict[str, list[SourceFile]] = {}
     for f in audio:
         groups.setdefault(f.format or _ext(f.name), []).append(f)
@@ -140,13 +144,13 @@ def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
     families: dict[tuple[_Class, str], list[_Format]] = {}
     for fmt in out:
         exts = {_ext(f.name) for f in fmt.files}
-        if len(exts) == 1:
+        if len(exts) == 1 and not any(f.derived_from for f in fmt.files):
             families.setdefault((fmt.cls, exts.pop()), []).append(fmt)
     for (cls, _), split in families.items():
         if len(split) < 2 or any(len(fmt.files) == tracks for fmt in split):
             continue
         files = tuple(f for fmt in split for f in fmt.files)
-        if len({_stem(f.name) for f in files}) == len(files):
+        if len(files) == tracks == len({_track(f.name) for f in files}):
             out.append(_Format(" + ".join(sorted(fmt.key for fmt in split)), cls, files))
     return out
 

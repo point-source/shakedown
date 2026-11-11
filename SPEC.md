@@ -725,9 +725,12 @@ Observable behavior:
   size per track otherwise. A format counts only when it covers every
   track of the show and the source serves it (files the source refuses
   are not available). A copy is the files sharing the source's format
-  name; when no single name covers the show, the files of one audio
-  class and file type count as one copy as long as no track appears
-  twice. archive.org names a FLAC's format by its bit depth, so a show
+  name; when no single name covers the show, the uploader's files of
+  one audio class and file type count as one copy as long as together
+  they hold exactly the show's track count and no track twice. The
+  source's derivatives never merge: archive.org labels its own copies
+  consistently, and its MP3s of different bitrates are separate copies
+  of the same tracks. archive.org names a FLAC's format by its bit depth, so a show
   with one 16-bit track among 24-bit ones lists "24bit Flac" for most
   tracks and "Flac" for the rest (`aru2015-08-15.24Bit48khzMS`); its
   FLAC files are still the show's lossless copy. Names that each cover

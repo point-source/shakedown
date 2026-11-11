@@ -356,6 +356,36 @@ def test_lossy_copies_of_different_bitrates_are_not_merged() -> None:
 
 
 
+
+def test_partly_derived_lossy_copies_never_outweigh_a_complete_lossless_copy() -> None:
+    """One track failed to derive: VBR and 64 kb MP3 each miss it. Their files have
+    distinct names but are two copies of the same tracks, so they never merge into one
+    oversized copy that pushes out the complete FLAC (independent review, 2026-11-11)."""
+    files = [_f(f"t{n:02}.flac", "Flac", size=40 * MB) for n in range(1, 18)]
+    for n in range(1, 17):
+        files.append(_f(f"t{n:02}.mp3", "VBR MP3", size=9 * MB, original=f"t{n:02}.flac"))
+        files.append(
+            _f(f"t{n:02}_64kb.mp3", "64Kbps MP3", size=3 * MB, original=f"t{n:02}.flac")
+        )
+    chosen = select(files, None)
+    assert _names(chosen) == [f"t{n:02}.flac" for n in range(1, 18)]
+
+
+def test_split_labels_merge_across_disc_folders() -> None:
+    """Tracks are told apart by their whole path, so disc folders that repeat track
+    names still form one copy."""
+    files = (
+        _f("cd1/t01.flac", "24bit Flac", size=60 * MB),
+        _f("cd1/t02.flac", "24bit Flac", size=60 * MB),
+        _f("cd2/t01.flac", "24bit Flac", size=60 * MB),
+        _f("cd2/t02.flac", "Flac", size=30 * MB),
+        *(
+            _f(f"cd{d}/t0{n}.mp3", "VBR MP3", size=9 * MB, original=f"cd{d}/t0{n}.flac")
+            for d in (1, 2) for n in (1, 2)
+        ),
+    )
+    assert [n for n in _names(select(files, None)) if n.endswith(".mp3")] == []
+
 # --- which non-audio files the library gets ------------------------------------------
 
 
