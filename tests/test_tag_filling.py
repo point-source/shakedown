@@ -25,6 +25,7 @@ from shakedown.restage import run_restage
 from shakedown.state import DriftRepo, ItemRepo, RunRepo, TagRecord, TagRepo
 from shakedown.sync import _record_disappeared, run_sync
 from shakedown.tagging import (
+    FillResult,
     TagIndex,
     TagWriteError,
     desired_tags,
@@ -33,7 +34,7 @@ from shakedown.tagging import (
     recover_interrupted_tagging,
 )
 from shakedown.verify import run_verify
-from tests.audio_fixtures import make_audio, read_tags
+from tests.audio_fixtures import make_audio, mp3_with_text_shaped_link_frame, read_tags
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 from tests.serve_child import SPEC_ENV
@@ -314,6 +315,27 @@ def test_a_file_the_library_cannot_parse_is_left_untouched(tmp_path: Path) -> No
     assert path.read_bytes() == b"not really a flac file"
 
 
+
+def test_a_tag_the_library_cannot_save_leaves_the_file_untouched(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """archive.org's MP3 of aru1993-08-13.shnf holds a frame mutagen cannot write back
+    as ID3v2.3 (seen on the NAS, 2026-11-11). The file is skipped with a warning, left
+    exactly as it was, and no backup is left behind; shakedown never rewrites or
+    drops someone else's frame to get its own tags in."""
+    path = tmp_path / "coll" / "aru93" / "t01.mp3"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(mp3_with_text_shaped_link_frame())
+    original = path.read_bytes()
+    backup = tmp_path / "coll" / ".tagging" / "aru93" / "t01.mp3"
+
+    result = fill_file(path, DESIRED, None, backup)
+
+    assert result == FillResult("untaggable", None)
+    assert path.read_bytes() == original
+    assert not backup.exists()
+    assert "not filling tags in" in caplog.text and "Invalid frame ID" in caplog.text
+
 # --- crashes mid-tagging (Q-8-1: the next run restores before anything else) ---------
 
 def _crash_at(monkeypatch: pytest.MonkeyPatch, at: str) -> None:
@@ -543,6 +565,68 @@ def test_a_disk_error_tagging_a_download_fails_the_show_for_a_retry(
     monkeypatch.undo()
     assert run_sync(config) == 0
     assert read_tags(_archive_file(config, "gd77", "d1t01.flac"))["album"]
+
+
+
+ARU_META = {"creator": "Aquarium Rescue Unit", "date": "1993-08-13",
+            "venue": "Carowinds Paladium Amphitheatre"}
+ARU_ALBUM = "1993-08-13 \N{EN DASH} Carowinds Paladium Amphitheatre"
+
+
+def _untaggable_mp3_show(identifier: str, tmp_path: Path) -> FakeItem:
+    """Shaped like aru1993-08-13.shnf on archive.org: an SHN-only show whose staged
+    VBR MP3 holds a frame mutagen cannot save as ID3v2.3, beside one it can tag."""
+    taggable = make_audio(tmp_path / "source-bytes" / identifier / "t02.mp3").read_bytes()
+    item = FakeItem(identifier, [
+        FakeFile("t01.shn", b"S" * 500, format="Shorten"),
+        FakeFile("t02.shn", b"T" * 500, format="Shorten"),
+        FakeFile("t01.mp3", mp3_with_text_shaped_link_frame(), format="VBR MP3",
+                 derived_from="t01.shn"),
+        FakeFile("t02.mp3", taggable, format="VBR MP3", derived_from="t02.shn"),
+    ], metadata={**ARU_META})
+    FakePlugin.items[identifier] = item
+    return item
+
+
+def test_a_download_whose_tag_cannot_be_saved_still_completes(tmp_roots) -> None:
+    """Seen on the NAS (2026-11-11): the show failed every run with "fetch crash".
+    The file keeps the source's bytes, its sibling is tagged, and the show is
+    complete (§spec:per-item-isolation)."""
+    config = make_config(*tmp_roots, fill_tags=True)
+    _untaggable_mp3_show("aru93", tmp_roots[0].parent)
+
+    assert run_sync(config) == 0
+
+    stored = ItemRepo(_db(config)).get("fake-src", "coll1", "aru93")
+    assert stored is not None and stored.status == ItemStatus.COMPLETE
+    assert _archive_file(config, "aru93", "t01.mp3").read_bytes() == (
+        mp3_with_text_shaped_link_frame()
+    )
+    assert read_tags(_archive_file(config, "aru93", "t02.mp3"))["album"] == [ARU_ALBUM]
+    assert _library_file(config, "t01.mp3").stat().st_ino == (
+        _archive_file(config, "aru93", "t01.mp3").stat().st_ino
+    )
+
+
+def test_a_mirrored_file_whose_tag_cannot_be_saved_does_not_stop_the_run(
+    tmp_roots,
+) -> None:
+    """The pass over mirrored shows skips the file and finishes the collection; the
+    show is marked done, so later runs do not reopen it."""
+    root = tmp_roots[0].parent
+    _untaggable_mp3_show("aru93", root)
+    _fake_show("gd77", root)
+    assert run_sync(make_config(*tmp_roots)) == 0
+    config = make_config(*tmp_roots, fill_tags=True)
+
+    assert run_sync(config) == 0
+
+    assert _album(config, "gd77") == [ALBUM]
+    assert read_tags(_archive_file(config, "aru93", "t02.mp3"))["album"] == [ARU_ALBUM]
+    assert _archive_file(config, "aru93", "t01.mp3").read_bytes() == (
+        mp3_with_text_shaped_link_frame()
+    )
+    assert "aru93" in _tag_repo(config).fingerprints("fake-src", "coll1")
 
 
 # --- verify --deep: shakedown's own tagging is not drift ------------------------------

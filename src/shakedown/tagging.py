@@ -313,6 +313,17 @@ def _discard(backup: Path) -> None:
             return
 
 
+def _undo(path: Path, backup: Path | None) -> None:
+    """After a failed write, put the original bytes back from the backup, if any."""
+    if backup is None:
+        return
+    try:
+        _restore(backup, path)
+        _discard(backup)
+    except OSError:
+        log.exception("could not restore %s; the next run restores it", path)
+
+
 def fill_file(
     path: Path, desired: Mapping[str, str], record: TagRecord | None, backup: Path | None
 ) -> FillResult:
@@ -369,13 +380,18 @@ def fill_file(
         tags.save(path)
         _fsync(path)
     except (OSError, MutagenError) as e:
-        if backup is not None:
-            try:
-                _restore(backup, path)
-                _discard(backup)
-            except OSError:
-                log.exception("could not restore %s; the next run restores it", path)
+        _undo(path, backup)
         raise TagWriteError(str(e)) from e
+    except Exception as e:
+        # The tags cannot be written back as they are: a frame someone else wrote that
+        # the library rejects (archive.org MP3s carry a LINK frame written like a text
+        # frame, which mutagen cannot save as ID3v2.3: "Invalid frame ID"). Rewriting
+        # or dropping that frame would change someone else's tag, so the file is left
+        # as it is and the show goes on (§spec:per-item-isolation).
+        _undo(path, backup)
+        log.warning("not filling tags in %s: its existing tags cannot be saved: %s: %s",
+                    path, type(e).__name__, e)
+        return FillResult("untaggable", record)
     post_tag_md5 = _md5(path)
     _fault_point("saved")
     if backup is not None:

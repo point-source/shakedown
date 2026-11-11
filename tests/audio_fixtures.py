@@ -68,3 +68,17 @@ def read_tags(path: Path) -> dict[str, list[str]]:
         return {k: list(v) for k, v in EasyID3(path).items()}
     f = FLAC(path) if path.suffix.lower() == ".flac" else OggVorbis(path)
     return {k.lower(): list(v) for k, v in f.items()}
+
+
+def mp3_with_text_shaped_link_frame() -> bytes:
+    """An MP3 whose ID3v2.3 tag holds a LINK frame written like a text frame (an
+    encoding byte, then a URL), as archive.org's MP3s of aru1993-08-13.shnf carry.
+    mutagen reads it, but cannot save the tag as v2.3: "Invalid frame ID"."""
+    def frame(frame_id: bytes, body: bytes) -> bytes:
+        return frame_id + len(body).to_bytes(4, "big") + b"\x00\x00" + body
+
+    frames = frame(b"TPE1", b"\x00Aquarium Rescue Unit") + frame(
+        b"LINK", b"\x00http://www.archive.org/details/aru1993-08-13.shnf"
+    )
+    size = bytes((len(frames) >> shift) & 0x7F for shift in (21, 14, 7, 0))
+    return b"ID3\x03\x00\x00" + size + frames + mp3_bytes()
