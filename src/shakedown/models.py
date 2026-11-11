@@ -90,7 +90,7 @@ class SourceFile:
     md5: str | None
     format: str | None = None
     refused: bool = False  # the source will not serve this file
-    derived_from: str | None = None  # the original file, for a derivative
+    derived_from: tuple[str, ...] = ()  # the original file(s), for a derivative
     bitrate: int | None = None  # kbps, when the source lists it
     title: str | None = None  # the file's track title, when the source lists it
     track: str | None = None  # the file's track number, as the source writes it

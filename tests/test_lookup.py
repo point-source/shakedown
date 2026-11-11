@@ -16,6 +16,7 @@ from shakedown.discovery import (
     describe,
     lookup,
 )
+from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import ItemLookup
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 
@@ -229,8 +230,63 @@ def test_raw_fields_quality_selection_needs_are_carried() -> None:
     result, _ = _run(_plugin())
     assert isinstance(result, ItemDetails)
     mp3, shn = result.files
-    assert (mp3.format, mp3.derived_from, mp3.bitrate, mp3.refused) == ("VBR MP3", "a.shn", 192, False)
-    assert (shn.refused, shn.derived_from, shn.bitrate) == (True, None, None)
+    assert (mp3.format, mp3.derived_from, mp3.bitrate, mp3.refused) == ("VBR MP3", ("a.shn",), 192, False)
+    assert (shn.refused, shn.derived_from, shn.bitrate) == (True, (), None)
+
+
+# Trimmed from archive.org's real file list for ARU1994-03-18: the item's checksum and
+# fingerprint derivatives name every track they were made from, as a list.
+_ARU_TRACKS = ["ARU_1994-03-18_D1T01.flac", "ARU_1994-03-18_D1T02.flac"]
+_ARU1994_03_18_FILES = [
+    {"name": "ARU1994-03-18.ffp", "source": "derivative", "format": "Flac FingerPrint",
+     "original": _ARU_TRACKS},
+    {"name": "ARU1994-03-18.md5", "source": "derivative", "format": "Checksums",
+     "original": _ARU_TRACKS},
+    {"name": "ARU_1994-03-18_D1T01.flac", "source": "original", "format": "Flac",
+     "size": "13553230", "md5": "6bba15e479605db2f6fb73dd0f768e12",
+     "title": "Plain or Peanut", "track": "01"},
+    {"name": "ARU_1994-03-18_D1T01.mp3", "source": "derivative", "title": "Plain or Peanut",
+     "track": "01", "bitrate": "189", "format": "VBR MP3",
+     "original": "ARU_1994-03-18_D1T01.flac", "size": "3355648",
+     "md5": "b1b426d03ee1ade142e8392772481c19"},
+    {"name": "ARU_1994-03-18_D1T02.flac", "source": "original", "format": "Flac",
+     "size": "27028408", "md5": "96483b013657322d46c331e2c70a1fcb",
+     "title": "Time Flack", "track": "02"},
+]
+
+
+def test_archive_org_file_derived_from_several_originals_is_well_formed() -> None:
+    """archive.org names every original of a whole-show derivative (its .ffp and .md5)
+    in a list. That is a normal listing, not a malformed one."""
+    FakePlugin.lookup_faults["a"] = [
+        _answer(*file_records("ARU1994-03-18", _ARU1994_03_18_FILES))
+    ]
+    result, _ = _run(_plugin())
+    assert isinstance(result, ItemDetails)
+    by_name = {f.name: f for f in result.files}
+    assert by_name["ARU1994-03-18.ffp"].derived_from == tuple(_ARU_TRACKS)
+    assert by_name["ARU1994-03-18.md5"].derived_from == tuple(_ARU_TRACKS)
+    assert by_name["ARU_1994-03-18_D1T01.mp3"].derived_from == ("ARU_1994-03-18_D1T01.flac",)
+    assert by_name["ARU_1994-03-18_D1T01.flac"].derived_from == ()
+
+
+@pytest.mark.parametrize("original", [["a.flac", 1], {"name": "a.flac"}, 7])
+def test_unexpected_original_is_dropped_and_logged(
+    original: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing reads a file's original yet, so an unexpected shape never fails the
+    show: the value is dropped, and a warning names the show and file so it can be
+    looked into."""
+    FakePlugin.lookup_faults["a"] = [
+        _answer({"name": "a.ffp", "derived_from": original}, {"name": "a.flac"})
+    ]
+    with caplog.at_level("WARNING", logger="shakedown.discovery"):
+        result, _ = _run(_plugin())
+    assert isinstance(result, ItemDetails)
+    assert [(f.name, f.derived_from) for f in result.files] == [("a.ffp", ()), ("a.flac", ())]
+    assert caplog.messages == [
+        "a: ignored the original of 'a.ffp': not a file name or a list of file names"
+    ]
 
 
 def test_per_file_title_and_track_are_carried_to_the_manifest() -> None:

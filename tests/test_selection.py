@@ -33,7 +33,7 @@ def _f(
         md5=None,
         format=fmt,
         refused=refused,
-        derived_from=original,
+        derived_from=(original,) if original else (),
         bitrate=bitrate,
     )
 

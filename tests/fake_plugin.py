@@ -24,7 +24,7 @@ class FakeFile:
     content: bytes
     format: str | None = None
     refused: bool = False
-    derived_from: str | None = None
+    derived_from: str | list[str] | None = None  # passed through raw, as a source would
     bitrate: int | None = None
     title: str | None = None
     track: str | None = None
