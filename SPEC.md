@@ -110,8 +110,7 @@ criterion 5).
 
 ## Item lifecycle §spec:item-lifecycle
 
-*Status: implemented, except recording and showing when a show was
-removed upstream (below) — not started.*
+*Status: complete*
 
 Every discovered item carries a persistent status:
 
@@ -1212,7 +1211,7 @@ exits (§req:constraints). The command surface:
 | Command | Behavior |
 | --- | --- |
 | `sync [--source S] [--collection C] [--dry-run] [--refresh-metadata]` | Run a sync now; defaults to all configured collections. What the scheduler invokes. `--refresh-metadata` re-resolves and rewrites `metadata.json` sidecars for preserve-opted collections without re-downloading media (§spec:metadata-preservation). |
-| `status [--json]` | Last run per collection with its kind (sync, refetch, or reconform), item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, disappeared items, known drift, library separations in effect (§spec:library-ownership), library files shakedown did not place (§spec:library-cleanup), undelivered handoff notices (§spec:durable-handoff), and shows not playable (§spec:quality-selection). |
+| `status [--json]` | Last run per collection with its kind (sync, refetch, or reconform), item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, shows removed upstream and kept (each with the date it was first found missing, §spec:item-lifecycle), known drift, library separations in effect (§spec:library-ownership), library files shakedown did not place (§spec:library-cleanup), undelivered handoff notices (§spec:durable-handoff), and shows not playable (§spec:quality-selection). |
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
@@ -1385,8 +1384,12 @@ Sync state lives in a single-file embedded SQLite database at
   library placement — its folder and the files shakedown placed there
   (§spec:library-ownership, §spec:library-cleanup); per file shakedown
   tagged, the post-tag checksum and the tag values it wrote
-  (§spec:tag-filling); and per collection, the shows covered by handoff
-  notices not yet delivered (§spec:durable-handoff). The schema moves
+  (§spec:tag-filling); per show removed upstream, the date it was first
+  found missing from a complete listing (§spec:item-lifecycle — a show
+  already removed before the upgrade has no date: the only candidate,
+  its last verification time, is rewritten by every `reconcile`); and
+  per collection, the shows covered by handoff notices not yet
+  delivered (§spec:durable-handoff). The schema moves
   forward by one migration on first start of the new version; nothing
   is re-downloaded (§req:constraints: deployment status). A database
   rebuilt by `reconcile` starts with no placement record and adopts the
