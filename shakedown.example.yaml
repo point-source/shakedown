@@ -29,14 +29,9 @@ sources:
     collections:
       - name: grateful-dead
         query: 'collection:GratefulDead'
-        format_filters: [flac, shn]
-        exclude_filters: ['*_64kb.mp3', '*_vbr.mp3']
-        # Opt-in: when archive.org refuses every lossless file of a show (stream-only
-        # soundboards), mirror its MP3 copy instead of skipping the show. `shakedown
-        # status` lists these shows; if the lossless files are served again later, the
-        # next sync fetches them in place of the MP3s. Read by `ia` sources only; an
-        # etree collection accepts the setting and ignores it.
-        fallback_format_filters: [mp3]
+        # There are no file settings: every show keeps its best copy, a copy a common
+        # player reads when the best one isn't (e.g. MP3 beside SHN), and every
+        # non-audio file (SPEC.md §spec:quality-selection).
         # Template renders the staging *directory*; original filenames are appended
         # automatically (SPEC.md §spec:library-staging). Available IA fields: identifier, title, creator,
         # date, year, venue, coverage. Filters: sanitize, short, lower, upper. Every field
@@ -51,13 +46,21 @@ sources:
         # excluded from change detection — an upstream notes edit never re-fetches media;
         # run `shakedown sync --refresh-metadata` to explicitly re-pull and rewrite it.
         preserve_source_metadata: false
-        on_complete:
-          webhook: http://beets:8337/import?path={staging_root}
+        # Opt-in tag filling (SPEC.md §spec:tag-filling): fill in missing artist, album,
+        # date, venue, and track title tags from archive.org's metadata, so shows group
+        # and display correctly in Navidrome. Tags already present are never changed.
+        # Off by default; when on, the archive copy carries the filled tags too.
+        fill_tags: false
+        # No handoff is needed to listen: Navidrome in the example compose stack
+        # watches the library tree and picks up new shows on its own. To tell
+        # your own receiver about new shows instead, set one of these (both are
+        # placeholders — point them at a receiver you run). See docs/handoff.md.
+        # on_complete:
+        #   webhook: http://your-receiver.example/shakedown?collection={collection}
+        #   # or: exec: /path/to/your-command {staging_root}
 
       - name: phish
         query: 'collection:Phish'
-        format_filters: [flac]
-        fallback_format_filters: [mp3]
         # Default library_layout is `passthrough`: mirrors the archive layout 1:1.
         # Opt-in fast-path for recurring no-op syncs (SPEC.md §spec:incremental-discovery):
         # when the source's cheap change signal is unchanged, skip the per-item metadata
@@ -76,12 +79,12 @@ sources:
         # Leave out collections the internetarchive source already mirrors, so
         # no show is downloaded and linked twice.
         query: 'collection:etree AND NOT collection:GratefulDead AND NOT collection:Phish'
-        format_filters: [flac, shn]
-        exclude_filters: ['*_64kb.mp3', '*_vbr.mp3']
         # Available etree fields: identifier, title, creator, date, year,
         # venue, coverage. Filters: sanitize, short, lower, upper.
         library_layout: '{year}/{date} - {venue}/{identifier}'
 
-notifications:
-  on_failure:
-    webhook: http://ntfy:80/shakedown
+# Optional alert when a run fails. Placeholder: point it at a receiver you run
+# (for example an ntfy topic URL). See docs/handoff.md.
+# notifications:
+#   on_failure:
+#     webhook: http://your-ntfy.example/shakedown

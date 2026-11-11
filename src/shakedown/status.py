@@ -8,8 +8,19 @@ import click
 
 from shakedown.config import Config
 from shakedown.db import connect
-from shakedown.models import ItemStatus, OperationOutcome
-from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
+from shakedown.models import ItemStatus, OperationOutcome, RunKind
+from shakedown.state import (
+    DriftRepo,
+    ItemRepo,
+    OperationOutcomeRepo,
+    PendingHandoffRepo,
+    PlacementRepo,
+    RunRepo,
+)
+
+# Shows removed upstream are a fact, not a warning (§spec:item-lifecycle); `shows`
+# is "1 show" or "N shows".
+REMOVED_UPSTREAM_LINE = "  removed upstream: {shows} (kept; dates in status --json)"
 
 
 def _collection_summary(
@@ -23,6 +34,9 @@ def _collection_summary(
 ) -> dict[str, Any]:
     counts = items.count_by_status(source_name, collection_name)
     last = runs.latest(source_name, collection_name)
+    # Only a sync lists the source, so only a sync can leave the collection stale or
+    # clear it; a later single-show run does neither (§spec:failure-behavior).
+    last_sync = runs.latest(source_name, collection_name, kind=RunKind.SYNC)
     recovery = outcomes.latest_actionable(source_name, collection_name)
     bytes_on_disk = items.archived_bytes(source_name, collection_name)
 
@@ -30,6 +44,8 @@ def _collection_summary(
         {"identifier": identifier, "reason": reason}
         for identifier, reason in items.list_restricted(source_name, collection_name)
     ]
+    placements = PlacementRepo(items.conn)
+    library_dir = config.library_root / source_name / collection_name
 
     return {
         "source": source_name,
@@ -40,14 +56,64 @@ def _collection_summary(
         "last_run": _summarize_run(last) if last else None,
         "recovery": _summarize_recovery(recovery) if recovery else None,
         "restricted": restricted,
-        # Stale = the most recent run failed to enumerate the source; existing
+        # Complete shows with no copy a common player reads (§spec:quality-selection).
+        "not_playable": [
+            {"identifier": identifier, "reason": reason}
+            for identifier, reason in items.list_not_playable(source_name, collection_name)
+        ],
+        # Shows removed upstream and kept, each with the day it was first found
+        # missing, or None if it went before dates were recorded (§spec:item-lifecycle).
+        "removed_upstream": [
+            {"identifier": identifier, "removed_on": when.date().isoformat() if when else None}
+            for identifier, when in items.list_removed_upstream(source_name, collection_name)
+        ],
+        # Shows that render the same library folder, each staged into its own folder
+        # labelled with its identifier (§spec:library-ownership).
+        "separations": [
+            {"identifier": identifier, "folder": str(library_dir / folder)}
+            for identifier, folder in placements.list_separated(source_name, collection_name)
+        ],
+        # Library files shakedown did not place, left in place (§spec:library-cleanup).
+        "unplaced_files": [
+            str(library_dir / path)
+            for path in placements.list_unplaced(source_name, collection_name)
+        ],
+        # Shows whose handoff notice was not delivered yet (§spec:durable-handoff).
+        "handoff_pending": _handoff_pending(config, source_name, collection_name, items),
+        # Stale = the most recent sync failed to enumerate the source; existing
         # items are retained (§spec:failure-behavior).
-        "stale": bool(last.stale) if last else False,
+        "stale": bool(last_sync.stale) if last_sync else False,
+    }
+
+
+def _handoff_pending(
+    config: Config, source_name: str, collection_name: str, items: ItemRepo
+) -> dict[str, Any] | None:
+    """The collection's pending handoff, or None. A collection whose `on_complete` was
+    removed has dropped its list, even before the next run deletes the rows."""
+    has_handoff = any(
+        c.name == collection_name and c.on_complete is not None
+        for s in config.sources if s.name == source_name
+        for c in s.collections
+    )
+    pending = PendingHandoffRepo(items.conn).list(source_name, collection_name)
+    if not has_handoff or not pending:
+        return None
+    return {
+        "shows": len(pending),
+        "since": min(p.since for p in pending).isoformat(),
+        "last_reason": pending[0].last_reason,
+        "identifiers": [p.identifier for p in pending],
     }
 
 
 def _summarize_run(run: Any) -> dict[str, Any]:
     return {
+        # The id a `serve` trigger answers with, so a caller can find its run here
+        # (§spec:api-sync-runs).
+        "run_id": run.id,
+        # sync, refetch, or reconform (§spec:single-show-runs).
+        "kind": run.kind.value,
         "started_at": run.started_at.isoformat(),
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "items_discovered": run.items_discovered,
@@ -56,10 +122,8 @@ def _summarize_run(run: Any) -> dict[str, Any]:
         "items_failed": run.items_failed,
         "bytes_downloaded": run.bytes_downloaded,
         "errors": run.errors,
-        # Recordings dropped to layout collisions last run, distinct from item_failed
-        # (§spec:layout-collision-safety).
-        "collisions_dropped": run.collisions_dropped,
-        "collision_paths": run.collision_paths,
+        # Why this run's failure alert was not delivered (§spec:durable-handoff).
+        "failure_notice_error": run.failure_notice_error,
     }
 
 
@@ -128,38 +192,58 @@ def print_status(config: Config, *, as_json: bool) -> None:
             click.echo("  STALE: source enumeration failed last run; existing items retained")
         last = s["last_run"]
         if last:
+            # A single-show run names its kind; a sync's line stays as it was.
+            kind = "" if last["kind"] == RunKind.SYNC else f" ({last['kind']})"
             click.echo(
-                f"  last run: {last['started_at']} → "
+                f"  last run: {last['started_at']}{kind} → "
                 f"new={last['items_new']} updated={last['items_updated']} "
                 f"failed={last['items_failed']} bytes={last['bytes_downloaded']}"
             )
+            if last["failure_notice_error"]:
+                click.echo(f"  failure notice not delivered: {last['failure_notice_error']}")
         else:
             click.echo("  last run: never")
+        handoff = s["handoff_pending"]
+        if handoff:
+            shows = "1 show" if handoff["shows"] == 1 else f"{handoff['shows']} shows"
+            click.echo(f"  handoff not delivered: {shows} since {handoff['since']}")
+            click.echo(f"    last reason: {handoff['last_reason']}")
         click.echo("  items: " + ", ".join(f"{k}={v}" for k, v in s["counts"].items() if v))
         click.echo(f"  disk:  {s['bytes_on_disk'] / 1e9:.2f} GiB")
-        if last and last["collisions_dropped"]:
-            # Recordings dropped to layout collisions last run — a loud line separate
-            # from ordinary fetch failures (§spec:layout-collision-safety).
+        separations = s["separations"]
+        if separations:
             click.echo(
-                f"  layout collisions: {last['collisions_dropped']} recording(s) "
-                f"dropped to a shared path last run"
+                f"  shared folder names ({len(separations)} shows, each labelled by identifier):"
             )
-            for path in last["collision_paths"][:10]:
-                # `!r`: paths derive from remote metadata via the layout template and
-                # may carry control characters — repr neutralizes terminal-escape
-                # injection into `status` output (§spec:layout-collision-safety).
-                click.echo(f"    - {path!r}")
-            if len(last["collision_paths"]) > 10:
-                click.echo(f"    ... and {len(last['collision_paths']) - 10} more")
+            # `!r`: folder names come from source metadata via the layout template and
+            # may carry control characters — repr neutralizes terminal escapes.
+            _echo_capped([f"{sep['identifier']} → {sep['folder']!r}" for sep in separations])
+        if s["unplaced_files"]:
+            click.echo(
+                f"  library files not placed by shakedown: {len(s['unplaced_files'])} "
+                "(left in place; paths in status --json)"
+            )
+        removed = len(s["removed_upstream"])
+        if removed:
+            shows = "1 show" if removed == 1 else f"{removed} shows"
+            click.echo(REMOVED_UPSTREAM_LINE.format(shows=shows))
         if s["drift_files"]:
             click.echo(f"  drift: {s['drift_files']} files (run `verify --deep --list` for paths)")
         if s["restricted"]:
             click.echo(f"  restricted ({len(s['restricted'])}):")
-            for r in s["restricted"][:10]:
-                click.echo(f"    - {r['identifier']}: {r['reason']}")
-            if len(s["restricted"]) > 10:
-                click.echo(f"    ... and {len(s['restricted']) - 10} more")
+            _echo_capped([f"{r['identifier']}: {r['reason']}" for r in s["restricted"]])
+        if s["not_playable"]:
+            click.echo(f"  not playable ({len(s['not_playable'])}):")
+            _echo_capped([f"{r['identifier']}: {r['reason']}" for r in s["not_playable"]])
         click.echo("")
+
+
+def _echo_capped(rows: list[str], cap: int = 10) -> None:
+    """One status list: the first ``cap`` rows, then how many more there are."""
+    for row in rows[:cap]:
+        click.echo(f"    - {row}")
+    if len(rows) > cap:
+        click.echo(f"    ... and {len(rows) - cap} more")
 
 
 def show_item(config: Config, identifier: str) -> None:

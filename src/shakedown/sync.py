@@ -11,28 +11,40 @@ import logging
 import os
 import queue
 import shutil
-import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
-from contextlib import contextmanager
+from collections.abc import Collection, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
+from shakedown.discovery import (
+    ItemDescriptor,
+    ItemDetails,
+    LookupFailure,
+    SourceBudget,
+    describe,
+    look_up_rows,
+    source_budgets,
+    stream_items,
+)
 from shakedown.filesystem import is_within
 from shakedown.lock import run_exclusive
 from shakedown.models import (
     Item,
     ItemStatus,
     Manifest,
+    ManifestFile,
     OperationOutcome,
     OperationStatus,
     OperationType,
     Run,
+    RunKind,
 )
 from shakedown.notify import (
     SyncCompletePayload,
@@ -40,183 +52,52 @@ from shakedown.notify import (
     fire_complete,
     fire_failure,
 )
+from shakedown.placement import (
+    LibraryPlacement,
+    PlacementReport,
+    has_archive_copy,
+    log_separations,
+)
 from shakedown.plugins import registry
-from shakedown.plugins.base import FetchResult, ItemDescriptor, SourcePlugin
+from shakedown.plugins.base import FetchResult, ListedItem, SourcePlugin
 from shakedown.staging import (
     METADATA_SIDECAR,
-    StageResult,
-    UnsafeLibraryPathError,
     manifest_reserves_sidecar_name,
-    stage_item,
-    unstage_item,
     write_sidecar,
 )
-from shakedown.state import ItemRepo, OperationOutcomeRepo, RunRepo
+from shakedown.state import (
+    ItemRepo,
+    OperationOutcomeRepo,
+    PendingHandoffRepo,
+    RunRepo,
+    TagRecord,
+    TagRepo,
+)
+from shakedown.tagging import (
+    Desired,
+    TagPlanner,
+    TagWriteError,
+    fill_collection_tags,
+    fill_file,
+    fingerprint,
+    recover_interrupted_tagging,
+    tag_failure,
+)
+from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
 
 
-class SourceBudget:
-    """Shared per-source concurrency ceiling (SPEC §spec:source-budget).
+# Recorded as an item's restriction_reason when the source lists no audio for it
+# (operator-approved copy).
+NO_FILES_REASON = "source lists no audio files"
 
-    One instance per upstream host, shared across every collection of the sources
-    on that host and both their discovery and download workers, so the number of
-    simultaneous connections Shakedown opens to the host never exceeds the
-    configured budget — no matter how many collections run concurrently.
-    """
-
-    def __init__(self, size: int) -> None:
-        self.size = size
-        self._sem = threading.BoundedSemaphore(size)
-
-    @contextmanager
-    def slot(self) -> Iterator[None]:
-        self._sem.acquire()
-        try:
-            yield
-        finally:
-            self._sem.release()
-
-
-def _source_budget_size(config: Config, source: SourceConfig) -> int:
-    return source.max_concurrent_requests or config.max_concurrent_downloads
-
-
-def _source_budgets(
-    config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
-) -> dict[str, SourceBudget]:
-    """One shared concurrency budget per upstream host, keyed by source name.
-
-    All collections of a source — and every source whose plugin names the same host
-    (an `ia` and an `etree` source both reach archive.org) — draw on one bounded
-    pool, so the ceiling on simultaneous connections to a host holds even with
-    max_concurrent_collections > 1. A shared budget takes the smallest ceiling its
-    sources set (SPEC §spec:source-budget).
-    """
-    groups: dict[str, list[SourceConfig]] = {}
-    group_of: dict[str, str] = {}
-    for source, _collection, plugin in work:
-        if source.name in group_of:
-            continue
-        key = f"host:{plugin.upstream_host}" if plugin.upstream_host else f"source:{source.name}"
-        groups.setdefault(key, []).append(source)
-        group_of[source.name] = key
-    shared = {
-        key: SourceBudget(min(_source_budget_size(config, s) for s in sources))
-        for key, sources in groups.items()
-    }
-    return {name: shared[key] for name, key in group_of.items()}
-
-
-def _describe_one(
-    plugin: SourcePlugin,
-    identifier: str,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-) -> ItemDescriptor | None:
-    with budget.slot():
-        return plugin.describe_item(identifier, collection)
-
-
-def _describe_paced[K](
-    plugin: SourcePlugin,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-    keyed_ids: Iterable[tuple[str, K]],
-    workers: int,
-) -> Iterator[tuple[ItemDescriptor | None, K]]:
-    """Resolve each (identifier, key) to its descriptor across the shared budget,
-    yielding (descriptor, key) as each resolves.
-
-    Lookups are submitted only as the consumer takes results, a few ahead of it, so a
-    show's details live from its lookup until the consumer has handled them — never
-    for the whole listing. Memory stays flat however large the collection.
-    """
-    window = 2 * workers
-    todo = iter(keyed_ids)
-    pending: dict[Future[ItemDescriptor | None], K] = {}
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-
-        def top_up() -> None:
-            while len(pending) < window:
-                nxt = next(todo, None)
-                if nxt is None:
-                    return
-                identifier, key = nxt
-                fut = pool.submit(_describe_one, plugin, identifier, collection, budget)
-                pending[fut] = key
-
-        top_up()
-        while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for fut in done:
-                key = pending.pop(fut)
-                yield fut.result(), key
-                top_up()
-
-
-def _stream_descriptors(
-    plugin: SourcePlugin,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-    enumerated: set[str],
-) -> Iterator[ItemDescriptor]:
-    """Yield item descriptors as they resolve, fanning per-item metadata resolution
-    across the shared per-source budget (SPEC §spec:discovery-pipeline).
-
-    Sources exposing `enumerate_items()` get concurrent `describe_item()` resolution
-    bounded by the source budget, yielded by `_describe_paced` so a consumer can act on
-    each item the moment it resolves (the overlap lever). Sources without the
-    enumerate/describe split fall back to the serial `discover()` stream. A transient
-    per-item fault yields None from `describe_item` and is dropped, exactly as the serial
-    path skipped a failed metadata fetch. Materializing the id list or a `describe_item`
-    call raising propagates to the consumer, which treats it as an enumeration failure.
-
-    Every identifier the enumeration returned is added to ``enumerated`` — including one
-    whose `describe_item` transiently failed and was dropped. That set, not the resolved
-    descriptors, is the prune signal (SPEC §spec:prune-safety): an enumerated-but-unresolved
-    item is still present in the collection, so it must never be read as `disappeared`. In
-    the `discover()` fallback there is no enumerate/describe split, so ``enumerated``
-    collects the resolved identifiers instead.
-    """
-    identifiers = plugin.enumerate_items(collection)
-    if identifiers is None:
-        for desc in plugin.discover(collection):
-            enumerated.add(desc.identifier)
-            yield desc
-        return
-    ids = list(identifiers)  # materialize the enumeration (may raise -> stale)
-    enumerated.update(ids)
-    if not ids:
-        return
-    for desc, _ in _describe_paced(
-        plugin, collection, budget, ((i, None) for i in ids), min(budget.size, len(ids))
-    ):
-        if desc is not None:
-            yield desc
-
-
-def _discover_descriptors(
-    plugin: SourcePlugin,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-) -> tuple[list[ItemDescriptor], set[str]]:
-    """Materialize the full enumeration for the dry-run path (Discover + Plan, no fetch).
-    The real run streams the same descriptors (`_stream_descriptors`) into the fetch
-    pipeline instead of buffering them here.
-
-    Returns the resolved descriptors plus the set of *enumerated* identifiers — the prune
-    signal. The latter is a superset of the described identifiers: an item enumeration
-    listed but whose description failed is present for prune purposes even though it
-    resolved to no descriptor (SPEC §spec:prune-safety).
-    """
-    enumerated: set[str] = set()
-    descriptors = list(_stream_descriptors(plugin, collection, budget, enumerated))
-    return descriptors, enumerated
-
-
-# Recorded as an item's restriction_reason when the source lists no files for it.
-NO_FILES_REASON = "source lists no files matching this collection's filters"
+# The command that retries a run of each kind, for its outcome's next safe action.
+_RERUN = {
+    RunKind.SYNC: "sync",
+    RunKind.REFETCH: "item refetch",
+    RunKind.RECONFORM: "verify --deep --reconform",
+}
 
 
 class PlanAction(StrEnum):
@@ -232,6 +113,57 @@ class PlannedItem:
     descriptor: ItemDescriptor | None  # None for disappeared (no longer in source)
     existing: Item | None
     action: PlanAction
+    # The descriptor's files to download; None downloads all of them. The rest are
+    # kept from the archive copy (§spec:quality-selection: an upgrade downloads only
+    # what is missing).
+    fetch: tuple[ManifestFile, ...] | None = None
+    # Each taggable file's computed tags, on a `fill_tags` collection: the downloaded
+    # files are tagged before the show enters the archive (§spec:tag-filling).
+    tags: Desired | None = None
+
+
+def plan_files(
+    selected: Manifest, existing: Item | None, *, refetch: bool = False
+) -> tuple[Manifest, tuple[ManifestFile, ...]]:
+    """The manifest to record for a show and the files to download for it.
+
+    Selected files the archive already holds — same name, size, and checksum as
+    recorded, and on disk (a stat, never a hash) — are kept; ``refetch`` downloads
+    every selected file instead. Recorded files the rule no longer selects stay in the
+    archive copy, recorded as archive-only, while they are on disk: a selection change
+    never deletes archive audio (§spec:quality-selection).
+    """
+    if (
+        not selected.files
+        or existing is None
+        or existing.recorded_manifest is None
+        or existing.archive_path is None
+    ):
+        return selected, selected.files
+    folder = existing.archive_path
+    recorded = existing.recorded_manifest.fingerprint()
+    chosen = {f.name for f in selected.files}
+    fetch = tuple(
+        f
+        for f in selected.files
+        if refetch
+        or (f.name, f.size, f.md5) not in recorded
+        or not (folder / f.name).is_file()
+    )
+    retained = tuple(
+        replace(f, library=False)
+        for f in existing.recorded_manifest.files
+        if f.name not in chosen and (folder / f.name).is_file()
+    )
+    merged = Manifest(files=tuple(sorted(selected.files + retained, key=lambda f: f.name)))
+    return merged, fetch
+
+
+def _entries(manifest: Manifest) -> frozenset[ManifestFile]:
+    """A manifest's files with everything the record keeps beyond identity: the
+    library flag staging reads, and the per-file title and track tag filling reads
+    (§spec:tag-filling)."""
+    return frozenset(manifest.files)
 
 
 @dataclass
@@ -243,15 +175,19 @@ class CollectionSyncStats:
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items left untouched
-    # Recordings dropped this run because their library_layout rendered onto a path
-    # another item already staged (§spec:layout-collision-safety). Counted once per
-    # dropped recording and kept distinct from `failed` — the item's archive copy is
-    # intact, only its library link was dropped. `collision_paths` holds the colliding
-    # staging directories for the consolidated run/status summary.
-    collisions_dropped: int = 0
-    collision_paths: list[str] = field(default_factory=list)
     # Fetches the source refused (recorded unavailable, not failed).
     unavailable: int = 0
+    # Shows counted in `failed` because staging them left an issue (a foreign file at a
+    # target, a failed removal, a refused path, a disk error, a tag write that failed),
+    # not because of a fetch.
+    staging_issues: int = 0
+    # Why the run's failure alert was not delivered, shown with this run only.
+    failure_notice_error: str | None = None
+    # Separations in effect after the run's staging pass (§spec:library-ownership):
+    # reported, never a failure.
+    separated: int = 0
+    # Archive path of each show fetched this run, for the handoff payload.
+    fetched: dict[str, Path] = field(default_factory=dict)
     # Items fetched and staged this run, for the sync.complete batch payload
     # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
     staged: list[dict[str, str]] = field(default_factory=list)
@@ -305,6 +241,8 @@ def _run_sync(
             work.append((source, collection, plugin))
 
     if not work:
+        if not dry_run:
+            announce_started([])
         return 0
 
     # Initialize the state DB once, up front. The one-time WAL switch and schema
@@ -313,10 +251,15 @@ def _run_sync(
     # already-migrated DB). SPEC §spec:sync-workflow.
     connect(config.state_db).close()  # type: ignore[arg-type]
 
-    budgets = _source_budgets(config, work)
+    budgets = source_budgets(config, [(s, p) for s, _, p in work])
 
     if refresh_metadata:
+        announce_started([])
         return _run_refresh(config, work, budgets)
+
+    opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = (
+        {} if dry_run else _open_runs(config, work)
+    )
 
     overall_failed = 0
     max_workers = min(config.max_concurrent_collections, len(work))
@@ -325,6 +268,7 @@ def _run_sync(
             pool.submit(
                 _sync_collection, config, source, collection, plugin,
                 dry_run=dry_run, budget=budgets[source.name],
+                opened=opened.get((source.name, collection.name)),
             ): (source, collection)
             for source, collection, plugin in work
         }
@@ -340,28 +284,51 @@ def _run_sync(
                 log.warning("%s/%s: STALE (source enumeration failed)", source.name, collection.name)
             else:
                 log.info(
-                    "%s/%s: discovered=%d new=%d updated=%d failed=%d collisions=%d bytes=%d",
+                    "%s/%s: discovered=%d new=%d updated=%d failed=%d separated=%d bytes=%d",
                     source.name, collection.name,
                     stats.discovered, stats.new, stats.updated, stats.failed,
-                    stats.collisions_dropped, stats.bytes_downloaded,
+                    stats.separated, stats.bytes_downloaded,
                 )
-                if stats.collisions_dropped:
-                    # Consolidated per-run collision summary (§spec:layout-collision-safety):
-                    # one line naming how many recordings were dropped and to which paths,
-                    # not a WARNING buried per file. Paths are rendered with `!r` because
-                    # they derive from remote metadata via the layout template and may hold
-                    # control characters — repr neutralizes terminal-escape injection.
-                    log.warning(
-                        "%s/%s: %d recording(s) dropped to layout collisions; "
-                        "colliding paths: %s",
-                        source.name, collection.name, stats.collisions_dropped,
-                        ", ".join(repr(p) for p in stats.collision_paths),
-                    )
-            # A same-run layout collision is a loud non-zero exit like any other loss —
-            # the run still completes and the rest of the collection stages normally.
-            if stats.failed > 0 or stats.stale or stats.collisions_dropped > 0:
+            # A separation is reported but never fails the run: no recording was lost.
+            log_separations(source.name, collection.name, stats.separated)
+            if stats.failed > 0 or stats.stale:
                 overall_failed += 1
     return 0 if overall_failed == 0 else 1
+
+
+def _open_runs(
+    config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
+) -> dict[tuple[str, str], tuple[Run, OperationOutcome]]:
+    """Open every collection's run record and outcome before any collection starts,
+    then announce them to `serve` if it started this run (§spec:api-sync-runs): serve
+    answers a trigger with the run ids, so they must exist before the first collection
+    begins. Each collection resets its start time when it actually begins."""
+    started = datetime.now()
+    opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = {}
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        runs = RunRepo(conn)
+        outcomes = OperationOutcomeRepo(conn)
+        for source, collection, _plugin in work:
+            run = runs.start(source.name, collection.name, started)
+            outcome = outcomes.start(
+                OperationType.SYNC,
+                source.name,
+                collection.name,
+                started,
+                phase="discover",
+                safe_next_action="restore source access and rerun sync",
+            )
+            opened[(source.name, collection.name)] = (run, outcome)
+    announce_started([
+        {
+            "run_id": run.id,
+            "outcome_id": outcome.id,
+            "source": run.source_name,
+            "collection": run.collection_name,
+        }
+        for run, outcome in opened.values()
+    ])
+    return opened
 
 
 def _run_refresh(
@@ -405,11 +372,13 @@ def _refresh_collection(
     Re-resolution reuses the budgeted descriptor stream, so it honors the shared per-source
     politeness ceiling (§spec:source-budget). For each mirrored item still enumerated
     upstream, the fresh metadata is written to `metadata.json` (in place, so the library
-    hardlink tracks it) and to the recorded `source_metadata`, then the item is restaged —
-    media is never re-downloaded. Returns 1 if any item hit a staging collision, else 0.
+    hardlink tracks it) and to the recorded `source_metadata`, then the collection is
+    restaged, so a show whose folder renders differently moves — media is never
+    re-downloaded. Returns 1 if a lookup failed or staging left a per-show issue, else 0.
     """
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
+    _recover(config, source.name, collection)
     mirrored = [
         it
         for it in items.list_for_collection(source.name, collection.name)
@@ -421,83 +390,110 @@ def _refresh_collection(
         log.info("[%s/%s] metadata refresh: no mirrored items", source.name, collection.name)
         return 0
 
-    enumerated: set[str] = set()
+    mirrored_ids = {it.identifier for it in mirrored}
     fresh: dict[str, ItemDescriptor] = {}
+    failed = 0
     try:
-        for desc in _stream_descriptors(plugin, collection, budget, enumerated):
-            fresh[desc.identifier] = desc
+        for found in stream_items(
+            plugin, collection, budget, set(),
+            look_up=lambda row: row.identifier in mirrored_ids,
+        ):
+            if isinstance(found, LookupFailure):
+                # The item keeps its sidecar and recorded metadata; retried next refresh.
+                failed += 1
+                log.warning("[%s/%s] %s: %s", source.name, collection.name,
+                            found.identifier, found.reason)
+            else:
+                fresh[found.identifier] = found
     except Exception as e:
         log.warning(
             "[%s/%s] metadata refresh enumeration failed: %s", source.name, collection.name, e
         )
         return 1
 
-    staged_paths: set[Path] = set()
     refreshed = 0
-    failed = 0
     for item in mirrored:
         desc = fresh.get(item.identifier)
         if desc is None:
-            continue  # no longer enumerated upstream; nothing to re-resolve from
+            continue  # not listed upstream, or its lookup failed (logged above)
         assert item.archive_path is not None and item.recorded_manifest is not None
         item.source_metadata = desc.metadata
         # Rewrite the DB record always, but skip the sidecar when a media file claims its
-        # reserved name (stage_item applies the same guard, §spec:sync-identity).
+        # reserved name (staging applies the same guard, §spec:sync-identity).
         if not manifest_reserves_sidecar_name(item.recorded_manifest):
             write_sidecar(item.archive_path / METADATA_SIDECAR, desc.metadata)
         items.upsert(item)
-        try:
-            result = stage_item(
-                config, collection, source.name, item, item.recorded_manifest,
-                staged_paths=staged_paths,
-            )
-        except UnsafeLibraryPathError as e:
-            failed += 1
-            log.warning("[%s/%s] %s", source.name, collection.name, e)
-            continue
-        if result.collisions:
-            failed += 1
-            for c in result.collisions:
-                log.warning("[%s/%s] %s", source.name, collection.name, c)
         refreshed += 1
+    # A changed venue or date changes the tags shakedown filled (§spec:tag-filling).
+    tag_issues = _fill_tags(config, source.name, collection, items)
+    for lines in tag_issues.values():
+        for line in lines:
+            log.warning("[%s/%s] %s", source.name, collection.name, line)
+    report = LibraryPlacement(config, collection, source.name, items).finish()
     log.info(
         "[%s/%s] metadata refresh: refreshed=%d of %d mirrored",
         source.name, collection.name, refreshed, len(mirrored),
     )
-    return 1 if failed else 0
+    log_separations(source.name, collection.name, report.separations)
+    if report.render_error is not None:
+        log.warning("[%s/%s] %s: %s", source.name, collection.name, *report.render_error)
+        return 1
+    return 1 if report.issues or tag_issues or failed else 0
 
 
-# Upper bound on the colliding-path *sample* retained per run. The count
-# (`collisions_dropped`) is always exact; this only caps the illustrative path list
-# that lands in the DB, the notification payload, and the summary line.
-_MAX_COLLISION_PATHS = 100
-
-
-def _record_collision(
+def _apply_placement_report(
     stats: CollectionSyncStats,
-    source_name: str,
-    collection_name: str,
-    stage_result: StageResult,
+    report: PlacementReport,
+    tag_issues: dict[str, list[str]],
 ) -> None:
-    """Record one recording dropped to a same-run layout collision, counted once per
-    recording (not per colliding file) into ``collisions_dropped``
-    (§spec:layout-collision-safety).
+    """Fold a staging pass, and the tag filling before it, into the run: each show
+    with an issue counts once as failed (a disk error while linking already did,
+    §spec:failure-behavior), separations are counted for the summary, and shows
+    fetched this run join the handoff payload with the folder they ended up in."""
+    if report.render_error is not None:
+        identifier, message = report.render_error
+        stats.failed += 1
+        stats.staging_issues += 1
+        stats.errors.append(f"{identifier}: {message}")
+    for identifier in sorted(tag_issues.keys() | report.issues.keys()):
+        stats.failed += 1
+        stats.staging_issues += 1
+        stats.errors.extend(tag_issues.get(identifier, []))
+        stats.errors.extend(report.issues.get(identifier, []))
+    stats.separated = report.separations
+    for identifier, archive_path in stats.fetched.items():
+        folder = report.folder_of.get(identifier)
+        if folder is None:
+            continue  # refused: nothing of it is in the library
+        stats.staged.append(
+            {
+                "identifier": identifier,
+                "archive_path": str(archive_path),
+                "staging_path": str(folder),
+            }
+        )
 
-    No-op when the stage had no collision. The per-file detail is logged at DEBUG; the
-    single consolidated WARNING is emitted once per collection by ``run_sync``.
 
-    ``collisions_dropped`` stays exact, but the retained path *sample* is capped
-    (``_MAX_COLLISION_PATHS``): a lossy layout over a large source can drop tens of
-    thousands of recordings, and an unbounded list would bloat the DB blob, the
-    notification payload, and the summary line without adding signal.
-    """
-    if not stage_result.collisions:
-        return
-    stats.collisions_dropped += 1
-    if len(stats.collision_paths) < _MAX_COLLISION_PATHS:
-        stats.collision_paths.append(str(stage_result.staging_dir))
-    for c in stage_result.collisions:
-        log.debug("[%s/%s] layout collision detail: %s", source_name, collection_name, c)
+def _fill_tags(
+    config: Config, source_name: str, collection: CollectionConfig, items: ItemRepo
+) -> dict[str, list[str]]:
+    """The run's tag filling over mirrored shows, before its staging pass, on a
+    `fill_tags` collection (§spec:tag-filling)."""
+    if not collection.fill_tags:
+        return {}
+    return fill_collection_tags(
+        config.archive_root / source_name / collection.name, items,
+        source_name, collection.name,
+    )
+
+
+def _recover(config: Config, source_name: str, collection: CollectionConfig) -> None:
+    """Finish what a crashed run left half done, before anything else reads the
+    archive: an interrupted swap of a show's folder, and an interrupted tag write
+    (whether or not the collection still fills tags)."""
+    root = config.archive_root / source_name / collection.name
+    _recover_interrupted_swaps(root)
+    recover_interrupted_tagging(root)
 
 
 def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: datetime) -> None:
@@ -509,8 +505,7 @@ def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: d
     run.bytes_downloaded = stats.bytes_downloaded
     run.stale = stats.stale
     run.errors = stats.errors
-    run.collisions_dropped = stats.collisions_dropped
-    run.collision_paths = stats.collision_paths
+    run.failure_notice_error = stats.failure_notice_error
     run.finished_at = finished
     runs.finish(run)
 
@@ -522,7 +517,6 @@ def _completed_work(stats: CollectionSyncStats) -> dict[str, int]:
         "items_updated": stats.updated,
         "items_failed": stats.failed,
         "bytes_downloaded": stats.bytes_downloaded,
-        "collisions_dropped": stats.collisions_dropped,
     }
 
 
@@ -547,6 +541,7 @@ def _sync_collection(
     *,
     dry_run: bool,
     budget: SourceBudget,
+    opened: tuple[Run, OperationOutcome] | None = None,
 ) -> CollectionSyncStats:
     """Sync one (source, collection) end-to-end.
 
@@ -563,19 +558,14 @@ def _sync_collection(
     runs = RunRepo(conn)
     outcomes = OperationOutcomeRepo(conn)
 
-    run = runs.start(source.name, collection.name, started) if not dry_run else None
-    outcome = (
-        outcomes.start(
-            OperationType.SYNC,
-            source.name,
-            collection.name,
-            started,
-            phase="discover",
-            safe_next_action="restore source access and rerun sync",
-        )
-        if not dry_run
-        else None
-    )
+    run: Run | None = None
+    outcome: OperationOutcome | None = None
+    if opened is not None:
+        # Opened up front by `_open_runs`; time the run from when this collection
+        # actually begins, not from when it was queued behind the others.
+        run, outcome = opened
+        runs.mark_started(run, started)
+        outcomes.mark_started(outcome, started)
 
     stats = CollectionSyncStats()
     try:
@@ -584,25 +574,80 @@ def _sync_collection(
             stats, started, dry_run=dry_run, budget=budget,
         )
     except Exception as e:
-        # An unexpected crash must still close the run record and its outcome, so
-        # `status` never shows a run stuck in progress and the next run starts clean.
-        stats.errors.append(f"sync crashed: {e}")
-        finished = datetime.now()
-        if run is not None and run.finished_at is None:
-            _finish_run(runs, run, stats, finished)
-        if outcome is not None and outcome.finished_at is None:
-            outcomes.finish(
-                outcome,
-                OperationStatus.FAILED_BEFORE_COMPLETION,
-                finished,
-                phase=outcome.phase,
-                completed_work=_completed_work(stats),
-                preservation_context="completed archive work retained",
-                deletion_context=_deletion_context(collection),
-                safe_next_action="check the logged error and rerun sync",
-                errors=stats.errors,
-            )
+        _close_crashed(runs, run, outcomes, outcome, stats, collection, e, RunKind.SYNC)
         raise
+
+
+def _close_crashed(
+    runs: RunRepo,
+    run: Run | None,
+    outcomes: OperationOutcomeRepo,
+    outcome: OperationOutcome | None,
+    stats: CollectionSyncStats,
+    collection: CollectionConfig,
+    error: Exception,
+    kind: RunKind,
+) -> None:
+    """An unexpected crash must still close the run record and its outcome, so
+    `status` never shows a run stuck in progress and the next run starts clean."""
+    stats.errors.append(f"{kind.value} crashed: {error}")
+    finished = datetime.now()
+    if run is not None and run.finished_at is None:
+        _finish_run(runs, run, stats, finished)
+    if outcome is not None and outcome.finished_at is None:
+        outcomes.finish(
+            outcome,
+            OperationStatus.FAILED_BEFORE_COMPLETION,
+            finished,
+            phase=outcome.phase,
+            completed_work=_completed_work(stats),
+            preservation_context="completed archive work retained",
+            deletion_context=_deletion_context(collection),
+            safe_next_action=f"check the logged error and rerun {_RERUN[kind]}",
+            errors=stats.errors,
+        )
+
+
+def _finish_outcome(
+    outcomes: OperationOutcomeRepo,
+    outcome: OperationOutcome,
+    stats: CollectionSyncStats,
+    collection: CollectionConfig,
+    finished: datetime,
+    kind: RunKind,
+    shows: Collection[str] | None = None,
+) -> None:
+    """Close a run's outcome once its work is done (§spec:recoverable-operation-reporting).
+    A clean run clears earlier warnings of its own kind only: a single-show run did
+    not redo a sync's work, and a sync does not refetch an unchanged show. A clean
+    single-show run (``shows``) clears only warnings about the shows it acted on."""
+    if stats.failed > 0:
+        phase = "stage" if stats.failed == stats.staging_issues else "fetch"
+        outcomes.finish(
+            outcome,
+            OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
+            finished,
+            phase=phase,
+            affected_item=_affected_item_from_errors(stats.errors),
+            completed_work=_completed_work(stats),
+            preservation_context="completed archive work retained",
+            deletion_context=_deletion_context(collection),
+            safe_next_action=f"fix failed item issues and rerun {_RERUN[kind]}",
+            errors=stats.errors,
+        )
+        return
+    outcomes.finish(
+        outcome,
+        OperationStatus.COMPLETED,
+        finished,
+        phase="record",
+        completed_work=_completed_work(stats),
+        deletion_context=_deletion_context(collection),
+    )
+    outcomes.resolve_actionable(
+        OperationType(kind.value), outcome.source_name, outcome.collection_name, finished,
+        affected_items=shows,
+    )
 
 
 def _sync_collection_phases(
@@ -623,7 +668,6 @@ def _sync_collection_phases(
 ) -> CollectionSyncStats:
     """The phases of `_sync_collection`, run inside its crash guard."""
     conn = items.conn
-    staged_paths: set[Path] = set()
 
     log.info("[%s/%s] discovering...", source.name, collection.name)
 
@@ -631,10 +675,14 @@ def _sync_collection_phases(
         # Dry-run performs Discover and Plan only (SPEC §spec:sync-workflow): no fetch,
         # no overlap to exploit, no writes. Materialize the enumeration and report the
         # plan without touching disk or DB.
+        enumerated_identifiers: set[str] = set()
+        descriptors: list[ItemDescriptor] = []
         try:
-            descriptors, enumerated_identifiers = _discover_descriptors(
-                plugin, collection, budget
-            )
+            for found in stream_items(plugin, collection, budget, enumerated_identifiers):
+                if isinstance(found, LookupFailure):
+                    _note_lookup_failure(stats, source.name, collection.name, found)
+                else:
+                    descriptors.append(found)
         except Exception as e:
             log.warning("[%s/%s] source enumeration failed: %s", source.name, collection.name, e)
             stats.stale = True
@@ -648,9 +696,9 @@ def _sync_collection_phases(
         _log_plan(source.name, collection.name, plan)
         return stats
 
-    # Finish any swap a crashed run left half done, before anything decides whether
-    # an item's archive copy exists.
-    _recover_interrupted_swaps(config.archive_root / source.name / collection.name)
+    # Finish any swap or tag write a crashed run left half done, before anything
+    # decides whether an item's archive copy exists.
+    _recover(config, source.name, collection)
 
     # Snapshot the pre-run DB state once. It drives per-item classification (is this
     # `new`/`changed-upstream`/`unchanged`?) and, after enumeration, the prune barrier
@@ -663,11 +711,19 @@ def _sync_collection_phases(
         item.identifier: item
         for item in items.list_for_planning(source.name, collection.name)
     }
+    # Every show's library folder, so each download is linked as soon as it lands
+    # (§spec:discovery-pipeline) at the folder a full pass would give it.
+    placement = LibraryPlacement(config, collection, source.name, items)
+    placement.begin()
 
     # Phases 1-4, pipelined: discover -> classify -> fetch + stage, overlapping downloads
     # with the remaining enumeration (SPEC §spec:discovery-pipeline, overlap lever).
+    planner = (
+        TagPlanner(items, source.name, collection.name) if collection.fill_tags else None
+    )
     enumerated_identifiers, deferred, enum_error = _pipelined_discover_and_fetch(
-        config, source, collection, plugin, items, stats, staged_paths, budget, by_identifier,
+        config, source, collection, plugin, items, stats, placement, budget, by_identifier,
+        planner,
     )
     stats.discovered = len(enumerated_identifiers)
 
@@ -682,8 +738,14 @@ def _sync_collection_phases(
         )
         stats.stale = True
         stats.errors.append(f"source enumeration failed: {enum_error}")
+        # Shows fetched before the failure are valid; stage them. Nothing is pruned.
+        tag_issues = _fill_tags(config, source.name, collection, items)
+        report = placement.finish()
+        _apply_placement_report(stats, report, tag_issues)
         finished = datetime.now()
-        _fire_notifications(config, source, collection, stats, started, finished)
+        _fire_notifications(
+            config, items, source, collection, stats, started, finished, report.folder_of
+        )
         if run is not None:
             _finish_run(runs, run, stats, finished)
         if outcome is not None:
@@ -714,8 +776,8 @@ def _sync_collection_phases(
         settled={_planned_identifier(p) for p in deferred},
     )
 
-    # Re-stage UNCHANGED items so missing hardlinks (PRD §13) are restored.
-    # stage_item is idempotent — already-linked files share an inode and are skipped.
+    # Bring UNCHANGED shows back to complete or refresh their reason; the staging pass
+    # below relinks any of their files a library tool deleted (PRD §13).
     for p in deferred:
         if (
             p.action == PlanAction.UNCHANGED
@@ -725,26 +787,29 @@ def _sync_collection_phases(
             existing = items.get(source.name, collection.name, p.existing.identifier)
             if existing is None or existing.recorded_manifest is None:
                 continue
-            # A looked-up show brings its current reason (set for a fallback copy); a
-            # show skipped on an unchanged signal is complete and keeps its own.
-            reason = (
-                p.descriptor.restriction_reason
-                if p.descriptor is not None
-                else existing.restriction_reason
+            # A looked-up show brings its current reasons, its change signal (the full
+            # comparison just proved it unchanged) and, when the rule now stages
+            # different files, its new manifest; a show skipped on an unchanged signal
+            # is complete and keeps its own.
+            desc = p.descriptor
+            update = desc is not None and (
+                bool(desc.manifest.files)
+                or desc.restriction_reason != existing.restriction_reason
+                or desc.not_playable_reason != existing.not_playable_reason
+                or (desc.change_signal or existing.change_signal) != existing.change_signal
             )
+            if desc is not None:
+                if desc.manifest.files:
+                    existing.recorded_manifest = desc.manifest
+                existing.restriction_reason = desc.restriction_reason
+                existing.not_playable_reason = desc.not_playable_reason
+                existing.change_signal = desc.change_signal or existing.change_signal
             if existing.status != ItemStatus.COMPLETE:
                 # Back upstream with the files we already hold (e.g. after an empty
                 # answer or a lifted restriction): the archive copy is complete again.
-                _record_back_to_complete(items, existing, reason)
-            elif reason != existing.restriction_reason:
-                existing.restriction_reason = reason
+                _record_back_to_complete(items, existing, existing.restriction_reason)
+            elif update:
                 items.upsert(existing)
-            stage_result = _stage_or_fail(
-                config, collection, source.name, existing, existing.recorded_manifest,
-                stats, staged_paths,
-            )
-            if stage_result is not None:
-                _record_collision(stats, source.name, collection.name, stage_result)
 
     # Persist the disappeared set in one shot (unavailable shows were recorded as listed).
     with transaction(conn):
@@ -752,48 +817,28 @@ def _sync_collection_phases(
             assert p.existing is not None
             existing = items.get(source.name, collection.name, p.existing.identifier)
             if existing is not None:
-                _record_disappeared(items, config, source.name, collection, existing)
+                _record_disappeared(items, source.name, collection, existing)
 
-    # Phase 5: notify. Fire before recording so any delivery failure is captured
-    # in the run's errors (visible in `status`) but never aborts the sync.
+    # Stage: every show with an archive copy at its current folder, and every file
+    # no longer placed (a pruned show, an old layout or name) removed
+    # (§spec:library-ownership, §spec:library-cleanup). Tags are filled first, so the
+    # library sees each show's files once, already tagged (§spec:tag-filling).
+    tag_issues = _fill_tags(config, source.name, collection, items)
+    report = placement.finish()
+    _apply_placement_report(stats, report, tag_issues)
+
+    # Phase 5: notify. Fire before recording so an undelivered notice is captured
+    # in the run's errors but never aborts the sync (§spec:durable-handoff).
     finished = datetime.now()
-    _fire_notifications(config, source, collection, stats, started, finished)
+    _fire_notifications(
+        config, items, source, collection, stats, started, finished, report.folder_of
+    )
 
     # Phase 6: record run
     if run is not None:
         _finish_run(runs, run, stats, finished)
     if outcome is not None:
-        if stats.failed > 0 or stats.collisions_dropped > 0:
-            phase = "fetch" if stats.failed > 0 else "stage"
-            action = (
-                "fix failed item issues and rerun sync"
-                if stats.failed > 0
-                else "fix library layout and rerun sync"
-            )
-            outcomes.finish(
-                outcome,
-                OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
-                finished,
-                phase=phase,
-                affected_item=_affected_item_from_errors(stats.errors),
-                completed_work=_completed_work(stats),
-                preservation_context="completed archive work retained",
-                deletion_context=_deletion_context(collection),
-                safe_next_action=action,
-                errors=stats.errors,
-            )
-        else:
-            outcomes.finish(
-                outcome,
-                OperationStatus.COMPLETED,
-                finished,
-                phase="record",
-                completed_work=_completed_work(stats),
-                deletion_context=_deletion_context(collection),
-            )
-            outcomes.resolve_actionable(
-                OperationType.SYNC, source.name, collection.name, finished
-            )
+        _finish_outcome(outcomes, outcome, stats, collection, finished, RunKind.SYNC)
 
     return stats
 
@@ -805,9 +850,10 @@ def _pipelined_discover_and_fetch(
     plugin: SourcePlugin,
     items: ItemRepo,
     stats: CollectionSyncStats,
-    staged_paths: set[Path],
+    placement: LibraryPlacement,
     budget: SourceBudget,
     by_identifier: dict[str, Item],
+    planner: TagPlanner | None,
 ) -> tuple[set[str], list[PlannedItem], Exception | None]:
     """Overlap discover → classify → fetch (SPEC §spec:discovery-pipeline, overlap lever).
 
@@ -822,10 +868,10 @@ def _pipelined_discover_and_fetch(
     - ``enumerated`` — every identifier the enumeration returned; the input to the
       prune/`disappeared` barrier, which the caller runs only when ``enum_error`` is None.
       Prune eligibility keys on absence from *this* set, never on absence from the
-      described set: an item enumeration listed but whose `describe_item` failed this run
+      described set: an item enumeration listed but whose lookup failed this run
       is still present and must never be pruned or flagged `disappeared`
-      (SPEC §spec:prune-safety). Such an item is left entirely untouched — not in
-      ``deferred``, not fetched — so its DB row is reconsidered unchanged next run.
+      (SPEC §spec:prune-safety). Such an item is listed failed and never fetched or
+      deferred; a recorded item keeps its DB row unchanged for the next run.
     - ``deferred`` — the UNCHANGED / UNAVAILABLE planned items.
     - ``enum_error`` — the exception if enumeration faulted partway (the collection goes
       stale and nothing is pruned), else None for a complete, successful enumeration.
@@ -849,6 +895,11 @@ def _pipelined_discover_and_fetch(
         def dispatch(desc: ItemDescriptor) -> None:
             planned = _classify_one(desc, by_identifier)
             if planned.action in (PlanAction.NEW, PlanAction.CHANGED_UPSTREAM):
+                if planner is not None:
+                    assert planned.descriptor is not None
+                    planned.tags = planner.plan(
+                        desc.identifier, desc.metadata, planned.descriptor.manifest
+                    )
                 archive_root.mkdir(parents=True, exist_ok=True)
                 fut = fetch_pool.submit(
                     _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
@@ -856,11 +907,17 @@ def _pipelined_discover_and_fetch(
                 fetch_futures[fut] = planned
                 fut.add_done_callback(finished.put)
             elif planned.action == PlanAction.UNCHANGED:
-                # Re-staging needs only the record and the current reason (set for a
-                # fallback copy): drop the rest of the listed details now.
+                # Re-staging needs only the record and the current reasons: drop the
+                # rest of the listed details now, keeping the manifest only when the
+                # record must take it (files the rule no longer selects, new flags).
+                assert planned.descriptor is not None and planned.existing is not None
+                manifest = planned.descriptor.manifest
+                recorded = planned.existing.recorded_manifest
+                if recorded is not None and _entries(manifest) == _entries(recorded):
+                    manifest = Manifest(files=())
                 deferred.append(
                     PlannedItem(
-                        replace(desc, manifest=Manifest(files=()), metadata={}),
+                        replace(planned.descriptor, manifest=manifest, metadata={}),
                         planned.existing,
                         PlanAction.UNCHANGED,
                     )
@@ -885,17 +942,24 @@ def _pipelined_discover_and_fetch(
             # caller's idempotent re-stage pass (§spec:incremental-discovery).
             deferred.append(PlannedItem(None, existing, PlanAction.UNCHANGED))
 
-        descriptor_stream = (
-            _stream_descriptors_incremental(
-                plugin, collection, budget, by_identifier, on_skip, enumerated
-            )
-            if collection.incremental_discovery
-            else _stream_descriptors(plugin, collection, budget, enumerated)
+        def look_up(row: ListedItem) -> bool:
+            # Incremental fast path (§spec:incremental-discovery): an item whose stored
+            # change signal still matches is UNCHANGED without a lookup.
+            existing = by_identifier.get(row.identifier)
+            if collection.incremental_discovery and _signal_unchanged(
+                row.change_signal, existing
+            ):
+                assert existing is not None  # _signal_unchanged guarantees it
+                on_skip(row.identifier, existing)
+                return False
+            return True
+
+        descriptor_stream = stream_items(
+            plugin, collection, budget, enumerated, look_up=look_up
         )
         def process(fut: Future[_FetchOutcome]) -> None:
             _process_fetch_result(
-                fut, fetch_futures.pop(fut), config, source, collection, items, stats,
-                staged_paths,
+                fut, fetch_futures.pop(fut), source, collection, items, stats, placement,
             )
 
         descriptors = iter(descriptor_stream)
@@ -911,7 +975,10 @@ def _pipelined_discover_and_fetch(
                 desc = next(descriptors, None)
                 if desc is None:
                     break
-                dispatch(desc)
+                if isinstance(desc, LookupFailure):
+                    _record_lookup_failure(items, source.name, collection.name, desc, stats)
+                else:
+                    dispatch(desc)
             except Exception as e:  # any enumeration fault marks the collection stale
                 enum_error = e
                 break
@@ -933,65 +1000,126 @@ def _pipelined_discover_and_fetch(
 
 def _fire_notifications(
     config: Config,
+    items: ItemRepo,
     source: SourceConfig,
     collection: CollectionConfig,
     stats: CollectionSyncStats,
     started: datetime,
     finished: datetime,
+    folder_of: dict[str, Path],
 ) -> None:
-    """Fire the once-per-(collection, run) handoff and failure notifications
-    (SPEC §spec:handoff).
+    """Send the once-per-(collection, run) handoff and failure notifications
+    (SPEC §spec:handoff, §spec:durable-handoff).
 
-    ``sync.complete`` fires when the run staged at least one item; ``sync.failed``
-    fires when the run failed (source enumeration stale, one or more items failed, or
-    recordings were dropped to layout collisions, §spec:layout-collision-safety). Both
-    are best-effort: a delivery failure is appended to ``stats.errors`` (recorded in the
-    run, surfaced by `status`) and never raises.
+    The handoff goes out on every run that has shows to hand off — newly staged or
+    still pending from an earlier run. ``sync.failed`` fires when the run failed
+    (source enumeration stale, or one or more items failed). A notice that is not
+    delivered is appended to ``stats.errors`` and never changes the run's outcome.
     """
     run_errors = list(stats.errors)  # substantive errors, before any delivery attempt
-    if stats.collisions_dropped:
-        run_errors.append(
-            f"{stats.collisions_dropped} recording(s) dropped to layout collisions: "
-            f"{', '.join(stats.collision_paths)}"
-        )
-    staging_root = str(config.library_root / source.name / collection.name)
     run_obj = {
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "items_new": stats.new,
         "items_updated": stats.updated,
         "items_failed": stats.failed,
-        "collisions_dropped": stats.collisions_dropped,
         "bytes_downloaded": stats.bytes_downloaded,
     }
 
-    if stats.staged:
-        err = fire_complete(
-            collection,
-            SyncCompletePayload(
-                source=source.name,
-                collection=collection.name,
-                staging_root=staging_root,
-                run=run_obj,
-                staged=stats.staged,
-            ),
-        )
-        if err:
-            stats.errors.append(err)
+    err = send_collection_handoff(
+        config, items, source.name, collection,
+        staged=stats.staged, folder_of=folder_of, run=run_obj,
+    )
+    if err:
+        stats.errors.append(f"handoff not delivered: {err}")
 
-    if stats.stale or stats.failed > 0 or stats.collisions_dropped > 0:
+    if stats.stale or stats.failed > 0:
         err = fire_failure(
             config.notifications,
             SyncFailedPayload(
                 source=source.name,
                 collection=collection.name,
-                staging_root=staging_root,
+                staging_root=_staging_root(config, source.name, collection),
                 run=run_obj,
                 errors=run_errors,
             ),
         )
         if err:
-            stats.errors.append(err)
+            log.warning(
+                "[%s/%s] failure notice not delivered: %s", source.name, collection.name, err
+            )
+            stats.errors.append(f"failure notice not delivered: {err}")
+            stats.failure_notice_error = err
+
+
+def _staging_root(config: Config, source_name: str, collection: CollectionConfig) -> str:
+    return str(config.library_root / source_name / collection.name)
+
+
+def send_collection_handoff(
+    config: Config,
+    items: ItemRepo,
+    source_name: str,
+    collection: CollectionConfig,
+    *,
+    staged: list[dict[str, str]],
+    folder_of: dict[str, Path],
+    run: dict[str, Any],
+) -> str | None:
+    """Send this collection's handoff for one run (§spec:durable-handoff): ONE notice
+    whose ``staged`` list holds the shows the run staged plus every show still pending
+    from earlier runs, at their current library folders. Returns why the notice was not
+    delivered, or ``None``. Called by every run of a collection, sync or single-show.
+
+    ``staged`` holds this run's entries ({identifier, archive_path, staging_path});
+    ``folder_of`` is the library folder of every show staged after the run's full
+    placement pass. A delivered notice clears the shows it covered; an undelivered one
+    keeps them all pending with the reason. A pending show without an archive copy
+    (pruned) leaves the list; one with a copy but no folder this pass stays pending,
+    left out of this notice. With no ``on_complete`` the pending list is dropped.
+    """
+    pending = PendingHandoffRepo(items.conn)
+    if collection.on_complete is None:
+        pending.drop(source_name, collection.name)
+        return None
+
+    entries = {entry["identifier"]: entry for entry in staged}
+    gone: list[str] = []
+    for show in pending.list(source_name, collection.name):
+        if show.identifier in entries:
+            continue
+        item = items.get(source_name, collection.name, show.identifier)
+        if item is None or not has_archive_copy(item):
+            gone.append(show.identifier)
+            continue
+        folder = folder_of.get(show.identifier)
+        if folder is None:
+            continue
+        entries[show.identifier] = {
+            "identifier": show.identifier,
+            "archive_path": str(item.archive_path),
+            "staging_path": str(folder),
+        }
+    pending.clear(source_name, collection.name, gone)
+    if not entries:
+        return None
+
+    err = fire_complete(
+        collection,
+        SyncCompletePayload(
+            source=source_name,
+            collection=collection.name,
+            staging_root=_staging_root(config, source_name, collection),
+            run=run,
+            staged=list(entries.values()),
+        ),
+    )
+    if err is None:
+        pending.clear(source_name, collection.name, entries)
+        return None
+    log.warning("[%s/%s] handoff not delivered: %s", source_name, collection.name, err)
+    pending.mark_undelivered(source_name, collection.name, entries, err, datetime.now())
+    return err
 
 
 def _files_missing(item: Item) -> bool:
@@ -1010,7 +1138,8 @@ def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> Plann
     Never hashes bytes: the comparison is between the source's *current* manifest and
     the manifest recorded at fetch time. PRD §5 also requires the expected file paths
     still exist on disk — manifest-equality alone isn't enough; vanished files trigger
-    a re-fetch. This decision needs only *this* item's state, so it is safe to make the
+    a re-fetch. Only the selected files that are missing are downloaded (plan_files).
+    This decision needs only *this* item's state, so it is safe to make the
     moment the item is discovered, before the rest of the enumeration
     (SPEC §spec:discovery-pipeline).
     """
@@ -1018,19 +1147,19 @@ def _classify_one(desc: ItemDescriptor, by_identifier: dict[str, Item]) -> Plann
     if desc.is_restricted:
         return PlannedItem(desc, existing, PlanAction.UNAVAILABLE)
     if not desc.manifest.files:
-        # An empty file list (darked item, upstream glitch, or a filter that now matches
-        # nothing) is never "the item changed": fetching it would swap an empty folder in
-        # over the archive copy. Record it unavailable and keep the local copy.
+        # No audio listed (darked item, upstream glitch) is never "the item changed":
+        # fetching it would swap an audio-less folder in over the archive copy. Record
+        # it unavailable and keep the local copy.
         return PlannedItem(
             replace(desc, restriction_reason=NO_FILES_REASON), existing, PlanAction.UNAVAILABLE
         )
     if existing is None or existing.recorded_manifest is None:
         return PlannedItem(desc, existing, PlanAction.NEW)
-    if existing.recorded_manifest == desc.manifest:
-        if _files_missing(existing):
-            return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
-        return PlannedItem(desc, existing, PlanAction.UNCHANGED)
-    return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
+    manifest, fetch = plan_files(desc.manifest, existing)
+    desc = replace(desc, manifest=manifest)
+    if fetch:
+        return PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM, fetch)
+    return PlannedItem(desc, existing, PlanAction.UNCHANGED)
 
 
 def _signal_unchanged(signal: str | None, existing: Item | None) -> bool:
@@ -1052,48 +1181,6 @@ def _signal_unchanged(signal: str | None, existing: Item | None) -> bool:
     )
 
 
-def _stream_descriptors_incremental(
-    plugin: SourcePlugin,
-    collection: CollectionConfig,
-    budget: SourceBudget,
-    by_identifier: dict[str, Item],
-    on_skip: Callable[[str, Item], None],
-    enumerated: set[str],
-) -> Iterator[ItemDescriptor]:
-    """Incremental-discovery variant of _stream_descriptors (§spec:incremental-discovery).
-
-    Requests the cheap per-item change signal from the source's search. An item whose
-    stored signal matches (and whose files are present) is reported UNCHANGED via
-    on_skip WITHOUT the per-item metadata fetch — describe_item()/get_item() is never
-    called for it. Every other item (signal changed, no stored signal, or vanished
-    files) falls through to describe_item() and the full manifest comparison, exactly
-    as today; the fresh signal is attached to its descriptor so a successful fetch
-    persists it. Falls back to the non-incremental stream when the plugin exposes no
-    signal (enumerate_with_signals returns None).
-    """
-    signals = plugin.enumerate_with_signals(collection)
-    if signals is None:
-        yield from _stream_descriptors(plugin, collection, budget, enumerated)
-        return
-    pairs = list(signals)  # materialize the enumeration (may raise -> stale)
-    enumerated.update(identifier for identifier, _ in pairs)
-    to_describe: list[tuple[str, str | None]] = []
-    for identifier, signal in pairs:
-        existing = by_identifier.get(identifier)
-        if _signal_unchanged(signal, existing):
-            assert existing is not None  # _signal_unchanged guarantees it
-            on_skip(identifier, existing)
-        else:
-            to_describe.append((identifier, signal))
-    if not to_describe:
-        return
-    for desc, signal in _describe_paced(
-        plugin, collection, budget, to_describe, min(budget.size, len(to_describe))
-    ):
-        if desc is not None:
-            yield replace(desc, change_signal=signal)
-
-
 def _disappeared_plan(
     by_identifier: dict[str, Item],
     enumerated_identifiers: set[str],
@@ -1106,7 +1193,7 @@ def _disappeared_plan(
 
     Eligibility keys on absence from ``enumerated_identifiers`` — every identifier the
     source *listed* — never on absence from the successfully-*described* set. An item the
-    enumeration returned counts as present even when its `describe_item` failed this run,
+    enumeration returned counts as present even when its lookup failed this run,
     so a transient metadata fault can never masquerade as a takedown (SPEC §spec:prune-safety).
 
     Already-terminal states are skipped so a still-absent item isn't reprocessed every
@@ -1179,57 +1266,20 @@ def _log_pipeline_plan(
     log.info("[%s/%s] plan: %s", source_name, collection_name, counts)
 
 
-def _execute_fetch_and_stage(
-    config: Config,
-    source: SourceConfig,
-    collection: CollectionConfig,
-    plugin: SourcePlugin,
-    items: ItemRepo,
-    targets: list[PlannedItem],
-    stats: CollectionSyncStats,
-    staged_paths: set[Path] | None = None,
-    budget: SourceBudget | None = None,
-) -> None:
-    """Concurrent fetch (capped by max_concurrent_downloads); sequential staging.
-
-    Each item is its own atomic unit: fetch into temp, persist row + create
-    hardlinks once the bytes are on disk and the manifest is recorded.
-
-    When a per-source ``budget`` is supplied, each fetch acquires a slot from it
-    around the whole ``_fetch_one`` call, so simultaneous connections to the
-    source's upstream host never exceed the shared per-source ceiling — the pool's
-    worker count is only the per-collection parallelism (SPEC §spec:source-budget).
-    """
-    if not targets:
-        return
-
-    archive_root = config.archive_root / source.name / collection.name
-    archive_root.mkdir(parents=True, exist_ok=True)
-
-    with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as pool:
-        futures = {
-            pool.submit(
-                _fetch_one_budgeted, budget, plugin, target, archive_root, collection
-            ): target
-            for target in targets
-        }
-        for fut in as_completed(futures):
-            _process_fetch_result(
-                fut, futures[fut], config, source, collection, items, stats, staged_paths
-            )
-
-
 def _process_fetch_result(
     fut: Future[_FetchOutcome],
     target: PlannedItem,
-    config: Config,
     source: SourceConfig,
     collection: CollectionConfig,
     items: ItemRepo,
     stats: CollectionSyncStats,
-    staged_paths: set[Path] | None,
+    placement: LibraryPlacement,
+    *,
+    refused_fails: bool = False,
 ) -> None:
-    """Apply one completed fetch: record the row, stage hardlinks, accumulate stats.
+    """Apply one completed fetch: record the row, link it into the library, accumulate
+    stats. With ``refused_fails`` (a single-show run) a download the source refuses
+    also fails the show in the run.
 
     Called only on the orchestrating thread (never a fetch worker), so the DB writes
     and the per-run counters it mutates are serialized and exact even though the
@@ -1255,6 +1305,8 @@ def _process_fetch_result(
         _record_unavailable(
             items, source.name, collection.name, replace(desc, restriction_reason=outcome.error)
         )
+        if refused_fails:
+            _fail_refused(stats, desc.identifier, outcome.error)
         return
 
     if not outcome.success:
@@ -1269,56 +1321,13 @@ def _process_fetch_result(
     else:
         stats.updated += 1
 
-    new_item = _record_complete(items, source.name, collection, desc, outcome.archive_path)
-    stage_result = _stage_or_fail(
-        config, collection, source.name, new_item, desc.manifest, stats, staged_paths,
-    )
-    if stage_result is None:
-        return  # archive copy recorded; the next sync or restage relinks it
-    if stage_result.collisions:
-        # Layout collision: this recording lost its staging path to another item this
-        # run. The archive copy is intact; only the library link was dropped
-        # (§spec:layout-collision-safety). Skip the handoff entry — nothing landed in
-        # the library for this item.
-        _record_collision(stats, source.name, collection.name, stage_result)
-        return
-
-    # Collect for the once-per-run sync.complete batch payload; the handoff
-    # fires once after the run, not per item (SPEC §spec:handoff).
-    stats.staged.append(
-        {
-            "identifier": desc.identifier,
-            "archive_path": str(new_item.archive_path),
-            "staging_path": str(stage_result.staging_dir),
-        }
-    )
-
-
-def _stage_or_fail(
-    config: Config,
-    collection: CollectionConfig,
-    source_name: str,
-    item: Item,
-    manifest: Manifest,
-    stats: CollectionSyncStats,
-    staged_paths: set[Path] | None,
-) -> StageResult | None:
-    """Stage one item, turning a disk error (permission denied, disk full, name too
-    long, EXDEV) into a per-item failure so the rest of the collection still links,
-    records, and notifies. A library path that would leave the collection's library
-    folder fails the item the same way. Returns None when staging failed."""
-    try:
-        return stage_item(
-            config, collection, source_name, item, manifest, staged_paths=staged_paths,
-        )
-    except (OSError, UnsafeLibraryPathError) as e:
-        log.warning(
-            "[%s/%s] %s: linking into the library failed: %s",
-            source_name, collection.name, item.identifier, e,
-        )
-        stats.failed += 1
-        stats.errors.append(f"{item.identifier}: linking into the library failed: {e}")
-        return None
+    with transaction(items.conn):
+        _record_complete(items, source.name, collection, desc, outcome.archive_path)
+        _record_download_tags(items, source.name, collection.name, target, outcome)
+    stats.fetched[desc.identifier] = outcome.archive_path
+    # Linked now, not at the end of the run, so a run that dies later keeps it staged.
+    # Issues are reported by the run's full staging pass, which meets them again.
+    placement.update(desc.identifier)
 
 
 @dataclass
@@ -1328,6 +1337,8 @@ class _FetchOutcome:
     bytes_downloaded: int = 0
     error: str | None = None
     unavailable: bool = False  # the source refuses to serve the item
+    # What tagging the downloaded files recorded, per file; None when nothing was tagged.
+    tag_records: dict[str, TagRecord | None] | None = None
 
 
 # Bounded core-owned retries for transient fetch faults (checksum mismatch,
@@ -1346,8 +1357,8 @@ def _fetch_with_retries(
     plugin: SourcePlugin,
     desc: ItemDescriptor,
     tmp_dir: Path,
-    collection: CollectionConfig,
     *,
+    files: Sequence[ManifestFile] | None = None,
     max_attempts: int = _MAX_FETCH_ATTEMPTS,
 ) -> FetchResult:
     """Call plugin.fetch with bounded retries and backoff (SPEC §spec:failure-behavior).
@@ -1360,16 +1371,17 @@ def _fetch_with_retries(
     The temp dir is kept between attempts (and runs), so one late error does not
     re-download a whole show: plugins keep a leftover file only once it matches the
     manifest's size and md5, and fetch the rest. Anything in the temp dir that is not
-    a manifest file is removed before each attempt.
-    """
-    for attempt in range(1, max_attempts + 1):
-        _prepare_tmp_dir(desc, tmp_dir)
+    a file to fetch is removed before each attempt.
 
-        result = plugin.fetch(
-            desc, tmp_dir, collection.format_filters, collection.exclude_filters
-        )
+    ``files`` are the files to download (default: the whole manifest).
+    """
+    wanted = desc.manifest.files if files is None else tuple(files)
+    for attempt in range(1, max_attempts + 1):
+        _prepare_tmp_dir(wanted, tmp_dir)
+
+        result = plugin.fetch(desc.identifier, wanted, tmp_dir)
         if result.success:
-            short = _size_mismatches(desc, tmp_dir)
+            short = _size_mismatches(wanted, tmp_dir)
             if short:
                 # A plugin can report success over a short file (dropped connection,
                 # truncated write). Sizes are a stat, not a hash; retry like any
@@ -1399,11 +1411,11 @@ def _fetch_with_retries(
     raise AssertionError("unreachable: max_attempts must be >= 1")
 
 
-def _prepare_tmp_dir(desc: ItemDescriptor, tmp_dir: Path) -> None:
-    """Create the temp dir, keeping files a previous attempt left for the manifest's
-    names (the plugin re-checks them before reuse) and removing everything else."""
+def _prepare_tmp_dir(files: Sequence[ManifestFile], tmp_dir: Path) -> None:
+    """Create the temp dir, keeping files a previous attempt left for the names to
+    fetch (the plugin re-checks them before reuse) and removing everything else."""
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    wanted = {os.path.normpath(mf.name) for mf in desc.manifest.files}
+    wanted = {os.path.normpath(mf.name) for mf in files}
     wanted_dirs = {os.path.dirname(name) for name in wanted}
     for dirpath, dirnames, filenames in os.walk(tmp_dir, topdown=False):
         rel_dir = os.path.relpath(dirpath, tmp_dir)
@@ -1420,11 +1432,11 @@ def _prepare_tmp_dir(desc: ItemDescriptor, tmp_dir: Path) -> None:
                 shutil.rmtree(path)
 
 
-def _size_mismatches(desc: ItemDescriptor, tmp_dir: Path) -> list[str]:
-    """Manifest files present in the temp dir whose size differs from the source's.
+def _size_mismatches(files: Sequence[ManifestFile], tmp_dir: Path) -> list[str]:
+    """Fetched files present in the temp dir whose size differs from the source's.
     Missing files are left to the plugin's verify() guard."""
     short: list[str] = []
-    for mf in desc.manifest.files:
+    for mf in files:
         path = tmp_dir / mf.name
         if mf.size is not None and path.is_file() and path.stat().st_size != mf.size:
             short.append(mf.name)
@@ -1448,8 +1460,15 @@ def _fsync_tree(root: Path) -> None:
         _fsync_path(Path(dirpath))
 
 
+def _is_single_folder_name(name: str) -> bool:
+    """One folder name a show may own. Names starting with a dot are shakedown's own
+    under a collection folder (`.tmp-`, `.stale-`, `.tagging`; reconcile skips them)."""
+    separators = {"/", os.sep} | ({os.altsep} if os.altsep else set())
+    return bool(name) and not name.startswith(".") and not any(sep in name for sep in separators)
+
+
 def _fetch_one_budgeted(
-    budget: SourceBudget | None,
+    budget: SourceBudget,
     plugin: SourcePlugin,
     target: PlannedItem,
     archive_root: Path,
@@ -1458,11 +1477,8 @@ def _fetch_one_budgeted(
     """Acquire a per-source budget slot around the whole fetch (SPEC §spec:source-budget).
 
     The slot is held for the entire ``_fetch_one`` call so it counts as one live
-    upstream connection; with no budget (e.g. a single-item refetch) the fetch runs
-    unbounded.
+    upstream connection.
     """
-    if budget is None:
-        return _fetch_one(plugin, target, archive_root, collection)
     with budget.slot():
         return _fetch_one(plugin, target, archive_root, collection)
 
@@ -1487,15 +1503,15 @@ def _fetch_one(
     dest = archive_root / desc.identifier
 
     # Trust boundary: the identifier comes from a remote source and drives
-    # os.rename / shutil.rmtree / plugin downloads below. Reject anything that
-    # would escape the archive tree (traversal via `..`, an absolute path, or a
-    # separator) before it touches the filesystem.
-    if not is_within(archive_root, dest):
+    # os.rename / shutil.rmtree / plugin downloads below. It must be one folder name:
+    # a separator or `..` could escape the archive tree, or (`x/..`) name the
+    # collection folder itself, whose other shows the temp-dir sweep would delete.
+    if not _is_single_folder_name(desc.identifier):
         log.warning("[%s] rejecting unsafe identifier: %r", desc.identifier, desc.identifier)
         return _FetchOutcome(
             success=False,
             archive_path=dest,
-            error=f"unsafe identifier escapes archive tree: {desc.identifier!r}",
+            error=f"unsafe identifier is not a single folder name: {desc.identifier!r}",
         )
 
     # Trust boundary: manifest file names also come from the remote source and
@@ -1514,27 +1530,15 @@ def _fetch_one(
             error=f"unsafe file name(s) escape item directory: {unsafe_names[:5]}",
         )
 
+    # Callers have already finished any swap a crashed run left half done
+    # (`_recover_interrupted_swaps`) and routed shows the source refuses away from
+    # the fetch. The temp dir is swept per-attempt inside _fetch_with_retries.
     tmp_dir = archive_root / f"{_TMP_PREFIX}{desc.identifier}"
     stale_dir = archive_root / f"{_STALE_PREFIX}{desc.identifier}"
 
-    # Finish a swap a prior crashed promotion left half done (the collection sweep
-    # covers sync; this covers `item refetch`), before any early return, so the
-    # archive copy is always back in place. The temp dir is swept per-attempt
-    # inside _fetch_with_retries.
-    _recover_swap(stale_dir, dest)
-
-    # A show the source refuses (flagged at lookup) stays unavailable with its reason;
-    # only `item refetch` reaches here with one, since classification routes it away.
-    if desc.is_restricted:
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
-        return _FetchOutcome(
-            success=False, archive_path=dest, error=desc.restriction_reason, unavailable=True
-        )
-
     # Never promote an empty fetch: it would replace the archive copy with an empty
-    # folder. Classification already routes an empty manifest to `unavailable`; this
-    # guards the paths that skip classification (`item refetch`).
+    # folder. Both callers route an empty manifest away first; this is the last line
+    # in front of the archive copy.
     if not desc.manifest.files:
         return _FetchOutcome(
             success=False,
@@ -1542,7 +1546,8 @@ def _fetch_one(
             error=f"{NO_FILES_REASON}; archive copy left untouched",
         )
 
-    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, collection)
+    fetch = desc.manifest.files if target.fetch is None else target.fetch
+    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, files=fetch)
     if fetch_result.unavailable:
         # Nothing will resume a download the source refuses; the archive copy (if
         # any) is untouched.
@@ -1560,11 +1565,16 @@ def _fetch_one(
             error=fetch_result.error,
         )
 
+    # The files the archive copy already holds join the download by hardlink: no
+    # bytes are read or hashed, and the swap below keeps them (§spec:quality-selection).
+    fetched = {mf.name for mf in fetch}
+    _link_kept(dest, tmp_dir, [mf for mf in desc.manifest.files if mf.name not in fetched])
+
     # Core-owned completeness guard before promotion: route the existence-only
     # check through the plugin's own verify() contract (no byte hashing —
     # SPEC §spec:sync-identity) so a plugin can't commit partial state even if it
     # over-reports success.
-    verified = plugin.verify(desc, tmp_dir)
+    verified = plugin.verify(desc.manifest.files, tmp_dir)
     if not verified.ok:
         return _FetchOutcome(
             success=False,
@@ -1572,6 +1582,25 @@ def _fetch_one(
             bytes_downloaded=fetch_result.bytes_downloaded,
             error=f"missing after fetch: {verified.missing_files[:5]}",
         )
+
+    # Fill the downloads' missing tags while they are still in the temp dir, so the
+    # tagged bytes enter the archive atomically with the show (§spec:tag-filling).
+    # Kept files are links to the live archive copy and are never touched here.
+    tag_records: dict[str, TagRecord | None] | None = None
+    if target.tags is not None:
+        tag_records = {}
+        for name in sorted(fetched & target.tags.keys()):
+            try:
+                tag_records[name] = fill_file(tmp_dir / name, target.tags[name], None, None).record
+            except TagWriteError as e:
+                # The download may be torn: drop it, and the next run fetches it again.
+                (tmp_dir / name).unlink(missing_ok=True)
+                return _FetchOutcome(
+                    success=False,
+                    archive_path=dest,
+                    bytes_downloaded=fetch_result.bytes_downloaded,
+                    error=tag_failure(name, e),
+                )
 
     # Preserve the raw source metadata as a sidecar inside the temp dir *before* the
     # atomic promotion, so it lands in the archive atomically with the media or not at
@@ -1596,7 +1625,20 @@ def _fetch_one(
         success=True,
         archive_path=dest,
         bytes_downloaded=fetch_result.bytes_downloaded,
+        tag_records=tag_records,
     )
+
+
+def _link_kept(dest: Path, tmp_dir: Path, kept: Sequence[ManifestFile]) -> None:
+    """Hardlink the archive copy's kept files into the temp dir before promotion. A
+    kept file missing from the archive is left for verify() to report."""
+    for mf in kept:
+        src, link = dest / mf.name, tmp_dir / mf.name
+        if not src.is_file():
+            continue
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.unlink(missing_ok=True)
+        os.link(src, link)
 
 
 _STALE_PREFIX = ".stale-"
@@ -1690,20 +1732,48 @@ def _record_complete(
         discovered_at=now,
         downloaded_at=now,
         last_verified_at=now,
-        # Set when the copy is a fallback (e.g. MP3 for refused lossless files).
+        # Set when the copy is the best lossy one because lossless files are refused.
         restriction_reason=desc.restriction_reason,
         source_metadata=desc.metadata,
         recorded_manifest=desc.manifest,
         change_signal=desc.change_signal,
+        not_playable_reason=desc.not_playable_reason,
     )
     items.upsert(item)
     return item
+
+
+def _record_download_tags(
+    items: ItemRepo,
+    source_name: str,
+    collection_name: str,
+    target: PlannedItem,
+    outcome: _FetchOutcome,
+) -> None:
+    """The downloaded files hold new bytes: their old tag records go, replaced by what
+    fetch-time tagging wrote. The show's fingerprint is kept only when every taggable
+    file was downloaded and tagged now; otherwise the run's pass over mirrored shows
+    (or, with `fill_tags` off, a later opt-in) revisits it (§spec:tag-filling)."""
+    assert target.descriptor is not None
+    desc = target.descriptor
+    repo = TagRepo(items.conn)
+    downloaded = {mf.name for mf in (target.fetch if target.fetch is not None else desc.manifest.files)}
+    repo.drop_files(source_name, collection_name, desc.identifier, sorted(downloaded))
+    for name, record in (outcome.tag_records or {}).items():
+        if record is not None:
+            repo.put_file(source_name, collection_name, desc.identifier, name, record)
+    if target.tags is not None and outcome.tag_records is not None and target.tags.keys() <= downloaded:
+        repo.set_fingerprint(source_name, collection_name, desc.identifier, fingerprint(target.tags))
+    else:
+        repo.clear_fingerprint(source_name, collection_name, desc.identifier)
 
 
 def _record_back_to_complete(items: ItemRepo, existing: Item, reason: str | None) -> None:
     existing.status = ItemStatus.COMPLETE
     existing.restriction_reason = reason
     existing.last_verified_at = datetime.now()
+    # Listed again: no longer removed upstream (§spec:item-lifecycle).
+    existing.disappeared_at = None
     items.upsert(existing)
 
 
@@ -1728,6 +1798,46 @@ def _record_unavailable(
         recorded_manifest=existing.recorded_manifest if existing else None,
     )
     items.upsert(item)
+
+
+def _note_lookup_failure(
+    stats: CollectionSyncStats, source_name: str, collection_name: str, failure: LookupFailure
+) -> None:
+    """List a failed lookup in the run's item failures (§spec:per-item-isolation)."""
+    log.warning("[%s/%s] %s: %s", source_name, collection_name, failure.identifier, failure.reason)
+    stats.failed += 1
+    stats.errors.append(f"{failure.identifier}: {failure.reason}")
+
+
+def _record_lookup_failure(
+    items: ItemRepo,
+    source_name: str,
+    collection_name: str,
+    failure: LookupFailure,
+    stats: CollectionSyncStats,
+) -> None:
+    """A listed item whose lookup failed this run (§spec:per-item-isolation).
+
+    It is listed failed with its reason and retried next run. A new item is recorded
+    `failed`; an item already recorded is left exactly as it was — status, manifest,
+    and files — so a mirrored show is never touched by a bad lookup
+    (§spec:prune-safety). It stays in the run's listing, so it is never `disappeared`.
+    """
+    _note_lookup_failure(stats, source_name, collection_name, failure)
+    if items.get(source_name, collection_name, failure.identifier) is not None:
+        return
+    now = datetime.now()
+    items.upsert(
+        Item(
+            source_name=source_name,
+            collection_name=collection_name,
+            identifier=failure.identifier,
+            status=ItemStatus.FAILED,
+            discovered_at=now,
+            last_verified_at=now,
+            restriction_reason=failure.reason,
+        )
+    )
 
 
 def _record_failed(
@@ -1756,7 +1866,6 @@ def _record_failed(
 
 def _record_disappeared(
     items: ItemRepo,
-    config: Config,
     source_name: str,
     collection: CollectionConfig,
     existing: Item,
@@ -1765,70 +1874,315 @@ def _record_disappeared(
 
     Default: retain the local files and flag the item `disappeared` — an upstream
     takedown never deletes the user's copy. With `prune_disappeared: true`: delete
-    the archive files and staging links but *retain the DB record* marked `pruned`,
-    so `shakedown status` can still report the takedown.
+    the archive files but *retain the DB record* marked `pruned`, so `shakedown status`
+    can still report the takedown; the run's staging pass then removes its library
+    links, so its bytes are freed (§spec:library-cleanup).
+
+    Either way the record keeps the date the show was first found missing: set now
+    unless it was already `disappeared`, whose date (or lack of one, for a show gone
+    before dates were recorded) stands (§spec:item-lifecycle).
     """
+    now = datetime.now()
+    if existing.status != ItemStatus.DISAPPEARED:
+        existing.disappeared_at = now
+    existing.last_verified_at = now
     if collection.prune_disappeared:
         if existing.archive_path and existing.archive_path.exists():
             shutil.rmtree(existing.archive_path)
-        unstage_item(config, collection, source_name, existing)
         existing.status = ItemStatus.PRUNED
         existing.archive_path = None
-        existing.last_verified_at = datetime.now()
         items.upsert(existing)
+        # The tagged bytes are gone with the archive copy (§spec:tag-filling).
+        TagRepo(items.conn).delete_show(source_name, collection.name, existing.identifier)
         return
     existing.status = ItemStatus.DISAPPEARED
-    existing.last_verified_at = datetime.now()
     items.upsert(existing)
 
 
-# --- single-item operations called from `shakedown item ...` ---
+# --- single-show runs: `item refetch` and `verify --deep --reconform` ---------------
+
+
+class UnknownShow(Exception):
+    """`item refetch` named an identifier that no configured collection records."""
+
 
 def refetch_item(config: Config, identifier: str) -> int:
-    """Force re-fetch of a single item by identifier across all configured collections."""
+    """`item refetch`: a single-show run of ``identifier`` in each configured collection
+    that records it, under the writer lock (§spec:single-show-runs). Raises UnknownShow
+    when none does."""
     return run_exclusive(config, lambda: _refetch_item(config, identifier))
 
 
 def _refetch_item(config: Config, identifier: str) -> int:
-    conn = connect(config.state_db)  # type: ignore[arg-type]
-    items = ItemRepo(conn)
-    for source in config.sources:
-        plugin = registry.for_source(source)
-        for collection in source.collections:
-            existing = items.get(source.name, collection.name, identifier)
-            if existing is None:
-                continue
-            log.info("refetch: %s/%s/%s", source.name, collection.name, identifier)
-            for desc in plugin.discover(collection):
-                if desc.identifier != identifier:
-                    continue
-                target = PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM)
-                stats = CollectionSyncStats()
-                _execute_fetch_and_stage(
-                    config, source, collection, plugin, items, [target], stats
-                )
-                ok = stats.failed == 0 and stats.collisions_dropped == 0 and stats.unavailable == 0
-                return 0 if ok else 1
-    log.warning("identifier %s not found in any configured collection", identifier)
-    return 1
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        items = ItemRepo(conn)
+        targets: dict[tuple[str, str], SingleShows] = {
+            (source.name, collection.name): {identifier: None}
+            for source in config.sources
+            for collection in source.collections
+            if items.get(source.name, collection.name, identifier) is not None
+        }
+    if not targets:
+        raise UnknownShow(identifier)
+    return run_single_shows(config, targets, RunKind.REFETCH)
 
 
-def forget_item(config: Config, identifier: str) -> None:
-    """Drop an item from the DB (does not delete files)."""
+# The shows a single-show run acts on: identifier -> the archive files to repair, or
+# None to download every selected file again (a refetch).
+SingleShows = dict[str, frozenset[str] | None]
+
+
+def run_single_shows(
+    config: Config, targets: dict[tuple[str, str], SingleShows], kind: RunKind
+) -> int:
+    """Run the sync pipeline for exactly these shows, keyed by (source, collection):
+    one run per collection, marked ``kind`` (§spec:single-show-runs). Each show is
+    looked up on its own — the collection is never listed — and every lookup and
+    download draws from the shared source budget (§spec:source-budget). The caller
+    holds the writer lock. Returns 0 when every show was fetched, else 1."""
+    work = [
+        (source, collection, registry.for_source(source), targets[key])
+        for source in config.sources
+        for collection in source.collections
+        if (key := (source.name, collection.name)) in targets and targets[key]
+    ]
+    if not work:
+        return 0
+    budgets = source_budgets(config, [(s, p) for s, _, p, _ in work])
+    failed = 0
+    for source, collection, plugin, shows in work:
+        try:
+            stats = _single_show_collection(
+                config, source, collection, plugin, shows, kind, budgets[source.name]
+            )
+        except Exception:
+            log.exception("%s failed for %s/%s", kind.value, source.name, collection.name)
+            failed += 1
+            continue
+        log.info(
+            "%s/%s: %s new=%d updated=%d failed=%d unavailable=%d bytes=%d",
+            source.name, collection.name, kind.value, stats.new, stats.updated,
+            stats.failed, stats.unavailable, stats.bytes_downloaded,
+        )
+        log_separations(source.name, collection.name, stats.separated)
+        if stats.failed > 0:
+            failed += 1
+    return 0 if failed == 0 else 1
+
+
+def _plan_repair(
+    identifier: str,
+    existing: Item | None,
+    details: ItemDetails,
+    drifted: frozenset[str],
+    items: ItemRepo,
+    stats: CollectionSyncStats,
+) -> tuple[Manifest, tuple[ManifestFile, ...]] | None:
+    """A reconform's manifest and downloads for one show: each drifted archive file the
+    source still serves — a picked copy or an archive-only one outside the current
+    selection — and nothing else (§spec:verify-drift). The rest of the archive copy is
+    kept as recorded.
+
+    A drifted file the source no longer serves (no longer listed, or refused) cannot
+    be repaired: it is listed in the run's errors and never causes a download. One the
+    archive no longer holds leaves the record, as any archive-only file gone from disk
+    does (§spec:quality-selection). Returns None when there is nothing to download;
+    the caller counts the show failed once if any file was not repaired."""
+    if existing is None or existing.recorded_manifest is None or existing.archive_path is None:
+        return None
+    listed = {f.name: f for f in details.files}
+    folder = existing.archive_path
+    files: list[ManifestFile] = []
+    fetch: list[ManifestFile] = []
+    for mf in existing.recorded_manifest.files:
+        if mf.name not in drifted:
+            files.append(mf)
+            continue
+        source_file = listed.get(mf.name)
+        if source_file is None or source_file.refused:
+            stats.errors.append(
+                f"{identifier}: {mf.name} drifted and the source no longer serves it;"
+                " not repaired"
+            )
+            if (folder / mf.name).is_file():
+                files.append(mf)
+            continue
+        current = replace(
+            mf, size=source_file.size, md5=source_file.md5,
+            title=source_file.title, track=source_file.track,
+        )
+        files.append(current)
+        fetch.append(current)
+    manifest = Manifest(files=tuple(files))
+    if not fetch:
+        if manifest != existing.recorded_manifest:
+            existing.recorded_manifest = manifest
+            items.upsert(existing)
+        return None
+    return manifest, tuple(fetch)
+
+
+def _fail_refused(stats: CollectionSyncStats, identifier: str, reason: str | None) -> None:
+    """A show the source refuses in a single-show run: recorded unavailable, as a sync
+    would, and failed in the run — it was asked for and nothing was fetched
+    (operator decision, 2026-11-10)."""
+    stats.failed += 1
+    stats.errors.append(f"{identifier}: unavailable: {reason}")
+
+
+def _single_show_collection(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    plugin: SourcePlugin,
+    shows: SingleShows,
+    kind: RunKind,
+    budget: SourceBudget,
+) -> CollectionSyncStats:
+    """One collection's single-show run, recorded like a sync's: a run record and an
+    outcome, closed even if the run crashes."""
+    started = datetime.now()
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
+    runs = RunRepo(conn)
     outcomes = OperationOutcomeRepo(conn)
-    for source in config.sources:
-        for collection in source.collections:
-            if items.get(source.name, collection.name, identifier):
-                items.delete(source.name, collection.name, identifier)
-                now = datetime.now()
-                for operation in OperationType:
-                    outcomes.resolve_actionable(
-                        operation,
-                        source.name,
-                        collection.name,
-                        now,
-                        affected_item=identifier,
+    run = runs.start(source.name, collection.name, started, kind=kind)
+    outcome = outcomes.start(
+        OperationType(kind.value),
+        source.name,
+        collection.name,
+        started,
+        phase="fetch",
+        safe_next_action=f"restore source access and rerun {_RERUN[kind]}",
+    )
+    stats = CollectionSyncStats()
+    try:
+        _single_show_phases(
+            config, source, collection, plugin, shows, kind, budget,
+            items, runs, run, outcomes, outcome, stats, started,
+        )
+    except Exception as e:
+        _close_crashed(runs, run, outcomes, outcome, stats, collection, e, kind)
+        raise
+    return stats
+
+
+def _single_show_phases(
+    config: Config,
+    source: SourceConfig,
+    collection: CollectionConfig,
+    plugin: SourcePlugin,
+    shows: SingleShows,
+    kind: RunKind,
+    budget: SourceBudget,
+    items: ItemRepo,
+    runs: RunRepo,
+    run: Run,
+    outcomes: OperationOutcomeRepo,
+    outcome: OperationOutcome,
+    stats: CollectionSyncStats,
+    started: datetime,
+) -> None:
+    """Look up, fetch, stage, hand off, and record — the sync's phases for just these
+    shows, downloading even what the manifest says is unchanged: that is what a
+    refetch or reconform asks for. A refetch downloads every selected file; a
+    reconform only the drifted files (§spec:verify-drift). A show whose lookup fails,
+    or that the source's answer does not hold, is failed with the reason and left
+    exactly as it was — record, archive copy, and library placement."""
+    archive_root = config.archive_root / source.name / collection.name
+    # Finish any swap or tag write a crashed run left half done, so each show's
+    # archive copy is back in place even when this run does not fetch it.
+    _recover(config, source.name, collection)
+    stats.discovered = len(shows)
+    placement = LibraryPlacement(config, collection, source.name, items)
+    placement.begin()
+
+    planner = (
+        TagPlanner(items, source.name, collection.name) if collection.fill_tags else None
+    )
+    unrepaired: set[str] = set()
+    with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
+        fetches: dict[Future[_FetchOutcome], PlannedItem] = {}
+        for identifier, details in look_up_rows(plugin, list(shows), budget):
+            if isinstance(details, LookupFailure):
+                _note_lookup_failure(stats, source.name, collection.name, details)
+                continue
+            found = describe(identifier, details)
+            if found.is_restricted:
+                # The source refuses the show: recorded unavailable, as a sync would.
+                log.info(
+                    "[%s/%s] %s: unavailable: %s",
+                    source.name, collection.name, found.identifier, found.restriction_reason,
+                )
+                _record_unavailable(items, source.name, collection.name, found)
+                stats.unavailable += 1
+                _fail_refused(stats, found.identifier, found.restriction_reason)
+                continue
+            existing = items.get(source.name, collection.name, identifier)
+            drifted = shows[identifier]
+            if drifted is None:
+                if not found.manifest.files:
+                    _note_lookup_failure(
+                        stats, source.name, collection.name,
+                        LookupFailure(
+                            identifier, f"{NO_FILES_REASON}; archive copy left untouched"
+                        ),
                     )
-                log.info("forgot %s/%s/%s", source.name, collection.name, identifier)
+                    continue
+                # Every selected file is downloaded again; archive-only copies the
+                # rule no longer selects stay (§spec:quality-selection).
+                manifest, fetch = plan_files(found.manifest, existing, refetch=True)
+            else:
+                errors_before = len(stats.errors)
+                repair = _plan_repair(identifier, existing, details, drifted, items, stats)
+                if len(stats.errors) > errors_before:
+                    unrepaired.add(identifier)
+                if repair is None:
+                    continue
+                manifest, fetch = repair
+            action = (
+                PlanAction.CHANGED_UPSTREAM
+                if existing is not None and has_archive_copy(existing)
+                else PlanAction.NEW
+            )
+            planned = PlannedItem(replace(found, manifest=manifest), existing, action, fetch)
+            if planner is not None:
+                # A reconform restores the drifted files' source bytes, then fills their
+                # gaps again (§spec:verify-drift).
+                planned.tags = planner.plan(identifier, found.metadata, manifest)
+            archive_root.mkdir(parents=True, exist_ok=True)
+            fut = fetch_pool.submit(
+                _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
+            )
+            fetches[fut] = planned
+        for fut in as_completed(fetches):
+            # The sync's own fetch handling: record, link into the library, count.
+            failed_before = stats.failed
+            _process_fetch_result(
+                fut, fetches[fut], source, collection, items, stats, placement,
+                refused_fails=True,
+            )
+            if stats.failed > failed_before:
+                unrepaired.discard(_planned_identifier(fetches[fut]))
+    # A show with a drifted file left unrepaired is failed once, unless its download
+    # already failed it.
+    stats.failed += len(unrepaired)
+
+    # Each show fetched here went through the sync's fetch, record, and link path
+    # above, and is staged with the same ownership and cleanup pass below
+    # (§spec:library-ownership, §spec:library-cleanup). On a `fill_tags` collection the
+    # downloads were tagged before entering the archive (a reconform refills the gaps
+    # of the source bytes it restored), and the pass below follows any clash change
+    # the fetched shows brought (§spec:tag-filling).
+    tag_issues = _fill_tags(config, source.name, collection, items)
+    report = placement.finish()
+    _apply_placement_report(stats, report, tag_issues)
+
+    # The collection's handoff, exactly as a sync sends it, including shows still
+    # pending from earlier runs (§spec:durable-handoff).
+    finished = datetime.now()
+    _fire_notifications(
+        config, items, source, collection, stats, started, finished, report.folder_of
+    )
+    _finish_run(runs, run, stats, finished)
+    _finish_outcome(outcomes, outcome, stats, collection, finished, kind, shows)

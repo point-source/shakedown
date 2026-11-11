@@ -35,11 +35,8 @@ class CollectionConfig(BaseModel):
 
     name: str
     query: str
-    format_filters: list[str] = Field(default_factory=list)
-    exclude_filters: list[str] = Field(default_factory=list)
-    # Opt-in: formats to mirror instead when the source refuses every file
-    # `format_filters` wants (e.g. MP3 for a stream-only show's lossless tapes).
-    fallback_format_filters: list[str] = Field(default_factory=list)
+    # Which files to mirror is not configurable: the core keeps the best available and
+    # best playable copy plus every non-audio file (§spec:quality-selection).
     library_layout: str = "passthrough"
     prune_disappeared: bool = False
     # Opt-in per-collection fast-path (§spec:incremental-discovery); skips the per-item
@@ -52,6 +49,10 @@ class CollectionConfig(BaseModel):
     # archive item directory and hardlinks it into the library beside the media. Off by
     # default — preservation is context, never coupled to media change detection.
     preserve_source_metadata: bool = False
+    # Opt-in per-collection tag filling (§spec:tag-filling): fill in missing basic tags
+    # (artist, album, date, venue, title) from the source metadata shakedown holds. Only
+    # absent tags are filled. Off by default: the archive keeps the source's bytes.
+    fill_tags: bool = False
     on_complete: Handoff | None = None
 
 
@@ -178,10 +179,10 @@ def _validate_layouts(config: Config) -> None:
       to the same path — a guaranteed total collapse config can prove, so it fails
       fast like every other config fault (§spec:configuration).
     - **No per-item-unique field → warning.** The layout keys only on shared fields
-      (e.g. `{year}/{venue}`); two items with the same values collide at staging time.
-      Config can't prove an arbitrary *combination* is lossy, so this is a proactive
-      heads-up, not a hard error — the runtime collision summary is the correctness
-      backstop that fires only on actual loss.
+      (e.g. `{year}/{venue}`); two items with the same values render the same folder
+      and are separated into folders labelled with their identifier at staging time
+      (§spec:library-ownership). Config can't prove an arbitrary *combination* clashes,
+      so this is a proactive heads-up, not a hard error.
     """
     from shakedown.plugins import registry
     from shakedown.utils.templates import FILTER_NAMES, fields_in, unknown_filters
@@ -221,9 +222,8 @@ def _validate_layouts(config: Config) -> None:
             if not (referenced & unique):
                 log.warning(
                     "%s/%s: library_layout %r references no per-item-unique field %s; "
-                    "two items sharing these fields will collide at staging and the "
-                    "loser will be dropped from the library — add a unique component "
-                    "such as {identifier} to the leaf",
+                    "two items sharing these fields get folders labelled with their "
+                    "identifier — add a unique component such as {identifier} to the leaf",
                     source.name,
                     collection.name,
                     collection.library_layout,

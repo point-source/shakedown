@@ -8,31 +8,36 @@ package. It uses three endpoints:
 - ``GET /metadata/<identifier>`` for an item's metadata and file list.
 - ``GET /download/<identifier>/<name>`` for a file's bytes.
 
-Everything hard about durability (temp dirs, atomic promotion, retries/backoff,
-completeness guard) lives in the core; this plugin is a thin adapter that
-implements ``discover``, ``fetch`` and ``verify``.
+Everything hard (temp dirs, atomic promotion, retries/backoff, lookup isolation,
+file selection, completeness guard) lives in the core; this plugin is a thin
+adapter that implements ``list_items``, ``lookup_item``, ``fetch`` and ``verify``.
 """
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from shakedown.config import CollectionConfig, SourceConfig
-from shakedown.models import Manifest, ManifestFile
+from shakedown.models import ManifestFile
+from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
     FetchResult,
-    ItemDescriptor,
+    ItemLookup,
+    ListedItem,
     SourcePlugin,
     VerifyResult,
+    http_status,
+    retry_after_seconds,
     reusable_leftover,
 )
 from shakedown.plugins.registry import register
+from shakedown.selection import DOWNLOAD_REFUSED_REASON
 
 _BASE_URL = "https://archive.org"
 _PAGE_SIZE = 100
@@ -40,29 +45,6 @@ _TIMEOUT = 60.0
 # Hard ceiling on enumeration pages, so a source that reports an inflated
 # numFound while always returning a non-empty page cannot loop forever.
 _MAX_PAGES = 10_000
-
-
-def _keep(name: str, fmt: str, formats: list[str], excludes: list[str]) -> bool:
-    """Filter one file: excludes (fnmatch globs) first, then a format/ext keep-list.
-
-    Matches the semantics documented in docs/plugins.md so that every plugin
-    filters identically.
-    """
-    if any(fnmatch.fnmatch(name, pat) for pat in excludes):
-        return False
-    if not formats:
-        return True
-    fmt = (fmt or "").lower()
-    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    return any(f.lower() == fmt or f.lower() == ext for f in formats)
-
-
-def _coerce_size(raw: Any) -> int | None:
-    """archive.org reports file sizes as strings; coerce to int or None."""
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
 
 
 def _is_contained(base: Path, name: str) -> bool:
@@ -80,17 +62,6 @@ def _is_contained(base: Path, name: str) -> bool:
     return target.startswith(base_n + os.sep)
 
 
-def _sanitize_identifier(identifier: str) -> str:
-    """Reduce an upstream id to a single safe path segment.
-
-    The core uses the identifier as an archive subdirectory name and rejects any
-    that would escape the archive tree, so collapse separators here.
-    """
-    seg = identifier.replace("/", "_").replace("\\", "_")
-    seg = seg.strip().strip(".")
-    return seg or identifier
-
-
 def _first(meta: dict[str, Any], key: str) -> Any:
     """archive.org metadata values may be a scalar or a list; return the first."""
     value = meta.get(key)
@@ -99,16 +70,18 @@ def _first(meta: dict[str, Any], key: str) -> Any:
     return value
 
 
-def _is_restricted(meta: dict[str, Any]) -> tuple[bool, str | None]:
-    """Detect an access-restricted / dark item from archive.org metadata flags."""
-    if str(_first(meta, "access-restricted-item")).lower() == "true":
-        return True, "access-restricted-item"
+def _restriction_reason(meta: dict[str, Any]) -> str | None:
+    """Why the whole item is access-restricted or dark, or None.
+
+    ``access-restricted-item`` is not an item restriction: archive.org sets it on
+    stream-only shows whose MP3s stay public, and marks each refused file
+    ``private`` — the per-file verdict the core's selection honours."""
     if str(_first(meta, "access-restricted")).lower() == "true":
-        return True, "access-restricted"
+        return "access-restricted"
     curation = _first(meta, "curation")
     if curation and "dark" in str(curation).lower():
-        return True, "dark"
-    return False, None
+        return "dark"
+    return None
 
 
 def _classify(exc: httpx.HTTPError) -> tuple[bool, float | None, str]:
@@ -120,14 +93,7 @@ def _classify(exc: httpx.HTTPError) -> tuple[bool, float | None, str]:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         retriable = status == 429 or 500 <= status < 600
-        retry_after: float | None = None
-        raw = exc.response.headers.get("Retry-After")
-        if raw is not None:
-            try:
-                retry_after = float(raw)
-            except (TypeError, ValueError):
-                retry_after = None
-        return retriable, retry_after, f"HTTP {status}"
+        return retriable, retry_after_seconds(exc), f"HTTP {status}"
     if isinstance(exc, httpx.TimeoutException):
         return True, None, f"timeout: {exc}"
     if isinstance(exc, httpx.TransportError):
@@ -169,50 +135,31 @@ class EtreePlugin(SourcePlugin):
             follow_redirects=True,
         )
 
-    # -- discover -----------------------------------------------------------
+    # -- list / look up ------------------------------------------------------
 
-    def discover(self, collection: CollectionConfig) -> Iterator[ItemDescriptor]:
+    def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:
         for identifier in self._enumerate(collection.query):
-            doc = self._metadata(identifier)
-            meta = doc.get("metadata", {}) or {}
-            files_raw = doc.get("files", []) or []
+            yield ListedItem(identifier)
 
-            files = tuple(
-                ManifestFile(
-                    name=f["name"],
-                    size=_coerce_size(f.get("size")),
-                    md5=f.get("md5"),
-                )
-                for f in files_raw
-                if "name" in f
-                and _keep(
-                    f["name"],
-                    f.get("format", ""),
-                    collection.format_filters,
-                    collection.exclude_filters,
-                )
-            )
-
-            date = _first(meta, "date")
-            year = str(date)[:4] if date else None
-            metadata: dict[str, Any] = {
+    def lookup_item(self, identifier: str, timeout: float) -> ItemLookup:
+        resp = self._client.get(f"/metadata/{quote(identifier)}", timeout=timeout)
+        resp.raise_for_status()
+        doc = resp.json()
+        meta = doc.get("metadata", {}) or {}
+        date = _first(meta, "date")
+        return ItemLookup(
+            metadata={
                 "identifier": identifier,
                 "title": _first(meta, "title"),
                 "creator": _first(meta, "creator"),
                 "date": date,
-                "year": year,
+                "year": str(date)[:4] if date else None,
                 "venue": _first(meta, "venue"),
                 "coverage": _first(meta, "coverage"),
-            }
-
-            restricted, reason = _is_restricted(meta)
-            yield ItemDescriptor(
-                identifier=_sanitize_identifier(identifier),
-                manifest=Manifest(files=files),
-                metadata=metadata,
-                is_restricted=restricted,
-                restriction_reason=reason,
-            )
+            },
+            files=file_records(identifier, doc.get("files", []) or []),
+            restriction_reason=_restriction_reason(meta),
+        )
 
     def _enumerate(self, query: str) -> Iterator[str]:
         """Yield every matching identifier, paginating advancedsearch.php.
@@ -268,31 +215,13 @@ class EtreePlugin(SourcePlugin):
                 f"listed {len(seen)} of {num_found} items"
             )
 
-    def _metadata(self, identifier: str) -> dict[str, Any]:
-        resp = self._client.get(f"/metadata/{identifier}")
-        resp.raise_for_status()
-        return resp.json()
-
     # -- fetch --------------------------------------------------------------
 
     def fetch(
-        self,
-        item: ItemDescriptor,
-        dest_dir: Path,
-        format_filters: list[str],
-        exclude_filters: list[str],
+        self, identifier: str, files: Sequence[ManifestFile], dest_dir: Path
     ) -> FetchResult:
-        if item.is_restricted:
-            # Fail fast, permanently: a restricted item will never download.
-            return FetchResult(
-                success=False,
-                bytes_downloaded=0,
-                error=f"restricted: {item.restriction_reason}",
-                retriable=False,
-            )
-
         total = 0
-        for mf in item.manifest.files:
+        for mf in files:
             # Trust boundary: the file name comes from the remote source. Refuse
             # to write anything that would escape the item directory. The core
             # enforces this too, but guarding here keeps the plugin safe on its
@@ -321,7 +250,7 @@ class EtreePlugin(SourcePlugin):
             written = 0
             try:
                 with self._client.stream(
-                    "GET", f"/download/{item.identifier}/{mf.name}"
+                    "GET", f"/download/{quote(identifier)}/{quote(mf.name)}"
                 ) as resp:
                     resp.raise_for_status()
                     with out.open("wb") as fh:
@@ -330,6 +259,15 @@ class EtreePlugin(SourcePlugin):
                             hasher.update(chunk)
                             written += len(chunk)
             except httpx.HTTPError as exc:
+                if http_status(exc) == 403:
+                    # archive.org serves some shows stream-only with no restriction
+                    # flag in their metadata; the refusal is the only signal.
+                    return FetchResult(
+                        success=False,
+                        bytes_downloaded=total,
+                        error=DOWNLOAD_REFUSED_REASON,
+                        unavailable=True,
+                    )
                 retriable, retry_after, message = _classify(exc)
                 return FetchResult(
                     success=False,
@@ -356,10 +294,6 @@ class EtreePlugin(SourcePlugin):
 
     # -- verify -------------------------------------------------------------
 
-    def verify(self, item: ItemDescriptor, archive_path: Path) -> VerifyResult:
-        missing = [
-            f.name
-            for f in item.manifest.files
-            if not (archive_path / f.name).is_file()
-        ]
+    def verify(self, files: Sequence[ManifestFile], archive_path: Path) -> VerifyResult:
+        missing = [f.name for f in files if not (archive_path / f.name).is_file()]
         return VerifyResult(ok=not missing, missing_files=missing)

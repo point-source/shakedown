@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from shakedown.db import connect
-from shakedown.models import ItemStatus, OperationStatus, OperationType
+from shakedown.models import ItemStatus
 from shakedown.reconcile import run_reconcile
-from shakedown.state import ItemRepo, OperationOutcomeRepo
+from shakedown.state import ItemRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -94,51 +94,6 @@ def test_reconcile_marks_disappeared_for_on_disk_only_items(
     assert row.status == ItemStatus.DISAPPEARED
 
 
-def test_reconcile_tolerates_source_unavailable(
-    tmp_roots: tuple[Path, Path], monkeypatch
-) -> None:
-    """If `discover` raises (source down, network out), reconcile still records on-disk
-    items rather than refusing to run."""
-    archive, library = tmp_roots
-    config = make_config(archive, library)
-    FakePlugin.items["a"] = FakeItem(
-        identifier="a", files=[FakeFile(name="a.flac", content=b"a")]
-    )
-    assert run_sync(config) == 0
-    config.state_db.unlink()  # type: ignore[union-attr]
-
-    def discover_explodes(self, collection):
-        raise ConnectionError("upstream unreachable")
-        yield  # pragma: no cover  (keeps it a generator)
-
-    monkeypatch.setattr(FakePlugin, "discover", discover_explodes)
-    assert run_reconcile(config) == 1
-
-    conn = connect(config.state_db)  # type: ignore[arg-type]
-    items = ItemRepo(conn)
-    row = items.get("fake-src", "coll1", "a")
-    assert row is not None, "on-disk items must be reconciled even when source is unreachable"
-    # No prior DB row + no source descriptor → COMPLETE with no manifest;
-    # next sync (when source returns) will refresh the manifest.
-    assert row.status == ItemStatus.COMPLETE
-    assert row.recorded_manifest is None
-
-    recovery = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
-    assert recovery is not None
-    assert recovery.operation == OperationType.RECONCILE
-    assert recovery.status == OperationStatus.STALE_ENUMERATION
-    assert recovery.phase == "fetch-manifests"
-    assert recovery.completed_work["items_on_disk"] == 1
-    assert recovery.preservation_context == "local recordings retained"
-    assert recovery.safe_next_action == "restore source access and rerun reconcile"
-
-    monkeypatch.undo()
-    assert run_reconcile(config) == 0
-    assert OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1") is None
-    row = items.get("fake-src", "coll1", "a")
-    assert row is not None and row.recorded_manifest is not None
-
-
 def test_reconcile_keeps_prior_status_when_source_unreachable(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
@@ -154,10 +109,110 @@ def test_reconcile_keeps_prior_status_when_source_unreachable(
         raise ConnectionError("upstream unreachable")
         yield  # pragma: no cover  (keeps it a generator)
 
-    monkeypatch.setattr(FakePlugin, "discover", discover_explodes)
+    monkeypatch.setattr(FakePlugin, "list_items", discover_explodes)
     assert run_reconcile(config) == 1
 
     row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "a")  # type: ignore[arg-type]
     assert row is not None
     assert row.status == ItemStatus.COMPLETE
     assert row.recorded_manifest is not None
+
+
+def test_reconcile_never_marks_a_listed_show_disappeared_because_its_lookup_failed(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """§spec:per-item-isolation: reconcile marks a show `disappeared` only when a
+    complete listing omits it. A show the listing still has, whose lookup fails, keeps
+    its status, manifest, and files; the failure is reported and reconcile exits 1."""
+    from shakedown.models import OperationStatus, OperationType
+    from shakedown.state import OperationOutcomeRepo
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["a"] = FakeItem(identifier="a", files=[FakeFile(name="a.flac", content=b"a")])
+    FakePlugin.items["b"] = FakeItem(identifier="b", files=[FakeFile(name="b.flac", content=b"b")])
+    assert run_sync(config) == 0
+    FakePlugin.lookup_faults["a"] = [ConnectionResetError("connection reset")]
+
+    assert run_reconcile(config) == 1
+
+    conn = connect(config.state_db)  # type: ignore[arg-type]
+    row = ItemRepo(conn).get("fake-src", "coll1", "a")
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE
+    assert row.recorded_manifest is not None
+    assert (archive / "fake-src" / "coll1" / "a" / "a.flac").read_bytes() == b"a"
+    other = ItemRepo(conn).get("fake-src", "coll1", "b")
+    assert other is not None and other.status == ItemStatus.COMPLETE
+
+    outcome = OperationOutcomeRepo(conn).latest_actionable("fake-src", "coll1")
+    assert outcome is not None
+    assert outcome.operation == OperationType.RECONCILE
+    assert outcome.status == OperationStatus.COMPLETED_WITH_ITEM_ISSUES
+    assert outcome.errors == ["a: lookup failed after 3 attempts: connection error"]
+
+
+def test_reconcile_looks_up_only_shows_on_disk(tmp_roots: tuple[Path, Path]) -> None:
+    """The listing says what is upstream; only shows on disk need their manifests."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["a"] = FakeItem(identifier="a", files=[FakeFile(name="a.flac", content=b"a")])
+    assert run_sync(config) == 0
+    FakePlugin.items["not-mirrored"] = FakeItem(identifier="not-mirrored")
+    FakePlugin.lookup_calls.clear()
+
+    assert run_reconcile(config) == 0
+
+    assert [identifier for identifier, _ in FakePlugin.lookup_calls] == ["a"]
+
+
+def test_reconcile_keeps_a_lossless_refused_shows_reason(tmp_roots: tuple[Path, Path]) -> None:
+    """A show mirrored as its best lossy copy stays listed in `status` with its reason
+    after a rebuild (§spec:item-lifecycle: restricted shows appear with their reason)."""
+    from shakedown.selection import LOSSLESS_REFUSED_REASON
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["sbd"] = FakeItem(
+        identifier="sbd",
+        files=[
+            FakeFile(name="t.shn", content=b"lossless", refused=True),
+            FakeFile(name="t.mp3", content=b"mp3"),
+        ],
+    )
+    assert run_sync(config) == 0
+    config.state_db.unlink()  # type: ignore[union-attr]
+
+    assert run_reconcile(config) == 0
+
+    row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "sbd")  # type: ignore[arg-type]
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE
+    assert row.restriction_reason == LOSSLESS_REFUSED_REASON
+
+
+def test_reconcile_keeps_the_reason_of_a_show_whose_lookup_fails(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A show that keeps its prior status keeps everything it had, its reason too."""
+    from shakedown.selection import LOSSLESS_REFUSED_REASON
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["sbd"] = FakeItem(
+        identifier="sbd",
+        files=[
+            FakeFile(name="t.shn", content=b"lossless", refused=True),
+            FakeFile(name="t.mp3", content=b"mp3"),
+        ],
+        change_signal="v1",
+    )
+    assert run_sync(config) == 0
+    FakePlugin.lookup_faults["sbd"] = [ConnectionResetError("connection reset")]
+
+    assert run_reconcile(config) == 1
+
+    row = ItemRepo(connect(config.state_db)).get("fake-src", "coll1", "sbd")  # type: ignore[arg-type]
+    assert row is not None
+    assert row.status == ItemStatus.COMPLETE
+    assert row.restriction_reason == LOSSLESS_REFUSED_REASON

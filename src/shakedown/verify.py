@@ -16,11 +16,12 @@ import click
 from shakedown.config import Config
 from shakedown.db import connect, transaction
 from shakedown.lock import run_exclusive
-from shakedown.models import Item, ItemStatus, Manifest
+from shakedown.models import Item, ItemStatus, RunKind
 from shakedown.plugins import registry
-from shakedown.plugins.base import ItemDescriptor
-from shakedown.state import DriftRepo, ItemRepo
-from shakedown.sync import CollectionSyncStats, PlanAction, PlannedItem, _execute_fetch_and_stage
+from shakedown.state import DriftRepo, ItemRepo, TagRepo
+from shakedown.sync import run_single_shows
+from shakedown.tagging import recover_interrupted_tagging
+from shakedown.trigger import announce_started
 
 log = logging.getLogger(__name__)
 
@@ -45,12 +46,15 @@ def _md5_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _scan_drift(item: Item) -> list[DriftRecord]:
-    """Hash every recorded-manifest file; report mismatches and missing files."""
+def _scan_drift(item: Item, post_tag: dict[str, str]) -> list[DriftRecord]:
+    """Hash every recorded-manifest file; report mismatches and missing files. A file
+    shakedown tagged is compared against its recorded post-tag checksum, so its own
+    tagging is not drift while any later change is (§spec:tag-filling)."""
     drifts: list[DriftRecord] = []
     if item.recorded_manifest is None or item.archive_path is None:
         return drifts
     for mf in item.recorded_manifest.files:
+        expected = post_tag.get(mf.name, mf.md5)
         on_disk = item.archive_path / mf.name
         if not on_disk.is_file():
             drifts.append(
@@ -59,22 +63,22 @@ def _scan_drift(item: Item) -> list[DriftRecord]:
                     collection=item.collection_name,
                     identifier=item.identifier,
                     file_name=mf.name,
-                    expected_md5=mf.md5,
+                    expected_md5=expected,
                     observed_md5=None,
                 )
             )
             continue
-        if mf.md5 is None:
+        if expected is None:
             continue  # source didn't publish a checksum; nothing to compare
         observed = _md5_file(on_disk)
-        if observed != mf.md5:
+        if observed != expected:
             drifts.append(
                 DriftRecord(
                     source=item.source_name,
                     collection=item.collection_name,
                     identifier=item.identifier,
                     file_name=mf.name,
-                    expected_md5=mf.md5,
+                    expected_md5=expected,
                     observed_md5=observed,
                 )
             )
@@ -110,9 +114,14 @@ def _run_verify(
     list_drift: bool,
     assume_yes: bool,
 ) -> int:
+    # A verify opens no run record up front; serve learns only that it started (and,
+    # for a reconform, that it holds the writer lock) (§spec:api-sync-runs). A
+    # reconform's runs are opened once the hash pass knows what drifted.
+    announce_started([])
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     drift_repo = DriftRepo(conn)
+    tags = TagRepo(conn)
 
     all_drift: list[DriftRecord] = []
     missing_summary: dict[tuple[str, str], int] = {}
@@ -123,6 +132,12 @@ def _run_verify(
         for collection in source.collections:
             if collection_filter and collection.name != collection_filter:
                 continue
+            if reconform:
+                # Holding the writer lock, undo a tag write a crash cut short before
+                # hashing: the file is its original again, not drift to re-download
+                # (§spec:tag-filling). A plain verify holds no lock, so a backup may
+                # belong to a sync still writing; it only reports what it finds.
+                recover_interrupted_tagging(config.archive_root / source.name / collection.name)
 
             for item in items.list_for_collection(source.name, collection.name):
                 if item.status != ItemStatus.COMPLETE:
@@ -130,19 +145,21 @@ def _run_verify(
                 if not deep:
                     # cheap check: existence only, via plugin
                     plugin = registry.for_source(source)
-                    desc = ItemDescriptor(
-                        identifier=item.identifier,
-                        manifest=item.recorded_manifest or Manifest(files=()),
-                        metadata=item.source_metadata,
-                    )
-                    result = plugin.verify(desc, item.archive_path)  # type: ignore[arg-type]
+                    files = item.recorded_manifest.files if item.recorded_manifest else ()
+                    result = plugin.verify(files, item.archive_path)  # type: ignore[arg-type]
                     if not result.ok:
                         missing_summary[(source.name, collection.name)] = (
                             missing_summary.get((source.name, collection.name), 0)
                             + len(result.missing_files)
                         )
                 else:
-                    drifts = _scan_drift(item)
+                    post_tag = {
+                        name: record.post_tag_md5
+                        for name, record in tags.file_records(
+                            item.source_name, item.collection_name, item.identifier
+                        ).items()
+                    }
+                    drifts = _scan_drift(item, post_tag)
                     all_drift.extend(drifts)
                     with transaction(conn):
                         # Refresh drift table for this item.
@@ -188,44 +205,25 @@ def _run_verify(
             click.echo("aborted")
             return 0
 
-    return _reconform(config, items, all_drift)
+    return _reconform(config, all_drift)
 
 
-def _reconform(config: Config, items: ItemRepo, drifts: list[DriftRecord]) -> int:
-    """Re-fetch items that have any drifted file. Whole item, not per-file."""
-    by_collection: dict[tuple[str, str], set[str]] = {}
+def _reconform(config: Config, drifts: list[DriftRecord]) -> int:
+    """Re-fetch the drifted files the source still lists, as one single-show run per
+    collection (§spec:verify-drift, §spec:single-show-runs). On a
+    `fill_tags` collection, tags are refilled on the single-show run's shared fetch
+    and staging path (§spec:tag-filling)."""
+    drifted: dict[tuple[str, str], dict[str, set[str]]] = {}
     for d in drifts:
-        by_collection.setdefault((d.source, d.collection), set()).add(d.identifier)
-
-    failed = 0
-    for source in config.sources:
-        plugin = registry.for_source(source)
-        for collection in source.collections:
-            ids = by_collection.get((source.name, collection.name))
-            if not ids:
-                continue
-            log.info(
-                "reconform: re-fetching %d items in %s/%s",
-                len(ids), source.name, collection.name,
-            )
-            descriptors_by_id: dict[str, ItemDescriptor] = {}
-            for desc in plugin.discover(collection):
-                if desc.identifier in ids:
-                    descriptors_by_id[desc.identifier] = desc
-
-            targets: list[PlannedItem] = []
-            for identifier in ids:
-                desc = descriptors_by_id.get(identifier)
-                existing = items.get(source.name, collection.name, identifier)
-                if desc is None or existing is None:
-                    log.warning("reconform: %s no longer in source — skipped", identifier)
-                    continue
-                targets.append(PlannedItem(desc, existing, PlanAction.CHANGED_UPSTREAM))
-
-            stats = CollectionSyncStats()
-            _execute_fetch_and_stage(
-                config, source, collection, plugin, items, targets, stats
-            )
-            if stats.failed:
-                failed += stats.failed
-    return 0 if failed == 0 else 1
+        shows = drifted.setdefault((d.source, d.collection), {})
+        shows.setdefault(d.identifier, set()).add(d.file_name)
+    for (source, collection), shows in drifted.items():
+        log.info("reconform: repairing %d shows in %s/%s", len(shows), source, collection)
+    return run_single_shows(
+        config,
+        {
+            key: {identifier: frozenset(files) for identifier, files in shows.items()}
+            for key, shows in drifted.items()
+        },
+        RunKind.RECONFORM,
+    )

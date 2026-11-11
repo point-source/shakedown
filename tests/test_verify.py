@@ -36,11 +36,11 @@ def test_verify_deep_detects_drift(tmp_roots: tuple[Path, Path]) -> None:
     config, archived = _setup_with_one_item(tmp_roots)
     archived.write_bytes(b"original audio + ID3v2 tags rewritten by Beets")
 
-    conn = connect(config.state_db)
+    conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     item = items.get("fake-src", "coll1", "gd-x")
     assert item is not None
-    drifts = _scan_drift(item)
+    drifts = _scan_drift(item, {})
     assert len(drifts) == 1
     assert drifts[0].file_name == "gd-x.flac"
     assert drifts[0].observed_md5 != drifts[0].expected_md5
@@ -68,3 +68,22 @@ def test_verify_deep_reconform_restores_upstream_bytes(tmp_roots: tuple[Path, Pa
     assert rc == 0
     assert archived.read_bytes() == b"upstream bytes"
     assert FakePlugin.fetch_count["gd-x"] == 2  # one initial sync, one reconform
+    # The library serves the restored bytes too, not the drifted copy.
+    staged = config.library_root / "fake-src" / "coll1" / "gd-x" / "gd-x.flac"
+    assert staged.stat().st_ino == archived.stat().st_ino
+
+
+def test_reconform_fails_when_a_drifted_shows_lookup_fails(tmp_roots: tuple[Path, Path]) -> None:
+    """The drift was not repaired, so reconform must not report success."""
+    config, archived = _setup_with_one_item(tmp_roots, content=b"upstream bytes")
+    archived.write_bytes(b"locally mutated bytes")
+    FakePlugin.lookup_faults["gd-x"] = [ConnectionResetError("connection reset")]
+
+    rc = run_verify(
+        config, source_filter=None, collection_filter=None,
+        deep=True, reconform=True, list_drift=False, assume_yes=True,
+    )
+
+    assert rc == 1
+    assert archived.read_bytes() == b"locally mutated bytes"
+    assert FakePlugin.fetch_count["gd-x"] == 1

@@ -10,7 +10,9 @@ import hmac
 import json
 import logging
 import os
+from collections.abc import Callable
 from contextlib import closing
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -24,21 +26,33 @@ from prometheus_client import (
 )
 
 from shakedown import __version__
-from shakedown.config import Config, UnknownScopeError, check_scope
+from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope, load
 from shakedown.db import connect
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
-from shakedown.sync import run_sync as do_sync
+from shakedown.trigger import DEFAULT_ARGV_PREFIX, Busy, ExitedEarly, Failed, launch
 from shakedown.validate import validate_config
-from shakedown.verify import run_verify as do_verify
 
 log = logging.getLogger(__name__)
 
 TOKEN_ENV = "SHAKEDOWN_API_TOKEN"
+BUSY_MESSAGE = "a run is in progress; try again when it finishes"
 
 
-def build_app(config: Config) -> FastAPI:
+def build_app(
+    config_path: Path,
+    *,
+    argv_prefix: tuple[str, ...] = DEFAULT_ARGV_PREFIX,
+    child_env: dict[str, str] | None = None,
+) -> FastAPI:
+    """The control plane over the config file at ``config_path``. Every endpoint
+    that needs the config reads the file as it is at the request, so an edit takes
+    effect without a restart, and a broken file is a 503 naming the problem rather
+    than a crash (§spec:api-sync-runs)."""
     app = FastAPI(title="shakedown", version=__version__)
+    # Runs this serve started that may still be going, newest last; each one's
+    # watcher sets `done` when it exits.
+    app.state.triggered = []
     registry = CollectorRegistry()
     g_items = Gauge(
         "shakedown_items_total",
@@ -79,7 +93,59 @@ def build_app(config: Config) -> FastAPI:
         ):
             raise HTTPException(401, "invalid or missing bearer token")
 
-    def require_scope(source: str | None, collection: str | None) -> None:
+    def scope_args(source: str | None, collection: str | None) -> list[str]:
+        return [
+            *(["--source", source] if source else []),
+            *(["--collection", collection] if collection else []),
+        ]
+
+    def start_run(
+        config: Config,
+        verb: str,
+        source: str | None,
+        collection: str | None,
+        args: list[str],
+        *,
+        on_exit: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]:
+        """Start the run as a separate one-shot process and answer once it holds the
+        writer lock and has opened its run records (§spec:api-sync-runs)."""
+        assert config.state_db is not None  # filled in by Config validation
+        result = launch(
+            config_path,
+            args,
+            state_db=config.state_db,
+            on_exit=on_exit,
+            argv_prefix=argv_prefix,
+            env=child_env,
+        )
+        if isinstance(result, Busy):
+            raise HTTPException(409, BUSY_MESSAGE)
+        if isinstance(result, Failed):
+            raise HTTPException(503, result.error)
+        if isinstance(result, ExitedEarly):
+            raise HTTPException(
+                500,
+                f"the run exited before starting (exit {result.returncode}); "
+                f"see the serve logs",
+            )
+        # serve lives for months: keep only the runs still going, plus this one.
+        app.state.triggered = [t for t in app.state.triggered if not t.done.is_set()]
+        app.state.triggered.append(result.run)
+        return {
+            "started": verb,
+            "source": source,
+            "collection": collection,
+            "run_ids": [r["run_id"] for r in result.run.runs],
+        }
+
+    def current_config() -> Config:
+        try:
+            return load(config_path)
+        except ConfigError as e:
+            raise HTTPException(503, str(e)) from e
+
+    def require_scope(config: Config, source: str | None, collection: str | None) -> None:
         try:
             check_scope(config, source, collection)
         except UnknownScopeError as e:
@@ -91,6 +157,7 @@ def build_app(config: Config) -> FastAPI:
 
     @app.get("/status")
     def status() -> JSONResponse:
+        config = current_config()
         with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
             items = ItemRepo(conn)
             runs = RunRepo(conn)
@@ -108,7 +175,11 @@ def build_app(config: Config) -> FastAPI:
 
     @app.get("/metrics")
     def metrics() -> PlainTextResponse:
-        # Refresh gauges from current DB state on each scrape.
+        config = current_config()
+        # Refresh gauges from current DB state on each scrape. Clear them first so a
+        # collection removed from the config stops reporting.
+        for gauge in (g_items, g_bytes, g_drift):
+            gauge.clear()
         with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
             items = ItemRepo(conn)
             drift = DriftRepo(conn)
@@ -127,19 +198,25 @@ def build_app(config: Config) -> FastAPI:
         body = generate_latest(registry)
         return PlainTextResponse(body.decode(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.post("/sync")
+    @app.post("/sync", status_code=202)
     def trigger_sync(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_token(authorization)
-        require_scope(source, collection)
-        rc = do_sync(config, source_filter=source, collection_filter=collection)
-        c_sync.labels("ok" if rc == 0 else "fail").inc()
-        return {"exit_code": rc}
+        config = current_config()
+        require_scope(config, source, collection)
 
-    @app.post("/verify")
+        def count(returncode: int) -> None:
+            c_sync.labels("ok" if returncode == 0 else "fail").inc()
+
+        return start_run(
+            config, "sync", source, collection, ["sync", *scope_args(source, collection)],
+            on_exit=count,
+        )
+
+    @app.post("/verify", status_code=202)
     def trigger_verify(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
@@ -148,17 +225,16 @@ def build_app(config: Config) -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         require_token(authorization)
-        require_scope(source, collection)
-        rc = do_verify(
-            config,
-            source_filter=source,
-            collection_filter=collection,
-            deep=deep,
-            reconform=reconform,
-            list_drift=False,
-            assume_yes=True,
-        )
-        return {"exit_code": rc}
+        config = current_config()
+        require_scope(config, source, collection)
+        if reconform and not deep:
+            raise HTTPException(400, "reconform requires deep")
+        args = ["verify", *scope_args(source, collection)]
+        if deep:
+            args.append("--deep")
+        if reconform:
+            args += ["--reconform", "--yes"]
+        return start_run(config, "verify", source, collection, args)
 
     @app.post("/validate")
     def validate(
@@ -173,7 +249,8 @@ def build_app(config: Config) -> FastAPI:
         # sync and verify (§spec:serve, §spec:setup-readiness-validation).
         if live_handoff:
             require_token(authorization)
-        require_scope(source, collection)
+        config = current_config()
+        require_scope(config, source, collection)
         report = validate_config(
             config,
             source_filter=source,
@@ -185,8 +262,8 @@ def build_app(config: Config) -> FastAPI:
     return app
 
 
-def serve(config: Config, *, host: str, port: int) -> None:
+def serve(config_path: Path, *, host: str, port: int) -> None:
     import uvicorn
 
-    app = build_app(config)
+    app = build_app(config_path)
     uvicorn.run(app, host=host, port=port)

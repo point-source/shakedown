@@ -9,6 +9,7 @@ import click
 from shakedown import __version__
 from shakedown import config as config_module
 from shakedown.filesystem import FilesystemError, ensure_hardlinkable
+from shakedown.trigger import announce_failed
 
 DEFAULT_CONFIG_PATH = Path("/config/shakedown.yaml")
 
@@ -30,12 +31,14 @@ def _load_config(ctx: click.Context, *, check_filesystem: bool = True) -> config
         cfg = config_module.load(cfg_path)
     except config_module.ConfigError as e:
         click.echo(f"error: {e}", err=True)
+        announce_failed(str(e))
         ctx.exit(2)
     if check_filesystem:
         try:
             ensure_hardlinkable(cfg.archive_root, cfg.library_root)
         except FilesystemError as e:
             click.echo(f"error: {e}", err=True)
+            announce_failed(str(e))
             ctx.exit(2)
     return cfg
 
@@ -114,35 +117,6 @@ def status(ctx: click.Context, as_json: bool) -> None:
     from shakedown.status import print_status
 
     print_status(cfg, as_json=as_json)
-
-
-@main.command("release-validate")
-@click.option(
-    "--deterministic-only",
-    is_flag=True,
-    help="Run only fake-source release scenarios; explicitly skips the real IA seam.",
-)
-@click.option(
-    "--real-source-only",
-    is_flag=True,
-    help="Run only the pinned real Internet Archive seam.",
-)
-@click.pass_context
-def release_validate(
-    ctx: click.Context, deterministic_only: bool, real_source_only: bool
-) -> None:
-    """Run the opt-in bounded release validation gate."""
-    if deterministic_only and real_source_only:
-        click.echo("error: choose at most one narrower release validation mode", err=True)
-        ctx.exit(2)
-    from shakedown.release_validation import run_release_validation
-
-    ctx.exit(
-        run_release_validation(
-            deterministic=not real_source_only,
-            real_source=not deterministic_only,
-        )
-    )
 
 
 @main.command()
@@ -268,19 +242,13 @@ def item_show(ctx: click.Context, identifier: str) -> None:
 @click.pass_context
 def item_refetch(ctx: click.Context, identifier: str) -> None:
     cfg = _load_config(ctx)
-    from shakedown.sync import refetch_item
+    from shakedown.sync import UnknownShow, refetch_item
 
-    ctx.exit(refetch_item(cfg, identifier))
-
-
-@item.command("forget")
-@click.argument("identifier")
-@click.pass_context
-def item_forget(ctx: click.Context, identifier: str) -> None:
-    cfg = _load_config(ctx)
-    from shakedown.sync import forget_item
-
-    forget_item(cfg, identifier)
+    try:
+        exit_code = refetch_item(cfg, identifier)
+    except UnknownShow as e:
+        raise click.UsageError(f"no recorded show named {identifier!r}") from e
+    ctx.exit(exit_code)
 
 
 @main.command()
@@ -289,14 +257,20 @@ def item_forget(ctx: click.Context, identifier: str) -> None:
 @click.pass_context
 def serve(ctx: click.Context, host: str, port: int) -> None:
     """Start the optional HTTP control plane (PRD §10)."""
-    cfg = _load_config(ctx)
+    config_path: Path = ctx.obj["config_path"]
+    # serve reads the config at each request, so a broken file is an answer from
+    # each endpoint, not a reason to refuse to start (§spec:api-sync-runs).
+    try:
+        config_module.load(config_path)
+    except config_module.ConfigError as e:
+        log.warning("config is not valid yet; endpoints answer 503 until it is: %s", e)
     try:
         from shakedown.server import serve as run_server
     except ImportError as e:
         click.echo(f"error: serve dependencies not installed: {e}", err=True)
         click.echo("install with: pip install 'shakedown[serve]'", err=True)
         ctx.exit(2)
-    run_server(cfg, host=host, port=port)
+    run_server(config_path, host=host, port=port)
 
 
 if __name__ == "__main__":  # pragma: no cover

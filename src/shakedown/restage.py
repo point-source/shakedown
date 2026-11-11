@@ -1,23 +1,26 @@
 """Rebuild the library staging tree from the DB. PRD §10.
 
 Used after a `library_layout` change or after manually wiping `/data/library/`.
-Never downloads anything — the archive layer is the source of truth.
+Never downloads anything — the archive layer is the source of truth. Removes only
+files shakedown placed (§spec:library-cleanup).
 """
 from __future__ import annotations
 
 import logging
-import shutil
 from datetime import datetime
 
-from shakedown.config import CollectionConfig, Config
+from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.lock import run_exclusive
-from shakedown.models import Item, OperationStatus, OperationType
-from shakedown.staging import UnsafeLibraryPathError, stage_item, staging_dir_for
+from shakedown.models import OperationStatus, OperationType
+from shakedown.placement import LibraryPlacement, log_separations
 from shakedown.state import ItemRepo, OperationOutcomeRepo
-from shakedown.utils.templates import TemplateError
+from shakedown.tagging import recover_interrupted_tagging
 
 log = logging.getLogger(__name__)
+
+# Next step shown in `status` after a restage that left per-show issues.
+RESTAGE_ISSUES_ACTION = "fix the listed show issues and rerun restage"
 
 
 def run_restage(
@@ -26,7 +29,8 @@ def run_restage(
     source_filter: str | None = None,
     collection_filter: str | None = None,
 ) -> int:
-    """Wipe and rebuild the library tree under each (source, collection) scope."""
+    """Put every show with an archive copy at its current library folder, per
+    (source, collection) scope, removing only what shakedown placed."""
     return run_exclusive(
         config, lambda: _run_restage(config, source_filter, collection_filter)
     )
@@ -56,18 +60,28 @@ def _run_restage(
                 phase="plan",
                 safe_next_action="fix storage/path/layout and rerun restage",
             )
-            # Every show whose archive copy is on disk, whatever its status: a show
-            # marked disappeared or unavailable keeps its files, so it keeps its
-            # library folder, exactly as sync leaves it.
-            to_stage = [
-                item for item in items.list_for_collection(source.name, collection.name)
-                if item.recorded_manifest is not None
-                and item.archive_path is not None
-                and item.archive_path.is_dir()
-            ]
-            render_error = _first_render_error(config, collection, source.name, to_stage)
-            if render_error is not None:
-                identifier, err = render_error
+            try:
+                # A tag write a crash cut short is undone before anything is linked
+                # (§spec:tag-filling).
+                recover_interrupted_tagging(config.archive_root / source.name / collection.name)
+                report = LibraryPlacement(config, collection, source.name, items).finish()
+            except OSError as e:
+                failed += 1
+                outcomes.finish(
+                    outcome,
+                    OperationStatus.FAILED_BEFORE_COMPLETION,
+                    datetime.now(),
+                    phase="stage",
+                    preservation_context="archive recordings retained",
+                    deletion_context="removed only files shakedown placed",
+                    safe_next_action="fix storage/path/layout and rerun restage",
+                    errors=[str(e)],
+                )
+                log.warning("[%s/%s] restage failed: %s", source.name, collection.name, e)
+                continue
+
+            if report.render_error is not None:
+                identifier, message = report.render_error
                 failed += 1
                 outcomes.finish(
                     outcome,
@@ -75,147 +89,56 @@ def _run_restage(
                     datetime.now(),
                     phase="plan",
                     affected_item=identifier,
-                    completed_work={"items_staged": 0, "links_created": 0, "collisions": 0},
+                    completed_work={"items_staged": 0, "links_created": 0, "files_removed": 0},
                     preservation_context="archive recordings and library tree retained",
                     deletion_context="nothing deleted",
                     safe_next_action="fix library layout and rerun restage",
-                    errors=[str(err)],
+                    errors=[message],
                 )
                 log.warning(
-                    "[%s/%s] restage stopped before clearing the library: %s: %s",
-                    source.name, collection.name, identifier, err,
+                    "[%s/%s] restage stopped before changing the library: %s: %s",
+                    source.name, collection.name, identifier, message,
                 )
                 continue
 
-            scope = config.library_root / source.name / collection.name
-            if scope.exists():
-                try:
-                    shutil.rmtree(scope)
-                except OSError as e:
-                    failed += 1
-                    finished = datetime.now()
-                    outcomes.finish(
-                        outcome,
-                        OperationStatus.FAILED_BEFORE_COMPLETION,
-                        finished,
-                        phase="clear-library",
-                        affected_path=str(scope),
-                        completed_work={"items_staged": 0, "links_created": 0, "collisions": 0},
-                        preservation_context="archive recordings retained",
-                        deletion_context="library staging tree is disposable",
-                        safe_next_action="fix storage/path/layout and rerun restage",
-                        errors=[str(e)],
-                    )
-                    log.warning("[%s/%s] restage failed clearing %s: %s", source.name, collection.name, scope, e)
-                    continue
-
-            linked = 0
-            collisions = 0
-            refused: list[str] = []
-            staged_paths: set = set()
-            stage_failed = False
-            for item in to_stage:
-                assert item.recorded_manifest is not None  # filtered into to_stage
-                try:
-                    result = stage_item(
-                        config, collection, source.name, item, item.recorded_manifest,
-                        staged_paths=staged_paths,
-                    )
-                except UnsafeLibraryPathError as e:
-                    # One item's crafted metadata fails only that item.
-                    refused.append(f"{item.identifier}: {e}")
-                    log.warning("[%s/%s] %s: %s", source.name, collection.name, item.identifier, e)
-                    continue
-                except OSError as e:
-                    failed += 1
-                    stage_failed = True
-                    finished = datetime.now()
-                    outcomes.finish(
-                        outcome,
-                        OperationStatus.FAILED_BEFORE_COMPLETION,
-                        finished,
-                        phase="stage",
-                        affected_item=item.identifier,
-                        affected_path=str(item.archive_path) if item.archive_path else None,
-                        completed_work={
-                            "items_staged": len(staged_paths),
-                            "links_created": linked,
-                            "collisions": collisions,
-                        },
-                        preservation_context="archive recordings retained",
-                        deletion_context="library staging tree is disposable",
-                        safe_next_action="fix storage/path/layout and rerun restage",
-                        errors=[str(e)],
-                    )
-                    log.warning(
-                        "[%s/%s] restage failed staging %s: %s",
-                        source.name, collection.name, item.identifier, e,
-                    )
-                    break
-                linked += result.linked
-                collisions += len(result.collisions)
-                for c in result.collisions:
-                    log.warning("[%s/%s] %s", source.name, collection.name, c)
-            if stage_failed:
-                continue
+            completed_work = {
+                "items_staged": len(report.folder_of),
+                "links_created": report.links_created,
+                "files_removed": report.files_removed,
+                "separations": report.separations,
+            }
             log.info(
-                "[%s/%s] restage: linked=%d collisions=%d refused=%d",
-                source.name, collection.name, linked, collisions, len(refused),
+                "[%s/%s] restage: staged=%d linked=%d removed=%d separated=%d issues=%d",
+                source.name, collection.name, len(report.folder_of), report.links_created,
+                report.files_removed, report.separations, len(report.issues),
             )
-            if collisions or refused:
+            log_separations(source.name, collection.name, report.separations)
+            finished = datetime.now()
+            if report.issues:
                 failed += 1
+                errors = [line for lines in report.issues.values() for line in lines]
                 outcomes.finish(
                     outcome,
                     OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
-                    datetime.now(),
+                    finished,
                     phase="stage",
-                    completed_work={
-                        "items_staged": len(staged_paths),
-                        "links_created": linked,
-                        "collisions": collisions,
-                        "refused_paths": len(refused),
-                    },
+                    affected_item=next(iter(report.issues)),
+                    completed_work=completed_work,
                     preservation_context="archive recordings retained",
-                    deletion_context="library staging tree is disposable",
-                    safe_next_action="fix library layout and rerun restage",
-                    errors=refused,
+                    deletion_context="removed only files shakedown placed",
+                    safe_next_action=RESTAGE_ISSUES_ACTION,
+                    errors=errors,
                 )
             else:
-                finished = datetime.now()
                 outcomes.finish(
                     outcome,
                     OperationStatus.COMPLETED,
                     finished,
                     phase="stage",
-                    completed_work={
-                        "items_staged": len(staged_paths),
-                        "links_created": linked,
-                        "collisions": collisions,
-                    },
-                    deletion_context="library staging tree is disposable",
+                    completed_work=completed_work,
+                    deletion_context="removed only files shakedown placed",
                 )
                 outcomes.resolve_actionable(
                     OperationType.RESTAGE, source.name, collection.name, finished
                 )
     return 0 if failed == 0 else 1
-
-
-def _first_render_error(
-    config: Config, collection: CollectionConfig, source_name: str, to_stage: list[Item]
-) -> tuple[str, TemplateError] | None:
-    """Render every item's library folder before the library is cleared, so a layout
-    that cannot render leaves the existing tree in place. Returns the first failure.
-
-    Config load already rejects unknown filters; this backs that up for any render
-    failure it misses, because a failure after the clear would empty the library."""
-    for item in to_stage:
-        assert item.archive_path is not None  # filtered into to_stage
-        try:
-            staging_dir_for(
-                config, collection, source_name, item.source_metadata, item.archive_path
-            )
-        except TemplateError as e:
-            return item.identifier, e
-        except UnsafeLibraryPathError:
-            continue  # refused per item while staging; the other items still link
-    return None

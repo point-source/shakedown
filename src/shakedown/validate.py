@@ -155,8 +155,8 @@ def _config_group(config: Config) -> Group:
 
 def _layout_check(source_type: str, collection: config_module.CollectionConfig) -> Check:
     """Elevate the existing collision-risk guard (§spec:layout-collision-safety) to a
-    readiness failure: a non-passthrough layout with no per-item-unique field will drop
-    the loser of any two items sharing its fields. Config load only *warns* about this;
+    readiness failure: a non-passthrough layout with no per-item-unique field gives any
+    two items sharing its fields labelled folders. Config load only *warns* about this;
     validate treats it as a fail so an unsafe template exits non-zero before a mirror.
 
     Hard layout faults (unknown field, no field at all) are already rejected at config
@@ -177,7 +177,7 @@ def _layout_check(source_type: str, collection: config_module.CollectionConfig) 
             consequence=(
                 f"library_layout {layout!r} references no per-item-unique field "
                 f"{sorted(unique) or '(none declared by plugin)'}; two items sharing "
-                f"these fields collide at staging and the loser is dropped from the library"
+                f"these fields get folders labelled with their identifier"
             ),
             action="add a unique component such as {identifier} to the layout leaf",
         )

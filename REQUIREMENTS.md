@@ -45,6 +45,14 @@ but not the seam between them:
 - Beets + Navidrome is the canonical library/streaming pair, but has no
   opinion about *where music comes from* or how to keep it fresh.
 
+**The two goals.** Shakedown keeps, for every configured collection,
+(1) a local *playable* copy of all the publicly available music, and
+(2) an *archival-quality* copy of the music and its associated data
+(notes, checksums, artwork, source metadata), in case the remote source
+is ever permanently lost. When the best version a source offers is also
+playable, one copy serves both goals; when it isn't (e.g. SHN), both
+copies are kept.
+
 Shakedown is the missing middle: it owns the archive layer and the seam
 between archive and library, and hands off cleanly to whatever library
 tool the user prefers — without that tool needing to know Shakedown
@@ -58,8 +66,10 @@ demonstrable end-to-end from the product's surface (CLI, config,
 on-disk trees, status output). Criteria 1–10 defined v1 (shipped);
 criteria 11–12 defined the discovery-performance increment (shipped);
 criteria 13–15 defined the mirror-integrity & metadata increment
-(shipped); criteria 16–18 define the current setup, recovery, and
-validation-confidence increment.
+(shipped); criteria 16–18 defined the setup, recovery, and
+validation-confidence increment (shipped; criterion 18 revised by the
+current increment); criteria 19–26 define the current ownership,
+handoff, and discovery increment.
 
 1. **Unattended weekly mirror that actually fires.** A weekly sync of
    the IA Grateful Dead collection runs unattended for a month with no
@@ -81,7 +91,10 @@ validation-confidence increment.
 5. **Honest drift reporting.** After a library tool retags files,
    `shakedown verify --deep` reports the drift accurately (drift is
    informational, not an error); `verify --deep --reconform` restores
-   the original upstream bytes for users who want byte-fidelity.
+   the original upstream bytes for users who want byte-fidelity. (On a
+   collection that opted into tag filling, reconform then refills the
+   missing tags — criterion 25; users who want strict byte-fidelity
+   leave tag filling off.)
 6. **Web-UI-only setup on QNAP.** After creating the shared folders,
    initial setup is achievable through Container Station and File
    Station alone — no SSH. Schedule changes are made by editing the
@@ -104,8 +117,7 @@ validation-confidence increment.
     Archive item for real and drives the typical lifecycle against it:
     sync into the archive, hardlink staging into the library tree,
     re-sorting the library by changing the layout template and
-    restaging, and deletion via disappeared-item handling and
-    forgetting an item. It passes on a clean machine with one command
+    restaging, and deletion via disappeared-item handling. It passes on a clean machine with one command
     and is excluded from the default test run and CI, so day-to-day
     development stays offline and deterministic while releases can be
     gated on the real thing.
@@ -138,13 +150,13 @@ validation-confidence increment.
     apart (renders multiple items to the same path) is flagged at
     config-validation time, before the first sync — not discovered later
     as missing files. If items still collide during a run, the run
-    completes (colliding items are skipped, the rest of the sync
-    proceeds) but a visible per-run summary reports how many recordings
-    were dropped to template collisions and where, so a lone WARNING can
-    never be mistaken for a clean sync. Verifiable by configuring a
-    colliding layout against a collection with multiple items per
-    date/venue and seeing both the config-time guard and the drop count
-    in the run summary.
+    completes and the rest of the sync proceeds, and a visible per-run
+    summary reports every collision and where, so a lone WARNING can
+    never be mistaken for a clean sync. (How a run-time collision is
+    resolved — every colliding recording still reaches the library — is
+    criterion 19.) Verifiable by configuring a colliding layout against a
+    collection with multiple items per date/venue and seeing both the
+    config-time guard and the collision report in the run summary.
 15. **An opt-in, self-describing library.** A collection can opt into
     preserving each item's source metadata alongside its media — written
     into the library as a `metadata.json` sidecar carrying the item's
@@ -178,15 +190,118 @@ validation-confidence increment.
     and confirming no local recording is lost and status does not report
     success until the affected work is complete.
 18. **Release validation proves the workflows users rely on.** A
-    maintainer can run one bounded, documented validation before
-    publishing that exercises first-setup readiness, unsafe config
+    bounded validation exercises first-setup readiness, unsafe config
     rejection, partial-failure recovery, and the ordinary sync-to-library
-    path. The check finishes quickly enough to be used before release,
-    does not require inspecting internals to understand failure, and
-    fails loudly when a user-facing workflow is broken rather than
-    passing because it skipped the risky scenario. Verifiable on a clean
-    machine by running the documented release check and seeing a clear
-    pass/fail result with any failure tied to the affected user workflow.
+    path, and it must pass before any release image is published — a
+    release whose validation fails never reaches the NAS. The check
+    finishes quickly enough to gate every release, does not require
+    inspecting internals to understand failure, and fails loudly when a
+    user-facing workflow is broken rather than passing because it skipped
+    the risky scenario. The release check is a maintainer/CI concern: it
+    uses synthetic data only (no real media, no operator config), so the
+    shipped product carries no release-check command, and in particular
+    no command that always fails inside the shipped image. Readiness of
+    a real deployment remains criterion 16's job. Verifiable by
+    publishing a release with a deliberately broken workflow and seeing
+    publication blocked with the failure tied to that workflow, and by
+    finding no command in the shipped image that fails by construction.
+19. **Every library folder has exactly one owner.** When two distinct
+    recordings render to the same library folder or file, both still
+    reach the library: shakedown separates them by distinguishing the
+    clashing paths with each recording's identifier. Which recording
+    lands where is the same on every run and after a full restage — it
+    never flips with run order — and no recording ever silently replaces
+    or merges into another. Each separation is reported in the run
+    summary and visible in `status`, naming both recordings and the
+    paths they received. Verifiable by configuring a layout that renders
+    two items to one folder, syncing twice and restaging, and seeing both
+    recordings in separate folders at the same paths every time, with
+    the clash reported.
+20. **The library mirrors the archive, with no stale copies.** After a
+    layout change synced without a restage, a re-fetch that brings new
+    metadata, a metadata refresh, an upstream rename, or a prune, the
+    library holds each show only at its current path: the old folders
+    and files are gone, and a pruned show's bytes are actually freed
+    rather than kept alive by a leftover library link. Shakedown removes
+    only what it placed in the library; anything else found there is
+    left alone and reported. The first run after upgrading clears the
+    duplicates already present on the NAS (e.g. Aquarium Rescue Unit
+    shows linked into two folders) without re-downloading them.
+    Verifiable by changing the layout and syncing (no restage), then
+    finding no library file that is no longer linked to the archive and
+    no show present at two paths.
+21. **Handoff notices are delivered or visibly pending.** A handoff
+    triggers the library tool's work rather than waiting for it: the
+    receiver acknowledges within minutes, and what the tool does
+    afterwards (its import or scan) is outside shakedown. A notice
+    that fails is shown in `status` (text and JSON) as undelivered, with
+    the shows it covered, and is resent on later runs until it is
+    delivered. A failed notice does not, by itself, make the run fail.
+    Any handoff recipe the documentation ships works when followed
+    literally against the stock target tool and the example compose
+    stack; a recipe that cannot work is not shipped. Verifiable by
+    configuring a receiver that never answers and seeing the notice
+    marked undelivered within minutes, and by configuring an
+    unreachable target, syncing, seeing
+    the undelivered notice in `status`, fixing the target, and seeing
+    the next run deliver it.
+22. **One bad item fails alone, on every source.** A server error,
+    timeout, or malformed file listing for one item marks only that item
+    failed for the run (and retries it next run); every other item in
+    the collection still syncs, and the collection is not reported
+    stale. This holds for every shipped source (Internet Archive and
+    etree alike) and for any plugin written from the documented plugin
+    interface without extra effort by its author. Verifiable by
+    injecting a per-item server error and a malformed listing into a
+    collection of many items and seeing only those items failed, the
+    rest synced, and the collection current in `status`.
+23. **Single-show operations behave like a sync of that show.**
+    Refetching one show, or reconforming shows, looks up only the shows
+    it acts on — never the whole collection — respects the source's
+    request limits, is recorded as a run in `status`, and sends handoff
+    notices for what it fetched exactly as a sync would. Verifiable by
+    refetching one identifier in a large collection and seeing a handful
+    of upstream requests, a recorded run, and a handoff notice.
+24. **"Sync now" from the API uses the current config and never
+    overlaps.** A sync triggered through the optional `serve` API runs
+    with the configuration as it is at the moment of the request, so a
+    config edit takes effect without restarting `serve`. If another run
+    already holds the collection, the request is refused immediately
+    with a clear "a run is in progress" response, rather than queuing or
+    overlapping. Verifiable by editing the config and triggering a sync
+    that reflects the edit, and by triggering a sync while a scheduled
+    run is in progress and getting the refusal.
+25. **Shows browse properly in a tag-driven player.** A collection can
+    opt in to having shakedown fill in missing tags — artist, date,
+    venue, title — from the source metadata it already holds, so that
+    shows group and display correctly in Navidrome. Only absent tags are
+    filled; a tag already present (from the source or from the user's
+    own tool) is never overwritten. Tagging never triggers a re-download,
+    and an unchanged show stays unchanged: when the source's listing
+    still matches what was recorded and each file on disk still matches
+    the checksum recorded after tagging, nothing happens. `verify --deep`
+    treats shakedown's own tagging as expected (no drift) while still
+    reporting changes made by anything else. `verify --deep --reconform`
+    restores the source's exact bytes and then fills the gaps again on
+    tag-enabled collections. Verifiable by enabling tagging on a
+    collection with untagged files, syncing, seeing the shows grouped by
+    artist and date in Navidrome, then running sync and `verify --deep`
+    again and seeing no re-download and no drift.
+26. **Best copy kept, best playable copy in the library.** For every
+    show, shakedown keeps the highest-quality version the source offers
+    and the highest-quality version common players can play — one copy
+    when they are the same, both when they differ (e.g. an SHN-only
+    show keeps its SHN and the source's best playable copy). The
+    playable copy is what appears in the library; every non-audio file
+    the source lists (notes, checksums, metadata, artwork) is kept in
+    both. The operator does not pick formats per collection. Shows with
+    no playable copy are listed in `status` as not playable. Shakedown
+    never converts audio itself, and changing what is selected never
+    re-downloads files already in the archive. Verifiable by syncing a
+    FLAC show (FLAC only, plus its notes), an SHN-only Grateful Dead
+    show (SHN in the archive, the best playable copy in the archive and
+    library, playable in Navidrome), and a show whose lossless files
+    archive.org refuses (best lossy copy kept, reason in `status`).
 
 ## User stories §req:user-stories
 
@@ -237,7 +352,15 @@ criterion and implies a testable path through the product's surface.
 - **Hand off to my library tool automatically.** As a homelab operator,
   I want a successful sync to poke my library tool — via a webhook, or
   by executing a command like `beet import` when I prefer — so that new
-  shows flow into my library without me watching. *(→ criteria 1, 2)*
+  shows flow into my library without me watching. *(→ criteria 1, 2, 21)*
+- **Never miss a show because a notice failed.** As a homelab operator,
+  I want a handoff that failed or was unreachable to show up in
+  `status` and be resent on the next run, so that my library tool never
+  silently misses shows. *(→ criterion 21)*
+- **Copy the docs and it works.** As a homelab operator, I want any
+  handoff example in the docs to work against the stock tool when I
+  follow it literally, so that I don't discover weeks later that it
+  imported 64 tracks out of 58,000. *(→ criterion 21)*
 - **Prove it works for real before I ship.** As a maintainer preparing
   a release, I want to run one opt-in check that downloads a small real
   IA item and exercises the typical lifecycle end-to-end — sync,
@@ -296,10 +419,56 @@ criterion and implies a testable path through the product's surface.
   what still needs attention, so that recovery does not involve guessing
   whether my archive is complete. *(→ criterion 17)*
 - **Gate a release on real operator workflows.** As a maintainer, I want
-  a bounded validation run that proves setup, unsafe-config handling,
-  partial-failure recovery, and sync-to-library behavior still work, so
-  that I do not ship a release that only passed narrow unit checks.
-  *(→ criterion 18)*
+  a bounded validation that proves setup, unsafe-config handling,
+  partial-failure recovery, and sync-to-library behavior still work to
+  run automatically before any image publishes, so that I do not ship a
+  release that only passed narrow unit checks — and my NAS never runs a
+  product command that fails by construction. *(→ criterion 18)*
+- **Browse my library straight from the folders.** As a homelab
+  operator using Navidrome as my primary player, I want shakedown's
+  library to be good to browse on its own — every recording present,
+  each show in exactly one place, no leftover duplicates — so that I
+  don't need a separate organizer just to make it usable.
+  *(→ criteria 19, 20)*
+- **Two tapes of one show both stay.** As a homelab operator, I want two
+  recordings that my layout puts in the same folder to both land in the
+  library, separated the same way every run, and to be told it
+  happened, so that I never lose a tape to a layout clash or see it
+  move between runs. *(→ criterion 19)*
+- **Change the layout without cleanup.** As a homelab operator, I want
+  old folders to disappear when a show moves — after a layout change, a
+  re-fetch, a rename, or a prune — so that my player never shows the
+  same show twice and pruned shows actually free their space.
+  *(→ criterion 20)*
+- **One broken item doesn't stall the collection.** As a homelab
+  operator, I want a single item that errors or has a broken file list
+  to fail on its own while the rest of the collection keeps syncing, so
+  that my collection never goes stale behind one bad item.
+  *(→ criterion 22)*
+- **Fix one show without walking the collection.** As a homelab
+  operator, I want refetching or reconforming a show to touch only that
+  show, count as a run, stay polite to the source, and notify my
+  library tool, so that one-show fixes are quick and show up like any
+  other sync. *(→ criterion 23)*
+- **Trigger a sync after editing config.** As a homelab operator, I want
+  the API's "sync now" to use the config as I just edited it and to
+  refuse cleanly if a run is already going, so that I never restart
+  `serve` to pick up a change or end up with two runs at once.
+  *(→ criterion 24)*
+- **Untagged shows still browse well.** As a homelab operator, I want
+  shakedown to fill in missing artist, date, venue, and title tags from
+  the source metadata it already has, so that Navidrome groups my shows
+  properly — without re-downloading anything and without false drift in
+  `verify --deep`. *(→ criterion 25)*
+- **Play the old SHN tapes.** As a Grateful Dead collector, I want
+  SHN-only shows to come with a playable version in my library while
+  the original SHN stays in the archive, so that those shows are not
+  dead weight in my player. *(→ criterion 26)*
+- **Always the best copy, without picking formats.** As a homelab
+  operator, I want shakedown to keep the best version of every show and
+  the best version I can play, with all its notes and files, so that I
+  have both a listening library and a preservation copy without
+  writing format rules per collection. *(→ criterion 26)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -328,13 +497,27 @@ constraints that drive architecture.
 - **No silent library data loss.** The library never silently drops a
   recording it successfully fetched. If a configured layout cannot
   represent two distinct items distinctly, that is surfaced — guarded at
-  config time and, if a run still collides, counted in a visible per-run
-  summary — never left as a lone warning buried in the logs. Skipping
-  colliding items does not abort the rest of the run, but a run that
-  dropped recordings to collisions is never reported as clean.
+  config time and, if a run still collides, reported in a visible
+  per-run summary — never left as a lone warning buried in the logs. A
+  run-time collision is resolved by separating the recordings, never by
+  dropping, replacing, or merging one into another, and never in a way
+  that depends on run order.
+- **The library is a faithful, deterministic view of the archive.**
+  Every library path has exactly one owning recording; the same archive
+  state and config always yield the same library, whether reached by
+  incremental syncs or by a full restage. Nothing stale outlives the
+  show it belonged to, and shakedown never deletes a library file it
+  did not place.
 - **Storage efficiency.** Archive + library staging together cost
   effectively 1x storage. Any further duplication is a library-tool
-  decision, not Shakedown's.
+  decision, not Shakedown's — with one accepted exception: mirroring a
+  source's playable alternative for shows whose original format is
+  unplayable (criterion 26). Tag filling changes files in place and
+  adds no copies.
+- **Durable handoff.** A handoff notice is either delivered or visibly
+  pending and resent; it is never lost silently. A handoff triggers the
+  library tool and waits only for its acknowledgement, never for the
+  tool's own work.
 - **Restage speed.** Rebuilding the full library tree for a ~14k-item
   collection completes in under five minutes and never re-downloads.
 - **Sync speed.** A recurring sync's wall-clock scales with what
@@ -361,7 +544,9 @@ constraints that drive architecture.
   mismatches, disk-full, and source rate-limiting each fail cleanly
   (retry, back off, or mark the single item failed) without corrupting
   the archive or aborting the whole run. No partial commits reach the
-  archive tree.
+  archive tree. Per-item isolation is a property of the product, not of
+  each source plugin: it holds equally for every shipped source and for
+  third-party plugins written from the docs.
 - **Scheduled runs are observable and self-contained.** Every scheduled
   tick launches a fresh, self-contained run; it never relies on
   attaching to a container that is already running. A tick that fails to
@@ -388,6 +573,9 @@ constraints that drive architecture.
   are supplied only via environment variables or secrets files, never
   written into the YAML config. Any ad-hoc trigger API is
   auth-protected.
+- **Config edits take effect without restarts.** Every run — scheduled,
+  manual, or API-triggered — uses the config as it is when the run
+  starts.
 
 ## Constraints §req:constraints
 
@@ -414,7 +602,8 @@ Technical, operational, and scope bounds on the solution space.
   deployment need not — and should not be required to — keep an idle
   Shakedown container running between ticks. An optional `serve` command
   may expose a small auth-protected control plane (health, status,
-  metrics, trigger), but never schedules.
+  metrics, trigger), but never schedules. A triggered sync is an ordinary
+  run under the same one-writer-at-a-time rule as scheduled runs.
 - **Deploys as one Docker Compose stack.** The whole deployment —
   including scheduling — is one compose file paste-able into Container
   Station.
@@ -426,7 +615,12 @@ Technical, operational, and scope bounds on the solution space.
   sync, Shakedown can notify the library tool via a webhook (default,
   loosely coupled) or by executing a configured command (e.g.
   `beet import`) as a built-in fallback. Deciding the webhook payload
-  contract is part of the design.
+  contract is part of the design. The handoff is optional: Navidrome
+  browsing shakedown's library directly is the primary listening path,
+  and Beets is no longer assumed to be part of the stack (the operator
+  will decide after seeing the library in Navidrome). Any documented
+  handoff recipe must target an interface the named tool actually
+  offers in its stock form.
 - **Network-dependent verification is opt-in and bounded.** The default
   test run and CI are fully offline and deterministic. The real-data
   end-to-end check is invoked explicitly by a developer, downloads a
@@ -445,10 +639,36 @@ Technical, operational, and scope bounds on the solution space.
   metadata is a distinct, explicitly-invoked operation, not something a
   routine sync does on its own.
 - **Not a library manager, discovery tool, transcoder, or general
-  downloader.** Shakedown does not tag, rename inside the library, serve
-  audio, recommend/scrobble, transcode, or wrap arbitrary downloaders.
-  Those jobs belong to Beets/Lidarr/Picard/Navidrome and are out of
-  scope.
+  downloader.** Shakedown does not retag or rename inside the library
+  beyond its own layout, serve audio, recommend/scrobble, transcode, or
+  wrap arbitrary downloaders. Those jobs belong to
+  Beets/Lidarr/Picard/Navidrome and are out of scope. Two bounded
+  exceptions: (1) opt-in, per-collection gap-filling of basic tags
+  (artist, date, venue, title) from source metadata shakedown already
+  holds — it only adds missing tags and never overwrites existing ones;
+  (2) mirroring a source-provided playable alternative for media in an
+  unplayable format. Shakedown never converts audio itself.
+- **Tagged bytes are recorded state.** When tag filling changes a file,
+  the post-tag checksum becomes part of shakedown's recorded state.
+  Sync's change detection still compares only source listing against
+  recorded listing (tagging never causes a re-download or a re-hash of
+  the source), and `verify --deep` compares disk against the recorded
+  post-tag checksum.
+- **Deployment status.** Deployed — a single operator's QNAP NAS install
+  in daily use (live shakedown as of 2026-11-09); no external consumers
+  (no API clients, no published packages, no other installs). Every
+  surface is free to break: config keys and their shape, library
+  layout, CLI flags, the HTTP API, and the state database (which may be
+  migrated or even rebuilt via `reconcile`). The one hard limit is
+  data: an upgrade must never force re-downloading the bulk of media
+  already in the archive. Relocating or renaming archive and library
+  files is acceptable, and re-downloading a small share is tolerable.
+- **Governance: symphony-native.** REQUIREMENTS.md and SPEC.md are the
+  repo's durable governance artifacts and ship in the PR as-is; the repo
+  has no ADR/RFC/design-doc tree to convert into.
+- **UI: none.** Scope is limited to the CLI, `status` output, the
+  on-disk library tree, and the optional `serve` HTTP API; no visual
+  user interface is in scope (see "No web UI" below).
 - **No web UI in v1.** The goal is a backend service, not a dashboard;
   users who want a UI can point Homepage/Homarr at the status endpoint.
 
@@ -456,9 +676,10 @@ Technical, operational, and scope bounds on the solution space.
 
 Ordered by user impact. v1 shipped; a second (etree) plugin was pulled
 in to prove the plugin seam. The discovery-performance increment (items
-13–15) and mirror-integrity & metadata preservation increment (items
-16–18) have shipped; the current increment is setup, recovery, and
-validation confidence (items 19–21).
+13–15), the mirror-integrity & metadata preservation increment (items
+16–18), and the setup, recovery, and validation-confidence increment
+(items 19–21) have shipped; the current increment is ownership,
+handoff, and discovery (items 22–29).
 
 **Must have (v1 core):**
 
@@ -520,8 +741,8 @@ independently-shippable items addressed in one pass:**
     media change-detection, with an explicit metadata-resync operation
     to refresh it (→ criterion 15; GH #15).
 
-**Next — setup, recovery, and validation confidence (post-v1, current
-increment). Three independently-shippable items addressed in one pass:**
+**Shipped — setup, recovery, and validation confidence (post-v1). Three
+independently-shippable items addressed in one pass:**
 
 19. First-setup readiness: a user can validate paths, config, source
     access, credentials, and handoff targets before the first large
@@ -536,9 +757,44 @@ increment). Three independently-shippable items addressed in one pass:**
     partial-failure recovery, and sync-to-library behavior with clear
     pass/fail output (→ criterion 18; GH #21).
 
+**Next — ownership, handoff, and discovery (post-v1, current
+increment).** Pre-triaged from the 2026-11-07 codebase review and the
+2026-11-09 live-NAS diagnosis. Ordered by impact on the operator's
+day-to-day listening, which today is Navidrome browsing shakedown's
+library folders directly:
+
+22. Library ownership and stale-copy cleanup (→ criteria 19, 20).
+    Highest impact and highest confidence: the duplicates and merged
+    tapes are visible in Navidrome now (3,263 Aquarium Rescue Unit files
+    linked into two folders), and both criteria rest on the same notion
+    of which recording owns which library path. Ship together.
+23. Per-item isolation on every source (→ criterion 22). A single bad
+    item can freeze a whole collection forever; not active on the NAS
+    today (etree is commented out) but it blocks re-enabling etree and
+    is the foundation item 24 builds on.
+24. Single-show operations as runs (→ criterion 23). Cheap once item 23
+    exists; makes refetch/reconform polite, visible, and handed off.
+25. Durable handoff and a working documented recipe (→ criterion 21).
+    Lower immediate impact while Navidrome is primary and Beets is
+    optional, but a silently lost notice is a correctness defect and the
+    shipped example currently cannot work.
+26. Tag filling (→ criterion 25). High listening impact (only ~33–50%
+    of sampled Grateful Dead / Aquarium Rescue Unit files are tagged)
+    but moderate confidence and effort: it is the first time shakedown
+    changes archive bytes, so the recorded-state rules must hold.
+27. Best available and best playable copy, with every non-audio file
+    (→ criterion 26). 891 Grateful Dead files are SHN and unplayable
+    today; the same rule replaces per-collection format settings and
+    makes the refused-lossless fallback automatic on every source.
+28. API "sync now" as a fresh, non-overlapping run (→ criterion 24).
+    The writer lock already prevents overlap damage; this closes the
+    stale-config gap and gives a clean refusal.
+29. Release gate in CI before publish; no always-failing command in the
+    shipped image (→ criterion 18, revised). Small and contained.
+
 **Nice to have / out of scope (candidates for later):**
 
-22. Web UI for status and config; push notifications beyond webhooks
+30. Web UI for status and config; push notifications beyond webhooks
     (Pushover, Discord); direct library-tool integrations; multiple
     archive roots / tiered storage; BitTorrent as a source; cross-host
     sync. These are explicitly deferred.

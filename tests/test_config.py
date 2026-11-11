@@ -31,6 +31,33 @@ sources:
     assert cfg.sources[0].collections[0].library_layout == "passthrough"
     # preserve_source_metadata is opt-in and defaults off (§spec:metadata-preservation).
     assert cfg.sources[0].collections[0].preserve_source_metadata is False
+    # fill_tags is opt-in and defaults off (§spec:tag-filling).
+    assert cfg.sources[0].collections[0].fill_tags is False
+
+
+def test_fill_tags_opt_in(tmp_path: Path) -> None:
+    p = _write(tmp_path, """
+archive_root: /data/archive
+library_root: /data/library
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'collection:GratefulDead'
+        fill_tags: true
+""")
+    cfg = load(p)
+    assert cfg.sources[0].collections[0].fill_tags is True
+
+
+def test_example_config_documents_fill_tags_off() -> None:
+    """The annotated example shows the opt-in, switched off (§spec:configuration)."""
+    example = Path(__file__).resolve().parent.parent / "shakedown.example.yaml"
+    cfg = load(example)
+    collections = [c for s in cfg.sources for c in s.collections]
+    assert "fill_tags" in example.read_text()
+    assert all(c.fill_tags is False for c in collections)
 
 
 def test_preserve_source_metadata_opt_in(tmp_path: Path) -> None:
@@ -164,6 +191,11 @@ sources:
     assert cfg.sources[0].collections[0].library_layout == "{year}/{venue}"
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("ia/gd" in m and "per-item-unique" in m for m in warnings), warnings
+    assert any(
+        "two items sharing these fields get folders labelled with their identifier — add a "
+        "unique component such as {identifier} to the leaf" in m
+        for m in warnings
+    ), warnings
 
 
 def test_layout_with_unique_field_does_not_warn(
@@ -184,26 +216,6 @@ sources:
     with caplog.at_level("WARNING"):
         load(p)
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
-
-
-def test_constant_layout_rejected(tmp_path: Path) -> None:
-    """A template with no source fields renders every item to one path — a guaranteed
-    collapse and a hard config error (§spec:layout-collision-safety)."""
-    p = _write(tmp_path, """
-archive_root: /a
-library_root: /l
-sources:
-  - name: ia
-    type: ia
-    collections:
-      - name: gd
-        query: 'q'
-        library_layout: 'all-shows'
-""")
-    with pytest.raises(ConfigError) as exc_info:
-        load(p)
-    assert "ia/gd" in str(exc_info.value)
-    assert "same path" in str(exc_info.value)
 
 
 def test_max_concurrent_collections_defaults(tmp_path: Path) -> None:
@@ -302,4 +314,33 @@ sources:
         query: 'q'
 """)
     with pytest.raises(ConfigError):
+        load(p)
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("format_filters", "[flac, shn]"),
+        ("exclude_filters", "['*_64kb.mp3']"),
+        ("fallback_format_filters", "[mp3]"),
+    ],
+)
+def test_removed_format_settings_fail_to_load_naming_the_key(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    """File choice follows the quality rule (§spec:quality-selection); a config that
+    still sets a removed format setting fails to load, naming it, so the operator
+    deletes it once on upgrade (§spec:configuration)."""
+    p = _write(tmp_path, f"""
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'collection:GratefulDead'
+        {key}: {value}
+""")
+    with pytest.raises(ConfigError, match=key):
         load(p)

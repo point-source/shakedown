@@ -12,9 +12,11 @@ from pathlib import Path
 
 import pytest
 import requests
+from requests.adapters import HTTPAdapter
 
 import shakedown.sync as sync_module
 from shakedown.config import CollectionConfig, SourceConfig
+from shakedown.discovery import LOOKUP_ATTEMPTS, ItemDescriptor, SourceBudget, look_up_one
 from shakedown.plugins.ia import plugin as ia_plugin
 from shakedown.plugins.ia.plugin import IAPlugin
 from tests.fake_archive import FakeArchive, Reply, fake_archive
@@ -27,7 +29,6 @@ COLLECTION = CollectionConfig(name="dead", query="collection:GratefulDead")
 
 @pytest.fixture()
 def archive(monkeypatch) -> Iterator[FakeArchive]:
-    monkeypatch.setattr(ia_plugin.time, "sleep", lambda _s: None)
     monkeypatch.setattr(sync_module.time, "sleep", lambda _s: None)
     with fake_archive() as fake:
         yield fake
@@ -38,9 +39,11 @@ def _plugin() -> IAPlugin:
 
 
 def _search_then_describe(archive: FakeArchive, plugin: IAPlugin, identifier: str = "gd1"):
+    """List the collection, then run the core's lookup of its one item."""
     archive.search_results({"identifier": identifier})
-    assert list(plugin.enumerate_items(COLLECTION)) == [identifier]
-    return plugin.describe_item(identifier, COLLECTION)
+    (row,) = plugin.list_items(COLLECTION)
+    assert row.identifier == identifier
+    return look_up_one(plugin, row, SourceBudget(4))
 
 
 def test_metadata_5xx_after_a_search_is_asked_once_per_shakedown_attempt(archive) -> None:
@@ -49,13 +52,13 @@ def test_metadata_5xx_after_a_search_is_asked_once_per_shakedown_attempt(archive
     plugin = _plugin()
     archive.metadata("gd1", Reply(500, b"oops"))
 
-    assert _search_then_describe(archive, plugin) is None
-    assert len(archive.calls_to("/metadata/gd1")) == ia_plugin._MAX_METADATA_ATTEMPTS
+    assert not isinstance(_search_then_describe(archive, plugin), ItemDescriptor)
+    assert len(archive.calls_to("/metadata/gd1")) == LOOKUP_ATTEMPTS
 
 
 def test_metadata_retry_after_reaches_shakedown(archive, monkeypatch) -> None:
     delays: list[float] = []
-    monkeypatch.setattr(ia_plugin.time, "sleep", delays.append)
+    monkeypatch.setattr("shakedown.discovery._sleep", delays.append)
     plugin = _plugin()
     archive.metadata(
         "gd1",
@@ -65,7 +68,7 @@ def test_metadata_retry_after_reaches_shakedown(archive, monkeypatch) -> None:
 
     desc = _search_then_describe(archive, plugin)
 
-    assert desc is not None
+    assert isinstance(desc, ItemDescriptor)
     assert delays == [7.0]
     assert len(archive.calls_to("/metadata/gd1")) == 2
 
@@ -75,9 +78,9 @@ def test_download_5xx_after_a_search_is_one_request_and_retriable(archive, tmp_p
     archive.item("gd1", FILES)
     archive.file("gd1", "d1t01.flac", Reply(503, b"busy", {"Retry-After": "7"}))
     desc = _search_then_describe(archive, plugin)
-    assert desc is not None
+    assert isinstance(desc, ItemDescriptor)
 
-    result = plugin.fetch(desc, tmp_path / ".tmp-gd1", [], [])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, tmp_path / ".tmp-gd1")
 
     assert result.success is False
     assert result.retriable is True
@@ -97,9 +100,9 @@ def test_hours_long_retry_after_on_a_download_waits_only_the_core_cap(archive, m
         Reply(200, AUDIO),
     )
     desc = _search_then_describe(archive, plugin)
-    assert desc is not None
+    assert isinstance(desc, ItemDescriptor)
 
-    result = sync_module._fetch_with_retries(plugin, desc, tmp_path / ".tmp-gd1", COLLECTION)
+    result = sync_module._fetch_with_retries(plugin, desc, tmp_path / ".tmp-gd1")
 
     assert result.success is True
     assert delays == [sync_module._MAX_BACKOFF_SECONDS]
@@ -116,11 +119,11 @@ def test_search_retries_are_bounded_and_cap_retry_after(archive) -> None:
     )
 
     with pytest.raises(requests.exceptions.RetryError):
-        list(plugin.enumerate_items(COLLECTION))
+        list(plugin.list_items(COLLECTION))
 
     assert len(archive.calls_to("/services/search/v1/scrape")) == 1 + ia_plugin._SEARCH_RETRIES
     assert archive.sleeps
-    assert max(archive.sleeps) <= ia_plugin._METADATA_MAX_BACKOFF_SECONDS
+    assert max(archive.sleeps) <= ia_plugin._SEARCH_MAX_BACKOFF_SECONDS
 
 
 def test_session_used_for_metadata_and_downloads_keeps_retries_off(archive, tmp_path: Path) -> None:
@@ -128,11 +131,12 @@ def test_session_used_for_metadata_and_downloads_keeps_retries_off(archive, tmp_
     archive.item("gd1", FILES)
     archive.file("gd1", "d1t01.flac", Reply(200, AUDIO))
     desc = _search_then_describe(archive, plugin)
-    assert desc is not None
-    assert plugin.fetch(desc, tmp_path / ".tmp-gd1", [], []).success
+    assert isinstance(desc, ItemDescriptor)
+    assert plugin.fetch(desc.identifier, desc.manifest.files, tmp_path / ".tmp-gd1").success
 
-    retry = plugin._session.get_adapter("https://archive.org/download/gd1/x").max_retries
-    assert retry.total == 0
+    adapter = plugin._session.get_adapter("https://archive.org/download/gd1/x")
+    assert isinstance(adapter, HTTPAdapter)
+    assert adapter.max_retries.total == 0
 
 
 def test_403_on_a_download_reports_the_show_unavailable(archive, tmp_path: Path) -> None:
@@ -144,9 +148,9 @@ def test_403_on_a_download_reports_the_show_unavailable(archive, tmp_path: Path)
     archive.file("gd1", "d1t01.flac", Reply(403, b"Forbidden"))
     archive.file("gd1", "d1t02.flac", Reply(200, AUDIO))
     desc = _search_then_describe(archive, plugin)
-    assert desc is not None
+    assert isinstance(desc, ItemDescriptor)
 
-    result = plugin.fetch(desc, tmp_path / ".tmp-gd1", [], [])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, tmp_path / ".tmp-gd1")
 
     assert result.success is False
     assert result.unavailable is True
@@ -161,9 +165,9 @@ def test_download_cut_off_mid_stream_is_retriable(archive, tmp_path: Path) -> No
     archive.item("gd1", FILES)
     archive.file("gd1", "d1t01.flac", Reply(200, AUDIO[:3], {"Content-Length": "5"}))
     desc = _search_then_describe(archive, plugin)
-    assert desc is not None
+    assert isinstance(desc, ItemDescriptor)
 
-    result = plugin.fetch(desc, tmp_path / ".tmp-gd1", [], [])
+    result = plugin.fetch(desc.identifier, desc.manifest.files, tmp_path / ".tmp-gd1")
 
     assert result.success is False
     assert result.retriable is True

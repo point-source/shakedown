@@ -47,7 +47,7 @@ def _handler(request: httpx.Request) -> httpx.Response:
                     {"name": "gd77-05-08d1t01.flac", "size": str(len(_FLAC)),
                      "md5": _MD5, "format": "Flac"},
                     {"name": "gd77-05-08d1t01_64kb.mp3", "size": "10",
-                     "md5": "x", "format": "VBR MP3"},
+                     "md5": "9" * 32, "format": "VBR MP3"},
                 ],
             },
         )
@@ -72,8 +72,6 @@ def _etree_config(archive: Path, library: Path) -> Config:
                     CollectionConfig(
                         name="etree",
                         query="collection:etree",
-                        format_filters=["flac", "shn"],
-                        exclude_filters=["*_64kb.mp3"],
                         library_layout="{year}/{date} - {venue|sanitize}",
                     )
                 ],
@@ -95,7 +93,7 @@ def test_etree_source_syncs_into_archive_library_and_status(
         assert archived.is_file()
         assert archived.read_bytes() == _FLAC
 
-        # exclude_filter drops the lossy mp3.
+        # The flac is the best copy and plays, so no lossy copy is mirrored.
         assert not (archive / "etree-lma" / "etree" / _IDENT / "gd77-05-08d1t01_64kb.mp3").exists()
 
         # Library staging rendered from the template and hardlinked to the archive inode.

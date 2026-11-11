@@ -30,6 +30,8 @@ def test_help_exits_zero() -> None:
     result = CliRunner().invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "sync" in result.output and "verify" in result.output
+    # Release checks live in CI, not in the shipped product (§spec:release-validation-gate).
+    assert "release-validate" not in result.output
 
 
 def test_missing_config_exits_two(tmp_path: Path) -> None:
@@ -44,6 +46,17 @@ def test_verify_reconform_without_deep_exits_two(tmp_path: Path, tmp_roots) -> N
     result = CliRunner().invoke(main, ["--config", str(cfg), "verify", "--reconform"])
     assert result.exit_code == 2
     assert "--reconform requires --deep" in result.output
+
+
+def test_item_refetch_of_an_unrecorded_show_exits_two(tmp_path: Path, tmp_roots) -> None:
+    """§spec:single-show-runs: an identifier that names no recorded show is a usage
+    error, and nothing is looked up."""
+    archive, library = tmp_roots
+    cfg = _write_config(tmp_path, archive, library)
+    result = CliRunner().invoke(main, ["--config", str(cfg), "item", "refetch", "gd-nope"])
+    assert result.exit_code == 2
+    assert "Error: no recorded show named 'gd-nope'" in result.output
+    assert FakePlugin.lookup_calls == []
 
 
 def test_status_against_empty_db(tmp_path: Path, tmp_roots) -> None:
@@ -210,7 +223,7 @@ def test_status_reports_stale_collection(tmp_path: Path, tmp_roots, monkeypatch)
         raise ConnectionError("source unreachable")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(FakePlugin, "enumerate_items", unreachable_enumerate)
+    monkeypatch.setattr(FakePlugin, "list_items", unreachable_enumerate)
     assert run_sync(config) == 1
 
     result = CliRunner().invoke(main, ["--config", str(cfg), "status"])
@@ -225,26 +238,6 @@ def test_status_reports_stale_collection(tmp_path: Path, tmp_roots, monkeypatch)
     assert '"operation": "sync"' in json_result.output
     assert '"status": "stale_enumeration"' in json_result.output
     assert '"safe_next_action": "restore source access and rerun sync"' in json_result.output
-
-
-def test_item_forget_removes_row(tmp_path: Path, tmp_roots) -> None:
-    archive, library = tmp_roots
-    cfg = _write_config(tmp_path, archive, library)
-    FakePlugin.items["gd-x"] = FakeItem(
-        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"a")]
-    )
-    # Seed via library function (CliRunner needs a writable config-derived state)
-    from shakedown.config import load
-    config = load(cfg)
-    assert run_sync(config) == 0
-
-    result = CliRunner().invoke(main, ["--config", str(cfg), "item", "forget", "gd-x"])
-    assert result.exit_code == 0
-
-    from shakedown.db import connect
-    from shakedown.state import ItemRepo
-    conn = connect(config.state_db)
-    assert ItemRepo(conn).get("fake-src", "coll1", "gd-x") is None
 
 
 def test_startup_refuses_when_archive_cannot_hardlink_into_library(
@@ -293,3 +286,21 @@ def test_read_only_commands_skip_the_hardlink_probe(tmp_path: Path, tmp_roots) -
         show = CliRunner().invoke(main, ["--config", str(cfg), "item", "show", "nope"])
     assert status.exit_code == 0, status.output
     assert show.exit_code == 0, show.output
+
+
+def test_serve_starts_with_a_broken_config(tmp_path: Path, monkeypatch) -> None:
+    """serve reads the config per request, so a broken file must not stop it from
+    starting; the endpoints answer 503 until the file is fixed (§spec:api-sync-runs)."""
+    pytest.importorskip("fastapi")
+    import shakedown.server as server_module
+
+    cfg = tmp_path / "shakedown.yaml"
+    cfg.write_text("sources: [")
+    started: list[tuple[Path, str, int]] = []
+    monkeypatch.setattr(
+        server_module, "serve",
+        lambda path, *, host, port: started.append((path, host, port)),
+    )
+    result = CliRunner().invoke(main, ["--config", str(cfg), "serve", "--port", "9999"])
+    assert result.exit_code == 0, result.output
+    assert started == [(cfg, "0.0.0.0", 9999)]

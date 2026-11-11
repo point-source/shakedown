@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = [
     """
@@ -28,6 +28,11 @@ _SCHEMA = [
         source_metadata    TEXT NOT NULL DEFAULT '{}',
         recorded_manifest  TEXT,
         change_signal      TEXT,
+        -- why the show has no copy a common player reads (§spec:quality-selection)
+        not_playable_reason TEXT,
+        -- when the show was first found missing from a complete listing
+        -- (§spec:item-lifecycle)
+        disappeared_at     TEXT,
         PRIMARY KEY (source_name, collection_name, identifier)
     )
     """,
@@ -49,8 +54,8 @@ _SCHEMA = [
         bytes_downloaded   INTEGER NOT NULL DEFAULT 0,
         errors             TEXT NOT NULL DEFAULT '[]',
         stale              INTEGER NOT NULL DEFAULT 0,
-        collisions_dropped INTEGER NOT NULL DEFAULT 0,
-        collision_paths    TEXT NOT NULL DEFAULT '[]'
+        failure_notice_error TEXT,
+        kind               TEXT NOT NULL DEFAULT 'sync'
     )
     """,
     """
@@ -97,6 +102,111 @@ _SCHEMA = [
         )
     """,
 ]
+
+
+# The library placement record (§spec:library-ownership, §spec:library-cleanup). Paths
+# are relative to the collection's library folder (<library_root>/<source>/<collection>).
+_PLACEMENT_SCHEMA = [
+    # Every file shakedown placed in the library, with the inode it placed there: a
+    # different file later found at that path is not shakedown's. The primary key on
+    # the path makes "one owner per library path" a database invariant.
+    """
+    CREATE TABLE IF NOT EXISTS library_placements (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        path             TEXT NOT NULL,
+        inode            INTEGER NOT NULL,
+        PRIMARY KEY (source_name, collection_name, path)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS library_placements_show_idx
+        ON library_placements (source_name, collection_name, identifier)
+    """,
+    # Each staged show's library folder, and whether it was separated (labelled with
+    # its identifier) because another show renders the same folder.
+    """
+    CREATE TABLE IF NOT EXISTS library_folders (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        folder           TEXT NOT NULL,
+        separated        INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_name, collection_name, identifier)
+    )
+    """,
+    # Library files found where shakedown stages that it did not place; left alone and
+    # reported by `status`.
+    """
+    CREATE TABLE IF NOT EXISTS library_unplaced (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        path             TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name, path)
+    )
+    """,
+    # Collections whose existing library links were adopted into the record (once
+    # after the upgrade, or after a database rebuilt from scratch).
+    """
+    CREATE TABLE IF NOT EXISTS library_adoption (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        adopted_at       TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name)
+    )
+    """,
+]
+_SCHEMA += _PLACEMENT_SCHEMA
+
+# Shows covered by handoff notices not yet delivered (§spec:durable-handoff). `since` is
+# when the show first went undelivered; `last_reason` is the newest failure, the same on
+# every row of the collection.
+_HANDOFF_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS handoff_pending (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        since            TEXT NOT NULL,
+        last_reason      TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name, identifier)
+    )
+    """,
+]
+_SCHEMA += _HANDOFF_SCHEMA
+
+# Tag filling (§spec:tag-filling), kept beside — never inside — the recorded manifest,
+# which stays the source's word and the change-detection key (§spec:sync-identity).
+_TAG_SCHEMA = [
+    # One row per file shakedown changed: its checksum after tagging (what `verify
+    # --deep` compares against) and the tag values shakedown wrote that are still its
+    # own (JSON object), the only values it may later rewrite.
+    """
+    CREATE TABLE IF NOT EXISTS tag_files (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        file_name        TEXT NOT NULL,
+        post_tag_md5     TEXT NOT NULL,
+        written          TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (source_name, collection_name, identifier, file_name)
+    )
+    """,
+    # Fingerprint of the tag values a show was last filled with: a sync revisits a
+    # show only when its computed values no longer match, so a tagged show's files are
+    # never re-read.
+    """
+    CREATE TABLE IF NOT EXISTS tag_shows (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        fingerprint      TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name, identifier)
+    )
+    """,
+]
+_SCHEMA += _TAG_SCHEMA
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -155,12 +265,9 @@ def _migrate_to_3(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_4(conn: sqlite3.Connection) -> None:
-    """v3 → v4: add runs.collisions_dropped / runs.collision_paths so `status` can report
-    recordings dropped to layout collisions (§spec:layout-collision-safety)."""
-    if not _has_column(conn, "runs", "collisions_dropped"):
-        conn.execute("ALTER TABLE runs ADD COLUMN collisions_dropped INTEGER NOT NULL DEFAULT 0")
-    if not _has_column(conn, "runs", "collision_paths"):
-        conn.execute("ALTER TABLE runs ADD COLUMN collision_paths TEXT NOT NULL DEFAULT '[]'")
+    """v3 → v4 added runs.collisions_dropped / runs.collision_paths for the skip-the-loser
+    collision summary. Clash separation superseded it and v6 drops them, so there is
+    nothing to add on the way through."""
 
 
 def _migrate_to_5(conn: sqlite3.Connection) -> None:
@@ -198,12 +305,46 @@ def _migrate_to_5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_6(conn: sqlite3.Connection) -> None:
+    """v5 → v6, the one migration of the ownership, handoff, and discovery increment
+    (§spec:state): add the library placement record, the pending-handoff record,
+    each run's undelivered failure alert (§spec:durable-handoff) and its kind
+    (§spec:single-show-runs), the tag-filling records (§spec:tag-filling), and drop
+    the skip-the-loser collision columns, superseded by clash separation
+    (§spec:library-ownership).
+
+    The quality rule (§spec:quality-selection) adds each show's not-playable reason,
+    and clears every stored change signal once: the first sync after the upgrade then
+    looks every show up and applies the new rule, even on an incremental collection
+    (§spec:incremental-discovery).
+
+    Each show records the date it was first found missing upstream
+    (§spec:item-lifecycle). Shows already missing before the upgrade get none: the
+    only candidate, `last_verified_at`, is rewritten by every reconcile, so it is not
+    reliably that date."""
+    for stmt in _PLACEMENT_SCHEMA + _HANDOFF_SCHEMA + _TAG_SCHEMA:
+        conn.execute(stmt)
+    if not _has_column(conn, "runs", "failure_notice_error"):
+        conn.execute("ALTER TABLE runs ADD COLUMN failure_notice_error TEXT")
+    if not _has_column(conn, "runs", "kind"):
+        conn.execute("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'sync'")
+    for column in ("collisions_dropped", "collision_paths"):
+        if _has_column(conn, "runs", column):
+            conn.execute(f"ALTER TABLE runs DROP COLUMN {column}")
+    if not _has_column(conn, "items", "not_playable_reason"):
+        conn.execute("ALTER TABLE items ADD COLUMN not_playable_reason TEXT")
+    if not _has_column(conn, "items", "disappeared_at"):
+        conn.execute("ALTER TABLE items ADD COLUMN disappeared_at TEXT")
+    conn.execute("UPDATE items SET change_signal = NULL")
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
     3: _migrate_to_3,
     4: _migrate_to_4,
     5: _migrate_to_5,
+    6: _migrate_to_6,
 }
 
 

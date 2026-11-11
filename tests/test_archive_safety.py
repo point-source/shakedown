@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import shakedown.staging as staging_module
+import shakedown.placement as placement_module
 import shakedown.sync as sync_module
 from shakedown.db import connect
 from shakedown.models import ItemStatus, OperationStatus
@@ -113,14 +113,14 @@ def test_refetch_with_empty_upstream_manifest_keeps_archive_copy(
 
 
 def _flaky_hardlink(monkeypatch, bad_identifier: str, exc: OSError) -> None:
-    real = staging_module.hardlink
+    real = placement_module.hardlink
 
     def hardlink(src, dst):
         if bad_identifier in str(src):
             raise exc
         return real(src, dst)
 
-    monkeypatch.setattr(staging_module, "hardlink", hardlink)
+    monkeypatch.setattr(placement_module, "hardlink", hardlink)
 
 
 def test_link_oserror_fails_only_that_show(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
@@ -280,7 +280,7 @@ def test_short_file_is_retried_and_never_recorded_complete(
     monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
     attempts = {"n": 0}
 
-    def short_fetch(self, item, dest_dir, format_filters, exclude_filters):
+    def short_fetch(self, identifier, files, dest_dir):
         attempts["n"] += 1
         dest_dir.mkdir(parents=True, exist_ok=True)
         (dest_dir / "a.flac").write_bytes(b"full")  # truncated, but claims success
@@ -379,7 +379,7 @@ def test_abandoned_temp_dirs_are_removed_but_failed_shows_keep_theirs(
         (coll / leftover / "x.flac").write_bytes(b"partial")
     monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
 
-    def fail_c(self, item, dest_dir, format_filters, exclude_filters):
+    def fail_c(self, identifier, files, dest_dir):
         (dest_dir / "gd-c.flac").write_bytes(b"hello")  # partial, kept for resume
         return FetchResult(success=False, bytes_downloaded=5, error="timeout", retriable=True)
 
@@ -408,10 +408,10 @@ def test_temp_dirs_kept_when_enumeration_fails(
     assert (coll / ".tmp-gd-z").is_dir()
 
 
-# --- M9: a finished download is recorded while the listing is still running --------
+# --- M9: a finished download is recorded while lookups are still running ----------
 
 
-def test_download_is_recorded_and_linked_before_enumeration_finishes(
+def test_download_is_recorded_and_linked_before_discovery_finishes(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
     import threading
@@ -421,42 +421,46 @@ def test_download_is_recorded_and_linked_before_enumeration_finishes(
     config = make_config(archive, library)
     _seed("gd-a")
     _seed("gd-b")
-    fetched_a = threading.Event()
+    _seed("gd-c")
+    fetched = {"gd-a": threading.Event(), "gd-b": threading.Event()}
     real_fetch_one = sync_module._fetch_one
 
     def fetch_one(plugin, target, archive_root, collection):
         outcome = real_fetch_one(plugin, target, archive_root, collection)
-        if target.descriptor.identifier == "gd-a":
-            fetched_a.set()
+        if target.descriptor.identifier in fetched:
+            fetched[target.descriptor.identifier].set()
         return outcome
 
     observed: list[object] = []
+    real_lookup = FakePlugin.lookup_item
 
-    def slow_listing(self, collection):
-        yield self.describe_item("gd-a", collection)
-        assert fetched_a.wait(5)
-        time.sleep(0.05)  # let the fetch future settle as done
-        yield self.describe_item("gd-b", collection)
-        # The listing is still running (hours, on a big etree collection).
-        row = _row(config, "gd-a")
-        observed.append(row.status if row else None)
-        observed.append((library / "fake-src" / "coll1" / "gd-a" / "gd-a.flac").is_file())
-        raise RuntimeError("container stopped")
+    def slow_lookups(self, identifier, timeout):
+        # gd-b answers only once gd-a is downloaded; gd-c only once gd-b is, so the
+        # orchestrator has handled gd-a while gd-c is still being looked up.
+        if identifier == "gd-b":
+            assert fetched["gd-a"].wait(5)
+            time.sleep(0.05)  # let the fetch future settle as done
+        if identifier == "gd-c":
+            assert fetched["gd-b"].wait(5)
+            time.sleep(0.05)
+            # Discovery is still running (hours, on a big collection).
+            row = _row(config, "gd-a")
+            observed.append(row.status if row else None)
+            observed.append((library / "fake-src" / "coll1" / "gd-a" / "gd-a.flac").is_file())
+            raise RuntimeError("container stopped")
+        return real_lookup(self, identifier, timeout)
 
     monkeypatch.setattr(sync_module, "_fetch_one", fetch_one)
-    monkeypatch.setattr(FakePlugin, "enumerate_items", lambda self, collection: None)
-    monkeypatch.setattr(FakePlugin, "discover", slow_listing)
+    monkeypatch.setattr(FakePlugin, "lookup_item", slow_lookups)
 
     run_sync(config)
 
     assert observed == [ItemStatus.COMPLETE, True]
 
 
-def test_temp_dir_kept_for_show_whose_lookup_failed(
-    tmp_roots: tuple[Path, Path], monkeypatch
-) -> None:
-    """A show still listed upstream whose metadata lookup failed this run keeps its
-    partial downloads for the next run."""
+def test_temp_dir_kept_for_show_whose_lookup_failed(tmp_roots: tuple[Path, Path]) -> None:
+    """A show still listed upstream whose lookup failed this run keeps its partial
+    downloads for the next run."""
     archive, library = tmp_roots
     config = make_config(archive, library)
     _seed("gd-a")
@@ -465,14 +469,9 @@ def test_temp_dir_kept_for_show_whose_lookup_failed(
     coll.mkdir(parents=True)
     (coll / ".tmp-gd-b").mkdir()
     (coll / ".tmp-gd-b" / "gd-b.flac").write_bytes(b"partial")
-    real_describe = FakePlugin.describe_item
+    FakePlugin.lookup_faults["gd-b"] = [ConnectionResetError("connection reset")]
 
-    def flaky(self, identifier, collection):
-        return None if identifier == "gd-b" else real_describe(self, identifier, collection)
-
-    monkeypatch.setattr(FakePlugin, "describe_item", flaky)
-
-    assert run_sync(config) == 0
+    assert run_sync(config) == 1  # the failed lookup is listed (§spec:per-item-isolation)
 
     assert (coll / ".tmp-gd-b" / "gd-b.flac").is_file()
 

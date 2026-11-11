@@ -23,6 +23,16 @@ class OperationType(StrEnum):
     RESTAGE = "restage"
     RECONCILE = "reconcile"
     VALIDATE = "validate"
+    REFETCH = "refetch"
+    RECONFORM = "reconform"
+
+
+class RunKind(StrEnum):
+    """What a run did: a sync of the whole collection, or a single-show run that
+    fetched only the shows it acts on (§spec:single-show-runs)."""
+    SYNC = "sync"
+    REFETCH = "refetch"
+    RECONFORM = "reconform"
 
 
 class OperationStatus(StrEnum):
@@ -36,17 +46,54 @@ class OperationStatus(StrEnum):
 
 @dataclass(frozen=True)
 class ManifestFile:
-    """One file in a source's manifest. Identity-bearing fields only."""
+    """One file in a source's manifest: the identity-bearing fields (name, size, md5)
+    plus whether the library stages it (§spec:quality-selection). `library` is not
+    part of the identity: an archive-only copy is still a copy the archive holds."""
     name: str
     size: int | None
     md5: str | None
+    library: bool = True
+    # The track title and number the source lists for this file, when it lists them:
+    # the source's word, used to fill tags (§spec:tag-filling), never identity.
+    title: str | None = None
+    track: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {"name": self.name, "size": self.size, "md5": self.md5}
+        raw: dict[str, Any] = {"name": self.name, "size": self.size, "md5": self.md5}
+        if not self.library:
+            raw["library"] = False
+        if self.title is not None:
+            raw["title"] = self.title
+        if self.track is not None:
+            raw["track"] = self.track
+        return raw
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> ManifestFile:
-        return cls(name=raw["name"], size=raw.get("size"), md5=raw.get("md5"))
+        # Records written before the quality rule carry no flag: every file is staged.
+        return cls(
+            name=raw["name"],
+            size=raw.get("size"),
+            md5=raw.get("md5"),
+            library=raw.get("library", True),
+            title=raw.get("title"),
+            track=raw.get("track"),
+        )
+
+
+@dataclass(frozen=True)
+class SourceFile:
+    """One file a source lists for an item, as validated by the core
+    (shakedown.discovery.validate_lookup); file selection chooses among these."""
+    name: str
+    size: int | None
+    md5: str | None
+    format: str | None = None
+    refused: bool = False  # the source will not serve this file
+    derived_from: str | None = None  # the original file, for a derivative
+    bitrate: int | None = None  # kbps, when the source lists it
+    title: str | None = None  # the file's track title, when the source lists it
+    track: str | None = None  # the file's track number, as the source writes it
 
 
 @dataclass(frozen=True)
@@ -90,11 +137,16 @@ class Item:
     recorded_manifest: Manifest | None = None
     # last-seen source change signal for incremental discovery (§spec:incremental-discovery)
     change_signal: str | None = None
+    # set when the show has no copy a common player reads (§spec:quality-selection)
+    not_playable_reason: str | None = None
+    # when the show was first found missing from a complete listing; cleared when it
+    # is listed again (§spec:item-lifecycle)
+    disappeared_at: datetime | None = None
 
 
 @dataclass
 class Run:
-    """A single sync invocation against a (source, collection)."""
+    """One run against a (source, collection): a sync, or a single-show run."""
     id: int | None
     source_name: str
     collection_name: str
@@ -107,11 +159,9 @@ class Run:
     bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items retained
-    # Recordings dropped this run because their library_layout rendered to a path
-    # another item already staged (§spec:layout-collision-safety). Distinct from
-    # items_failed: the archive copy is intact, only the library link was dropped.
-    collisions_dropped: int = 0
-    collision_paths: list[str] = field(default_factory=list)
+    # Why this run's failure alert was not delivered; not resent (§spec:durable-handoff).
+    failure_notice_error: str | None = None
+    kind: RunKind = RunKind.SYNC
 
 
 @dataclass

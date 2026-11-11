@@ -8,7 +8,7 @@ instructions and the pinned-item replacement procedure.
 The check drives the `ia` plugin against exactly one pinned, small, public,
 unrestricted Internet Archive item — no credentials required — through the whole
 lifecycle in order: sync → hardlink staging → no-op re-sync → restage after a
-layout change → disappeared retention → prune → forget. Everything runs in a
+layout change → disappeared retention → prune. Everything runs in a
 throwaway ``tmp_path`` tree (archive, library, and state DB on one filesystem),
 so it can never touch a real deployment. A network or upstream failure fails the
 check loudly; it never skips itself into a false pass.
@@ -41,7 +41,7 @@ from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Run
 from shakedown.restage import run_restage
 from shakedown.state import ItemRepo, RunRepo
-from shakedown.sync import forget_item, run_sync
+from shakedown.sync import run_sync
 
 pytestmark = pytest.mark.network
 
@@ -55,9 +55,8 @@ PINNED_FILE_MD5 = "eebc1b05345cffe3cf7a80b15f6251f6"
 PINNED_FILE_SIZE = 198658
 PINNED_CREATOR = "test"  # template field surfaced by the ia plugin for this item
 
-# `format_filters=["mp3"]` narrows the item's manifest to the single small MP3,
-# keeping the download to a few hundred KB.
-FORMAT_FILTERS = ["mp3"]
+# The item's only audio is that one small MP3, so the quality rule mirrors it plus
+# archive.org's small metadata files (§spec:quality-selection): a few hundred KB.
 
 # A query that matches exactly the pinned item.
 QUERY_MATCHES = f"identifier:{PINNED_IDENTIFIER}"
@@ -89,7 +88,6 @@ def _config(tmp: Path, *, query: str, layout: str, prune: bool) -> Config:
                     CollectionConfig(
                         name=COLLECTION,
                         query=query,
-                        format_filters=FORMAT_FILTERS,
                         library_layout=layout,
                         prune_disappeared=prune,
                     )
@@ -180,7 +178,3 @@ def test_ia_plugin_full_lifecycle_against_pinned_item(tmp_path: Path) -> None:
     record = _record(prune)
     assert record is not None and record.status == ItemStatus.PRUNED
     assert record.archive_path is None
-
-    # 7. `item forget` drops the database record entirely.
-    forget_item(prune, PINNED_IDENTIFIER)
-    assert _record(prune) is None, "forget must drop the DB record"

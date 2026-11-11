@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,19 @@ from tests.fake_plugin import FakePlugin, install_fake, reset_fake
 
 
 @pytest.fixture(autouse=True)
-def _fake_registered() -> None:
+def _no_lookup_backoff() -> Iterator[None]:
+    """Lookup retries back off for real seconds; tests count attempts, not time.
+
+    Its own patch context, not the shared `monkeypatch` fixture: instantiating that
+    here would tear it down after fixtures a test requests later (fake_archive's
+    time.sleep patch), restoring their patched value instead of the real one."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("shakedown.discovery._sleep", lambda _seconds: None)
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _fake_registered() -> Iterator[None]:
     install_fake()
     reset_fake()
     yield
@@ -34,7 +47,7 @@ def make_config(
     prune_disappeared: bool = False,
     incremental_discovery: bool = False,
     preserve_source_metadata: bool = False,
-    format_filters=None,
+    fill_tags: bool = False,
 ) -> Config:
     return Config(
         archive_root=archive_root,
@@ -47,12 +60,12 @@ def make_config(
                     CollectionConfig(
                         name="coll1",
                         query="*",
-                        format_filters=format_filters or [],
                         library_layout=library_layout,
                         on_complete=on_complete,
                         prune_disappeared=prune_disappeared,
                         incremental_discovery=incremental_discovery,
                         preserve_source_metadata=preserve_source_metadata,
+                        fill_tags=fill_tags,
                     )
                 ],
             )
@@ -60,4 +73,12 @@ def make_config(
     )
 
 
-__all__ = ["FakePlugin", "make_config"]
+def write_config(path: Path, config: Config) -> Path:
+    """Write a Config as the YAML file a `shakedown` process (or serve) loads."""
+    import yaml
+
+    path.write_text(yaml.safe_dump(config.model_dump(mode="json", exclude_none=True)))
+    return path
+
+
+__all__ = ["FakePlugin", "make_config", "write_config"]
