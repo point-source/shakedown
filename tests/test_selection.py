@@ -455,8 +455,8 @@ def test_uploaded_extras_in_subfolders_are_staged() -> None:
 def test_a_raw_recording_zip_beside_the_flacs_stays_archive_only() -> None:
     """ajc00286_eelpie1997-09-11 (aadam-jacobs): the uploader added the raw recording
     as `_16bit48khz_rawfile.zip`, listed as an original "ZIP". v2.0.2 staged it into
-    the library (seen on the NAS, 2026-11-11: 188 zips). The archive keeps it; the
-    library gets the FLACs, notes, fingerprints and cover."""
+    the library (seen on the NAS, 2026-11-11: 188 zips, 181 of them raw recordings).
+    The archive keeps it; the library gets the FLACs, notes, fingerprints and cover."""
     chosen = select(_real_listing("ajc00286_eelpie1997-09-11.json"), None)
     assert _names(chosen, library=True) == [
         "cover.jpg",

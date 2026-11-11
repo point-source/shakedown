@@ -741,7 +741,7 @@ def test_v7_db_reselects_every_show_once(tmp_path: Path) -> None:
     conn.close()
 
     conn = connect(db_path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 8
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     item = ItemRepo(conn).get("s", "c", "x")
     assert item is not None
     assert item.change_signal is None
