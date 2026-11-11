@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = [
     """
@@ -348,6 +348,15 @@ def _migrate_to_7(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE items SET change_signal = NULL")
 
 
+def _migrate_to_8(conn: sqlite3.Connection) -> None:
+    """v7 → v8: the quality rule changes (§spec:quality-selection: the library no longer
+    stages archive files or system and editor leftovers, whoever provided them), so every
+    stored change signal is cleared once, as v7 did: the first sync after the upgrade
+    looks every show up and takes those files out of the library, even on an
+    incremental collection (§spec:incremental-discovery)."""
+    conn.execute("UPDATE items SET change_signal = NULL")
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -356,6 +365,7 @@ _MIGRATIONS = {
     5: _migrate_to_5,
     6: _migrate_to_6,
     7: _migrate_to_7,
+    8: _migrate_to_8,
 }
 
 

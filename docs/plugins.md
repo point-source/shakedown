@@ -391,7 +391,9 @@ plugin must not reimplement any of them.
   best available copy, the best playable copy when that is a different format,
   and every non-audio file. The library gets the playable copy and the
   uploader's non-audio files: not those with a `derived_from`, nor the
-  source's own index and metadata files. It ranks copies by the file extension, `format`,
+  source's own index and metadata files, nor archive files (`.zip`, `.rar`,
+  `.7z`, `.tar`, `.gz`, …) and system or editor leftovers (`.DS_Store`,
+  `Thumbs.db`, `._*`, `*~`, `.bak`), which the core tells by file name. It ranks copies by the file extension, `format`,
   `bitrate`, and `size` you pass through, and leaves out files the source
   refuses. There are no per-collection file settings.
 - **Fresh temp dir per fetch.** For each item the core creates a private

@@ -447,3 +447,71 @@ def test_uploaded_extras_in_subfolders_are_staged() -> None:
         "t01.flac",
     ]
     assert len(_names(chosen, library=False)) == 5
+
+
+# --- archive files and system/editor junk stay out of the library ----------------------
+
+
+def test_a_raw_recording_zip_beside_the_flacs_stays_archive_only() -> None:
+    """ajc00286_eelpie1997-09-11 (aadam-jacobs): the uploader added the raw recording
+    as `_16bit48khz_rawfile.zip`, listed as an original "ZIP". v2.0.2 staged it into
+    the library (seen on the NAS, 2026-11-11: 188 zips, 181 of them raw recordings).
+    The archive keeps it; the library gets the FLACs, notes, fingerprints and cover."""
+    chosen = select(_real_listing("ajc00286_eelpie1997-09-11.json"), None)
+    assert _names(chosen, library=True) == [
+        "cover.jpg",
+        "eelpie1997-09-11.ffp",
+        "eelpie1997-09-11.txt",
+        "eelpie1997-09-11t01.flac",
+        "eelpie1997-09-11t02.flac",
+    ]
+    assert "eelpie1997-09-11_16bit48khz_rawfile.zip" in _names(chosen, library=False)
+
+
+def test_uploaded_archives_and_junk_are_mirrored_but_not_staged() -> None:
+    """Archive files and system or editor leftovers the uploader included stay in the
+    archive and out of the library, in any folder and any letter case (operator
+    decisions, 2026-11-11)."""
+    archive_only = [
+        "._t01.flac",
+        ".DS_Store",
+        "Thumbs.db",
+        "desktop.ini",
+        "extras/.DS_Store",
+        "extras/THUMBS.DB",
+        "info.txt.bak",
+        "info.txt~",
+        "info.txt~1~",
+        "raw.7z",
+        "raw.RAR",
+        "raw.tar",
+        "raw.tar.bz2",
+        "raw.tar.gz",
+        "raw.tar.xz",
+        "raw.tgz",
+        "raw.zip",
+        "show_rawfile.ZIP",
+    ]
+    files = (_f("t01.flac", "Flac"), *(_f(name, "Unknown") for name in archive_only))
+    chosen = select(files, None)
+    assert _names(chosen, library=True) == ["t01.flac"]
+    assert _names(chosen, library=False) == sorted(archive_only)
+
+
+def test_uploaded_logs_track_lengths_notes_checksums_and_images_are_staged() -> None:
+    """Rip or recording logs and track-length listings are notes like `.txt` and
+    `.ffp` (operator decision, 2026-11-11); covers and posters stay staged too."""
+    kept = [
+        "cover.jpeg",
+        "cover.webp",
+        "eac.log",
+        "info.txt",
+        "poster.png",
+        "show.ffp",
+        "show.len",
+        "show.md5",
+    ]
+    files = (_f("t01.flac", "Flac"), *(_f(name, "Unknown") for name in kept))
+    chosen = select(files, None)
+    assert _names(chosen, library=True) == sorted([*kept, "t01.flac"])
+    assert _names(chosen, library=False) == []
