@@ -538,3 +538,43 @@ async def test_status_lists_shows_with_no_playable_copy(tmp_roots: tuple[Path, P
         {"identifier": "gd-shn", "reason": "only in SHN; archive.org offers no playable copy"}
     ]
     assert r.json()[0]["restricted"] == []
+
+
+@pytest.mark.asyncio
+async def test_status_lists_shows_removed_upstream_from_the_db(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """GET /status carries the same removed-upstream list as `status --json`
+    (§spec:item-lifecycle), read without walking the archive or loading every item."""
+    import os
+    from datetime import date
+
+    from shakedown.state import ItemRepo
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["gd-gone"] = FakeItem(
+        identifier="gd-gone", files=[FakeFile(name="g.flac", content=b"g")]
+    )
+    assert run_sync(config) == 0
+    FakePlugin.items.clear()
+    before = date.today()
+    assert run_sync(config) == 0
+    after = date.today()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a scrape must neither walk the archive nor load every item")
+
+    for target, name in ((Path, "rglob"), (os, "walk"), (os, "scandir"),
+                         (ItemRepo, "list_for_collection")):
+        monkeypatch.setattr(target, name, forbidden)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(config)),
+        base_url="http://testserver",
+    ) as client:
+        r = await client.get("/status")
+    assert r.status_code == 200
+    [removed] = r.json()[0]["removed_upstream"]
+    assert removed["identifier"] == "gd-gone"
+    assert removed["removed_on"] in {before.isoformat(), after.isoformat()}

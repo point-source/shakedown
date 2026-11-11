@@ -180,6 +180,22 @@ class ItemRepo:
         )
         return [(row["identifier"], row["not_playable_reason"]) for row in cur]
 
+    def list_removed_upstream(
+        self, source: str, collection: str
+    ) -> list[tuple[str, datetime | None]]:
+        """(identifier, first found missing) of the collection's shows removed upstream
+        and kept on disk; the date is None for a show gone before dates were recorded
+        (§spec:item-lifecycle)."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier, disappeared_at FROM items
+            WHERE source_name=? AND collection_name=? AND status=?
+            ORDER BY identifier
+            """,
+            (source, collection, ItemStatus.DISAPPEARED.value),
+        )
+        return [(row["identifier"], _parse_iso(row["disappeared_at"])) for row in cur]
+
     def count_by_status(self, source: str, collection: str) -> dict[ItemStatus, int]:
         cur = self.conn.execute(
             """

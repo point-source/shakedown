@@ -18,6 +18,10 @@ from shakedown.state import (
     RunRepo,
 )
 
+# Shows removed upstream are a fact, not a warning (§spec:item-lifecycle); `shows`
+# is "1 show" or "N shows".
+REMOVED_UPSTREAM_LINE = "  removed upstream: {shows} (kept; dates in status --json)"
+
 
 def _collection_summary(
     config: Config,
@@ -56,6 +60,12 @@ def _collection_summary(
         "not_playable": [
             {"identifier": identifier, "reason": reason}
             for identifier, reason in items.list_not_playable(source_name, collection_name)
+        ],
+        # Shows removed upstream and kept, each with the day it was first found
+        # missing, or None if it went before dates were recorded (§spec:item-lifecycle).
+        "removed_upstream": [
+            {"identifier": identifier, "removed_on": when.date().isoformat() if when else None}
+            for identifier, when in items.list_removed_upstream(source_name, collection_name)
         ],
         # Shows that render the same library folder, each staged into its own folder
         # labelled with its identifier (§spec:library-ownership).
@@ -213,6 +223,10 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 f"  library files not placed by shakedown: {len(s['unplaced_files'])} "
                 "(left in place; paths in status --json)"
             )
+        removed = len(s["removed_upstream"])
+        if removed:
+            shows = "1 show" if removed == 1 else f"{removed} shows"
+            click.echo(REMOVED_UPSTREAM_LINE.format(shows=shows))
         if s["drift_files"]:
             click.echo(f"  drift: {s['drift_files']} files (run `verify --deep --list` for paths)")
         if s["restricted"]:

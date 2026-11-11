@@ -3,17 +3,23 @@ first found missing from a complete listing is recorded, kept while it stays mis
 and cleared when the show is listed again."""
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
+from click.testing import CliRunner, Result
+
+from shakedown.cli import main
 from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.models import Item, ItemStatus
 from shakedown.reconcile import run_reconcile
 from shakedown.state import ItemRepo
+from shakedown.status import REMOVED_UPSTREAM_LINE
 from shakedown.sync import run_sync
-from tests.conftest import make_config
+from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 
 # An older takedown date, seeded so "the date is unchanged" is provable within a test.
@@ -266,3 +272,108 @@ def test_saving_a_show_without_a_date_clears_it(tmp_path: Path) -> None:
 
     assert (row := items.get("src", "coll", "gd-a")) is not None
     assert row.disappeared_at is None
+
+
+# --- status: informational, never a warning -----------------------------------------
+
+
+def _status(cfg: Path, *args: str) -> Result:
+    return CliRunner().invoke(main, ["--config", str(cfg), "status", *args])
+
+
+def _removed(cfg: Path) -> list[dict[str, Any]]:
+    result = _status(cfg, "--json")
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output)[0]["removed_upstream"]
+
+
+def test_status_reports_a_show_removed_upstream_as_a_fact(tmp_roots: tuple[Path, Path]) -> None:
+    """A sync whose only change is a show leaving upstream exits 0, raises no recovery
+    item or run error, and `status` lists the show with the day it went missing."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    cfg = write_config(archive.parent / "cfg.yaml", config)
+    _seed("gd-a")
+    _seed("gd-b")
+    assert CliRunner().invoke(main, ["--config", str(cfg), "sync"]).exit_code == 0
+
+    del FakePlugin.items["gd-a"]
+    before = date.today()
+    synced = CliRunner().invoke(main, ["--config", str(cfg), "sync"])
+    after = date.today()
+
+    assert synced.exit_code == 0, synced.output
+    summary = json.loads(_status(cfg, "--json").output)[0]
+    assert summary["recovery"] is None
+    assert summary["last_run"]["items_failed"] == 0
+    assert summary["last_run"]["errors"] == []
+    [removed] = summary["removed_upstream"]
+    assert removed["identifier"] == "gd-a"
+    assert removed["removed_on"] in {before.isoformat(), after.isoformat()}
+    text = _status(cfg)
+    assert text.exit_code == 0
+    assert REMOVED_UPSTREAM_LINE.format(shows="1 show") in text.output
+    assert "RECOVERY" not in text.output
+    assert "STALE" not in text.output
+
+
+def test_status_counts_every_show_removed_upstream(tmp_roots: tuple[Path, Path]) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    cfg = write_config(archive.parent / "cfg.yaml", config)
+    _seed("gd-a")
+    _seed("gd-b")
+    assert run_sync(config) == 0
+    FakePlugin.items.clear()
+    assert run_sync(config) == 0
+
+    assert [r["identifier"] for r in _removed(cfg)] == ["gd-a", "gd-b"]
+    assert REMOVED_UPSTREAM_LINE.format(shows="2 shows") in _status(cfg).output
+
+
+def test_a_show_listed_again_leaves_the_status_list(tmp_roots: tuple[Path, Path]) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    cfg = write_config(archive.parent / "cfg.yaml", config)
+    returning = _seed("gd-a")
+    assert run_sync(config) == 0
+    FakePlugin.items.clear()
+    assert run_sync(config) == 0
+    assert len(_removed(cfg)) == 1
+
+    FakePlugin.items["gd-a"] = returning
+    assert run_sync(config) == 0
+
+    assert _removed(cfg) == []
+    assert "removed upstream" not in _status(cfg).output
+
+
+def test_a_pruned_show_is_not_listed_as_kept(tmp_roots: tuple[Path, Path]) -> None:
+    """The list holds shows still on disk; a pruned takedown stays in the counts."""
+    archive, library = tmp_roots
+    config = make_config(archive, library, prune_disappeared=True)
+    cfg = write_config(archive.parent / "cfg.yaml", config)
+    _seed("gd-a")
+    assert run_sync(config) == 0
+    FakePlugin.items.clear()
+    assert run_sync(config) == 0
+
+    assert _removed(cfg) == []
+    output = _status(cfg).output
+    assert "pruned=1" in output
+    assert "removed upstream" not in output
+
+
+def test_status_lists_a_show_with_no_known_date_without_one(tmp_roots: tuple[Path, Path]) -> None:
+    """A show gone before the upgrade has no recorded date, so none is shown."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    cfg = write_config(archive.parent / "cfg.yaml", config)
+    _seed("gd-a")
+    assert run_sync(config) == 0
+    FakePlugin.items.clear()
+    assert run_sync(config) == 0
+    _set_date(config, "gd-a", None)
+
+    assert _removed(cfg) == [{"identifier": "gd-a", "removed_on": None}]
+    assert REMOVED_UPSTREAM_LINE.format(shows="1 show") in _status(cfg).output
