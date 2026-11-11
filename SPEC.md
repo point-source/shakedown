@@ -1463,8 +1463,8 @@ Sync state lives in a single-file embedded SQLite database at
   (§spec:library-cleanup). A release that changes the quality rule
   (§spec:quality-selection) clears every stored change signal in its
   migration, so its first sync looks every show up and applies the new
-  rule, even on an incremental collection; v2.0.0 (schema v6) and
-  v2.0.2 (schema v7) do. Tag-filling records are not recoverable from
+  rule, even on an incremental collection; v2.0.0 (schema v6), v2.0.2
+  (schema v7) and v2.0.3 (schema v8) do. Tag-filling records are not recoverable from
   disk: after a rebuild, `verify --deep` reports files shakedown had
   tagged as drift until they are reconformed — a database rebuild loses
   the record of which bytes were shakedown's, and guessing would hide

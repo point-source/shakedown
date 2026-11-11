@@ -714,9 +714,36 @@ def test_v6_db_reselects_every_show_once(tmp_path: Path) -> None:
     conn.close()
 
     conn = connect(db_path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 7
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     item = ItemRepo(conn).get("s", "c", "x")
     assert item is not None
     assert item.change_signal is None
     assert item.recorded_manifest is not None
     assert [(f.name, f.library) for f in item.recorded_manifest.files] == [("a.flac", False)]
+
+
+def test_v7_db_reselects_every_show_once(tmp_path: Path) -> None:
+    """v2.0.3 keeps archive files and system or editor junk out of the library
+    (§spec:quality-selection), so its one migration clears every stored change signal
+    once, as v7 did: the first sync after the upgrade looks each show up and takes those
+    files out of the library, even on an incremental collection
+    (§spec:incremental-discovery). Nothing else changes."""
+    db_path = tmp_path / "v7.db"
+    conn = connect(db_path)
+    conn.execute(
+        "INSERT INTO items (source_name, collection_name, identifier, status,"
+        " recorded_manifest, change_signal) VALUES ('s', 'c', 'x', 'complete',"
+        " '[{\"name\": \"raw.zip\", \"size\": 1, \"md5\": null, \"library\": true}]',"
+        " 'sig-1')"
+    )
+    conn.execute("UPDATE schema_version SET version = 7")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 8
+    item = ItemRepo(conn).get("s", "c", "x")
+    assert item is not None
+    assert item.change_signal is None
+    assert item.recorded_manifest is not None
+    assert [(f.name, f.library) for f in item.recorded_manifest.files] == [("raw.zip", True)]
