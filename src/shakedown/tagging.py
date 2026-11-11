@@ -382,12 +382,13 @@ def fill_file(
     except (OSError, MutagenError) as e:
         _undo(path, backup)
         raise TagWriteError(str(e)) from e
-    except Exception as e:
+    except ValueError as e:
         # The tags cannot be written back as they are: a frame someone else wrote that
-        # the library rejects (archive.org MP3s carry a LINK frame written like a text
-        # frame, which mutagen cannot save as ID3v2.3: "Invalid frame ID"). Rewriting
-        # or dropping that frame would change someone else's tag, so the file is left
-        # as it is and the show goes on (§spec:per-item-isolation).
+        # mutagen rejects (archive.org MP3s carry a LINK frame written like a text
+        # frame, which it cannot save as ID3v2.3: "Invalid frame ID"). Rewriting or
+        # dropping that frame would change someone else's tag, so the file is left as
+        # it is and the show goes on (§spec:per-item-isolation). Any other error is
+        # unexpected and propagates, so the show is retried rather than skipped.
         _undo(path, backup)
         log.warning("not filling tags in %s: its existing tags cannot be saved: %s: %s",
                     path, type(e).__name__, e)

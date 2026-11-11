@@ -1125,7 +1125,8 @@ Observable behavior:
 
   A file whose existing tags the tagging library cannot write back as
   they are (some archive.org MP3s carry a malformed link frame that
-  cannot be saved as ID3v2.3) is left exactly as it is, with a warning
+  cannot be saved as ID3v2.3, which mutagen rejects as an invalid
+  value) is left exactly as it is, with a warning
   in the run log; the show still completes and is not retried for that
   file. Shakedown never rewrites or drops another party's frame to
   make room for its own tags (§spec:per-item-isolation). A disk fault

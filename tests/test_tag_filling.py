@@ -336,6 +336,24 @@ def test_a_tag_the_library_cannot_save_leaves_the_file_untouched(
     assert not backup.exists()
     assert "not filling tags in" in caplog.text and "Invalid frame ID" in caplog.text
 
+
+def test_an_unexpected_error_while_saving_still_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the observed rejection of someone else's frame (ValueError) marks a file
+    untaggable for good; any other error surfaces, so the show is retried rather than
+    silently skipped forever."""
+    path, backup = _archived(tmp_path, "a.mp3")
+    original = path.read_bytes()
+
+    def broken(self: object, target: Path) -> None:
+        raise TypeError("a bug in the tag writer")
+
+    monkeypatch.setattr(tagging._Tags, "save", broken)
+    with pytest.raises(TypeError):
+        fill_file(path, DESIRED, None, backup)
+    assert path.read_bytes() == original
+
 # --- crashes mid-tagging (Q-8-1: the next run restores before anything else) ---------
 
 def _crash_at(monkeypatch: pytest.MonkeyPatch, at: str) -> None:
