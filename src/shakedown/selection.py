@@ -54,11 +54,11 @@ _LOSSLESS_ORDER = {"flac": 0, "m4a": 1, "wav": 2, "aif": 3, "aiff": 3, "shn": 4}
 _AUDIO_ZIP_WORDS = ("mp3", "vbr", "ogg", "flac", "shorten", "wav", "aiff", "kbps", "lossless")
 
 
-# Archive files (`.tar.gz` ends in `gz`) and the leftovers of operating systems and
-# editors that uploaders sometimes include. The archive keeps them; the library never
+# Archive files (`.tar.gz` ends in `gz`), editor backups (`.bak`) and the leftovers
+# of operating systems that uploaders sometimes include. The archive keeps them; the library never
 # stages them, whoever provided them (operator decisions, 2026-11-11: aadam-jacobs
 # staged 181 `_rawfile.zip` raw recordings, editor backups and `.DS_Store` files).
-_ARCHIVE_EXTS = frozenset({"zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"})
+_CLUTTER_EXTS = frozenset({"zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "bak"})
 _JUNK_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 
 
@@ -71,8 +71,7 @@ def _clutter(name: str) -> bool:
     `._` resource forks), or an editor backup (`~`, `~1~`, `.bak`)."""
     base = name.rsplit("/", 1)[-1]
     return (
-        _ext(base) in _ARCHIVE_EXTS
-        or _ext(base) == "bak"
+        _ext(base) in _CLUTTER_EXTS
         or base.lower() in _JUNK_NAMES
         or base.startswith("._")
         or base.endswith("~")
