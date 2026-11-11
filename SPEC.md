@@ -1269,7 +1269,7 @@ It is never scheduled by default (§req:constraints).
 
 ## CLI surface §spec:cli
 
-*Status: complete*
+*Status: in progress*
 
 Shakedown is a one-shot CLI; every command runs to completion and
 exits (§req:constraints). The command surface:
@@ -1277,7 +1277,7 @@ exits (§req:constraints). The command surface:
 | Command | Behavior |
 | --- | --- |
 | `sync [--source S] [--collection C] [--dry-run] [--refresh-metadata]` | Run a sync now; defaults to all configured collections. What the scheduler invokes. `--refresh-metadata` re-resolves and rewrites `metadata.json` sidecars for preserve-opted collections without re-downloading media (§spec:metadata-preservation). |
-| `status [--json]` | Last run per collection with its kind (sync, refetch, or reconform), item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, shows removed upstream and kept (each with the date it was first found missing, §spec:item-lifecycle), known drift, library separations in effect (§spec:library-ownership), library files shakedown did not place (§spec:library-cleanup), undelivered handoff notices (§spec:durable-handoff), and shows not playable (§spec:quality-selection). |
+| `status [--json]` | Last run per collection with its kind (sync, refetch, or reconform), item counts by status, archive size (from the recorded manifests — never a walk of the archive tree), restricted items with reasons, shows removed upstream and kept (each with the date it was first found missing, §spec:item-lifecycle), known drift, library separations in effect (§spec:library-ownership), library files shakedown did not place (§spec:library-cleanup), undelivered handoff notices (§spec:durable-handoff), shows not playable (§spec:quality-selection), and collections whose sync was rescheduled, with the time of the oldest skip (§spec:rescheduled-syncs). |
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
@@ -1297,7 +1297,9 @@ exits (§req:constraints). The command surface:
   (a kernel `flock` on `<state_db>.lock`). A second writer exits non-zero
   at once, naming the lock, instead of racing the first over shared temp
   folders. The kernel releases the lock when the holder exits, even on a
-  crash, so a stale lock file never blocks the next run.
+  crash, so a stale lock file never blocks the next run. A
+  `sync --collection` refused this way is also recorded as rescheduled
+  and caught up when the running sync finishes (§spec:rescheduled-syncs).
 - `status --json` emits machine-readable output for dashboards
   (Homepage/Homarr) in lieu of a web UI (§req:constraints).
 
@@ -1372,8 +1374,7 @@ notice sent, both shows' bytes restored.
 
 ## Configuration §spec:configuration
 
-*Status: implemented, including the removal of the format settings
-(§spec:quality-selection) and `fill_tags` (§spec:tag-filling).*
+*Status: complete*
 
 All configuration lives in a single YAML file mounted at
 `/config/shakedown.yaml`, editable through File Station or any text
@@ -1416,14 +1417,15 @@ the run rather than being ignored).
 - **There is no `schedule:` field.** Timing lives entirely in the
   deployment (ofelia labels in the compose file, §spec:deployment).
   **Why:** one place to answer "when does what run," and Shakedown
-  stays out of the scheduler business — no cron parser, no missed-run
-  logic, no drift between two sources of timing truth.
+  stays out of the scheduler business — no cron parser, no timing of
+  its own, no drift between two sources of timing truth. The one
+  bounded exception, catching up syncs skipped because the writer lock
+  was held, adds no config key and no timing: a finishing sync runs
+  them (§spec:rescheduled-syncs).
 
 ## State persistence and recovery §spec:state
 
-*Status: implemented, including the library placement, pending-handoff, and
-tag-filling records of the ownership, handoff, and discovery increment
-(below).*
+*Status: in progress*
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -1469,6 +1471,11 @@ Sync state lives in a single-file embedded SQLite database at
   tagged as drift until they are reconformed — a database rebuild loses
   the record of which bytes were shakedown's, and guessing would hide
   other tools' changes.
+- Per collection whose sync was skipped because the writer lock was
+  held, the database records the time of its oldest skip — at most one
+  entry per collection (§spec:rescheduled-syncs). Schema v9 adds it as
+  an additive migration; a database rebuilt by `reconcile` starts with
+  none.
 - `shakedown reconcile` rebuilds the database from scratch by walking
   the archive tree and re-fetching **manifests only** (never content)
   from the source. Because archive paths mirror source identifiers
@@ -1662,7 +1669,7 @@ all; it is not required for any success criterion.
 
 ## API-triggered runs §spec:api-sync-runs
 
-*Status: complete*
+*Status: in progress*
 
 A sync triggered through `serve` runs with the configuration as it is
 at the moment of the request, and never overlaps another run
@@ -1685,7 +1692,14 @@ Observable behavior:
   even if the run crashes or is killed (§spec:failure-behavior).
 - **Refuses immediately when busy.** If another run holds the writer
   lock, the request is refused with `409 Conflict` and the message "a
-  run is in progress; try again when it finishes". Nothing is queued.
+  run is in progress; try again when it finishes". Nothing is queued
+  and nothing is rescheduled: the caller is there to retry
+  (§spec:rescheduled-syncs).
+- **A triggered sync catches up like any sync.** When its own work
+  finishes, it runs the collections rescheduled at that moment
+  (§spec:rescheduled-syncs). Those catch-ups are not among the ids in
+  the `202` answer; they show in `GET /status` as each collection's
+  latest run.
 - `POST /verify` follows the same pattern (fresh run, `202`, `409` when
   a reconform cannot take the lock). `POST /validate`, `GET /status`,
   and `GET /metrics` read the config as it is at the request.
@@ -1726,9 +1740,181 @@ sync, then `POST /sync` again: `409` with the in-progress message. Break
 the config file: endpoints answer with the config error and `serve`
 stays up.
 
+## Rescheduled syncs §spec:rescheduled-syncs
+
+*Status: not started*
+
+Compatibility, from deployment status (deployed on one operator's NAS,
+no external consumers; §req:constraints): state database — additive
+migration, nothing re-downloaded or rebuilt; `status` text, `status
+--json`, and `GET /status` — new per-collection field, free; CLI exit
+codes, config keys, and the HTTP API — unchanged.
+
+A single-collection sync that cannot start because another run holds
+the writer lock is remembered, once per collection, and caught up when
+the running sync finishes, oldest skip first — so a days-long run
+delays other collections' scheduled syncs but never cancels them
+(§req:success-criteria #1, #27; §req:quality-attributes: scheduled runs
+are observable, truthful visible state; §req:constraints: one-shot CLI,
+external scheduler; §req:priorities #30).
+
+Observable behavior:
+
+- **What is rescheduled.** A `sync` scoped with `--collection` (with or
+  without `--source`), started from the scheduler or typed by the
+  operator, that finds the writer lock held records each (source,
+  collection) it covers as rescheduled. It logs, as a warning, that the
+  collection was rescheduled because another run holds the writer lock,
+  naming the collection and the time of its oldest skip. It still exits
+  1, so the tick fails visibly at the scheduler, as today.
+- **One entry per collection.** The entry is keyed by (source,
+  collection) and keeps the time of the oldest skip. A second skip of
+  the same collection neither adds an entry nor moves the time.
+- **What is not rescheduled.** A sync with no `--collection` (all
+  collections, or every collection of one `--source`), an API
+  `POST /sync` (still `409` at once, §spec:api-sync-runs),
+  `sync --refresh-metadata`, `restage`, `reconcile`,
+  `verify --reconform`, and `item refetch` refuse exactly as today and
+  leave no entry. `sync --dry-run` never takes the lock.
+- **Recording never needs the lock and never migrates.** The skipped
+  sync writes its entry to the state database without the writer lock,
+  waiting on the database the bounded time any writer waits. If the
+  entry cannot be written — the database is busy past that wait,
+  unreadable, or still at an older schema version because a run of the
+  previous release is writing — nothing is recorded, the log says why,
+  and the tick exits 1 exactly as before this feature.
+- **A finishing sync catches up.** When any sync that holds the lock
+  finishes its own work — any scope, started by the scheduler, the
+  operator, or `serve`, whatever its result; not
+  `sync --refresh-metadata` — it then, still holding the lock:
+  1. clears the entries of the collections its own work finished
+     (see Clearing);
+  2. reads the config file as it is now;
+  3. takes every entry outstanding at that moment, dropping (and
+     logging) any whose source or collection the current config no
+     longer names;
+  4. syncs the remaining collections as one multi-collection sync,
+     started oldest skip first, under the same
+     `max_concurrent_collections` cap and shared source budget as any
+     multi-collection sync (§spec:sync-workflow, §spec:source-budget);
+  5. exits.
+  Entries recorded after step 3 wait for the next sync to finish. If
+  the current config is invalid at step 2, the catch-up does not run,
+  every entry is kept, the config error is logged, and the run exits
+  non-zero. Restage, reconcile, `verify --reconform`, and
+  `item refetch` never catch up: they exit when their own work is done.
+- **A catch-up is an ordinary sync.** Each caught-up collection gets
+  its own run record (kind `sync`) and outcome, stages, sends its
+  handoff, and fires its failure notification like any sync; its log
+  lines mark it as a catch-up and name its skip time.
+- **Clearing.** A sync clears a collection's entry when it finishes
+  that collection with a complete enumeration — completed, or completed
+  with item issues — whether it was the collection's own tick, a manual
+  sync, an all-collections sync, an API sync, or a catch-up. A catch-up
+  clears its entry whatever its result; a stale or crashed catch-up
+  shows in `status` like any failed sync, and the collection's next tick
+  retries it. A sync that is not a catch-up and ends stale or crashed
+  keeps the entry, so the next finishing sync catches it up. A run
+  killed before it finishes a collection clears nothing. A finishing
+  run clears its collection's entry even when that skip was recorded
+  while the run was going.
+- **Exit codes.** The skipped tick exits 1. A finishing sync exits
+  non-zero when its own work or any of its catch-ups failed — the rule
+  every multi-collection sync already follows (§spec:cli).
+- **Visible in status.** `shakedown status` shows, per collection with
+  an entry, that its sync was rescheduled, the time of its oldest skip,
+  and that it runs when the current sync finishes. `status --json` and
+  `GET /status` carry `rescheduled: {"since": <time>}` per collection,
+  or `null`, with the time formatted like every other time in `status`.
+  An entry for a collection no longer configured is not shown.
+- **API-triggered runs.** A sync started by `POST /sync` catches up like
+  any sync. The `202` answer lists only the run records of the
+  collections it was asked for; catch-ups appear in `GET /status` as
+  each collection's latest run. If that run is killed during a
+  catch-up, `serve` does not know the catch-up's run record, so it
+  stays open like a killed scheduled run's; the entry is still there,
+  so the next finishing sync runs that collection again and its new run
+  replaces the open one in `status`.
+- **Rebuilds.** A database rebuilt by `reconcile` starts with no
+  entries; each collection's next tick runs as usual.
+
+**Decision and constraint.** Record the skip and let the next lock
+holder catch it up, because §req:success-criteria #27 requires a long
+run to delay rather than cancel other collections while
+§req:constraints keeps one writer at a time and keeps shakedown out of
+the scheduler business: no timing of its own, no runs started on its
+own initiative — a catch-up only extends a run something else started.
+(Operator decision, 2026-11-11, §req:priorities #30.)
+Entries live in the state database because it already serializes
+concurrent writers, makes "one entry per collection" a key constraint
+rather than a convention, and is backed up with the archive
+(§spec:state). Recording never migrates because a run of an older
+release refuses a newer schema version the next time it opens the
+database: a skipped tick that migrated would break the very run it was
+waiting for, and upgrading mid-run is exactly when a days-long sync is
+likely to be going. The catch-up reads the config afresh because the
+finishing run may have loaded its config days earlier, and a collection
+added since would otherwise be dropped as unknown
+(§req:quality-attributes: config edits take effect without restarts).
+A complete enumeration with item issues clears the entry because the
+next sync retries failed items anyway, and because a days-long
+collection that skipped its own tick would otherwise catch itself up
+at once and hold the lock for days more. The catch-up stops at the
+entries outstanding when it starts so every run ends: one that kept
+draining new skips could run forever while ticks keep arriving.
+Catch-ups use the ordinary multi-collection path because that path
+already bounds concurrency and shares the source request budget;
+starting them oldest first is the ordering rule.
+
+**Alternatives rejected.** *A lock per collection, so collections sync
+side by side* — removes the starvation at its source, but the
+archive.org request budget is shared only within one process, so two
+processes would double the request rate, and restage, reconcile, and
+refetch would still need a global lock; the operator chose catch-up
+(§req:priorities #30). *Wait for the lock with a time bound* — a
+multi-day run outlives any sensible bound, and the waiting container
+holds the tick open the whole time. *A sidecar file* — needs its own
+locking and atomic writes, which the state database already provides.
+*A queue of every skip* — duplicates pile up; one entry per collection
+with its oldest time is all the ordering rule needs. *Catch up one
+collection per finishing run* — a collection behind two others waits
+weeks. *Catch up serially* — leaves the second collection worker idle
+for no ordering gain the start order does not already give. *Exit 0 on
+a recorded skip* — §req:success-criteria #27 keeps the tick failing at
+the scheduler. *A distinct exit code for a skip* — ofelia only tells
+zero from non-zero; the log already says "rescheduled". *Reschedule API
+refusals* — §req:success-criteria #24 asks for a clean refusal, and the
+caller is there to retry. *A separate run kind for catch-ups* —
+staleness in `status` reads the latest sync, and a catch-up is one.
+*A rescheduled metric* — not required; `GET /status` carries the
+entries for dashboards.
+
+**Tradeoffs.** A skip recorded while a catch-up runs, or in the moment
+after the holder takes its list, waits for the next sync to finish —
+up to the next tick of any collection. The finishing job's container
+runs longer, and its exit code at the scheduler includes other
+collections' catch-up failures; the log names which collection failed.
+The first skip after upgrading to this release, while the previous
+release's run still writes, is not recorded. A run killed mid-catch-up
+leaves that catch-up's run record open until the collection runs
+again.
+
+**User-level test path.** Start a long sync of one collection. While it
+runs, start `sync --collection B`, then `sync --collection C`, then
+`sync --collection B` again: each exits 1 and logs "rescheduled";
+`status` shows B and C rescheduled, B keeping its first skip time, and
+`status --json` carries the same `since` times. `POST /sync` for a
+third collection answers `409` and adds no entry; so does `restage`.
+Let the long sync finish: B syncs, then C (B started first), both show
+as their latest runs, and `status` shows no rescheduled entries
+afterwards. Remove C from the config while it waits: the catch-up skips
+C and drops its entry. Start a skipped tick with the previous release
+still writing: it exits 1, records nothing, and the running sync
+finishes normally.
+
 ## Deployment §spec:deployment
 
-*Status: implemented*
+*Status: in progress*
 
 The deployment is a single Docker Compose stack, paste-able into QNAP
 Container Station, operable entirely through web UIs — no SSH at any
@@ -1741,7 +1927,9 @@ Shakedown is a one-shot, stateless-between-runs CLI (§req:constraints),
 no long-lived worker container exists to attach to. Each scheduled
 tick therefore *starts a new container* from the image, runs one
 `sync --collection <name>`, and exits — matching the batch design.
-When a tick fires, the sync runs; "the schedule is configured" and
+When a tick fires, the sync runs — or, if another run holds the writer
+lock, it is rescheduled and runs when that run finishes
+(§spec:rescheduled-syncs); "the schedule is configured" and
 "the sync ran" are the same event (§req:success-criteria #1,
 §req:quality-attributes "scheduled runs are observable and
 self-contained").
@@ -1809,8 +1997,11 @@ silently no-op because a prior run has exited. Schedule changes are
 compose-file label edits; "did the Sunday sync run?" is answerable
 from the ofelia container's log, which records each tick's start, stop,
 output, and failure (the per-tick containers are deleted when they
-finish). Missed schedules are harmless
-because sync is idempotent at any cadence (§spec:sync-workflow).
+finish). A tick missed because the host was down is harmless because
+sync is idempotent at any cadence (§spec:sync-workflow). A tick
+skipped because another run holds the writer lock is not: a days-long
+sync would cost every other collection its week, so it is recorded and
+caught up when that run finishes (§spec:rescheduled-syncs).
 Accepted tradeoffs: per-tick job definitions repeat the mount/env
 wiring and live on the scheduler rather than on a worker service (more
 verbose than a `schedule:` key in shakedown.yaml would be) — accepted
@@ -2049,7 +2240,7 @@ listed.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: complete*
+*Status: in progress*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
@@ -2080,10 +2271,13 @@ degrade a single item or a single run, never the archive.
 | Source lists no audio files for an item (darked, glitch) | Never treated as a change: the archive copy is kept and the item flagged `unavailable`; it returns to `complete` when the same files are listed again |
 | Item disappears upstream | Files retained by default; flagged `disappeared` (§spec:item-lifecycle) |
 | Source permanently gone | Existing items retained; collection reported stale in `status` |
-| Two writing commands overlap (scheduler tick, API trigger, manual run) | The second exits non-zero naming the writer lock; the first continues untouched (§spec:cli) |
+| Two writing commands overlap (scheduler tick, API trigger, manual run) | The second exits non-zero naming the writer lock; the first continues untouched (§spec:cli). A second `sync --collection` from the CLI or scheduler is also recorded as rescheduled, once per collection, and caught up when the first sync finishes (§spec:rescheduled-syncs) |
+| A sync is skipped while the previous release's run still writes (upgrade mid-run) | Nothing is recorded and the database is not migrated under the running writer; the tick exits 1 as before (§spec:rescheduled-syncs) |
+| Config invalid when a catch-up is due | Catch-up not run; every rescheduled entry kept; error logged; the run exits non-zero (§spec:rescheduled-syncs) |
+| Run killed during a catch-up | Entries not yet cleared stay; the next finishing sync catches them up (§spec:rescheduled-syncs) |
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
 | Handoff target down, failing, or slow | Slow: waited up to five minutes, then recorded undelivered. Failed: notice recorded undelivered, shown in `status`, resent on the collection's next run; the sync still succeeds (§spec:durable-handoff) |
-| API sync requested while a run holds the lock | `409` at once; nothing queued (§spec:api-sync-runs) |
+| API sync requested while a run holds the lock | `409` at once; nothing queued or rescheduled (§spec:api-sync-runs) |
 | Best available copy is unplayable (SHN) | Kept archive-only; the best playable copy also mirrored and staged; with no playable copy, the SHN is staged and the show listed as not playable in `status` (§spec:quality-selection) |
 
 ## Real-source end-to-end check §spec:e2e-real-source
