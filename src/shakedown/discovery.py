@@ -142,7 +142,7 @@ def _originals(raw: Any, name: str) -> tuple[str, ...]:
         return ()
     if isinstance(raw, str):
         return (raw,)
-    if isinstance(raw, list | tuple) and all(isinstance(o, str) and o for o in raw):
+    if isinstance(raw, list | tuple) and all(isinstance(o, str) for o in raw):
         return tuple(raw)
     raise MalformedLookup(
         f"source sent a malformed file list: original of {name!r} is not a file name"
