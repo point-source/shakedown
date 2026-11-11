@@ -179,16 +179,6 @@ def test_any_plugin_exception_fails_at_once() -> None:
             "source sent a malformed file list: checksum of 'a.flac' is not an md5",
         ),
         (
-            _answer({"name": "a.ffp", "derived_from": ["a.flac", 1]}),
-            "source sent a malformed file list: original of 'a.ffp' is not a file name"
-            " or a list of file names",
-        ),
-        (
-            _answer({"name": "a.mp3", "derived_from": {"name": "a.flac"}}),
-            "source sent a malformed file list: original of 'a.mp3' is not a file name"
-            " or a list of file names",
-        ),
-        (
             _answer("a.flac"),  # type: ignore[arg-type]
             "source sent a malformed file list: file entry 1 is not a file record",
         ),
@@ -278,6 +268,25 @@ def test_archive_org_file_derived_from_several_originals_is_well_formed() -> Non
     assert by_name["ARU1994-03-18.md5"].derived_from == tuple(_ARU_TRACKS)
     assert by_name["ARU_1994-03-18_D1T01.mp3"].derived_from == ("ARU_1994-03-18_D1T01.flac",)
     assert by_name["ARU_1994-03-18_D1T01.flac"].derived_from == ()
+
+
+@pytest.mark.parametrize("original", [["a.flac", 1], {"name": "a.flac"}, 7])
+def test_unexpected_original_is_dropped_and_logged(
+    original: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing reads a file's original yet, so an unexpected shape never fails the
+    show: the value is dropped, and a warning names the show and file so it can be
+    looked into."""
+    FakePlugin.lookup_faults["a"] = [
+        _answer({"name": "a.ffp", "derived_from": original}, {"name": "a.flac"})
+    ]
+    with caplog.at_level("WARNING", logger="shakedown.discovery"):
+        result, _ = _run(_plugin())
+    assert isinstance(result, ItemDetails)
+    assert [(f.name, f.derived_from) for f in result.files] == [("a.ffp", ()), ("a.flac", ())]
+    assert caplog.messages == [
+        "a: ignored the original of 'a.ffp': not a file name or a list of file names"
+    ]
 
 
 def test_per_file_title_and_track_are_carried_to_the_manifest() -> None:
