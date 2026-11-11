@@ -633,8 +633,8 @@ Observable behavior:
   each with the source's change signal when it has one); *look up one
   item* (the item's metadata, any item-level restriction, and the full
   list of files the source offers — each with name, size, checksum,
-  format, whether the source refuses it, and which original file it is
-  derived from, when it is a derivative); *fetch* given files into a
+  format, whether the source refuses it, and which original file or
+  files it is derived from, when it is a derivative); *fetch* given files into a
   core-owned temp folder; and *verify* existence. The plugin writes no
   retry loop, no concurrency, and no error handling for per-item faults.
   The serial plugin-driven `discover` iterator is removed.

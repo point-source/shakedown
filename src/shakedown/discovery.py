@@ -135,6 +135,21 @@ def _optional_str(raw: Any, field: str, name: str) -> str | None:
     raise MalformedLookup(f"source sent a malformed file list: {field} of {name!r} is not text")
 
 
+def _originals(raw: Any, name: str) -> tuple[str, ...]:
+    """The file(s) a derivative was made from. archive.org names one original for a
+    per-track derivative and lists every track for a whole-show one (its .ffp, .md5)."""
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, list | tuple) and all(isinstance(o, str) and o for o in raw):
+        return tuple(raw)
+    raise MalformedLookup(
+        f"source sent a malformed file list: original of {name!r} is not a file name"
+        " or a list of file names"
+    )
+
+
 def _track_value(raw: Any) -> str | None:
     """Informational only (a tag value, never identity): text or a number is kept as
     text; anything else is dropped, never a failure."""
@@ -185,7 +200,7 @@ def validate_lookup(raw: object) -> ItemDetails:
                 md5=_md5(entry.get("md5"), name),
                 format=_optional_str(entry.get("format"), "format", name),
                 refused=bool(entry.get("refused", False)),
-                derived_from=_optional_str(entry.get("derived_from"), "original", name),
+                derived_from=_originals(entry.get("derived_from"), name),
                 bitrate=_bitrate(entry.get("bitrate")),
                 title=_track_value(entry.get("title")),
                 track=_track_value(entry.get("track")),

@@ -69,6 +69,29 @@ def test_flac_show_archive_and_library_hold_the_flac_and_every_non_audio_file(
     assert _names(library, "gd-flac") == expected
 
 
+def test_show_whose_checksum_files_name_every_track_syncs_complete(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Shaped like ARU1994-03-18: archive.org lists the show's .ffp and .md5 as derived
+    from every FLAC track. The show syncs, and both are kept as non-audio files."""
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    tracks = ["t01.flac", "t02.flac"]
+    _show(
+        "aru-1994",
+        _flac(1), _flac(2), _vbr(1, original="t01.flac"), _vbr(2, original="t02.flac"),
+        FakeFile("show.ffp", b"fingerprints", format="Flac FingerPrint", derived_from=tracks),
+        FakeFile("show.md5", b"checksums", format="Checksums", derived_from=tracks),
+    )
+
+    assert run_sync(config) == 0
+
+    expected = ["show.ffp", "show.md5", "t01.flac", "t02.flac"]
+    assert _names(archive, "aru-1994") == expected
+    assert _names(library, "aru-1994") == expected
+    assert _item(config, "aru-1994").status == ItemStatus.COMPLETE
+
+
 def test_shn_show_keeps_shn_archive_only_and_stages_the_vbr_mp3(
     tmp_roots: tuple[Path, Path],
 ) -> None:

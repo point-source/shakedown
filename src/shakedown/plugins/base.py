@@ -93,9 +93,10 @@ class ItemLookup:
     - ``files`` — every file the source lists, each a mapping with these keys:
       ``name`` (str, required), ``size`` (bytes, int or digit string), ``md5`` (hex
       checksum), ``format`` (the source's format name), ``refused`` (True when the
-      source will not serve the file), ``derived_from`` (the original file's name when
-      this file is a derivative), ``bitrate`` (kbps, when the source lists it),
-      ``title`` and ``track`` (the file's track title and number, used to fill tags).
+      source will not serve the file), ``derived_from`` (the original file's name, or a
+      list of names, when this file is a derivative), ``bitrate`` (kbps, when the
+      source lists it), ``title`` and ``track`` (the file's track title and number,
+      used to fill tags).
       Only ``name`` is required; pass the source's values through without checking
       them.
     - ``restriction_reason`` — set when the source restricts the whole item.
