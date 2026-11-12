@@ -314,3 +314,26 @@ def test_rebuilt_database_starts_with_no_entries(config: Config) -> None:
     config.state_db.unlink()
     assert run_reconcile(config) == 0
     assert _entries(config) == set()
+
+
+def test_source_blocks_sharing_a_name_each_get_their_own_plugin(
+    tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two source blocks may share a name with different collections (and so
+    different credentials); each collection must sync with its own block's plugin."""
+    from shakedown.plugins import registry
+
+    archive, library = tmp_roots
+    first = SourceConfig(name=SRC, type="fake", collections=[CollectionConfig(name="a", query="*")])
+    second = SourceConfig(name=SRC, type="fake", collections=[CollectionConfig(name="b", query="*")])
+    cfg = Config(archive_root=archive, library_root=library, sources=[first, second])
+    asked: list[SourceConfig] = []
+    real = registry.for_source
+
+    def for_source(source: SourceConfig):  # type: ignore[no-untyped-def]
+        asked.append(source)
+        return real(source)
+
+    monkeypatch.setattr(registry, "for_source", for_source)
+    assert run_sync(cfg) == 0
+    assert any(s is first for s in asked) and any(s is second for s in asked)

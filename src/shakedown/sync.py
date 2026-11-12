@@ -332,12 +332,14 @@ def _run_sync(
     ``catch_up`` — each collection's oldest skip — the collections are catch-ups: their
     log lines say so, and each clears its rescheduled entry when it ends, whatever its
     result (§spec:rescheduled-syncs Clearing). A killed run clears nothing."""
-    plugins: dict[str, SourcePlugin] = {}
+    # One plugin per source block, not per name: two blocks may share a name with
+    # different collections and credentials.
+    plugins: dict[int, SourcePlugin] = {}
     work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
     for source, collection in scope:
-        if source.name not in plugins:
-            plugins[source.name] = registry.for_source(source)
-        work.append((source, collection, plugins[source.name]))
+        if id(source) not in plugins:
+            plugins[id(source)] = registry.for_source(source)
+        work.append((source, collection, plugins[id(source)]))
 
     if not work:
         if not dry_run:
