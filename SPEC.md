@@ -1742,7 +1742,7 @@ stays up.
 
 ## Rescheduled syncs §spec:rescheduled-syncs
 
-*Status: not started*
+*Status: in progress*
 
 Compatibility, from deployment status (deployed on one operator's NAS,
 no external consumers; §req:constraints): state database — additive
