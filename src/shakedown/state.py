@@ -862,6 +862,20 @@ class RescheduledRepo:
         ).fetchone()
         return datetime.fromisoformat(row["since"]) if row else None
 
+    def list(self) -> list[tuple[str, str, datetime]]:
+        """Every entry as (source, collection, oldest skip), oldest skip first: the
+        order a finishing sync catches them up in."""
+        if not self._has_table():
+            return []
+        rows = self.conn.execute(
+            "SELECT source_name, collection_name, since FROM rescheduled_syncs"
+            " ORDER BY since, source_name, collection_name"
+        ).fetchall()
+        return [
+            (row["source_name"], row["collection_name"], datetime.fromisoformat(row["since"]))
+            for row in rows
+        ]
+
     def clear(self, source: str, collection: str) -> None:
         """Forget the collection's entry: a sync finished it."""
         self.conn.execute(

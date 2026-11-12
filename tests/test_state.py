@@ -805,3 +805,17 @@ def test_rescheduled_clear_removes_only_its_collection(tmp_path: Path) -> None:
     assert repo.get("s", "b") is None
     assert repo.get("s", "c") == datetime(2026, 11, 10, 4, 0, 0)
     assert repo.get("t", "b") == datetime(2026, 11, 10, 5, 0, 0)
+
+
+def test_rescheduled_list_is_oldest_skip_first(tmp_path: Path) -> None:
+    """The catch-up order (§spec:rescheduled-syncs step 4)."""
+    repo = RescheduledRepo(connect(tmp_path / "s.db"))
+    assert repo.list() == []
+    repo.record("s", "c", datetime(2026, 11, 10, 4, 0, 0))
+    repo.record("t", "b", datetime(2026, 11, 10, 2, 0, 0))
+    repo.record("s", "b", datetime(2026, 11, 10, 3, 0, 0))
+    assert repo.list() == [
+        ("t", "b", datetime(2026, 11, 10, 2, 0, 0)),
+        ("s", "b", datetime(2026, 11, 10, 3, 0, 0)),
+        ("s", "c", datetime(2026, 11, 10, 4, 0, 0)),
+    ]

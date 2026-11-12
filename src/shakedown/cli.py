@@ -104,6 +104,7 @@ def sync(
         collection_filter=collection_filter,
         dry_run=dry_run,
         refresh_metadata=refresh_metadata,
+        config_path=ctx.obj["config_path"],
     )
     ctx.exit(exit_code)
 
