@@ -10,15 +10,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from shakedown.activity import HISTORY_DAYS, STOPPED_REPORTING
+from shakedown.activity import HISTORY_DAYS, RUNNING, STOPPED_REPORTING, ActivityKind, ActivityRepo
 from shakedown.dashboard import DashboardContext, iso
 from shakedown.history import GOOD_RESULTS, run_history
-from shakedown.models import ItemStatus, RunKind
+from shakedown.models import ItemStatus, OperationStatus, OperationType, RunKind
 from shakedown.selection import keeps_unplayable_original
 from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries
 
 _RECOVERY_TIMES = ("started_at", "updated_at", "finished_at")
+# The operations that fetch shows, so the only ones whose item issues are failed shows.
+_FETCHES = {OperationType.SYNC.value, OperationType.REFETCH.value, OperationType.RECONFORM.value}
+# The operation each run kind records its outcome under.
+_OPERATION_OF_KIND = {RunKind.CATCH_UP.value: OperationType.SYNC.value,
+                      ActivityKind.VERIFY.value: OperationType.VALIDATE.value}
 
 
 def _api_time(value: str | None) -> str | None:
@@ -68,36 +73,82 @@ def _unexpected_ends(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return ends
 
 
+def _operation(kind: str) -> str:
+    return _OPERATION_OF_KIND.get(kind, kind)
+
+
 def _entries(
-    summary: dict[str, Any], items: ItemRepo, runs: list[dict[str, Any]]
+    summary: dict[str, Any],
+    items: ItemRepo,
+    runs: list[dict[str, Any]],
+    running: set[tuple[str, str, str]],
 ) -> list[dict[str, Any]]:
-    """The collection's entries, in the kind order of §spec:needs-attention."""
+    """The collection's entries, in the kind order of §spec:needs-attention.
+    ``running`` holds (source, collection, operation) of the runs still reporting."""
     source, collection = summary["source"], summary["collection"]
     entries: list[dict[str, Any]] = []
-    if summary["counts"][ItemStatus.FAILED.value]:
-        failed = items.list_identifiers(source, collection, ItemStatus.FAILED)
-        entries.append(_entry("failed_shows", summary, identifiers=failed))
     recovery = summary["recovery"]
-    if recovery:
-        detail = {
-            **recovery,
-            **{key: _api_time(recovery[key]) for key in _RECOVERY_TIMES},
-        }
+    if (
+        recovery
+        and recovery["status"] == OperationStatus.IN_PROGRESS.value
+        and (source, collection, recovery["operation"]) in running
+    ):
+        recovery = None  # the run is still going: the activity view shows it
+    recovery_detail = (
+        {**recovery, **{key: _api_time(recovery[key]) for key in _RECOVERY_TIMES}}
+        if recovery
+        else None
+    )
+    ended = _unexpected_ends(runs)
+    failed = (
+        items.list_identifiers(source, collection, ItemStatus.FAILED)
+        if summary["counts"][ItemStatus.FAILED.value]
+        else []
+    )
+    # A recovery that explains another entry rides on it as `detail.recovery` rather
+    # than listing the same problem twice: a fetch that finished with item issues
+    # explains the failed shows; an operation still in progress whose run stopped
+    # reporting explains that unexpected end.
+    explains_failed = bool(
+        recovery
+        and failed
+        and recovery["status"] == OperationStatus.COMPLETED_WITH_ITEM_ISSUES.value
+        and recovery["operation"] in _FETCHES
+    )
+    explains_ended = bool(
+        recovery
+        and recovery["status"] == OperationStatus.IN_PROGRESS.value
+        and any(
+            _operation(run["kind"]) == recovery["operation"] for run in ended
+        )
+    )
+    if failed:
+        entries.append(
+            _entry(
+                "failed_shows",
+                summary,
+                identifiers=failed,
+                detail={"recovery": recovery_detail} if explains_failed else None,
+            )
+        )
+    if recovery and not (explains_failed or explains_ended):
         entries.append(
             _entry(
                 "recovery",
                 summary,
                 since=recovery["finished_at"] or recovery["updated_at"],
                 identifiers=[recovery["affected_item"]] if recovery["affected_item"] else [],
-                detail=detail,
+                detail=recovery_detail,
             )
         )
-    ended = _unexpected_ends(runs)
     if ended:
         times = [run["finished_at"] for run in ended if run["finished_at"]]
+        detail: dict[str, Any] = {"runs": ended}
+        if explains_ended:
+            detail["recovery"] = recovery_detail
         entries.append(
             {
-                **_entry("ended_unexpectedly", summary, detail={"runs": ended}),
+                **_entry("ended_unexpectedly", summary, detail=detail),
                 "since": min(times, key=datetime.fromisoformat) if times else None,
             }
         )
@@ -172,7 +223,13 @@ def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
     its health, in config order. Lists are complete; the page decides how many to
     show."""
     items = ItemRepo(ctx.conn)
-    history = run_history(ctx.conn, datetime.now(), HISTORY_DAYS)
+    now = datetime.now()
+    history = run_history(ctx.conn, now, HISTORY_DAYS)
+    running = {
+        (e["source"], e["collection"], _operation(e["kind"]))
+        for e in ActivityRepo(ctx.conn).live(now)
+        if e["state"] == RUNNING
+    }
     summaries = collection_summaries(ctx.config, ctx.conn)
 
     def runs_of(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -180,6 +237,8 @@ def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
         return [r for r in history if (r["source"], r["collection"]) == scope]
 
     return {
-        "entries": [entry for s in summaries for entry in _entries(s, items, runs_of(s))],
+        "entries": [
+            entry for s in summaries for entry in _entries(s, items, runs_of(s), running)
+        ],
         "health": [_health(s, items) for s in summaries],
     }
