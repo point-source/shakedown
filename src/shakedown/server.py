@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import closing, suppress
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +27,8 @@ from prometheus_client import (
 )
 
 from shakedown import __version__
-from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope, load
-from shakedown.dashboard import SharedAnswers
+from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope
+from shakedown.dashboard import ConfigTracker, SharedAnswers
 from shakedown.db import connect_reader
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
@@ -55,6 +55,12 @@ def build_app(
     answers (§spec:dashboard)."""
     app = FastAPI(title="shakedown", version=__version__)
     app.state.answers = SharedAnswers(clock)
+    # Every load goes through the tracker, so the dashboard knows the last config
+    # this serve loaded, including the one at start-up.
+    configs = ConfigTracker(config_path)
+    app.state.configs = configs
+    with suppress(ConfigError):
+        configs.load_now()
     # Runs this serve started that may still be going, newest last; each one's
     # watcher sets `done` when it exits.
     app.state.triggered = []
@@ -146,11 +152,9 @@ def build_app(
 
     def current_config() -> Config:
         try:
-            return load(config_path)
+            return configs.load_now()
         except ConfigError as e:
             raise HTTPException(503, str(e)) from e
-
-    app.state.dashboard_config = current_config
 
     def require_scope(config: Config, source: str | None, collection: str | None) -> None:
         try:

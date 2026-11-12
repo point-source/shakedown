@@ -23,11 +23,12 @@ from collections.abc import Callable, Hashable
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
-from shakedown.config import Config
+from shakedown.config import Config, ConfigError, load
 from shakedown.db import connect_reader
 
 # Refresh intervals (§spec:dashboard): the live view every few seconds, every other
@@ -42,10 +43,59 @@ def iso(dt: datetime | None) -> str | None:
     return dt.astimezone().isoformat() if dt else None
 
 
+@dataclass(frozen=True)
+class ConfigState:
+    """The config file as of the latest load: ``error`` is the reason it does not
+    load now (None when it does), ``last_loaded_at`` the time of the last load that
+    succeeded, whose config the views answer from."""
+    error: str | None
+    last_loaded_at: datetime | None
+
+
+class ConfigTracker:
+    """Loads the config file at each request and remembers the last config that
+    loaded, so the dashboard keeps answering while the file is broken
+    (§spec:dashboard "When the config is broken")."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._last_good: Config | None = None
+        self._state = ConfigState(error=None, last_loaded_at=None)
+
+    def load_now(self) -> Config:
+        """The config as the file is now; raises ConfigError when it does not load."""
+        try:
+            config = load(self.path)
+        except ConfigError as e:
+            with self._lock:
+                self._state = ConfigState(str(e), self._state.last_loaded_at)
+            raise
+        with self._lock:
+            self._last_good = config
+            self._state = ConfigState(None, datetime.now())
+        return config
+
+    def for_dashboard(self) -> tuple[Config, ConfigState]:
+        """The config to answer from: the file as it is now, else the last config
+        this serve loaded. A serve that never loaded one answers 503 with the
+        error, as the other endpoints do."""
+        try:
+            self.load_now()
+        except ConfigError as e:
+            if self._last_good is None:
+                raise HTTPException(503, str(e)) from e
+        with self._lock:
+            assert self._last_good is not None
+            return self._last_good, self._state
+
+
 @dataclass
 class DashboardContext:
-    """What a view's builder reads: the config in use and a reader connection."""
+    """What a view's builder reads: the config in use, the state of the config file,
+    and a reader connection."""
     config: Config
+    config_state: ConfigState
     conn: sqlite3.Connection
 
 
@@ -90,10 +140,11 @@ def shared_answer(app: FastAPI, key: Hashable, ttl: float, build: Builder) -> di
     config and a reader connection, stamped with `generated_at`."""
 
     def compute() -> dict[str, Any]:
-        config: Config = app.state.dashboard_config()
+        configs: ConfigTracker = app.state.configs
+        config, config_state = configs.for_dashboard()
         assert config.state_db is not None  # filled in by Config validation
         with closing(connect_reader(config.state_db)) as conn:
-            body = build(DashboardContext(config=config, conn=conn))
+            body = build(DashboardContext(config, config_state, conn))
         return {"generated_at": iso(datetime.now()), **body}
 
     answers: SharedAnswers = app.state.answers

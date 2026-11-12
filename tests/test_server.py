@@ -680,11 +680,14 @@ class _Clock:
         return self.now
 
 
-def _probe_app(config, clock):  # type: ignore[no-untyped-def]
-    """serve with one extra dashboard view that counts how often it is computed."""
+def _probe_app(config, clock, *, append: str = ""):  # type: ignore[no-untyped-def]
+    """serve with one extra dashboard view that counts how often it is computed,
+    over a config file holding ``config`` followed by ``append``."""
     from shakedown.dashboard import VIEW_TTL_S, register_api
 
-    app = build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock)
+    cfg_path = write_config(config.archive_root.parent / "cfg.yaml", config)
+    cfg_path.write_text(cfg_path.read_text() + append)
+    app = build_app(cfg_path, clock=clock)
     app.state.probe_builds = 0
 
     def probe(ctx):  # type: ignore[no-untyped-def]
@@ -754,3 +757,64 @@ def test_iso_carries_the_utc_offset() -> None:
     assert parsed.tzinfo is not None
     assert parsed.replace(tzinfo=None) == datetime(2026, 11, 12, 3, 0, 0)
     assert iso(None) is None
+
+
+# --- dashboard views on a broken config (§spec:dashboard "When the config is broken")
+
+TYPO = "archive_rot: /typo\n"  # a misspelled key: the config fails to load, naming it
+
+
+@pytest.mark.asyncio
+async def test_api_answers_from_the_last_good_config_while_the_file_is_broken(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Each view reads the config at the request; while the file is invalid it keeps
+    answering from the last config this serve loaded, and the other endpoints keep
+    their 503 naming the key."""
+    from shakedown.config import CollectionConfig
+    from shakedown.dashboard import VIEW_TTL_S
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    clock = _Clock()
+    app = _probe_app(config, clock)
+    cfg_path = archive.parent / "cfg.yaml"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        assert (await client.get("/api/probe")).json()["collections"] == ["coll1"]
+
+        config.sources[0].collections.append(CollectionConfig(name="coll2", query="*"))
+        write_config(cfg_path, config)
+        clock.now += VIEW_TTL_S
+        assert (await client.get("/api/probe")).json()["collections"] == ["coll1", "coll2"]
+
+        good = cfg_path.read_text()
+        cfg_path.write_text(good + TYPO)
+        clock.now += VIEW_TTL_S
+        r = await client.get("/api/probe")
+        assert r.status_code == 200
+        assert r.json()["collections"] == ["coll1", "coll2"]
+        assert app.state.probe_builds == 3
+        r = await client.get("/status")
+        assert r.status_code == 503 and "archive_rot" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_api_on_a_serve_that_never_loaded_a_valid_config_is_503(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    app = _probe_app(config, _Clock(), append=TYPO)
+    cfg_path = archive.parent / "cfg.yaml"
+    good = cfg_path.read_text().removesuffix(TYPO)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/probe")
+        assert r.status_code == 503
+        assert "archive_rot" in r.json()["detail"]
+        # a failure is never the cached answer: fixed file, next request answers
+        cfg_path.write_text(good)
+        assert (await client.get("/api/probe")).status_code == 200
