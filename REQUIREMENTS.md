@@ -59,6 +59,23 @@ tool the user prefers — without that tool needing to know Shakedown
 exists. A shell-script for one collection has been done before; it does
 not scale to "add Phish next month and etree the month after."
 
+**Seeing what shakedown is doing (dashboard increment, 2026-11-12).**
+Once the mirror runs unattended, the operator's remaining problem is
+visibility. Syncs run in short-lived containers started by the
+scheduler, and a Grateful Dead sync can run for days. Today the only
+windows into a run are the scheduler's log, `shakedown status`, and the
+`serve` JSON/metrics endpoints — and none of them shows a run's progress
+while it runs. The operator cannot tell whether a long sync is moving or
+stuck, or how long is left; cannot see download speed, throttling, or
+retries; and has no single place for the morning check ("what ran last
+night, what failed, what is new") or for the big picture (how many
+shows, how much disk, what is restricted, missing, or waiting on them).
+Pointing a generic homelab dashboard (Homepage/Homarr) at `/status`
+gives counters, not progress or history. The operator wants a read-only
+web dashboard, usable from a phone or a desktop, that answers all of
+these questions in one place. Managing config from the dashboard is a
+later step, not this one.
+
 ## Success criteria §req:success-criteria
 
 Observable outcomes that define the product as done. Each is
@@ -68,10 +85,14 @@ criteria 11–12 defined the discovery-performance increment (shipped);
 criteria 13–15 defined the mirror-integrity & metadata increment
 (shipped); criteria 16–18 defined the setup, recovery, and
 validation-confidence increment (shipped; criterion 18 revised by the
-current increment); criteria 19–26 define the current ownership,
-handoff, and discovery increment; criterion 27 (operator decisions,
+ownership increment); criteria 19–26 defined the ownership, handoff,
+and discovery increment (shipped); criterion 27 (operator decisions,
 2026-11-11) makes a long run delay, rather than cancel, other
-collections' scheduled syncs.
+collections' scheduled syncs (shipped); criteria 28–33 (operator
+decisions, 2026-11-12) define the current read-only web dashboard
+increment. The dashboard criteria are demonstrable from the dashboard
+page in a browser, compared against `shakedown status` and the run
+logs.
 
 1. **Unattended weekly mirror that actually fires.** A weekly sync of
    the IA Grateful Dead collection runs unattended for a month with no
@@ -342,6 +363,63 @@ collections' scheduled syncs.
     syncing, oldest skip first, when the long sync ends; and both
     entries gone afterwards.
 
+28. **A running sync shows live progress.** While any run is going —
+    a scheduled sync, a catch-up, an API "sync now", a restage, a
+    verify, a single-show refetch — the dashboard shows it: which
+    collection, what kind of run, what it is doing now (for example
+    discovering or downloading), shows done out of shows to do, the show
+    it is working on, bytes downloaded so far, current speed, and an
+    estimated time left. The numbers move on screen within a few seconds
+    of the run's own progress, without reloading the page. A run that
+    ends, fails, crashes, or is killed stops showing as running within
+    seconds of the next refresh, and never lingers as "running".
+    Verifiable by starting a long sync, watching the counts climb on a
+    phone and a desktop browser, killing the sync container, and seeing
+    the dashboard show the run as ended with its reason.
+29. **Network activity is visible, on every source.** The dashboard
+    shows, per source: current download speed and how many requests
+    are in flight; a graph of download speed over time for the past 30
+    days; and rate-limit hits, server errors, retries, and back-off,
+    each with when it happened. The same view works for every source
+    (Internet Archive, etree, and any plugin added later); nothing on
+    it is specific to archive.org. The history is complete even for
+    periods when the dashboard container was down or restarting: a
+    sync that ran while nobody was watching still shows its speed and
+    its errors afterwards. Verifiable by running a sync with the serve
+    container stopped, starting serve afterwards, and seeing that
+    sync's throughput and any throttling in the 30-day view.
+30. **Library and database at a glance.** The dashboard shows, per
+    collection and in total: shows mirrored, pending, failed,
+    restricted, and disappeared; bytes in the archive and in the
+    library; free space left on the data volume; and the last 30 days
+    of runs, each with its kind, start, duration, result, shows added
+    or updated, bytes downloaded, and errors. It shows the library's
+    growth (shows and bytes) over those 30 days. Every figure that also
+    appears in `shakedown status` matches it exactly.
+31. **One list of what needs me.** The dashboard has a single "needs
+    attention" list that names the collection or show affected and the
+    action available next, covering at least: failed shows, interrupted
+    or unrecovered runs, rescheduled collections and the time of their
+    oldest skip, undelivered handoff notices, library collisions and
+    separated recordings, and library files shakedown did not place.
+    It also shows library health: restricted shows with their reason,
+    disappeared shows, drift found by the last `verify --deep`, and
+    shows kept as an unplayable original plus a playable copy. When
+    nothing needs attention, the list says so plainly. Each entry
+    matches what `shakedown status` reports for the same thing.
+32. **I can tell which shakedown I am looking at.** The dashboard shows
+    the running shakedown release, whether `shakedown.yaml` is valid
+    right now (and, if not, the config error naming the key), and the
+    result and time of the last readiness validation.
+33. **The dashboard only looks.** The dashboard changes nothing: it has
+    no buttons or forms that start runs, edit config, or alter state,
+    and visiting it never causes a sync, a network request to a source,
+    or a write to the archive or library. Watching it — even left open
+    for hours on several devices — does not make a running sync or the
+    NAS noticeably slower. When it cannot get fresh data, it says so
+    and shows how old the data on screen is, instead of presenting old
+    numbers as current.
+
 ## User stories §req:user-stories
 
 Concrete workflows in the user's language. Each traces to a success
@@ -515,6 +593,30 @@ criterion and implies a testable path through the product's surface.
   the best version I can play, with all its notes and files, so that I
   have both a listening library and a preservation copy without
   writing format rules per collection. *(→ criterion 26)*
+- **Is the long sync stuck?** As a homelab operator whose Grateful
+  Dead sync runs for days, I want to open a page on my phone and see
+  that it is moving — how many shows are done, which show it is on, how
+  fast it is downloading, and roughly how long is left — so that I never
+  guess from a log whether it has hung. *(→ criterion 28)*
+- **The morning check.** As a homelab operator, I want one page that
+  tells me what ran overnight, what failed, what is new in the library,
+  and what is waiting on me, so that a ten-second glance replaces
+  reading the scheduler log and running `status`. *(→ criteria 30, 31)*
+- **Is the source throttling me?** As a homelab operator, I want to see
+  download speed now and over the past month, and when rate limits,
+  server errors, and retries happened, on whichever source they hit,
+  so that I can tell a slow source from a stuck shakedown.
+  *(→ criterion 29)*
+- **How big is it all?** As a collector, I want to see how many shows
+  each collection holds, what is restricted or gone upstream, how much
+  disk the archive and library use, and how much space is left, so that
+  I know the state of my mirror and a full disk never surprises me.
+  *(→ criteria 30, 31)*
+- **Look without fear.** As a homelab operator, I want the dashboard to
+  be safe to leave open on any device in the house — it never starts or
+  changes anything, never slows the sync, and never shows stale numbers
+  as if they were live — so that I can trust what it tells me.
+  *(→ criteria 32, 33)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -624,10 +726,37 @@ constraints that drive architecture.
 - **Security of secrets.** Source credentials (e.g. IA email/password)
   are supplied only via environment variables or secrets files, never
   written into the YAML config. Any ad-hoc trigger API is
-  auth-protected.
+  auth-protected. The read-only dashboard, like the read endpoints,
+  shows only operational data — never credentials or tokens.
 - **Config edits take effect without restarts.** Every run — scheduled,
   manual, or API-triggered — uses the config as it is when the run
   starts.
+- **The dashboard tells the same truth as everything else.** Every
+  figure the dashboard shows agrees with `shakedown status`, the
+  `serve` JSON, and the run logs. A disagreement is a defect, not a
+  rounding choice. Data that is not fresh is labelled with its age; a
+  run that has ended never shows as running. This extends "Truthful
+  visible state" to the dashboard.
+- **Live, but light.** Live progress reaches the screen within a few
+  seconds. Watching the dashboard never noticeably slows a sync, adds
+  requests to any source, or loads the NAS — including with the page
+  left open for hours on more than one device. Recording progress and
+  network activity for the dashboard must not weaken any existing
+  guarantee: correctness, idempotency, politeness, or per-item
+  isolation.
+- **Nothing lost while the dashboard is down.** Runs record their own
+  progress and network activity, so the 30-day history is complete
+  whether or not the dashboard container was running at the time.
+- **Phone and desktop alike.** Every part of the dashboard is fully
+  usable on a phone and on a desktop browser; neither is a degraded
+  afterthought.
+- **Source-neutral observability.** Progress, network, and error views
+  describe every source the same way. Adding a new source plugin makes
+  it appear on the dashboard without dashboard-specific work by the
+  plugin author.
+- **Bounded history.** The dashboard keeps about 30 days of run and
+  network history. Older detail may be dropped; the data that drives
+  sync identity is never affected by that.
 
 ## Constraints §req:constraints
 
@@ -723,14 +852,36 @@ Technical, operational, and scope bounds on the solution space.
   data: an upgrade must never force re-downloading the bulk of media
   already in the archive. Relocating or renaming archive and library
   files is acceptable, and re-downloading a small share is tolerable.
+  The dashboard is new in this increment; nothing depends on it yet,
+  so its pages and any data it reads are free to change.
 - **Governance: symphony-native.** REQUIREMENTS.md and SPEC.md are the
   repo's durable governance artifacts and ship in the PR as-is; the repo
   has no ADR/RFC/design-doc tree to convert into.
-- **UI: none.** Scope is limited to the CLI, `status` output, the
-  on-disk library tree, and the optional `serve` HTTP API; no visual
-  user interface is in scope (see "No web UI" below).
-- **No web UI in v1.** The goal is a backend service, not a dashboard;
-  users who want a UI can point Homepage/Homarr at the status endpoint.
+- **UI: web, track A (conventional), design state: none.** One
+  read-only web dashboard, fully usable on phone and desktop browsers,
+  with a familiar admin-dashboard look from a standard component kit.
+  No design guidelines or screens exist yet. Every other surface stays
+  as it is: CLI, `status`, the library tree, and the `serve` HTTP API.
+- **Read-only dashboard, no config management yet (operator decision,
+  2026-11-12).** This reverses the earlier "No web UI in v1" decision
+  for viewing only. The dashboard starts no runs, edits no config, and
+  changes no state; there is no "sync now" or "validate" button even
+  though the API offers both. Managing config from the dashboard is a
+  later increment. Showing each collection's next scheduled sync is
+  out of this pass: the schedule stays in the compose file's ofelia
+  labels. The operator may later move scheduling into the long-running
+  container when config management arrives; that is a future decision,
+  not part of this increment. `GET /status` stays available for
+  Homepage/Homarr-style tiles.
+- **The dashboard lives in the always-on serve container.** Running the
+  dashboard means running the `serve` container all the time; the
+  operator accepts that. It still never schedules and never starts a
+  run on its own. Syncs keep running in fresh one-shot containers, and
+  they work exactly as before when `serve` is not running.
+- **No login of its own.** The operator's reverse proxy (for example
+  Authelia) handles who may open the dashboard. Shakedown serves the
+  dashboard unauthenticated, like `GET /status`, and must work correctly
+  behind such a proxy. It exposes no credentials, tokens, or secrets.
 
 ## Priorities §req:priorities
 
@@ -738,8 +889,9 @@ Ordered by user impact. v1 shipped; a second (etree) plugin was pulled
 in to prove the plugin seam. The discovery-performance increment (items
 13–15), the mirror-integrity & metadata preservation increment (items
 16–18), and the setup, recovery, and validation-confidence increment
-(items 19–21) have shipped; the current increment is ownership,
-handoff, and discovery (items 22–30).
+(items 19–21), and the ownership, handoff, and discovery increment
+(items 22–30) have shipped; the current increment is the read-only web
+dashboard (items 32–36).
 
 **Must have (v1 core):**
 
@@ -817,8 +969,7 @@ independently-shippable items addressed in one pass:**
     partial-failure recovery, and sync-to-library behavior with clear
     pass/fail output (→ criterion 18; GH #21).
 
-**Next — ownership, handoff, and discovery (post-v1, current
-increment).** Pre-triaged from the 2026-11-07 codebase review and the
+**Shipped — ownership, handoff, and discovery (post-v1).** Pre-triaged from the 2026-11-07 codebase review and the
 2026-11-09 live-NAS diagnosis. Ordered by impact on the operator's
 day-to-day listening, which today is Navidrome browsing shakedown's
 library folders directly:
@@ -862,9 +1013,36 @@ library folders directly:
     collections sync side by side: the one-writer rule and the shared
     archive.org request budget stay as they are.
 
+**Next — read-only web dashboard (post-v1, current increment).**
+Operator decisions, 2026-11-12. One page, phone and desktop, viewing
+only. Ordered by impact on the operator's questions — "is it stuck?",
+"what did last night do?", "is the source throttling me?", "how big is
+it all?" — weighed against how much already exists to show:
+
+32. Live run progress (→ criteria 28, 33). Highest impact: multi-day
+    Grateful Dead syncs are the reason this increment exists, and
+    nothing shows progress today. Moderate effort and confidence: runs
+    must start reporting progress while they run, in short-lived
+    containers, without slowing down or weakening any sync guarantee.
+33. Needs attention and the recent-runs view (→ criteria 30, 31). High
+    impact for the morning check and high confidence: almost everything
+    it shows is already recorded and reported by `status`; the work is
+    putting it on one page that matches `status` exactly.
+34. Network activity, source-neutral (→ criterion 29). High impact for
+    telling a slow source from a stuck run, but new recording is needed,
+    it must survive the dashboard being down, and it must not lean on
+    archive.org specifics while more sources are coming.
+35. Library, database, and disk stats with 30-day growth (→ criterion
+    30). Medium impact, high confidence: mostly counts shakedown already
+    holds, plus free disk space and a growth history.
+36. Version and health (→ criterion 32). Small and contained.
+
 **Nice to have / out of scope (candidates for later):**
 
-31. Web UI for status and config; push notifications beyond webhooks
-    (Pushover, Discord); direct library-tool integrations; multiple
-    archive roots / tiered storage; BitTorrent as a source; cross-host
-    sync. These are explicitly deferred.
+31. Managing config from the web UI; showing next scheduled syncs and
+    possibly moving scheduling from ofelia into the long-running
+    container; push notifications beyond webhooks (Pushover, Discord);
+    direct library-tool integrations; multiple archive roots / tiered
+    storage; BitTorrent as a source; cross-host sync. These are
+    explicitly deferred. (A read-only status dashboard moved out of
+    this list into items 32–36.)
