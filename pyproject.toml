@@ -44,6 +44,8 @@ source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shakedown"]
+# The dashboard page build is gitignored; ship it as package data anyway.
+artifacts = ["src/shakedown/dashboard_web/"]
 
 [tool.ruff]
 line-length = 100

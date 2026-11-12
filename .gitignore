@@ -22,6 +22,9 @@ htmlcov/
 .vscode/
 *.swp
 
+# Dashboard page build, copied in from web/dist (§spec:dashboard-page)
+src/shakedown/dashboard_web/
+
 # Local data + secrets
 /data/
 shakedown.yaml
