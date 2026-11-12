@@ -2060,7 +2060,7 @@ the runs themselves). The unauthenticated page relies on the operator's
 proxy; anyone who reaches `serve`'s port directly sees operational data,
 the same exposure `GET /status` has today.
 
-**User-level test path.** Open `http://<host>:8080/` on a phone and a
+**User-level test path.** Open the dashboard through the proxy on a phone and a
 desktop: the dashboard loads with no request leaving the LAN (browser
 network panel). It has no button that changes anything; every request it
 makes is a `GET`. Put it behind a proxy under `/shakedown/`: it still
@@ -2613,8 +2613,9 @@ Long-running services in the stack:
   (§req:constraints: the dashboard lives in the always-on serve
   container); its bearer token stays optional and only unlocks the
   mutating endpoints. The example notes that the operator's reverse
-  proxy guards the dashboard and that `serve`'s port should not be
-  published past it. A stack without `serve` loses only the dashboard
+  proxy guards the dashboard, and it publishes `serve`'s port on the
+  host's loopback only, so the proxy is the one way in (operator
+  decision, 2026-11-12). A stack without `serve` loses only the dashboard
   and the triggers; syncs work exactly as before.
 - Library tool and streaming server (Beets, Navidrome, …) join the
   same stack, reading the library tree — the user's choice; Shakedown

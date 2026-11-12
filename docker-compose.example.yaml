@@ -89,15 +89,18 @@ services:
   #
   # The dashboard and its GET /api/* data have no login of their own, like
   # GET /status: put serve behind your reverse proxy (e.g. Authelia) and let
-  # the proxy decide who opens it. Do not publish port 8080 past that proxy:
-  # anyone who reaches it directly sees operational data (counts, paths,
-  # timings, errors — never credentials).
+  # the proxy decide who opens it. The port is published on loopback only, so
+  # the proxy is the one way in: anyone who reached it directly would see
+  # operational data (counts, paths, timings, errors — never credentials). A
+  # proxy on the host uses http://127.0.0.1:8080; a proxy in another container
+  # on this stack's network uses http://shakedown-serve:8080.
   #
   # SHAKEDOWN_API_TOKEN is optional. It only unlocks the mutating endpoints
   # (POST /sync, POST /verify, live handoff validation); unset, they are
-  # disabled (not open) and the dashboard works the same. Trigger a sync with:
+  # disabled (not open) and the dashboard works the same. Trigger a sync
+  # through the proxy (or with http://127.0.0.1:8080 on the host itself):
   #   curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" \
-  #     "http://host:8080/sync?collection=grateful-dead"
+  #     "https://<serve behind your proxy>/sync?collection=grateful-dead"
   #
   # serve starts each triggered sync/verify as its own run, so it needs the
   # same image, mounts, and user as the ofelia job (and the IA credentials env
@@ -116,7 +119,7 @@ services:
       # - IA_EMAIL=${IA_EMAIL:-}
       # - IA_PASSWORD=${IA_PASSWORD:-}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
 
   # Listening: Navidrome reads Shakedown's library tree directly. Its folder
