@@ -39,6 +39,8 @@ from shakedown.dashboard import (
 from shakedown.dashboard_activity import activity_answer
 from shakedown.dashboard_health import health_answer
 from shakedown.dashboard_library import library_answer
+from shakedown.dashboard_network import MAX_DAYS as NETWORK_MAX_DAYS
+from shakedown.dashboard_network import network_answer
 from shakedown.dashboard_runs import MAX_DAYS, runs_answer
 from shakedown.db import connect_reader
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
@@ -181,6 +183,12 @@ def build_app(
     @app.get("/api/runs")
     def runs(days: int = Query(MAX_DAYS, ge=1, le=MAX_DAYS)) -> dict[str, Any]:
         return shared_answer(app, ("/api/runs", days), VIEW_TTL_S, runs_answer(days))
+
+    @app.get("/api/network")
+    def network(
+        days: int = Query(NETWORK_MAX_DAYS, ge=1, le=NETWORK_MAX_DAYS),
+    ) -> dict[str, Any]:
+        return shared_answer(app, ("/api/network", days), VIEW_TTL_S, network_answer(days))
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
