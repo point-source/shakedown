@@ -20,6 +20,7 @@ def activity_answer(ctx: DashboardContext) -> dict[str, Any]:
     runs = ActivityRepo(ctx.conn).live(datetime.now())
     network = _network_now(ctx.conn, [r for r in runs if r["state"] == RUNNING])
     for entry in runs:
+        del entry["requests_in_flight"]
         for key in _TIMES:
             entry[key] = iso(entry[key])
     return {"runs": runs, "network": network}
@@ -29,27 +30,19 @@ def _network_now(conn: sqlite3.Connection, running: list[dict[str, Any]]) -> lis
     """Per source with a running entry (one that still reports): the sum of its
     entries' speed and requests in flight, and the newest network event since the
     earliest of them started — the run in progress, not an earlier one."""
-    if not running:
-        return []
-    marks = ",".join("?" for _ in running)
-    in_flight = dict(conn.execute(
-        f"SELECT id, requests_in_flight FROM run_activity WHERE id IN ({marks})",
-        [r["activity_id"] for r in running],
-    ).fetchall())
     sources: dict[str, dict[str, Any]] = {}
     for entry in running:
         now = sources.setdefault(entry["source"], {
             "speed": 0.0, "in_flight": 0, "since": entry["started_at"],
         })
         now["speed"] += entry["speed_bytes_per_second"] or 0.0
-        now["in_flight"] += in_flight.get(entry["activity_id"]) or 0
+        now["in_flight"] += entry["requests_in_flight"] or 0
         now["since"] = min(now["since"], entry["started_at"])
     repo = NetworkRepo(conn)
-    has_history = repo.has_tables()
     answer: list[dict[str, Any]] = []
     for source in sorted(sources):
         now = sources[source]
-        last = repo.last_event(source, now["since"]) if has_history else None
+        last = repo.last_event(source, now["since"])
         answer.append({
             "source": source,
             "speed_bytes_per_second": now["speed"],

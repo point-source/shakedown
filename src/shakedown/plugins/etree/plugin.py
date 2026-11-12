@@ -27,6 +27,7 @@ from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
+    TRANSIENT_CAUSES,
     FailureCause,
     FetchResult,
     ItemLookup,
@@ -86,22 +87,15 @@ def _restriction_reason(meta: dict[str, Any]) -> str | None:
     return None
 
 
-def _classify(exc: httpx.HTTPError) -> tuple[bool, float | None, str]:
-    """Classify an httpx error into (retriable, retry_after, message).
-
-    Transient: 429, 5xx, connection reset, timeout. Permanent: other 4xx.
-    Honors a numeric ``Retry-After`` when present.
-    """
+def _describe(exc: httpx.HTTPError) -> str:
+    """A short message for a failed download."""
     if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        retriable = status == 429 or 500 <= status < 600
-        return retriable, retry_after_seconds(exc), f"HTTP {status}"
+        return f"HTTP {exc.response.status_code}"
     if isinstance(exc, httpx.TimeoutException):
-        return True, None, f"timeout: {exc}"
+        return f"timeout: {exc}"
     if isinstance(exc, httpx.TransportError):
-        # Connection reset and similar transport-level faults are transient.
-        return True, None, f"transport error: {exc}"
-    return False, None, str(exc)
+        return f"transport error: {exc}"
+    return str(exc)
 
 
 @register
@@ -266,13 +260,13 @@ class EtreePlugin(SourcePlugin):
                         cause=FailureCause.REFUSED,
                         http_status=403,
                     )
-                retriable, retry_after, message = _classify(exc)
+                cause = failure_cause(exc)
                 return FetchResult(
                     success=False,
-                    error=f"{mf.name}: {message}",
-                    retriable=retriable,
-                    retry_after=retry_after,
-                    cause=failure_cause(exc),
+                    error=f"{mf.name}: {_describe(exc)}",
+                    retriable=cause in TRANSIENT_CAUSES,
+                    retry_after=retry_after_seconds(exc),
+                    cause=cause,
                     http_status=http_status(exc),
                 )
 

@@ -44,12 +44,14 @@ class MinuteTotals:
         return any(getattr(self, f.name) for f in fields(self))
 
 
-# The per-minute counter each failure cause adds to.
-CAUSE_COUNTERS: dict[EventKind, str] = {
+# The per-minute counter each kind of event adds one to; a back-off adds its seconds,
+# and a refusal has no counter.
+_COUNTERS: dict[EventKind, str] = {
     EventKind.RATE_LIMITED: "rate_limited",
     EventKind.SERVER_ERROR: "server_errors",
     EventKind.TIMEOUT: "timeouts",
     EventKind.CONNECTION_ERROR: "connection_errors",
+    EventKind.RETRY: "retries",
 }
 
 _TOTAL_COLUMNS = tuple(f.name for f in fields(MinuteTotals))
@@ -210,11 +212,9 @@ class NetworkMeter:
         with self._lock:
             self._events.append(event)
             totals = self._minute(event.at)
-            counter = CAUSE_COUNTERS.get(event.kind)
+            counter = _COUNTERS.get(event.kind)
             if counter is not None:
                 setattr(totals, counter, getattr(totals, counter) + 1)
-            elif event.kind is EventKind.RETRY:
-                totals.retries += 1
             elif event.kind is EventKind.BACKOFF:
                 totals.backoff_seconds += event.wait_seconds or 0.0
 
