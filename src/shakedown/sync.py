@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
-from shakedown.db import connect, transaction
+from shakedown.db import connect, connect_reader, transaction
 from shakedown.discovery import (
     ItemDescriptor,
     ItemDetails,
@@ -276,7 +276,8 @@ def _run_sync(
     # migration need brief exclusive access; doing it here keeps concurrent
     # collection workers from racing on it (each then opens an already-WAL,
     # already-migrated DB). SPEC §spec:sync-workflow.
-    connect(config.state_db).close()  # type: ignore[arg-type]
+    # A dry run takes no writer lock, so it reads the database without migrating it.
+    (connect_reader if dry_run else connect)(config.state_db).close()  # type: ignore[arg-type]
 
     budgets = source_budgets(config, [(s, p) for s, _, p in work])
 
@@ -580,7 +581,7 @@ def _sync_collection(
     successfully; a failed enumeration marks the collection stale and prunes nothing.
     """
     started = datetime.now()
-    conn = connect(config.state_db)  # type: ignore[arg-type]
+    conn = (connect_reader if dry_run else connect)(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     runs = RunRepo(conn)
     outcomes = OperationOutcomeRepo(conn)

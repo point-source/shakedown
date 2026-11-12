@@ -437,6 +437,18 @@ def test_status_on_a_new_install_creates_the_database(
     assert "last run: never" in capsys.readouterr().out
 
 
+def test_dry_run_reads_an_older_schema_without_migrating_it(config: Config) -> None:
+    """A dry run takes no writer lock, so it must not migrate either: checking a
+    collection while the previous release still writes leaves the database at v8."""
+    _seed()
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 0
+    _roll_back_to_v8(config)
+    with writer_lock(config):
+        assert run_sync(config, source_filter=SRC, collection_filter="b", dry_run=True) == 0
+    assert config.state_db is not None
+    assert _version(config.state_db) == 8
+
+
 def test_skip_is_recorded_when_the_state_path_needs_escaping(tmp_path: Path) -> None:
     """A state path with URI-special characters names the real database, never a
     stray file beside it."""
