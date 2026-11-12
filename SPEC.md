@@ -1955,7 +1955,8 @@ finishes normally.
 
 ## Read-only web dashboard §spec:dashboard
 
-*Status: not started*
+*Status: complete on the server side (shared answers, `generated_at`, the
+read-only posture, the last-good config); the page is not started*
 
 Compatibility, from deployment status "deployed, no outside consumers"
 (§req:constraints, operator-confirmed 2026-11-12): HTTP API — free; CLI
@@ -2501,7 +2502,7 @@ healthy mirror, the list says nothing needs attention.
 
 ## Release and health §spec:dashboard-health
 
-*Status: not started*
+*Status: complete*
 
 The dashboard shows which shakedown is running, whether its config is
 valid right now, and the last readiness validation
@@ -2544,8 +2545,7 @@ result and time appear per collection.
 
 ## Deployment §spec:deployment
 
-*Status: complete; serving the dashboard from the example stack is not
-started*
+*Status: complete*
 
 The deployment is a single Docker Compose stack, paste-able into QNAP
 Container Station, operable entirely through web UIs — no SSH at any
