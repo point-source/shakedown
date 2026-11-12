@@ -27,6 +27,7 @@ from prometheus_client import (
 )
 
 from shakedown import __version__
+from shakedown.activity import HISTORY_DAYS
 from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope
 from shakedown.dashboard import (
     LIVE_TTL_S,
@@ -40,9 +41,8 @@ from shakedown.dashboard_activity import activity_answer
 from shakedown.dashboard_attention import attention_answer
 from shakedown.dashboard_health import health_answer
 from shakedown.dashboard_library import library_answer
-from shakedown.dashboard_network import MAX_DAYS as NETWORK_MAX_DAYS
 from shakedown.dashboard_network import network_answer
-from shakedown.dashboard_runs import MAX_DAYS, runs_answer
+from shakedown.dashboard_runs import runs_answer
 from shakedown.db import connect_reader
 from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries
@@ -182,14 +182,14 @@ def build_app(
     register_api(app, "/api/library", VIEW_TTL_S, library_answer)
     register_api(app, "/api/attention", VIEW_TTL_S, attention_answer)
 
+    # A window longer than the history runs keep would read as empty; outside 1..30
+    # the request is a 422, never a cache entry.
     @app.get("/api/runs")
-    def runs(days: int = Query(MAX_DAYS, ge=1, le=MAX_DAYS)) -> dict[str, Any]:
+    def runs(days: int = Query(HISTORY_DAYS, ge=1, le=HISTORY_DAYS)) -> dict[str, Any]:
         return shared_answer(app, ("/api/runs", days), VIEW_TTL_S, runs_answer(days))
 
     @app.get("/api/network")
-    def network(
-        days: int = Query(NETWORK_MAX_DAYS, ge=1, le=NETWORK_MAX_DAYS),
-    ) -> dict[str, Any]:
+    def network(days: int = Query(HISTORY_DAYS, ge=1, le=HISTORY_DAYS)) -> dict[str, Any]:
         return shared_answer(app, ("/api/network", days), VIEW_TTL_S, network_answer(days))
 
     @app.get("/healthz")

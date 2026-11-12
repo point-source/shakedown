@@ -6,7 +6,6 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any
 
-from shakedown.activity import HISTORY_DAYS
 from shakedown.dashboard import Builder, DashboardContext, iso
 from shakedown.network import MinuteTotals, NetworkEvent, NetworkRepo
 
@@ -24,8 +23,6 @@ def event_answer(event: NetworkEvent) -> dict[str, Any]:
     }
 
 
-# The longest window `days` may name, and the default: the history runs keep.
-MAX_DAYS = HISTORY_DAYS
 # A series holds at most about this many points; one day keeps every minute
 # (parent answer Q-3-1: the spec's "60 for one day, 3600 for 30" win over its "~720").
 _MAX_POINTS = 720

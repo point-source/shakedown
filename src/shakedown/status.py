@@ -8,9 +8,10 @@ from typing import Any
 
 import click
 
-from shakedown.activity import STOPPED_REPORTING, ActivityRepo, stopped_reporting
+from shakedown.activity import STOPPED_REPORTING, ActivityRepo
 from shakedown.config import Config
 from shakedown.db import connect_reader
+from shakedown.history import run_end
 from shakedown.models import ItemStatus, OperationOutcome, RunKind
 from shakedown.state import (
     DriftRepo,
@@ -134,9 +135,9 @@ def _end_reason(conn: Any, run: Any) -> str | None:
     activity = ActivityRepo(conn)
     if run.finished_at is not None or not activity.has_table():
         return None
-    # A record from before heartbeats has none: its start is the last sign of life.
-    heard = activity.last_heartbeat_for_run(run.id) or run.started_at
-    return STOPPED_REPORTING if stopped_reporting(heard, datetime.now()) else None
+    # The run list's own rule, so `status` and `GET /api/runs` always agree.
+    now = datetime.now()
+    return run_end(run, activity.for_run(run.id, now), now).end_reason
 
 
 def _summarize_run(run: Any, end_reason: str | None = None) -> dict[str, Any]:
