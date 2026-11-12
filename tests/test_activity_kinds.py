@@ -134,3 +134,14 @@ def test_a_plain_verify_on_a_pre_v10_database_records_nothing(mirrored) -> None:
         assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 9
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name='run_activity'").fetchone() is None
+
+
+def test_a_restage_counts_a_show_with_an_issue_as_failed_not_done(mirrored) -> None:
+    """Done and failed never overlap: a show whose link is blocked is failed only."""
+    folder = mirrored.library_root / "fake-src" / "coll1" / "gd-a"
+    (folder / "gd-a.flac").unlink()
+    (folder / "gd-a.flac").write_bytes(b"not shakedown's")  # a foreign file at the target
+    assert run_restage(mirrored) == 1
+    [entry] = _entries(mirrored, "restage")
+    assert entry["result"] == "completed_with_item_issues"
+    assert _values(entry, FETCHING) == (2, 1, 1)

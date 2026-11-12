@@ -109,7 +109,6 @@ def _restage_collection(
         report = LibraryPlacement(
             config, collection, source_name, items, progress=progress
         ).finish()
-        progress.failed(len(report.issues))
         progress.phase(Phase.FINISHING)
     except OSError as e:
         outcomes.finish(

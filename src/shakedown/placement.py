@@ -170,7 +170,9 @@ class LibraryPlacement:
             self._report.render_error = self._render_error
             return self._report
         if self._progress is not None:
-            self._progress.work_total(len(self._bare))
+            # A show refused an unsafe path is part of the work, and failed.
+            self._progress.work_total(len(self._bare) + len(self._refused))
+            self._progress.failed(len(self._refused))
         self._apply(sorted(self._bare), full=True)
         self._refresh_unplaced()
         report = self._report
@@ -301,12 +303,16 @@ class LibraryPlacement:
             if progress is None:
                 self._link_show(item, folders.get(identifier))
                 continue
+            issues_before = len(self._report.issues.get(identifier, ()))
             progress.working(identifier)
             try:
                 self._link_show(item, folders.get(identifier))
             finally:
                 progress.idle(identifier)
-            progress.done()
+            if len(self._report.issues.get(identifier, ())) > issues_before:
+                progress.failed()
+            else:
+                progress.done()
 
     def _last_copy_moves(
         self, item: Item, desired: dict[str, str], stale: list[str], old_folder: str | None
