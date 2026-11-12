@@ -147,13 +147,21 @@ def test_a_failed_show_is_listed_until_a_good_sync(
     assert run_sync(config) == 1
 
     answer = _attention(config)
-    entry = _entry(answer, "failed_shows")
+    summary = _summary(_status(config, capsys))
+    # The sync's own recovery (finished with item issues) rides on the entry it
+    # explains, not as a second entry for the same show.
+    assert _kinds(answer) == [("coll1", "failed_shows")]
+    entry = answer["entries"][0]
     assert set(entry) == ENTRY_FIELDS
+    recovery = entry["detail"].pop("recovery")
     assert entry == {
         "kind": "failed_shows", "source": SRC, "collection": "coll1", "since": None,
         "identifiers": ["gd-bad"], "detail": {},
     }
-    assert len(entry["identifiers"]) == _summary(_status(config, capsys))["counts"]["failed"]
+    assert len(entry["identifiers"]) == summary["counts"]["failed"]
+    assert recovery["status"] == summary["recovery"]["status"] == "completed_with_item_issues"
+    assert recovery["affected_item"] == "gd-bad"
+    assert recovery["safe_next_action"] == summary["recovery"]["safe_next_action"]
 
     FakePlugin.lookup_faults.clear()
     assert run_sync(config) == 0
@@ -361,6 +369,58 @@ def test_a_killed_sync_is_listed_until_the_next_good_sync(
     assert _attention(config)["entries"] == []
 
 
+def test_a_killed_sync_carries_its_unfinished_recovery_as_one_entry(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A SIGKILL also leaves the sync's outcome `in_progress`: status's recovery rides on
+    the unexpected end it explains."""
+    config = make_config(*tmp_roots)
+    heartbeat = datetime.now() - timedelta(seconds=30)
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        _killed(conn, ActivityKind.SYNC, heartbeat=heartbeat)
+        OperationOutcomeRepo(conn).start(OperationType.SYNC, SRC, "coll1",
+                                         heartbeat - timedelta(minutes=5),
+                                         safe_next_action="rerun sync")
+        conn.commit()
+
+    answer = _attention(config)
+    recovery = _summary(_status(config, capsys))["recovery"]
+    assert _kinds(answer) == [("coll1", "ended_unexpectedly")]
+    carried = answer["entries"][0]["detail"]["recovery"]
+    assert carried["status"] == recovery["status"] == "in_progress"
+    assert carried["safe_next_action"] == recovery["safe_next_action"] == "rerun sync"
+
+
+def test_a_running_sync_is_not_a_recovery(tmp_roots: tuple[Path, Path]) -> None:
+    """While a sync still reports, its outcome is `in_progress`: that is the run going,
+    shown by the activity view, not something for the operator."""
+    config = make_config(*tmp_roots)
+    now = datetime.now()
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        _killed(conn, ActivityKind.CATCH_UP, heartbeat=now)  # still reporting
+        OperationOutcomeRepo(conn).start(OperationType.SYNC, SRC, "coll1",
+                                         now - timedelta(minutes=5))
+        conn.commit()
+
+    assert _attention(config)["entries"] == []
+
+
+def test_a_recovery_of_another_operation_stays_its_own_entry(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """An unfinished restage does not explain a killed sync."""
+    config = make_config(*tmp_roots)
+    heartbeat = datetime.now() - timedelta(seconds=30)
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        _killed(conn, ActivityKind.SYNC, heartbeat=heartbeat)
+        OperationOutcomeRepo(conn).start(OperationType.RESTAGE, SRC, "coll1", heartbeat)
+        conn.commit()
+
+    answer = _attention(config)
+    assert _kinds(answer) == [("coll1", "recovery"), ("coll1", "ended_unexpectedly")]
+    assert "recovery" not in _entry(answer, "ended_unexpectedly")["detail"]
+
+
 @pytest.mark.parametrize(
     ("kind", "result", "clears"),
     [
@@ -513,16 +573,16 @@ def test_four_problems_are_listed_by_collection_and_each_leaves_once_resolved(
 
     answer = _attention(blocked)
     status = _status(blocked, capsys)
-    # The failed show's sync also leaves status a `recovery` (completed_with_item_issues);
-    # reported as status reports it, pending Q-6-1.
+    # The failed show's sync also leaves status a `recovery`: it rides on failed_shows.
     assert _kinds(answer) == [
-        ("coll1", "failed_shows"), ("coll1", "recovery"), ("coll1", "unplaced_files"),
+        ("coll1", "failed_shows"), ("coll1", "unplaced_files"),
         ("coll2", "rescheduled"), ("coll2", "handoff_pending"),
     ]
     one, two = _summary(status, "coll1"), _summary(status, "coll2")
-    assert _entry(answer, "failed_shows")["identifiers"] == ["gd-bad"]
+    failed = _entry(answer, "failed_shows")
+    assert failed["identifiers"] == ["gd-bad"]
     assert one["counts"]["failed"] == 1
-    assert _entry(answer, "recovery")["detail"]["affected_item"] == "gd-bad"
+    assert failed["detail"]["recovery"]["affected_item"] == "gd-bad"
     assert _entry(answer, "unplaced_files")["detail"]["unplaced_files"] == (
         one["unplaced_files"]
     ) == [str(stray)]

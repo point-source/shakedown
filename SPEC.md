@@ -2449,7 +2449,7 @@ Observable behavior:
   | `kind` | Source of truth | Carries |
   | --- | --- | --- |
   | `failed_shows` | shows in status `failed` | identifiers |
-  | `recovery` | `status`'s `recovery` | operation, outcome, phase, affected item/path, `safe_next_action` |
+  | `recovery` | `status`'s `recovery`, unless it explains another entry | operation, outcome, phase, affected item/path, `safe_next_action` |
   | `ended_unexpectedly` | a run record or activity entry ended `stopped_reporting` in the last 30 days, not yet followed by a good run of that kind | run id, when |
   | `stale` | `status`'s `stale` | — |
   | `rescheduled` | `status`'s `rescheduled` | `since` |
@@ -2464,6 +2464,16 @@ Observable behavior:
   carries `detail.runs: [{run_id, activity_id, kind, finished_at}]`, so
   runs without a run record (restage, verify, reconcile) are named too.
   `recovery` lists its `affected_item` in `identifiers`.
+
+  A recovery that explains another entry rides on that entry as
+  `detail.recovery` (the same object) instead of listing the same
+  problem twice: a sync, refetch, or reconform that finished
+  `completed_with_item_issues` explains `failed_shows`, and an operation
+  still `in_progress` whose run ended `stopped_reporting` explains
+  `ended_unexpectedly`. A recovery still `in_progress` while a run of
+  that operation is still reporting is the run going, shown by the
+  live view (§spec:run-activity), so it is no entry. Any other
+  recovery is its own entry.
 
   Each entry has `since` when the source records one: when the problem
   began (the oldest skip, the first undelivered notice, the end of the
@@ -2517,8 +2527,11 @@ read-only.
 **User-level test path.** Make one show fail, block a handoff target,
 skip a collection's tick behind a long sync, and drop a stray file into
 a library folder: the list shows four entries naming each collection
-and show, matching `status`. Resolve each: its entry leaves. With a
-healthy mirror, the list says nothing needs attention.
+and show, matching `status`, the failed show's entry carrying the
+sync's recovery. Resolve each: its entry leaves. Kill a sync: one
+`ended_unexpectedly` entry carrying its unfinished recovery, gone after
+the next good sync. With a healthy mirror, the list says nothing needs
+attention.
 
 ## Release and health §spec:dashboard-health
 
