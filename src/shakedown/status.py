@@ -256,7 +256,7 @@ def print_status(config: Config, *, as_json: bool) -> None:
             click.echo(f"  handoff not delivered: {shows} since {handoff['since']}")
             click.echo(f"    last reason: {handoff['last_reason']}")
         click.echo("  items: " + ", ".join(f"{k}={v}" for k, v in s["counts"].items() if v))
-        click.echo(f"  disk:  {s['bytes_on_disk'] / 1e9:.2f} GiB")
+        click.echo(f"  disk:  {s['bytes_on_disk'] / 1e9:.2f} GB")
         separations = s["separations"]
         if separations:
             click.echo(
