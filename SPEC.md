@@ -2576,7 +2576,7 @@ result and time appear per collection.
 
 ## Dashboard UI kit §spec:ui-kit
 
-*Status: in progress (kit, Terms, and every screen approved 2026-11-12; page not yet served by `serve`)*
+*Status: complete*
 
 The visual kit, terms, and design authority for the read-only web
 dashboard (§spec:dashboard). §spec:dashboard and the endpoint sections
@@ -2777,6 +2777,12 @@ Spec and code names in the last column never appear on screen.
 | Valid (config) | shakedown.yaml loads right now. | OK, fine, good | `health.config.valid: true` |
 | Has an error (config) | shakedown.yaml does not load right now; the error names the key. | broken, invalid, failed | `health.config.valid: false` |
 | Next step | The action `status` suggests for an unfinished or failed operation, shown as the server words it. | fix, action, hint | `safe_next_action` |
+| Updated (shows) | Shows a run fetched again because they changed upstream. | changed, refreshed | `items_updated` |
+| Updated <time> | When the newest data on screen was computed. | refreshed, synced, as of | `generated_at` |
+
+"Updated" carries two meanings, kept on purpose (operator decision,
+2026-11-12): as a count of shows on Runs and Overview, and as the data
+time in the header. No other term may take a second meaning.
 
 ### Screens
 
@@ -2803,13 +2809,13 @@ is one route (`GET /`) with four tabs.
   (`web/tests/*.spec.ts`, config `web/playwright.config.ts`): one project
   per size × theme, `maxDiffPixels: 0`, `threshold: 0.05`, animations and
   caret off, UTC clock, `en-US` locale. Baselines are committed only for
-  approved screens and the approved kit sheet. Baselines come from the
-  environment CI renders in; a font or renderer difference is a finding,
-  never a reason to loosen the threshold. The kit baselines were
-  generated on Linux x86-64 with Playwright 1.65.0's Chromium and the
-  bundled fonts; CI has no web job yet, and the job that adds it renders
-  in that same setup or regenerates the baselines as an environment
-  change for the operator.
+  approved screens and the approved kit sheet. A font or renderer
+  difference is a finding, never a reason to loosen the threshold.
+  Every baseline was rendered on Linux x86-64 (Rocky Linux 9.8) with
+  Playwright 1.65.0's Chromium and the bundled fonts. The screenshot
+  tests run on a developer's machine before a UI change merges, not in
+  CI (operator decision, 2026-11-12): CI checks types and the build
+  only.
 - Fixtures (`web/src/fixtures/`) hold answers in the exact shape of the
   `/api/*` endpoints (`web/src/api/types.ts`), with a fixed clock.
   `web/src/fixtures/scenarios.ts` names each scenario and how the server
@@ -2856,11 +2862,11 @@ Observable behavior:
   `dashboard_web/` holds no `index.html`, `GET /` answers `404` and every
   other route works as before; tests and development runs of `serve`
   need no Node.
-- **CI checks the page.** A `web` job runs `npm ci`, `npm run
-  typecheck`, `npm run build`, and `npm run test:screens` (the
-  screenshot tests of §spec:ui-kit Harness) in the environment the
-  baselines were rendered in; the image build depends on it like it
-  depends on the Python tests.
+- **CI checks the page builds.** A `web` job runs `npm ci`, `npm run
+  typecheck`, and `npm run build`; the image build depends on it like
+  it depends on the Python tests. The screenshot tests are not part of
+  CI: they run on a developer's machine before a UI change merges
+  (operator decision, 2026-11-12; §spec:ui-kit Harness).
 
 **Decision and constraint.** Package data, not a separate directory in
 the image, because `serve` then finds the page the same way in the image

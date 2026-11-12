@@ -15,7 +15,8 @@ authority is §spec:ui-kit in SPEC.md, with the approved goldens in
 - Words on screen come from the Terms glossary in §spec:ui-kit; the page
   words every endpoint code in `web/src/lib/words.ts`.
 - A screen is done when its goldens pass (`npm run test:screens` in
-  `web/`) and every state its handoff spec lists exists.
+  `web/`) and every state its handoff spec lists exists. CI does not run
+  the screenshot tests; run them before a UI change merges.
 - A missing state or an ambiguous spec is never invented. Settle it from
   a named source (a kit pattern, a spec line, an approved screen) and
   record the call, or raise it as a question through the task's
