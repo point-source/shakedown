@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from shakedown.db import ACTIVITY_SINCE_VERSION, transaction
 from shakedown.models import OperationStatus
@@ -27,6 +28,8 @@ log = logging.getLogger(__name__)
 # History is kept this long; trimming never touches item, run, or placement records
 # (§spec:state).
 HISTORY_DAYS = 30
+# The live view keeps an ended entry this long, so its result and reason are seen.
+LIVE_ENDED_S = 600
 
 
 class ActivityKind(StrEnum):
@@ -90,6 +93,10 @@ class Snapshot:
     run_counts: RunCounts | None = None
 
 
+_COUNTER_COLUMNS = (
+    "items_listed", "items_to_look_up", "items_looked_up", "items_to_fetch",
+    "items_done", "items_failed",
+)
 _PROGRESS_COLUMNS = (
     "phase", "items_listed", "items_to_look_up", "items_looked_up", "items_to_fetch",
     "items_done", "items_failed", "bytes_downloaded", "bytes_to_fetch",
@@ -99,6 +106,35 @@ _PROGRESS_COLUMNS = (
 
 def _iso(dt: datetime) -> str:
     return dt.isoformat()
+
+
+def _parse(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _live_entry(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "activity_id": row["id"],
+        "run_id": row["run_id"],
+        "source": row["source_name"],
+        "collection": row["collection_name"],
+        "kind": row["kind"],
+        "started_by_serve": bool(row["started_by_serve"]),
+        "started_at": _parse(row["started_at"]),
+        "finished_at": _parse(row["finished_at"]),
+        "last_heartbeat_at": _parse(row["last_heartbeat_at"]),
+        "last_progress_at": _parse(row["last_progress_at"]),
+        "state": row["state"],
+        "result": row["result"],
+        "end_reason": row["end_reason"],
+        "phase": row["phase"],
+        **{column: row[column] for column in _COUNTER_COLUMNS},
+        "current_items": json.loads(row["current_items"]),
+        "bytes_downloaded": row["bytes_downloaded"],
+        "bytes_to_fetch": row["bytes_to_fetch"],
+        "speed_bytes_per_second": row["speed_bytes_per_second"],
+        "eta_seconds": row["eta_seconds"],
+    }
 
 
 class ActivityRepo:
@@ -215,6 +251,41 @@ class ActivityRepo:
              RUNNING, _iso(cutoff)),
         )
 
+    def live(self, now: datetime) -> list[dict[str, Any]]:
+        """The live view (§spec:run-activity): running entries, then entries that
+        ended in the last ten minutes, newest first. A running entry that stopped
+        reporting reads as ended at its last heartbeat. Times are datetimes; every
+        other value is as the API answers it. Empty before schema v10."""
+        if not self.has_table():
+            return []
+        cutoff = now - timedelta(seconds=LIVE_ENDED_S)
+        rows = self.conn.execute(
+            "SELECT * FROM run_activity WHERE state=? OR finished_at >= ?",
+            (RUNNING, _iso(cutoff)),
+        ).fetchall()
+        running: list[dict[str, Any]] = []
+        ended: list[dict[str, Any]] = []
+        for row in rows:
+            entry = _live_entry(row)
+            if entry["state"] == RUNNING and stopped_reporting(
+                entry["last_heartbeat_at"], now
+            ):
+                entry.update(
+                    state=ENDED,
+                    result=OperationStatus.FAILED_BEFORE_COMPLETION.value,
+                    end_reason=STOPPED_REPORTING,
+                    finished_at=entry["last_heartbeat_at"],
+                    current_items=[],
+                    speed_bytes_per_second=None,
+                    eta_seconds=None,
+                )
+                if entry["finished_at"] < cutoff:
+                    continue
+            (running if entry["state"] == RUNNING else ended).append(entry)
+        running.sort(key=lambda e: (e["started_at"], e["activity_id"]), reverse=True)
+        ended.sort(key=lambda e: (e["finished_at"], e["activity_id"]), reverse=True)
+        return running + ended
+
     def trim(self, now: datetime) -> None:
         """Drop ended entries older than the history window."""
         cutoff = now - timedelta(days=HISTORY_DAYS)
@@ -238,10 +309,6 @@ _END_BUSY_TIMEOUT_MS = 5000
 SPEED_WINDOW_S = 10.0
 ETA_WINDOW_S = 600.0
 
-_COUNTERS = (
-    "items_listed", "items_to_look_up", "items_looked_up", "items_to_fetch",
-    "items_done", "items_failed",
-)
 _LISTING = ("items_listed", "items_to_look_up", "items_looked_up")
 _FETCHING = ("items_to_fetch", "items_done", "items_failed")
 
@@ -460,7 +527,7 @@ class Progress:
                 self._samples.popleft()
             speed = self._speed(now_t, SPEED_WINDOW_S)
             eta_speed = self._speed(now_t, ETA_WINDOW_S)
-            values: dict[str, int | None] = {c: self._counts.get(c) for c in _COUNTERS}
+            values: dict[str, int | None] = {c: self._counts.get(c) for c in _COUNTER_COLUMNS}
             if counts is not None:
                 # Done and failed are the run record's own figures, so the entry and
                 # `status` always agree (§spec:run-activity "status agrees").

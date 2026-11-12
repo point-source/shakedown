@@ -124,8 +124,8 @@ def _end_reason(conn: Any, run: Any) -> str | None:
     activity = ActivityRepo(conn)
     if run.finished_at is not None or not activity.has_table():
         return None
-    heartbeat = activity.last_heartbeat_for_run(run.id)
-    heard = max(heartbeat, run.started_at) if heartbeat else run.started_at
+    # A record from before heartbeats has none: its start is the last sign of life.
+    heard = activity.last_heartbeat_for_run(run.id) or run.started_at
     return STOPPED_REPORTING if stopped_reporting(heard, datetime.now()) else None
 
 
