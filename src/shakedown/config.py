@@ -181,15 +181,17 @@ def _yaml_problem(e: yaml.YAMLError) -> str:
     if not isinstance(e, yaml.MarkedYAMLError):
         return type(e).__name__
 
-    def at(mark: yaml.Mark | None) -> str:
-        return f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
-
-    parts = []
-    if e.context:
-        parts.append(f"{e.context}{at(e.context_mark)}")
-    if e.problem:
-        parts.append(f"{e.problem}{at(e.problem_mark)}")
-    return ": ".join(parts) or "invalid YAML"
+    # Only where, never the parser's own words: those quote the input (an undefined
+    # alias or unknown tag names its text), and the text can be a secret. Where the
+    # broken construct starts, then where the parser noticed.
+    places = []
+    for mark in (e.context_mark, e.problem_mark):
+        place = f"line {mark.line + 1}, column {mark.column + 1}" if mark else None
+        if place and place not in places:
+            places.append(place)
+    if not places:
+        return "invalid YAML"
+    return f"invalid YAML at {places[0]}" + "".join(f" (found at {p})" for p in places[1:])
 
 
 def _validate_layouts(config: Config) -> None:
@@ -241,8 +243,8 @@ def _validate_layouts(config: Config) -> None:
                 )
             if not referenced:
                 raise ConfigError(
-                    f"{source.name}/{collection.name}: library_layout "
-                    f"{collection.library_layout!r} references no source field, so every "
+                    f"{source.name}/{collection.name}: library_layout references no "
+                    f"source field, so every "
                     f"item renders to the same path; include a per-item field such as "
                     f"{{identifier}}"
                 )

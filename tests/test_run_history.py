@@ -272,3 +272,16 @@ def test_a_closed_record_whose_entry_has_not_ended_yet_reads_from_the_record(
     [row] = _history(db, now=now)
     assert row["finished_at"] == now
     assert row["result"] == "completed_with_item_issues"
+
+
+def test_a_finished_record_outranks_an_entry_that_missed_its_end(db: Path) -> None:
+    """The run finished its record, but the final write to its entry failed: the
+    entry's stale heartbeat reads as stopped reporting. The record decides."""
+    now = datetime.now()
+    started = now - timedelta(minutes=10)
+    with closing(connect(db)) as conn:
+        run = _record(conn, started, finished=now - timedelta(minutes=5))
+        _entry(conn, ActivityKind.SYNC, started, run_id=run.id,
+               heartbeat=now - timedelta(minutes=5))
+    [row] = _history(db, now=now)
+    assert (row["result"], row["end_reason"]) == ("completed", None)

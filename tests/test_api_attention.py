@@ -690,6 +690,23 @@ async def test_answering_never_writes(tmp_roots: tuple[Path, Path]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_fresh_install_answers_without_creating_the_database(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Before any run there is no database; a GET must not create one."""
+    config = make_config(*tmp_roots)
+    app = _app(config)
+    assert config.state_db is not None and not config.state_db.exists()
+
+    for path in ("/api/health", "/api/activity", "/api/network", "/api/runs",
+                 "/api/library", "/api/attention"):
+        await _get(app, path)
+
+    assert not config.state_db.exists()
+    assert (await _get(app))["entries"] == []
+
+
+@pytest.mark.asyncio
 async def test_only_get_is_served(tmp_roots: tuple[Path, Path]) -> None:
     app = _app(make_config(*tmp_roots))
     async with httpx.AsyncClient(

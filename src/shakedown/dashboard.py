@@ -29,7 +29,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 
 from shakedown.config import Config, ConfigError, load
-from shakedown.db import connect_reader
+from shakedown.db import connect_empty, connect_reader
 
 # Refresh intervals (§spec:dashboard): the live view every few seconds, every other
 # view about every 30 seconds. An answer is computed at most once per interval.
@@ -143,7 +143,10 @@ def shared_answer(app: FastAPI, key: Hashable, ttl: float, build: Builder) -> di
         configs: ConfigTracker = app.state.configs
         config, config_state = configs.for_dashboard()
         assert config.state_db is not None  # filled in by Config validation
-        with closing(connect_reader(config.state_db)) as conn:
+        # Answering never writes, so a fresh install's first GET must not create the
+        # database: before any run it answers from an empty one.
+        exists = config.state_db.exists()
+        with closing(connect_reader(config.state_db) if exists else connect_empty()) as conn:
             body = build(DashboardContext(config, config_state, conn))
         return {"generated_at": iso(datetime.now()), **body}
 

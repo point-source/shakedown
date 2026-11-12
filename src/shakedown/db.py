@@ -376,6 +376,16 @@ def open_unmigrated(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_empty() -> sqlite3.Connection:
+    """An in-memory state DB at the current schema with nothing in it: what a reader
+    that must never create the database (the dashboard's GETs) reads before any run
+    has written one."""
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    _migrate(conn)
+    return conn
+
+
 def connect_reader(db_path: Path) -> sqlite3.Connection:
     """Open the state DB for a command that takes no writer lock (`status`, `item
     show`, `sync --dry-run`, `verify` without `--reconform`, `validate`, serve's

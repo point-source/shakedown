@@ -269,6 +269,8 @@ class LibraryPlacement:
         (and, in a full pass, for every show that no longer stages). Writes only what
         changed: a pass over an up-to-date library reads and stats, nothing more."""
         touched: set[Path] = set()
+        # Issues from removing, moving, or linking alike make a show failed.
+        issues_before = {i: len(self._report.issues.get(i, ())) for i in identifiers}
         folders = self.repo.folders(self.source, self.collection.name)
         for identifier in identifiers:
             item = self.items.get(self.source, self.collection.name, identifier)
@@ -303,13 +305,12 @@ class LibraryPlacement:
             if progress is None:
                 self._link_show(item, folders.get(identifier))
                 continue
-            issues_before = len(self._report.issues.get(identifier, ()))
             progress.working(identifier)
             try:
                 self._link_show(item, folders.get(identifier))
             finally:
                 progress.idle(identifier)
-            if len(self._report.issues.get(identifier, ())) > issues_before:
+            if len(self._report.issues.get(identifier, ())) > issues_before[identifier]:
                 progress.failed()
             else:
                 progress.done()

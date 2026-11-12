@@ -175,3 +175,14 @@ def test_a_closed_outcome_names_the_command_that_reruns_it(
     assert closed is not None
     assert closed.status == OperationStatus.FAILED_BEFORE_COMPLETION
     assert closed.safe_next_action == f"check the logged error and rerun {command}"
+
+
+def test_status_still_reports_a_killed_run_once_it_is_closed(
+    config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """After the next locked run closes it, status and the run list still agree."""
+    _abandoned_run(config.state_db, 60)
+    assert run_restage(config) == 0
+    summary = _status_json(config, capsys)
+    assert summary["last_run"]["finished_at"] is not None
+    assert summary["last_run"]["end_reason"] == "stopped_reporting"

@@ -1,10 +1,8 @@
 """`GET /api/library`: what the mirror holds, the disk it uses and has left, how it
-grew, what was mirrored most recently, and roughly when the disk fills
-(§spec:library-stats)."""
+grew, and what was mirrored most recently (§spec:library-stats)."""
 from __future__ import annotations
 
 import os
-from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -18,8 +16,6 @@ from shakedown.status import library_figures
 
 # How many of the most recently mirrored shows the view lists.
 RECENT_SHOWS = 20
-# The disk-full estimate needs at least this many days of growth.
-_MIN_GROWTH_DAYS = 7
 
 
 def library_answer(ctx: DashboardContext) -> dict[str, Any]:
@@ -52,11 +48,7 @@ def library_answer(ctx: DashboardContext) -> dict[str, Any]:
     growth = growth_repo.series(scopes, date.today()) if growth_repo.has_table() else []
     total_bytes, free_bytes = disk_usage(config.archive_root)
     return {
-        "disk": {
-            "total_bytes": total_bytes,
-            "free_bytes": free_bytes,
-            "full_in_days": full_in_days(growth, free_bytes),
-        },
+        "disk": {"total_bytes": total_bytes, "free_bytes": free_bytes},
         "totals": totals,
         "collections": collections,
         "growth": growth,
@@ -75,19 +67,3 @@ def disk_usage(path: Path) -> tuple[int, int]:
     st = os.statvfs(path)
     return st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
 
-
-def full_in_days(growth: list[dict[str, Any]], free_bytes: int) -> int | None:
-    """Days until free space runs out at the average daily growth of archive bytes
-    over the growth rows (all collections summed per day). None with fewer than
-    seven days of growth, or no growth."""
-    totals: dict[str, int] = defaultdict(int)
-    for row in growth:
-        totals[row["date"]] += row["archive_bytes"]
-    if not totals:
-        return None
-    first, last = min(totals), max(totals)
-    span = (date.fromisoformat(last) - date.fromisoformat(first)).days
-    grown = totals[last] - totals[first]
-    if span < _MIN_GROWTH_DAYS or grown <= 0:
-        return None
-    return int(free_bytes * span // grown)
