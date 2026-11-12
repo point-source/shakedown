@@ -277,7 +277,8 @@ class ActivityRepo:
         """The live view (§spec:run-activity): running entries, then entries that
         ended in the last ten minutes, newest first. A running entry that stopped
         reporting reads as ended at its last heartbeat. Times are datetimes; every
-        other value is as the API answers it. Empty before schema v10."""
+        other value is as the API answers it, plus each entry's
+        ``requests_in_flight`` for the network view. Empty before schema v10."""
         if not self.has_table():
             return []
         cutoff = now - timedelta(seconds=LIVE_ENDED_S)
@@ -288,7 +289,8 @@ class ActivityRepo:
         running: list[dict[str, Any]] = []
         ended: list[dict[str, Any]] = []
         for row in rows:
-            entry = _as_seen(_live_entry(row), now)
+            entry = {**_as_seen(_live_entry(row), now),
+                     "requests_in_flight": row["requests_in_flight"]}
             if entry["state"] == ENDED and entry["finished_at"] < cutoff:
                 continue  # stopped reporting before the live view's horizon
             (running if entry["state"] == RUNNING else ended).append(entry)
@@ -599,10 +601,13 @@ class Progress:
             wait_seconds=wait_seconds, detail=detail,
         ))
 
-    def _listing_retry(self, retry: ListingRetry) -> None:
+    def _listing_retry(self, retry: ListingRetry, heard: list[ListingRetry]) -> None:
+        heard.append(retry)
         if retry.cause is not None:
             self.network_event(EventKind(retry.cause.value), http_status=retry.http_status,
                                detail=retry.detail)
+        if retry.gave_up:
+            return
         self.network_event(EventKind.RETRY, detail=retry.detail)
         if retry.wait_seconds:
             self.network_event(EventKind.BACKOFF, wait_seconds=retry.wait_seconds)
@@ -610,13 +615,15 @@ class Progress:
     @contextlib.contextmanager
     def listing(self) -> Iterator[None]:
         """The collection listing, running: one request in flight, hearing the
-        plugin's own retries of it. A listing that fails records its cause."""
-        with self.request(), listing_retries_to(self._listing_retry):
+        plugin's own retries of it. A listing that fails records its cause, unless
+        the plugin already reported giving up on it."""
+        heard: list[ListingRetry] = []
+        with self.request(), listing_retries_to(lambda r: self._listing_retry(r, heard)):
             try:
                 yield
             except Exception as e:
                 cause = failure_cause(e)
-                if cause is not None:
+                if cause is not None and not any(r.gave_up for r in heard):
                     self.network_event(EventKind(cause.value), http_status=http_status(e),
                                        detail=str(e))
                 raise

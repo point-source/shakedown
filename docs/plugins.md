@@ -217,7 +217,7 @@ bundled `etree` plugin does this.
 
 The listing is the only request without a core retry around it. If your client
 library retries a search itself, keep that retry bounded and capped, and report
-each retry to the core with `self.report_listing_retry(...)`:
+each failed attempt to the core with `self.report_listing_retry(...)`:
 
 ```python
 self.report_listing_retry(
@@ -228,8 +228,10 @@ self.report_listing_retry(
 )
 ```
 
-Call it from the thread that iterates `list_items`, once per retry, before you
-wait. It never raises. The core shows these retries with every other network
+Call it from the thread that iterates `list_items`, once per failed attempt,
+before you wait. For the attempt that runs out of retries, pass `gave_up=True`
+and no `wait_seconds`, then raise as usual: the core counts that failure once. It
+never raises. The core shows these retries with every other network
 event. The bundled `ia` plugin reports the retries of its urllib3 `Retry` this
 way. A plugin whose listing does not retry, like `etree`, has nothing to report.
 

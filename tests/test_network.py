@@ -533,3 +533,20 @@ def test_a_syncs_bytes_are_what_it_fetched_and_its_series_sums_to_them(
     assert run.bytes_downloaded == 300 + 400
     assert sum(t.bytes for _, t in minutes) == run.bytes_downloaded
     assert max(t.peak_requests_in_flight for _, t in minutes) >= 1
+
+
+def test_a_listing_the_plugin_gave_up_on_is_recorded_once(db: Path) -> None:
+    """The plugin reports the attempt that ran out of its retries; the exception the
+    listing then raises is the same failure, not another one."""
+    rec = _recorder(db, _Time())
+    p = rec.open_entry("ia", "gd", ActivityKind.SYNC)
+    plugin = _fake()
+    with pytest.raises(requests.ConnectionError), p.listing():
+        plugin.report_listing_retry(cause=FailureCause.TIMEOUT, wait_seconds=1.0)
+        plugin.report_listing_retry(cause=FailureCause.TIMEOUT, gave_up=True)
+        raise requests.ConnectionError("Max retries exceeded")
+    rec.end(p, "failed_before_completion")
+    assert [(e.kind, e.wait_seconds) for e in _events(db)] == [
+        (EventKind.TIMEOUT, None), (EventKind.RETRY, None), (EventKind.BACKOFF, 1.0),
+        (EventKind.TIMEOUT, None),
+    ]

@@ -132,11 +132,13 @@ def failure_cause(exc: BaseException) -> FailureCause | None:
 
 @dataclass(frozen=True)
 class ListingRetry:
-    """One retry a plugin made of its own collection listing."""
+    """One failed attempt of a collection listing the plugin retries itself: a retry
+    follows after ``wait_seconds``, unless the plugin ``gave_up`` on this attempt."""
     cause: FailureCause | None
     http_status: int | None = None
     wait_seconds: float | None = None
     detail: str | None = None
+    gave_up: bool = False
 
 
 # Set by the core while it drives a listing; read by `report_listing_retry`. A context
@@ -283,16 +285,19 @@ class SourcePlugin(ABC):
         http_status: int | None = None,
         wait_seconds: float | None = None,
         detail: str | None = None,
+        gave_up: bool = False,
     ) -> None:
-        """Tell the core about one retry of the collection listing, the one request a
-        plugin may retry itself: its cause, the HTTP status when there was one, and
-        the seconds it waits before the next attempt. Call it from the thread that
-        iterates `list_items`. It never raises."""
+        """Tell the core about one failed attempt of the collection listing, the one
+        request a plugin may retry itself: its cause, the HTTP status when there was
+        one, and the seconds it waits before retrying. For the attempt that runs out
+        of retries, pass ``gave_up=True`` and no wait: the core counts it once, not
+        again from the exception the listing then raises. Call it from the thread
+        that iterates `list_items`. It never raises."""
         sink = _listing_retry_sink.get()
         if sink is None:
             return
         with contextlib.suppress(Exception):  # recording never fails a listing
-            sink(ListingRetry(cause, http_status, wait_seconds, detail))
+            sink(ListingRetry(cause, http_status, wait_seconds, detail, gave_up))
 
     @abstractmethod
     def lookup_item(self, identifier: str, timeout: float) -> ItemLookup:

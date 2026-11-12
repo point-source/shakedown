@@ -12,6 +12,7 @@ from urllib.parse import quote
 import internetarchive as ia
 from internetarchive.auth import S3Auth
 from urllib3 import Retry
+from urllib3.exceptions import MaxRetryError
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
@@ -51,9 +52,21 @@ _SEARCH_BACKOFF_BASE_SECONDS = 1.0
 _SEARCH_MAX_BACKOFF_SECONDS = 30.0
 
 
+def _attempt(status: int | None, error: Exception | None) -> dict[str, Any]:
+    """What a failed search attempt was, as `report_listing_retry` takes it."""
+    if status is not None:
+        return {"cause": status_cause(status), "http_status": status, "detail": f"HTTP {status}"}
+    return {
+        "cause": failure_cause(error) if error is not None else None,
+        "http_status": None,
+        "detail": str(error) if error is not None else None,
+    }
+
+
 class _ReportingRetry(Retry):
-    """The search's urllib3 retry, reporting each retry to the core with its cause and
-    the wait urllib3 takes before the next attempt (§spec:network-activity)."""
+    """The search's urllib3 retry, reporting each failed attempt to the core: its cause
+    and the wait urllib3 takes before the retry, or that it gave up
+    (§spec:network-activity)."""
 
     report: Callable[..., None] | None = None
 
@@ -61,6 +74,23 @@ class _ReportingRetry(Retry):
         retry = super().new(**kw)
         retry.report = self.report
         return retry
+
+    def increment(
+        self,
+        method: str | None = None,
+        url: str | None = None,
+        response: Any = None,
+        error: Exception | None = None,
+        _pool: Any = None,
+        _stacktrace: Any = None,
+    ) -> Self:
+        try:
+            return super().increment(method, url, response, error, _pool, _stacktrace)
+        except MaxRetryError:
+            if self.report is not None:
+                status = response.status if response is not None and error is None else None
+                self.report(**_attempt(status, error), gave_up=True)
+            raise
 
     def sleep(self, response: Any = None) -> None:
         if self.report is not None and self.history:
@@ -70,13 +100,7 @@ class _ReportingRetry(Retry):
                 wait = self.get_retry_after(response)
             if not wait:
                 wait = self.get_backoff_time()
-            if last.status is not None:
-                cause = status_cause(last.status)
-                detail = f"HTTP {last.status}"
-            else:
-                cause = failure_cause(last.error) if last.error is not None else None
-                detail = str(last.error) if last.error is not None else None
-            self.report(cause=cause, http_status=last.status, wait_seconds=wait, detail=detail)
+            self.report(**_attempt(last.status, last.error), wait_seconds=wait)
         super().sleep(response)
 
 
