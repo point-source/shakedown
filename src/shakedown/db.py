@@ -254,7 +254,7 @@ def open_unmigrated(db_path: Path) -> sqlite3.Connection:
     sync, which records its entry without the writer lock while a run of an older
     release may still be writing (§spec:rescheduled-syncs)."""
     conn = sqlite3.connect(
-        f"file:{db_path}?mode=rw", uri=True, isolation_level=None
+        db_path.resolve().as_uri() + "?mode=rw", uri=True, isolation_level=None
     )
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")

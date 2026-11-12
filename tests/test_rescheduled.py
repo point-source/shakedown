@@ -435,3 +435,18 @@ def test_status_on_a_new_install_creates_the_database(
     cfg = _config(*tmp_roots)
     print_status(cfg, as_json=False)
     assert "last run: never" in capsys.readouterr().out
+
+
+def test_skip_is_recorded_when_the_state_path_needs_escaping(tmp_path: Path) -> None:
+    """A state path with URI-special characters names the real database, never a
+    stray file beside it."""
+    archive, library = tmp_path / "a#1" / "archive", tmp_path / "library"
+    archive.mkdir(parents=True)
+    library.mkdir()
+    cfg = _config(archive, library)
+    assert cfg.state_db is not None
+    connect(cfg.state_db).close()
+    with writer_lock(cfg):
+        assert run_sync(cfg, source_filter=SRC, collection_filter="b") == 1
+    assert set(_entries(cfg)) == {(SRC, "b")}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a#1", "library"]
