@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -58,6 +59,9 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         identifier="gd-x", files=[FakeFile(name="x.flac", content=b"audio")]
     )
     assert run_sync(config) == 0
+    assert config.state_db is not None
+    with closing(connect(config.state_db)) as conn:
+        RescheduledRepo(conn).record("fake-src", "coll1", datetime(2026, 11, 10, 3, 0, 0))
 
     app = _child_app(config, items={"gd-x": {"x.flac": "audio"}})
     async with httpx.AsyncClient(
@@ -78,6 +82,8 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         # Same summary as `status --json` (§spec:library-ownership, §spec:library-cleanup).
         assert body[0]["separations"] == []
         assert body[0]["unplaced_files"] == []
+        # A rescheduled sync (§spec:rescheduled-syncs).
+        assert body[0]["rescheduled"] == {"since": "2026-11-10T03:00:00"}
 
         # metrics: open, prometheus text
         r = await client.get("/metrics")

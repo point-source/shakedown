@@ -15,6 +15,7 @@ from shakedown.state import (
     OperationOutcomeRepo,
     PendingHandoffRepo,
     PlacementRepo,
+    RescheduledRepo,
     RunRepo,
 )
 
@@ -46,6 +47,7 @@ def _collection_summary(
     ]
     placements = PlacementRepo(items.conn)
     library_dir = config.library_root / source_name / collection_name
+    rescheduled = RescheduledRepo(items.conn).get(source_name, collection_name)
 
     return {
         "source": source_name,
@@ -80,6 +82,9 @@ def _collection_summary(
         ],
         # Shows whose handoff notice was not delivered yet (§spec:durable-handoff).
         "handoff_pending": _handoff_pending(config, source_name, collection_name, items),
+        # The collection's sync was skipped because another run held the writer lock;
+        # `since` is its oldest skip (§spec:rescheduled-syncs).
+        "rescheduled": {"since": rescheduled.isoformat()} if rescheduled else None,
         # Stale = the most recent sync failed to enumerate the source; existing
         # items are retained (§spec:failure-behavior).
         "stale": bool(last_sync.stale) if last_sync else False,
@@ -203,6 +208,11 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 click.echo(f"  failure notice not delivered: {last['failure_notice_error']}")
         else:
             click.echo("  last run: never")
+        if s["rescheduled"]:
+            click.echo(
+                f"  rescheduled: first skipped {s['rescheduled']['since']}; "
+                "runs when the current sync finishes"
+            )
         handoff = s["handoff_pending"]
         if handoff:
             shows = "1 show" if handoff["shows"] == 1 else f"{handoff['shows']} shows"

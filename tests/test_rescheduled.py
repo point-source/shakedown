@@ -321,3 +321,57 @@ def test_refresh_metadata_and_dry_run_keep_the_entry(config: Config) -> None:
                     refresh_metadata=True) == 0
     assert run_sync(config, source_filter=SRC, collection_filter="b", dry_run=True) == 0
     assert set(_entries(config)) == {(SRC, "b")}
+
+
+# --- status -----------------------------------------------------------------------
+
+
+def test_status_json_carries_the_oldest_skip_per_collection(
+    config: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`status --json` (and `GET /status`, which shares the summary) carry
+    `rescheduled: {"since": <time>}` or null; an entry for a collection no longer
+    configured is not shown."""
+    import json
+
+    from shakedown.status import print_status
+
+    with writer_lock(config):
+        assert run_sync(config, source_filter=SRC, collection_filter="b") == 1
+        assert run_sync(config, source_filter=SRC, collection_filter="c") == 1
+    _mark(config, (SRC, "gone"))
+    entries = _entries(config)
+    capsys.readouterr()
+
+    print_status(config, as_json=True)
+
+    summaries = {
+        (s["source"], s["collection"]): s["rescheduled"]
+        for s in json.loads(capsys.readouterr().out)
+    }
+    assert summaries == {
+        (SRC, "a"): None,
+        (SRC, "b"): {"since": entries[(SRC, "b")]},
+        (SRC, "c"): {"since": entries[(SRC, "c")]},
+        ("other-src", "b"): None,
+    }
+
+
+def test_status_text_shows_the_rescheduled_collection(
+    config: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from shakedown.status import print_status
+
+    _mark(config, (SRC, "b"))
+    capsys.readouterr()
+
+    print_status(config, as_json=False)
+
+    out = capsys.readouterr().out
+    line = (
+        "  rescheduled: first skipped 2026-11-10T03:00:00; "
+        "runs when the current sync finishes"
+    )
+    assert out.count(line) == 1
+    section = out.split(f"=== {SRC}/b ===")[1].split("===")[0]
+    assert line in section
