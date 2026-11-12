@@ -2366,11 +2366,11 @@ last-good-sync age keeps growing day by day.
 *Status: complete*
 
 The dashboard shows, per collection and in total, what the mirror holds,
-how much disk it uses and has left, how it grew over 30 days, what was
-mirrored most recently, and roughly when the disk fills
-(§req:success-criteria #30; §req:user-stories: how big is it all?, the
-morning check; operator decisions 2026-11-12: recently added shows,
-disk-full estimate; §req:priorities #35).
+how much disk it uses and has left, how it grew over 30 days, and what
+was mirrored most recently (§req:success-criteria #30;
+§req:user-stories: how big is it all?, the morning check; operator
+decisions 2026-11-12: recently added shows, no disk-full estimate;
+§req:priorities #35).
 
 Observable behavior:
 
@@ -2392,12 +2392,9 @@ Observable behavior:
 - **Recently mirrored.** The 20 shows most recently downloaded (new or
   re-fetched), newest first, with collection, identifier, the source's
   title when it lists one, and when.
-- **Disk-full estimate.** Free bytes over the average daily growth of
-  archive bytes in the last 30 days. Shown only with at least seven
-  days of growth and growth above zero; otherwise null and hidden.
 
 API: `GET /api/library` (unauthenticated) answers `{generated_at, disk:
-{total_bytes, free_bytes, full_in_days}, totals: {counts, restricted,
+{total_bytes, free_bytes}, totals: {counts, restricted,
 archive_bytes, library_bytes}, collections: [{source, collection,
 counts, restricted, archive_bytes, library_bytes,
 last_successful_sync_at}], growth: [{date, source, collection,
@@ -2419,17 +2416,17 @@ of seconds on a NAS per refresh (§spec:state notes the same for
 `status`). *`serve` snapshotting growth on a timer* — misses days when
 `serve` is down. *A "new shows only" list* — the record does not
 distinguish a first download from a re-fetch; a re-fetched show is also
-news to the morning check.
+news to the morning check. *A disk-full estimate* (free bytes over
+average daily growth) — the operator does not need the forecast
+(operator decision, 2026-11-12); free space and the growth graph
+answer "how big is it all?".
 
-**Tradeoffs.** Growth starts at the upgrade; there is no backfill. The
-disk-full estimate is a straight line through 30 days and ignores
-planned new collections.
+**Tradeoffs.** Growth starts at the upgrade; there is no backfill.
 
 **User-level test path.** Compare every count and byte figure with
 `status --json`: identical. Compare free space with `df` on the NAS.
 Run a sync that adds shows: the next day's growth point rises by those
-shows, they lead the recently-mirrored list, and with a week of growth
-the disk-full estimate appears.
+shows, and they lead the recently-mirrored list.
 
 ## Needs attention §spec:needs-attention
 

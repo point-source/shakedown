@@ -1,6 +1,6 @@
 """`GET /api/library` (§spec:library-stats): what the mirror holds — matching
-`status` exactly — the disk, 30 days of growth, the most recently mirrored shows,
-and roughly when the disk fills."""
+`status` exactly — the disk, 30 days of growth, and the most recently mirrored
+shows."""
 from __future__ import annotations
 
 import json
@@ -132,7 +132,7 @@ async def test_disk_is_the_archive_filesystem(
     assert seen == [str(config.archive_root)]
     assert body["disk"]["total_bytes"] == st.f_blocks * st.f_frsize
     assert abs(body["disk"]["free_bytes"] - st.f_bavail * st.f_frsize) < 64 * 2**20
-    assert body["disk"]["full_in_days"] is None
+    assert set(body["disk"]) == {"total_bytes", "free_bytes"}
 
 
 def _show(identifier: str, size: int) -> None:
@@ -188,24 +188,11 @@ def _seed_growth(config: Config, days: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_eight_days_of_growth_show_when_the_disk_fills(
-    tmp_roots: tuple[Path, Path],
-) -> None:
+async def test_eight_days_of_growth_are_eight_points(tmp_roots: tuple[Path, Path]) -> None:
     config = make_config(*tmp_roots)
     _seed_growth(config, 8)
     body = await _get(_app(config, _Clock()))
     assert len(body["growth"]) == 8
-    free = body["disk"]["free_bytes"]
-    assert body["disk"]["full_in_days"] == free // 1_000_000
-
-
-@pytest.mark.asyncio
-async def test_six_days_of_growth_give_no_estimate(tmp_roots: tuple[Path, Path]) -> None:
-    config = make_config(*tmp_roots)
-    _seed_growth(config, 6)
-    body = await _get(_app(config, _Clock()))
-    assert len(body["growth"]) == 6
-    assert body["disk"]["full_in_days"] is None
 
 
 @pytest.mark.asyncio
@@ -244,7 +231,7 @@ async def test_a_pre_v10_database_answers_without_growth_and_never_migrates(
 
     body = await _get(_app(config, _Clock()))
 
-    assert body["growth"] == [] and body["disk"]["full_in_days"] is None
+    assert body["growth"] == []
     [coll] = body["collections"]
     [status] = _status(config, capsys)
     assert coll["counts"] == status["counts"]
