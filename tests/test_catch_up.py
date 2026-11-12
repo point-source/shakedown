@@ -337,3 +337,25 @@ def test_source_blocks_sharing_a_name_each_get_their_own_plugin(
     monkeypatch.setattr(registry, "for_source", for_source)
     assert run_sync(cfg) == 0
     assert any(s is first for s in asked) and any(s is second for s in asked)
+
+
+def test_source_blocks_sharing_a_name_share_the_smallest_request_ceiling(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A catch-up may start a later block's collection first; the shared budget still
+    takes the smallest ceiling either block sets (§spec:source-budget)."""
+    from shakedown.discovery import source_budgets
+
+    archive, library = tmp_roots
+    strict = SourceConfig(
+        name=SRC, type="fake", max_concurrent_requests=1,
+        collections=[CollectionConfig(name="a", query="*")],
+    )
+    loose = SourceConfig(
+        name=SRC, type="fake", max_concurrent_requests=4,
+        collections=[CollectionConfig(name="b", query="*")],
+    )
+    cfg = Config(archive_root=archive, library_root=library, sources=[strict, loose])
+    plugin = FakePlugin(strict)
+    for order in ([loose, strict], [strict, loose]):
+        assert source_budgets(cfg, [(s, plugin) for s in order])[SRC].size == 1
