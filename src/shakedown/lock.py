@@ -14,9 +14,12 @@ import fcntl
 import logging
 import os
 from collections.abc import Callable, Iterator
+from datetime import datetime
 from pathlib import Path
 
+from shakedown import activity
 from shakedown.config import Config
+from shakedown.db import connect
 from shakedown.trigger import announce_busy
 
 log = logging.getLogger(__name__)
@@ -58,9 +61,11 @@ def run_exclusive(
     on_busy: Callable[[], None] | None = None,
 ) -> int:
     """Run a writing command under the writer lock; return 1 with a logged error
-    when another run holds it, after calling ``on_busy`` if given."""
+    when another run holds it, after calling ``on_busy`` if given. Taking the lock
+    first closes what killed runs left open (§spec:run-activity)."""
     try:
         with writer_lock(config):
+            _close_abandoned(config)
             return command()
     except LockHeld as e:
         log.error("%s", e)
@@ -68,3 +73,13 @@ def run_exclusive(
         if on_busy is not None:
             on_busy()
         return 1
+
+
+def _close_abandoned(config: Config) -> None:
+    """Close the records of runs that were killed. Best effort: the command opens the
+    database itself next and reports any real problem with it."""
+    try:
+        with contextlib.closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+            activity.close_abandoned(conn, datetime.now())
+    except Exception as e:
+        log.warning("could not close runs that ended unexpectedly: %s", e)

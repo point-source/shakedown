@@ -19,6 +19,8 @@ from enum import StrEnum
 from pathlib import Path
 
 from shakedown.db import ACTIVITY_SINCE_VERSION, transaction
+from shakedown.models import OperationStatus
+from shakedown.state import OperationOutcomeRepo, RunRepo
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +53,10 @@ class Phase(StrEnum):
 
 RUNNING = "running"
 ENDED = "ended"
+# The one end reason: the run's heartbeat stopped — killed, crashed, or the host
+# went down (§spec:run-activity).
+STOPPED_REPORTING = "stopped_reporting"
+ABANDONED_ERROR = "run ended unexpectedly (stopped reporting)"
 
 
 @dataclass(frozen=True)
@@ -186,6 +192,27 @@ class ActivityRepo:
             """,
             (ENDED, result, end_reason, _iso(finished_at), _iso(finished_at),
              activity_id, RUNNING),
+        )
+
+    def last_heartbeat_for_run(self, run_id: int) -> datetime | None:
+        row = self.conn.execute(
+            "SELECT MAX(last_heartbeat_at) AS hb FROM run_activity WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        return datetime.fromisoformat(row["hb"]) if row and row["hb"] else None
+
+    def close_stale(self, now: datetime) -> None:
+        """End every running entry that stopped reporting, at its last heartbeat."""
+        cutoff = now - timedelta(seconds=STALE_AFTER_S)
+        self.conn.execute(
+            """
+            UPDATE run_activity SET state=?, result=?, end_reason=?,
+                finished_at=last_heartbeat_at, current_items='[]',
+                speed_bytes_per_second=NULL, eta_seconds=NULL
+            WHERE state=? AND last_heartbeat_at < ?
+            """,
+            (ENDED, OperationStatus.FAILED_BEFORE_COMPLETION.value, STOPPED_REPORTING,
+             RUNNING, _iso(cutoff)),
         )
 
     def trim(self, now: datetime) -> None:
@@ -656,3 +683,32 @@ class ActivityRecorder:
     def _run_timer(self) -> None:
         while not self._stop.wait(self._tick_s):
             self.tick()
+
+
+def stopped_reporting(last_heartbeat_at: datetime, now: datetime) -> bool:
+    """Whether a running entry last heard from at ``last_heartbeat_at`` stopped
+    reporting: more than about 20 seconds without a heartbeat."""
+    return now - last_heartbeat_at > timedelta(seconds=STALE_AFTER_S)
+
+
+def close_abandoned(conn: sqlite3.Connection, now: datetime) -> None:
+    """Close what killed runs left open (§spec:run-activity "Ends are never missed").
+    Only a run holding the writer lock calls this, before it opens its own records:
+    every other locked run has then ended, so each open run record and in-progress
+    outcome was abandoned. A run record closes at its last heartbeat (at its start
+    when it has none — it predates heartbeats). Running entries close only once they
+    stopped reporting: a lock-free `verify` may still be alive."""
+    activity = ActivityRepo(conn)
+    has_activity = activity.has_table()
+    runs = RunRepo(conn)
+    outcomes = OperationOutcomeRepo(conn)
+    with transaction(conn):
+        for run_id, started_at in runs.open_runs():
+            heartbeat = activity.last_heartbeat_for_run(run_id) if has_activity else None
+            runs.close_abandoned(run_id, ABANDONED_ERROR, heartbeat or started_at)
+            log.warning("closed run %s: %s", run_id, ABANDONED_ERROR)
+        for outcome in outcomes.in_progress():
+            assert outcome.id is not None
+            outcomes.close_abandoned(outcome.id, ABANDONED_ERROR, outcome.updated_at)
+        if has_activity:
+            activity.close_stale(now)

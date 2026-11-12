@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 import click
 
+from shakedown.activity import STOPPED_REPORTING, ActivityRepo, stopped_reporting
 from shakedown.config import Config
 from shakedown.db import connect_reader
 from shakedown.models import ItemStatus, OperationOutcome, RunKind
@@ -55,7 +57,7 @@ def _collection_summary(
         "counts": {s.value: counts.get(s, 0) for s in ItemStatus},
         "bytes_on_disk": bytes_on_disk,
         "drift_files": drift.count(source_name, collection_name),
-        "last_run": _summarize_run(last) if last else None,
+        "last_run": _summarize_run(last, _end_reason(items.conn, last)) if last else None,
         "recovery": _summarize_recovery(recovery) if recovery else None,
         "restricted": restricted,
         # Complete shows with no copy a common player reads (§spec:quality-selection).
@@ -112,7 +114,19 @@ def _handoff_pending(
     }
 
 
-def _summarize_run(run: Any) -> dict[str, Any]:
+def _end_reason(conn: Any, run: Any) -> str | None:
+    """``stopped_reporting`` for a run record left open by a run whose heartbeat went
+    stale — killed, crashed, or the host went down — else None (§spec:run-activity).
+    A database before schema v10 records no heartbeats, so it reports none."""
+    activity = ActivityRepo(conn)
+    if run.finished_at is not None or not activity.has_table():
+        return None
+    heartbeat = activity.last_heartbeat_for_run(run.id)
+    heard = max(heartbeat, run.started_at) if heartbeat else run.started_at
+    return STOPPED_REPORTING if stopped_reporting(heard, datetime.now()) else None
+
+
+def _summarize_run(run: Any, end_reason: str | None = None) -> dict[str, Any]:
     return {
         # The id a `serve` trigger answers with, so a caller can find its run here
         # (§spec:api-sync-runs).
@@ -129,6 +143,9 @@ def _summarize_run(run: Any) -> dict[str, Any]:
         "errors": run.errors,
         # Why this run's failure alert was not delivered (§spec:durable-handoff).
         "failure_notice_error": run.failure_notice_error,
+        # `stopped_reporting` when the run is still open but stopped reporting: it
+        # ended unexpectedly (§spec:run-activity).
+        "end_reason": end_reason,
     }
 
 
@@ -204,6 +221,8 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 f"new={last['items_new']} updated={last['items_updated']} "
                 f"failed={last['items_failed']} bytes={last['bytes_downloaded']}"
             )
+            if last["end_reason"] == STOPPED_REPORTING:
+                click.echo("  run ended unexpectedly (stopped reporting)")
             if last["failure_notice_error"]:
                 click.echo(f"  failure notice not delivered: {last['failure_notice_error']}")
         else:

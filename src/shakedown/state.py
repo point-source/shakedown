@@ -298,6 +298,15 @@ class RunRepo:
             (_iso(finished_at), json.dumps(errors), run_id),
         )
 
+    def open_runs(self) -> list[tuple[int, datetime]]:
+        """Every run record not closed yet: (id, started_at)."""
+        return [
+            (row["id"], datetime.fromisoformat(row["started_at"]))
+            for row in self.conn.execute(
+                "SELECT id, started_at FROM runs WHERE finished_at IS NULL ORDER BY id"
+            )
+        ]
+
     def latest(
         self, source: str, collection: str, *, kind: RunKind | None = None
     ) -> Run | None:
@@ -440,6 +449,14 @@ class OperationOutcomeRepo:
                 outcome.id,
             ),
         )
+
+    def in_progress(self) -> list[OperationOutcome]:
+        """Every outcome still in progress."""
+        rows = self.conn.execute(
+            "SELECT id FROM operation_outcomes WHERE status=? ORDER BY id",
+            (OperationStatus.IN_PROGRESS.value,),
+        ).fetchall()
+        return [o for o in (self.get(row["id"]) for row in rows) if o is not None]
 
     def close_abandoned(self, outcome_id: int, reason: str, finished_at: datetime) -> None:
         """Mark an outcome its process left in progress (it was killed) as failed
