@@ -207,6 +207,19 @@ class ItemRepo:
         )
         return [(row["identifier"], _parse_iso(row["disappeared_at"])) for row in cur]
 
+    def list_identifiers(self, source: str, collection: str, status: ItemStatus) -> list[str]:
+        """The collection's identifiers in ``status``, in order; as many as
+        `count_by_status` counts for it."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier FROM items
+            WHERE source_name=? AND collection_name=? AND status=?
+            ORDER BY identifier
+            """,
+            (source, collection, status.value),
+        )
+        return [row["identifier"] for row in cur]
+
     def count_by_status(self, source: str, collection: str) -> dict[ItemStatus, int]:
         cur = self.conn.execute(
             """

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime
 from typing import Any
 
@@ -179,21 +180,24 @@ def _summarize_recovery(outcome: OperationOutcome) -> dict[str, Any]:
     }
 
 
-def print_status(config: Config, *, as_json: bool) -> None:
-    conn = connect_reader(config.state_db)  # type: ignore[arg-type]
+def collection_summaries(config: Config, conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every configured collection's `status --json` summary, in config order: the one
+    computation `status` and the dashboard's attention view share
+    (§spec:needs-attention "Matches status")."""
     items = ItemRepo(conn)
     runs = RunRepo(conn)
     drift = DriftRepo(conn)
     outcomes = OperationOutcomeRepo(conn)
+    return [
+        _collection_summary(config, source.name, collection.name, items, runs, drift, outcomes)
+        for source in config.sources
+        for collection in source.collections
+    ]
 
-    summaries = []
-    for source in config.sources:
-        for collection in source.collections:
-            summaries.append(
-                _collection_summary(
-                    config, source.name, collection.name, items, runs, drift, outcomes
-                )
-            )
+
+def print_status(config: Config, *, as_json: bool) -> None:
+    conn = connect_reader(config.state_db)  # type: ignore[arg-type]
+    summaries = collection_summaries(config, conn)
 
     if as_json:
         click.echo(json.dumps(summaries, indent=2, default=str))
