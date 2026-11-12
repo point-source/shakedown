@@ -1269,7 +1269,7 @@ It is never scheduled by default (§req:constraints).
 
 ## CLI surface §spec:cli
 
-*Status: in progress*
+*Status: complete*
 
 Shakedown is a one-shot CLI; every command runs to completion and
 exits (§req:constraints). The command surface:
@@ -1425,7 +1425,7 @@ the run rather than being ignored).
 
 ## State persistence and recovery §spec:state
 
-*Status: in progress*
+*Status: complete*
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -1669,7 +1669,7 @@ all; it is not required for any success criterion.
 
 ## API-triggered runs §spec:api-sync-runs
 
-*Status: in progress*
+*Status: complete*
 
 A sync triggered through `serve` runs with the configuration as it is
 at the moment of the request, and never overlaps another run
@@ -1742,13 +1742,12 @@ stays up.
 
 ## Rescheduled syncs §spec:rescheduled-syncs
 
-*Status: in progress*
+*Status: complete*
 
-Compatibility, from deployment status (deployed on one operator's NAS,
-no external consumers; §req:constraints): state database — additive
-migration, nothing re-downloaded or rebuilt; `status` text, `status
---json`, and `GET /status` — new per-collection field, free; CLI exit
-codes, config keys, and the HTTP API — unchanged.
+Shipped as an additive state-database migration (schema v9) and a new
+per-collection `status` field; CLI exit codes, config keys, and the HTTP
+API are unchanged (deployed on one operator's NAS, no external
+consumers; §req:constraints).
 
 A single-collection sync that cannot start because another run holds
 the writer lock is remembered, once per collection, and caught up when
@@ -1914,7 +1913,7 @@ finishes normally.
 
 ## Deployment §spec:deployment
 
-*Status: in progress*
+*Status: complete*
 
 The deployment is a single Docker Compose stack, paste-able into QNAP
 Container Station, operable entirely through web UIs — no SSH at any
@@ -2240,7 +2239,7 @@ listed.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: in progress*
+*Status: complete*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
