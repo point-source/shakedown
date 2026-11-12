@@ -415,6 +415,19 @@ def test_an_unexpected_end_older_than_thirty_days_is_dropped(
     assert _attention(config)["entries"] == []
 
 
+def test_a_run_serve_closed_after_a_kill_is_listed_at_once(tmp_roots: tuple[Path, Path]) -> None:
+    """serve's watcher closes a killed child's record before its heartbeat goes stale."""
+    config = make_config(*tmp_roots)
+    now = datetime.now()
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        run_id, activity_id = _killed(conn, ActivityKind.SYNC, heartbeat=now - timedelta(seconds=2))
+        RunRepo(conn).close_abandoned(run_id, "run ended unexpectedly (killed by SIGKILL)", now)
+        conn.commit()
+
+    [run] = _entry(_attention(config), "ended_unexpectedly")["detail"]["runs"]
+    assert (run["run_id"], run["activity_id"], run["kind"]) == (run_id, activity_id, "sync")
+
+
 def test_a_killed_sync_older_than_thirty_days_is_dropped_even_while_still_latest(
     tmp_roots: tuple[Path, Path],
 ) -> None:
@@ -438,14 +451,17 @@ def test_an_open_run_with_no_entry_matches_status(
     """A run record whose entry was never written: status falls back to its start."""
     config = make_config(*tmp_roots)
     with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
-        run_id = RunRepo(conn).start(SRC, "coll1", datetime.now() - timedelta(minutes=2)).id
+        started = datetime.now() - timedelta(minutes=2)
+        run_id = RunRepo(conn).start(SRC, "coll1", started).id
         conn.commit()
 
     entry = _entry(_attention(config), "ended_unexpectedly")
-    assert _summary(_status(config, capsys))["last_run"]["end_reason"] == "stopped_reporting"
-    assert entry["since"] is None
+    last_run = _summary(_status(config, capsys))["last_run"]
+    assert last_run["end_reason"] == "stopped_reporting"
+    # Its start is its last sign of life, as status and the run history read it.
+    assert _same_instant(entry["since"], last_run["started_at"])
     assert entry["detail"]["runs"] == [
-        {"run_id": run_id, "activity_id": None, "kind": "sync", "finished_at": None}
+        {"run_id": run_id, "activity_id": None, "kind": "sync", "finished_at": entry["since"]}
     ]
 
 

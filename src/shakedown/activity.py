@@ -140,16 +140,6 @@ def _live_entry(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-_GOOD_RESULTS = frozenset(
-    {OperationStatus.COMPLETED.value, OperationStatus.COMPLETED_WITH_ITEM_ISSUES.value}
-)
-
-
-def _kind_group(kind: str) -> str:
-    """The kind whose good run clears an unexpected end: a catch-up is a sync."""
-    return ActivityKind.SYNC.value if kind == ActivityKind.CATCH_UP.value else kind
-
-
 def _as_seen(entry: dict[str, Any], now: datetime) -> dict[str, Any]:
     """A running entry that stopped reporting reads as ended at its last heartbeat,
     with ``failed_before_completion`` and ``stopped_reporting`` — before any closer
@@ -325,43 +315,6 @@ class ActivityRepo:
         return [
             {**_as_seen(_live_entry(row), now), "outcome_id": row["outcome_id"]}
             for row in rows
-        ]
-
-    def unexpected_ends(self, source: str, collection: str, now: datetime) -> list[dict[str, Any]]:
-        """The collection's runs that ended `stopped_reporting` in the history window
-        and were not followed by a good run of the same kind, newest first: each as
-        ``{run_id, activity_id, kind, finished_at}`` (§spec:needs-attention). A good
-        run ended `completed` or `completed_with_item_issues` (§spec:run-history "Last
-        good sync"); a catch-up counts as a sync. Empty before schema v10."""
-        if not self.has_table():
-            return []
-        rows = self.conn.execute(
-            "SELECT * FROM run_activity WHERE source_name=? AND collection_name=?",
-            (source, collection),
-        ).fetchall()
-        entries = [_as_seen(_live_entry(row), now) for row in rows]
-        last_good: dict[str, datetime] = {}
-        for e in entries:
-            if e["state"] == ENDED and e["result"] in _GOOD_RESULTS:
-                group = _kind_group(e["kind"])
-                last_good[group] = max(last_good.get(group, e["started_at"]), e["started_at"])
-        cutoff = now - timedelta(days=HISTORY_DAYS)
-
-        def cleared(e: dict[str, Any]) -> bool:
-            good = last_good.get(_kind_group(e["kind"]))
-            return good is not None and good > e["started_at"]
-
-        ends = [
-            e for e in entries
-            if e["end_reason"] == STOPPED_REPORTING
-            and e["finished_at"] >= cutoff
-            and not cleared(e)
-        ]
-        ends.sort(key=lambda e: (e["finished_at"], e["activity_id"]), reverse=True)
-        return [
-            {"run_id": e["run_id"], "activity_id": e["activity_id"], "kind": e["kind"],
-             "finished_at": e["finished_at"]}
-            for e in ends
         ]
 
     def trim(self, now: datetime) -> None:

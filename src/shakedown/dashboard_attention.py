@@ -7,12 +7,13 @@ facts; the page words the next action.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-from shakedown.activity import HISTORY_DAYS, STOPPED_REPORTING, ActivityRepo
+from shakedown.activity import HISTORY_DAYS, STOPPED_REPORTING
 from shakedown.dashboard import DashboardContext, iso
-from shakedown.models import ItemStatus
+from shakedown.history import GOOD_RESULTS, run_history
+from shakedown.models import ItemStatus, RunKind
 from shakedown.selection import keeps_unplayable_original
 from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries
@@ -43,33 +44,32 @@ def _entry(
     }
 
 
-def _unexpected_ends(
-    summary: dict[str, Any], activity: ActivityRepo, now: datetime
-) -> list[dict[str, Any]]:
-    """The collection's runs that ended unexpectedly and were not followed by a good
-    run of their kind, from their activity entries, plus a run `status` reports as
-    stopped reporting that has no entry (its start is its last sign of life)."""
-    runs = [
-        {**run, "finished_at": iso(run["finished_at"])}
-        for run in activity.unexpected_ends(summary["source"], summary["collection"], now)
-    ]
-    last_run = summary["last_run"]
-    if (
-        last_run
-        and last_run["end_reason"] == STOPPED_REPORTING
-        # status's own fallback: a record with no entry is judged by its start
-        and activity.last_heartbeat_for_run(last_run["run_id"]) is None
-        and datetime.fromisoformat(last_run["started_at"]) >= now - timedelta(days=HISTORY_DAYS)
-    ):
-        runs.append(
-            {"run_id": last_run["run_id"], "activity_id": None, "kind": last_run["kind"],
-             "finished_at": None}
-        )
-    return runs
+def _kind_group(kind: str) -> str:
+    """The kind whose good run clears an unexpected end: a catch-up is a sync."""
+    return RunKind.SYNC.value if kind == RunKind.CATCH_UP.value else kind
+
+
+def _unexpected_ends(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One collection's runs (the run history, newest first) that ended
+    `stopped_reporting` and were not followed by a good run of their kind
+    (§spec:needs-attention): a later run that ended `completed` or
+    `completed_with_item_issues` (§spec:run-history "Last good sync")."""
+    ends: list[dict[str, Any]] = []
+    cleared: set[str] = set()  # kinds with a good run later than the rows still to come
+    for run in runs:
+        group = _kind_group(run["kind"])
+        if run["result"] in GOOD_RESULTS:
+            cleared.add(group)
+        elif run["end_reason"] == STOPPED_REPORTING and group not in cleared:
+            ends.append(
+                {"run_id": run["run_id"], "activity_id": run["activity_id"],
+                 "kind": run["kind"], "finished_at": iso(run["finished_at"])}
+            )
+    return ends
 
 
 def _entries(
-    summary: dict[str, Any], items: ItemRepo, activity: ActivityRepo, now: datetime
+    summary: dict[str, Any], items: ItemRepo, runs: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """The collection's entries, in the kind order of §spec:needs-attention."""
     source, collection = summary["source"], summary["collection"]
@@ -92,7 +92,7 @@ def _entries(
                 detail=detail,
             )
         )
-    ended = _unexpected_ends(summary, activity, now)
+    ended = _unexpected_ends(runs)
     if ended:
         times = [run["finished_at"] for run in ended if run["finished_at"]]
         entries.append(
@@ -172,10 +172,14 @@ def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
     its health, in config order. Lists are complete; the page decides how many to
     show."""
     items = ItemRepo(ctx.conn)
-    activity = ActivityRepo(ctx.conn)
-    now = datetime.now()
+    history = run_history(ctx.conn, datetime.now(), HISTORY_DAYS)
     summaries = collection_summaries(ctx.config, ctx.conn)
+
+    def runs_of(summary: dict[str, Any]) -> list[dict[str, Any]]:
+        scope = (summary["source"], summary["collection"])
+        return [r for r in history if (r["source"], r["collection"]) == scope]
+
     return {
-        "entries": [entry for s in summaries for entry in _entries(s, items, activity, now)],
+        "entries": [entry for s in summaries for entry in _entries(s, items, runs_of(s))],
         "health": [_health(s, items) for s in summaries],
     }

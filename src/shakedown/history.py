@@ -73,7 +73,9 @@ def _record_end(run: Run, now: datetime) -> RunEnd:
     return RunEnd(result, None, run.finished_at)
 
 
-_GOOD = (OperationStatus.COMPLETED.value, OperationStatus.COMPLETED_WITH_ITEM_ISSUES.value)
+# A good run (§spec:run-history "Last good sync"; §spec:needs-attention clears an
+# unexpected end on one).
+GOOD_RESULTS = (OperationStatus.COMPLETED.value, OperationStatus.COMPLETED_WITH_ITEM_ISSUES.value)
 
 
 def last_good_sync_at(
@@ -86,7 +88,7 @@ def last_good_sync_at(
     for run in RunRepo(conn).finished(source, collection, (RunKind.SYNC, RunKind.CATCH_UP)):
         assert run.id is not None
         end = run_end(run, activity.for_run(run.id, now), now)
-        if end.result in _GOOD:
+        if end.result in GOOD_RESULTS:
             return run.finished_at
     return None
 
