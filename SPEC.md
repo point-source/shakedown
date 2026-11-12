@@ -2430,7 +2430,7 @@ the disk-full estimate appears.
 
 ## Needs attention §spec:needs-attention
 
-*Status: not started*
+*Status: complete on the server side (`GET /api/attention`); the page is not started*
 
 The dashboard has one list of what needs the operator, naming the
 collection or show affected and the next available action, and a
@@ -2455,7 +2455,18 @@ Observable behavior:
   | `separations` | `status`'s `separations` | identifiers and folders |
   | `unplaced_files` | `status`'s `unplaced_files` | paths |
 
-  Each entry has `since` when the source records one. The next action
+  A good run is one whose result is `completed` or
+  `completed_with_item_issues`, the same as a good sync in
+  §spec:run-history. A catch-up counts as a sync. `ended_unexpectedly`
+  carries `detail.runs: [{run_id, activity_id, kind, finished_at}]`, so
+  runs without a run record (restage, verify, reconcile) are named too.
+  `recovery` lists its `affected_item` in `identifiers`.
+
+  Each entry has `since` when the source records one: when the problem
+  began (the oldest skip, the first undelivered notice, the end of the
+  failed operation or run). Failed shows, stale collections,
+  separations, and unplaced files record no time, so their `since` is
+  null. The next action
   for each kind is fixed by the kind (for example, failed shows are
   retried by the next sync; a pending handoff is resent on the next
   run), so the page words it; `recovery` carries `status`'s
@@ -2464,7 +2475,10 @@ Observable behavior:
   disappeared shows with the day first found missing, drift found by
   the last `verify --deep` (file count), shows with no playable copy
   with reason (`status`'s `not_playable`), and shows kept as an
-  unplayable original plus a playable copy (identifiers). These are
+  unplayable original plus a playable copy (identifiers): complete shows
+  whose recorded manifest keeps SHN or unrecognised audio archive-only
+  beside a staged playable copy. A lossy copy left from older filters
+  beside staged FLAC is not one of them. These are
   facts, not to-dos, so they sit apart from the attention list.
 - **Matches `status`.** Each entry and health figure comes from the same
   computation `status` uses for the same thing.
