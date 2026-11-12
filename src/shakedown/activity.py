@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from shakedown.db import ACTIVITY_SINCE_VERSION, transaction
-from shakedown.models import OperationStatus
+from shakedown.models import ENDED_UNEXPECTEDLY, OperationStatus
 from shakedown.state import OperationOutcomeRepo, RunRepo
 
 log = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ ENDED = "ended"
 # The one end reason: the run's heartbeat stopped — killed, crashed, or the host
 # went down (§spec:run-activity).
 STOPPED_REPORTING = "stopped_reporting"
-ABANDONED_ERROR = "run ended unexpectedly (stopped reporting)"
+ABANDONED_ERROR = f"{ENDED_UNEXPECTEDLY} (stopped reporting)"
 
 
 @dataclass(frozen=True)

@@ -198,6 +198,26 @@ def test_a_killed_run_closed_by_the_next_run_still_reads_stopped_reporting(
     assert row["errors"] == [ABANDONED_ERROR]
 
 
+def test_a_run_serve_closed_after_its_child_was_killed_reads_stopped_reporting(
+    db: Path,
+) -> None:
+    """serve closes the record of a child it saw killed with its own wording
+    (trigger.close_abandoned): that run ended unexpectedly too, never `completed`."""
+    from shakedown.trigger import _ended_reason
+
+    now = datetime.now()
+    with closing(connect(db)) as conn:
+        killed = _record(conn, now - timedelta(minutes=5), finished=now - timedelta(minutes=4),
+                         errors=[_ended_reason(-9)])
+        exited = _record(conn, now - timedelta(minutes=3), finished=now - timedelta(minutes=2),
+                         errors=[_ended_reason(1)])
+    results = {r["run_id"]: (r["result"], r["end_reason"]) for r in _history(db, now=now)}
+    assert results == {
+        killed.id: ("failed_before_completion", "stopped_reporting"),
+        exited.id: ("failed_before_completion", "stopped_reporting"),
+    }
+
+
 def test_pre_release_records_appear_alone_with_their_result_from_the_record(
     db: Path,
 ) -> None:

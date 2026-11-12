@@ -15,13 +15,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from shakedown.activity import (
-    ABANDONED_ERROR,
     ENDED,
     STOPPED_REPORTING,
     ActivityRepo,
     stopped_reporting,
 )
-from shakedown.models import OperationStatus, Run, RunKind
+from shakedown.models import ENDED_UNEXPECTEDLY, OperationStatus, Run, RunKind
 from shakedown.state import OperationOutcomeRepo, RunRepo
 
 
@@ -53,14 +52,15 @@ def run_end(run: Run, entry: dict[str, Any] | None, now: datetime) -> RunEnd:
 def _record_end(run: Run, now: datetime) -> RunEnd:
     """The outcome code a record shows, by the rules the run used to set it: a record
     left open is still running until it stops reporting (its start is its last sign
-    of life); a killed run closed by the next one carries ABANDONED_ERROR; then a
+    of life); a killed run, closed by the next run or by serve, carries an error
+    starting ENDED_UNEXPECTEDLY; then a
     failed enumeration, a crash, failed shows, or a clean finish."""
     failed = OperationStatus.FAILED_BEFORE_COMPLETION.value
     if run.finished_at is None:
         if stopped_reporting(run.started_at, now):
             return RunEnd(failed, STOPPED_REPORTING, run.started_at)
         return _RUNNING
-    if ABANDONED_ERROR in run.errors:
+    if any(error.startswith(ENDED_UNEXPECTEDLY) for error in run.errors):
         return RunEnd(failed, STOPPED_REPORTING, run.finished_at)
     if run.stale:
         result = OperationStatus.STALE_ENUMERATION.value

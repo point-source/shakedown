@@ -7,6 +7,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+# How every closer of a killed run starts the error it records: the next locked run
+# ("... (stopped reporting)") and serve, which saw its child die ("... (killed by
+# SIGKILL)").
+ENDED_UNEXPECTEDLY = "run ended unexpectedly"
+
 
 class ItemStatus(StrEnum):
     PENDING = "pending"
