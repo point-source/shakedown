@@ -553,7 +553,7 @@ def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
     migrated = connect(db_path)
     for table in ("items", "runs", "library_placements", "library_folders",
                   "library_unplaced", "library_adoption", "handoff_pending",
-                  "tag_files", "tag_shows"):
+                  "tag_files", "tag_shows", "run_activity"):
         assert _columns(fresh, table) == _columns(migrated, table), table
 
 
@@ -802,7 +802,7 @@ def test_v8_db_gains_empty_rescheduled_syncs(tmp_path: Path) -> None:
 
     conn = connect(db_path)
     assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 9
+    assert SCHEMA_VERSION == 10
     assert "rescheduled_syncs" in _tables(conn)
     assert conn.execute("SELECT COUNT(*) AS n FROM rescheduled_syncs").fetchone()["n"] == 0
     item = ItemRepo(conn).get("s", "c", "x")
@@ -845,3 +845,50 @@ def test_rescheduled_list_is_oldest_skip_first(tmp_path: Path) -> None:
         ("s", "b", datetime(2026, 11, 10, 3, 0, 0)),
         ("s", "c", datetime(2026, 11, 10, 4, 0, 0)),
     ]
+
+
+def test_v9_db_gains_empty_run_activity(tmp_path: Path) -> None:
+    """v10 adds the activity entries as an additive migration (§spec:state,
+    §spec:run-activity): every item and run record stays as it was."""
+    db_path = tmp_path / "v9.db"
+    conn = connect(db_path)
+    ItemRepo(conn).upsert(_make_item())
+    run = RunRepo(conn).start("s", "c", datetime(2026, 11, 1))
+    conn.execute("DROP TABLE run_activity")
+    conn.execute("UPDATE schema_version SET version = 9")
+    conn.close()
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 10
+    assert "run_activity" in _tables(conn)
+    assert conn.execute("SELECT COUNT(*) AS n FROM run_activity").fetchone()["n"] == 0
+    assert ItemRepo(conn).get("s", "c", "x") is not None
+    latest = RunRepo(conn).latest("s", "c")
+    assert latest is not None and latest.id == run.id
+
+
+def test_activity_trim_keeps_30_days_and_never_touches_records(tmp_path: Path) -> None:
+    """History is kept 30 days; trimming never touches item, run, or placement
+    records (§spec:state)."""
+    from shakedown.activity import ActivityKind, ActivityRepo
+
+    conn = connect(tmp_path / "s.db")
+    ItemRepo(conn).upsert(_make_item())
+    run = RunRepo(conn).start("s", "c", datetime(2026, 9, 1))
+    repo = ActivityRepo(conn)
+    now = datetime(2026, 11, 12, 12, 0)
+    old = repo.create("s", "c", ActivityKind.SYNC, run_id=run.id,
+                      started_by_serve=False, at=datetime(2026, 9, 1))
+    repo.end(old, "completed", datetime(2026, 9, 1, 1))
+    recent = repo.create("s", "c", ActivityKind.VERIFY, run_id=None,
+                         started_by_serve=False, at=datetime(2026, 11, 1))
+    repo.end(recent, "completed", datetime(2026, 11, 1, 1))
+    running = repo.create("s", "c", ActivityKind.RESTAGE, run_id=None,
+                          started_by_serve=True, at=datetime(2026, 9, 2))
+
+    repo.trim(now)
+
+    ids = {row["id"] for row in conn.execute("SELECT id FROM run_activity")}
+    assert ids == {recent, running}
+    assert ItemRepo(conn).get("s", "c", "x") is not None
+    assert RunRepo(conn).latest("s", "c") is not None

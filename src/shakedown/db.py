@@ -6,11 +6,16 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
 RESCHEDULED_SINCE_VERSION = 9
+
+# The schema version that added `run_activity`: a run that takes no writer lock
+# (`verify`) records its progress only into a database already at this version or
+# later — it never migrates (§spec:run-activity, §spec:state).
+ACTIVITY_SINCE_VERSION = 10
 
 # How long any connection waits on another writer's SQLite lock before giving up.
 BUSY_TIMEOUT_MS = 5000
@@ -230,6 +235,54 @@ _RESCHEDULE_SCHEMA = [
 ]
 _SCHEMA += _RESCHEDULE_SCHEMA
 
+# Per run and collection, its live progress and result (§spec:run-activity): one row
+# per collection a run works on. History of its own — trimmed to 30 days without
+# touching item, run, or placement records (§spec:state). No foreign key to `runs`:
+# `run_id` is null for kinds without a run record (restage, verify, reconcile).
+_ACTIVITY_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS run_activity (
+        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name             TEXT NOT NULL,
+        collection_name         TEXT NOT NULL,
+        kind                    TEXT NOT NULL,
+        started_by_serve        INTEGER NOT NULL DEFAULT 0,
+        run_id                  INTEGER,
+        started_at              TEXT NOT NULL,
+        finished_at             TEXT,
+        last_heartbeat_at       TEXT NOT NULL,
+        last_progress_at        TEXT NOT NULL,
+        state                   TEXT NOT NULL,
+        result                  TEXT,
+        end_reason              TEXT,
+        phase                   TEXT,
+        items_listed            INTEGER,
+        items_to_look_up        INTEGER,
+        items_looked_up         INTEGER,
+        items_to_fetch          INTEGER,
+        items_done              INTEGER,
+        items_failed            INTEGER,
+        current_items           TEXT NOT NULL DEFAULT '[]',
+        bytes_downloaded        INTEGER,
+        bytes_to_fetch          INTEGER,
+        speed_bytes_per_second  REAL,
+        eta_seconds             INTEGER
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS run_activity_live_idx
+        ON run_activity (state, finished_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS run_activity_collection_idx
+        ON run_activity (source_name, collection_name, started_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS run_activity_run_idx ON run_activity (run_id)
+    """,
+]
+_SCHEMA += _ACTIVITY_SCHEMA
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and lazily create) the state DB at db_path."""
@@ -412,6 +465,15 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def _migrate_to_10(conn: sqlite3.Connection) -> None:
+    """v9 → v10, the one migration of the dashboard increment (§spec:state): add the
+    activity entries (§spec:run-activity). Additive: it starts empty, and nothing else
+    changes. Later parts of the increment (network activity, growth snapshots) add
+    their tables here too — the increment moves the schema forward exactly once."""
+    for stmt in _ACTIVITY_SCHEMA:
+        conn.execute(stmt)
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -422,6 +484,7 @@ _MIGRATIONS = {
     7: _migrate_to_7,
     8: _migrate_to_8,
     9: _migrate_to_9,
+    10: _migrate_to_10,
 }
 
 
