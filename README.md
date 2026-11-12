@@ -94,6 +94,8 @@ shakedown serve      [--host HOST] [--port PORT]    # optional HTTP control plan
 
 `shakedown validate` is the readiness preflight to run before the first large mirror: it checks config, path writability, that archive files can be hardlinked into the library, source/collection reachability, credentials, layout collision-risk, and handoff configuration, then reports one pass/fail per source and collection. It never downloads a collection and leaves nothing behind; a pass means "ready to attempt a sync," not "already mirrored." Handoff checks are non-mutating by default — pass `--live-handoff` to send a marked test webhook or run the configured command with a marked test payload.
 
+Writing commands take turns: one that finds another run still writing exits 1 at once. A `sync --collection` refused this way is also rescheduled: it logs that, and `shakedown status` shows `rescheduled: first skipped <time>; runs when the current sync finishes` for that collection until a sync finishes it. `status --json` and `GET /status` carry the same as `"rescheduled": {"since": "<time>"}`, or `null`. A sync without `--collection`, `sync --refresh-metadata`, `POST /sync`, and the other writing commands are not rescheduled.
+
 `shakedown verify --deep` is the **only** command that hashes on-disk bytes. It is operator-invoked, never scheduled. Drift (e.g. from Beets retagging in place) is informational, not an error. `--reconform` re-fetches drifted files from the source if you want byte-level fidelity to upstream.
 
 ### The serve control plane
