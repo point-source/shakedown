@@ -2578,7 +2578,7 @@ result and time appear per collection.
 
 ## Dashboard UI kit §spec:ui-kit
 
-*Status: in progress (kit, token set B, and Terms approved 2026-11-12; screens not started)*
+*Status: in progress (kit, Terms, and every screen approved 2026-11-12; page not yet served by `serve`)*
 
 The visual kit, terms, and design authority for the read-only web
 dashboard (§spec:dashboard). §spec:dashboard and the endpoint sections
@@ -2669,13 +2669,32 @@ Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
 - Show IDs and other source text render as plain React text (never
   `dangerouslySetInnerHTML`), in `font-mono text-xs`.
 - The page's content sits in one `main` landmark.
+- Below 1024 px wide, a table of more than three columns becomes
+  stacked rows (one list item per row, the key fields on two lines);
+  from 1024 px it is a Table.
+- Show IDs, paths, and server text wrap with `wrap-anywhere` (they
+  break inside a word only when they must); they are never truncated,
+  because a phone cannot hover to read the rest.
+- A list shows its first few items and "and N more"; there are no
+  expanders.
+
+**Operator decisions on the screens (2026-11-12).**
+
+- Running now lists only running runs. An ended run shows in Recent
+  runs and on the Runs tab; a killed one also in Needs attention. The
+  ended entries `/api/activity` keeps for ten minutes are not shown.
+- A running run whose `last_progress_at` is more than 5 minutes old
+  gets a `warning` Badge "No progress for <time>". This threshold is a
+  page decision; the API carries no verdict (§spec:run-activity).
+- The disk-full estimate (`disk.full_in_days`) is not shown.
+- On desktop (1024 px and up) Running now sits left of Needs attention;
+  below 1024 px Needs attention comes first.
 
 The kit sheet (`web/src/KitSheet.tsx`, `?view=kit`) shows every token
 and component state. The operator approved it on 2026-11-12 (round 2);
 its goldens are `web/tests/__screenshots__/kit-<size>-<theme>.png`.
-`web/src/KitPreview.tsx` is the representative screen the token sets
-were compared on; it is not a designed screen and the Screens step
-replaces it.
+The representative screen the token sets were compared on was replaced
+by the designed page.
 
 **Direction.** Track A: no bespoke direction. Three token sets were
 compared on one representative screen (round 1, 2026-11-12): A neutral
@@ -2740,13 +2759,31 @@ Spec and code names in the last column never appear on screen.
 | Retry | Another attempt at a request that failed. | redo | `retry` |
 | Drift | Archive files that changed after Shakedown recorded them. | corruption, mismatch | drift, `drift_files` |
 | Phases | Starting · Listing · Discovering · Downloading · Tagging · Updating library · Sending notices · Verifying · Finishing | — | `phase` codes; `staging` → Updating library, `notifying` → Sending notices |
+| Timed out | A request got no answer in time. | slow, hung | `timeout` |
+| Connection failed | Shakedown could not connect to the source. | offline, network error | `connection_error` |
+| Refused | The source refused the request. | denied, blocked | `refused` |
+| Passed | The last validation found no problems. | OK, valid, green | validation `completed` |
+| Passed with problems | The last validation finished but found problems. | warnings, partial | validation `completed_with_item_issues` |
+| Did not finish | The last validation stopped before it finished. | interrupted, aborted | validation `in_progress` |
+| Never validated | No validation is recorded for the collection. | unknown, untested | validation `status: null` |
+| No playable copy | A show with no audio file a player can read. | broken, unplayable | `not_playable` |
+| Original plus a playable copy | A show kept as its unplayable original beside a staged playable copy. | duplicate, converted | `playable_copies` |
+| Last completed sync | The end of a collection's latest sync that finished Completed or Completed, some shows failed. | last good sync, last success | `last_successful_sync_at` |
 
 ### Screens
 
 Each approved screen lists its handoff spec, its goldens
-(`web/tests/__screenshots__/`), and the round it was approved in.
+(`web/tests/__screenshots__/<scenario>-<tab>-<size>-<theme>.png`, from
+`web/tests/screens.spec.ts`), and the round it was approved in. The page
+is one route (`GET /`) with four tabs.
 
-*None yet.*
+| Screen | Handoff spec | Golden scenarios | Approved |
+| --- | --- | --- | --- |
+| Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading | round 2, 2026-11-12 |
+| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content | round 2, 2026-11-12 |
+| Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content | round 1, 2026-11-12 |
+| Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content | round 1, 2026-11-12 |
+| Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
 
 ### Harness
 
@@ -2767,6 +2804,12 @@ Each approved screen lists its handoff spec, its goldens
   change for the operator.
 - Fixtures (`web/src/fixtures/`) hold answers in the exact shape of the
   `/api/*` endpoints (`web/src/api/types.ts`), with a fixed clock.
+  `web/src/fixtures/scenarios.ts` names each scenario and how the server
+  behaves in it (answers, 503 with the config error, stops answering, or
+  hangs). `web/scripts/fixture-page.mjs` serves a scenario to the real
+  page by intercepting its `./api/*` requests, fixes the clock, and holds
+  the answers until the bundled fonts load, so chart labels measure the
+  same every time.
 - Handoff specs live in `docs/ui/handoff/`, one per screen, from
   `docs/ui/handoff/_template.md`.
 
