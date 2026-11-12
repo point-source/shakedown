@@ -595,7 +595,8 @@ cannot is unaffected and simply always resolves full manifests.
 The core, not the plugin, measures network activity for the dashboard
 (§spec:network-activity): bytes from the core-owned temp folder, requests
 in flight from the budget, and events from attempt outcomes and the
-failure cause a plugin already reports for retry decisions. A plugin
+failure cause a plugin reports with each failed request, the same cause
+that drives retry decisions. A plugin
 needs nothing dashboard-specific; the one exception is a plugin that
 retries its collection listing itself, which reports each retry to the
 core (the IA plugin does).
@@ -1664,8 +1665,8 @@ appears in Navidrome with no handoff configured.
 
 ## Serve control plane §spec:serve
 
-*Status: complete; the dashboard page and its read endpoints are not
-started (§spec:dashboard)*
+*Status: complete; the dashboard's read endpoints are complete, its page is
+not started (§spec:dashboard)*
 
 An optional `shakedown serve` command exposes a small HTTP API for
 users who want ad-hoc triggers and monitoring without `docker exec`
@@ -2263,7 +2264,9 @@ sources: [...]}`. Each source: `{source, series: [{t, bytes,
 peak_requests_in_flight, rate_limited, server_errors,
 timeouts, connection_errors, retries, backoff_seconds}], events: [...],
 events_total}`. `bucket_seconds` widens with the window so a series
-holds at most ~720 points (60 for one day, 3600 for 30). `events` holds
+keeps every minute for one day (60) and beyond that holds at most 720
+points, using the narrowest of 120, 300, 600, 900, 1800, or 3600 (3600
+for 30). `events` holds
 the newest 500 in the window, newest first: `{at, kind, http_status,
 collection, identifier, wait_seconds, detail}` where `kind` is
 `rate_limited`, `server_error`, `timeout`, `connection_error`,
