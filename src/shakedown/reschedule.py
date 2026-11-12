@@ -45,18 +45,12 @@ def record_skipped(config: Config, scope: Sequence[tuple[str, str]]) -> None:
             repo = RescheduledRepo(conn)
             now = datetime.now()
             recorded = [(s, c, repo.record(s, c, now)) for s, c in scope]
-    except sqlite3.OperationalError as e:
-        if "locked" in str(e):
-            log.warning(
-                "%s: not rescheduled: the state database stayed busy for more than "
-                "%gs; nothing recorded",
-                names, db.BUSY_TIMEOUT_MS / 1000,
-            )
-        else:
-            _unreadable(names, e)
-        return
     except sqlite3.Error as e:
-        _unreadable(names, e)
+        if e.sqlite_errorcode == sqlite3.SQLITE_BUSY:
+            why = f"the state database stayed busy for more than {db.BUSY_TIMEOUT_MS / 1000:g}s"
+        else:
+            why = f"the state database could not be written ({e})"
+        log.warning("%s: not rescheduled: %s; nothing recorded", names, why)
         return
     for source, collection, since in recorded:
         log.warning(
@@ -65,10 +59,3 @@ def record_skipped(config: Config, scope: Sequence[tuple[str, str]]) -> None:
             source, collection, since.isoformat(),
         )
 
-
-def _unreadable(names: str, error: sqlite3.Error) -> None:
-    log.warning(
-        "%s: not rescheduled: the state database could not be read (%s); "
-        "nothing recorded",
-        names, error,
-    )

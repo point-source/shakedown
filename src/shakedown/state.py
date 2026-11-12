@@ -832,14 +832,11 @@ class RescheduledRepo:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
-        self._present: bool | None = None
 
     def _has_table(self) -> bool:
-        if self._present is None:
-            self._present = self.conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rescheduled_syncs'"
-            ).fetchone() is not None
-        return self._present
+        return self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rescheduled_syncs'"
+        ).fetchone() is not None
 
     def record(self, source: str, collection: str, at: datetime) -> datetime:
         """Record a skip and return the collection's oldest skip time: an entry already
