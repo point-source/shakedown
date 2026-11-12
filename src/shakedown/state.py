@@ -393,6 +393,21 @@ class RunRepo:
             )
         ]
 
+    def finished(
+        self, source: str, collection: str, kinds: tuple[RunKind, ...]
+    ) -> Iterator[Run]:
+        """The collection's closed runs of ``kinds``, latest finish first."""
+        cur = self.conn.execute(
+            f"""
+            SELECT * FROM runs
+            WHERE source_name=? AND collection_name=? AND finished_at IS NOT NULL
+              AND kind IN ({', '.join('?' * len(kinds))})
+            ORDER BY finished_at DESC, id DESC
+            """,
+            (source, collection, *(k.value for k in kinds)),
+        )
+        return (_row_to_run(row) for row in cur)
+
 
 def _row_to_run(row: sqlite3.Row) -> Run:
     return Run(

@@ -293,6 +293,16 @@ class ActivityRepo:
         ended.sort(key=lambda e: (e["finished_at"], e["activity_id"]), reverse=True)
         return running + ended
 
+    def for_run(self, run_id: int, now: datetime) -> dict[str, Any] | None:
+        """The entry of run record ``run_id`` as the live view reads it, or None (no
+        entry, or a database before schema v10)."""
+        if not self.has_table():
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM run_activity WHERE run_id=? ORDER BY id DESC LIMIT 1", (run_id,)
+        ).fetchone()
+        return _as_seen(_live_entry(row), now) if row else None
+
     def since(self, started_at: datetime, now: datetime) -> list[dict[str, Any]]:
         """Every entry started at or after ``started_at``, as the live view reads it
         (a running entry that stopped reporting reads as ended), plus the

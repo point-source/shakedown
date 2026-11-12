@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from shakedown.activity import ABANDONED_ERROR, ActivityKind, ActivityRepo
-from shakedown.dashboard_library import last_good_sync_at
 from shakedown.db import connect
+from shakedown.history import last_good_sync_at
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile, Run, RunKind
 from shakedown.state import ItemRepo, RunRepo
 from shakedown.sync import run_sync
@@ -131,11 +131,11 @@ def _run(conn, *, kind: RunKind = RunKind.SYNC, finished: datetime | None,
 def test_last_good_sync_is_the_latest_completed_sync_or_catch_up(tmp_path: Path) -> None:
     day = datetime(2026, 11, 10, 3, 0)
     with closing(connect(tmp_path / "s.db")) as conn:
-        assert last_good_sync_at(conn, "s", "c") is None
+        assert last_good_sync_at(conn, "s", "c", datetime.now()) is None
         _run(conn, finished=day)
-        assert last_good_sync_at(conn, "s", "c") == day
+        assert last_good_sync_at(conn, "s", "c", datetime.now()) == day
         _run(conn, kind=RunKind.CATCH_UP, finished=day + timedelta(hours=1), failed=2)
-        assert last_good_sync_at(conn, "s", "c") == day + timedelta(hours=1)
+        assert last_good_sync_at(conn, "s", "c", datetime.now()) == day + timedelta(hours=1)
         # Not good: a stale listing, a crash, a killed run, a refetch, an open run.
         _run(conn, finished=day + timedelta(hours=2), stale=True)
         _run(conn, finished=day + timedelta(hours=3), errors=["sync crashed: boom"])
@@ -145,7 +145,7 @@ def test_last_good_sync_is_the_latest_completed_sync_or_catch_up(tmp_path: Path)
              errors=["run ended unexpectedly (killed by SIGKILL)"])
         _run(conn, kind=RunKind.REFETCH, finished=day + timedelta(hours=5))
         _run(conn, finished=None)
-        assert last_good_sync_at(conn, "s", "c") == day + timedelta(hours=1)
+        assert last_good_sync_at(conn, "s", "c", datetime.now()) == day + timedelta(hours=1)
 
 
 def test_an_ended_activity_entry_decides_the_result(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ def test_an_ended_activity_entry_decides_the_result(tmp_path: Path) -> None:
                                 started_by_serve=False, at=day)
         activity.end(entry, "failed_before_completion", day + timedelta(hours=1))
         assert good.id is not None
-        assert last_good_sync_at(conn, "s", "c") == day
+        assert last_good_sync_at(conn, "s", "c", datetime.now()) == day
 
 
 def test_last_good_sync_on_a_pre_v10_database(tmp_path: Path) -> None:
@@ -171,5 +171,5 @@ def test_last_good_sync_on_a_pre_v10_database(tmp_path: Path) -> None:
     from shakedown.db import connect_reader
 
     with closing(connect_reader(db)) as conn:
-        assert last_good_sync_at(conn, "s", "c") == day
+        assert last_good_sync_at(conn, "s", "c", datetime.now()) == day
         assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 9

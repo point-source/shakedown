@@ -73,6 +73,24 @@ def _record_end(run: Run, now: datetime) -> RunEnd:
     return RunEnd(result, None, run.finished_at)
 
 
+_GOOD = (OperationStatus.COMPLETED.value, OperationStatus.COMPLETED_WITH_ITEM_ISSUES.value)
+
+
+def last_good_sync_at(
+    conn: sqlite3.Connection, source: str, collection: str, now: datetime
+) -> datetime | None:
+    """When the collection's latest sync or catch-up that ended `completed` or
+    `completed_with_item_issues` finished, or None (§spec:run-history "Last good
+    sync"); each run's result read as the run list reads it."""
+    activity = ActivityRepo(conn)
+    for run in RunRepo(conn).finished(source, collection, (RunKind.SYNC, RunKind.CATCH_UP)):
+        assert run.id is not None
+        end = run_end(run, activity.for_run(run.id, now), now)
+        if end.result in _GOOD:
+            return run.finished_at
+    return None
+
+
 def _duration(started_at: datetime, finished_at: datetime | None) -> int | None:
     return int((finished_at - started_at).total_seconds()) if finished_at else None
 
