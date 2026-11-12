@@ -235,7 +235,6 @@ class IAPlugin(SourcePlugin):
                 log.info("IA download refused for %s: %s", identifier, e)
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=0,
                     error=DOWNLOAD_REFUSED_REASON,
                     unavailable=True,
                     cause=FailureCause.REFUSED,
@@ -244,16 +243,12 @@ class IAPlugin(SourcePlugin):
             log.warning("IA download failed for %s: %s", identifier, e)
             return FetchResult(
                 success=False,
-                bytes_downloaded=0,
                 error=str(e),
                 retriable=_is_retriable(e),
                 retry_after=retry_after_seconds(e),
                 cause=failure_cause(e),
                 http_status=http_status(e),
             )
-
-        # Every manifest file is now on disk: reused above or just written.
-        bytes_downloaded = sum((dest_dir / mf.name).stat().st_size for mf in files)
 
         # Check every downloaded file against the manifest (reused leftovers were
         # checked above). A corrupt file is removed and the fetch retried.
@@ -263,12 +258,11 @@ class IAPlugin(SourcePlugin):
                 (dest_dir / mf.name).unlink()
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=bytes_downloaded,
                     error=mismatch,
                     retriable=True,
                 )
 
-        return FetchResult(success=True, bytes_downloaded=bytes_downloaded)
+        return FetchResult(success=True)
 
     def _download_file(self, identifier: str, name: str, path: Path) -> None:
         """Stream one file straight to its place in the temp dir, so every finished

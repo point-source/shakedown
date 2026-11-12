@@ -220,7 +220,6 @@ class FetchResult:
       mismatch).
     """
     success: bool
-    bytes_downloaded: int
     error: str | None = None
     retriable: bool = False
     retry_after: float | None = None

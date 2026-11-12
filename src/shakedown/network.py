@@ -4,7 +4,8 @@ each network event, recorded by the run into the state database (schema v10)."""
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import StrEnum
@@ -165,3 +166,71 @@ class NetworkRepo:
     def last_event(self, source: str, since: datetime) -> NetworkEvent | None:
         events = self.events(source, since, limit=1)
         return events[0] if events else None
+
+
+class NetworkMeter:
+    """One source's network activity in this process, as the run's hooks report it:
+    per-minute totals and events not yet written. Collections of the same source share
+    one meter, so their requests and bytes add up to the source's. Every method is an
+    in-memory update under a lock and never raises; the recorder takes what is pending
+    in its few-second writes and gives it back if the write cannot land."""
+
+    def __init__(self, source: str, now: Callable[[], datetime] = datetime.now) -> None:
+        self.source = source
+        self._now = now
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self._minutes: dict[datetime, MinuteTotals] = {}
+        self._events: list[NetworkEvent] = []
+
+    def _minute(self, at: datetime) -> MinuteTotals:
+        return self._minutes.setdefault(at.replace(second=0, microsecond=0), MinuteTotals())
+
+    def _note_peak(self, at: datetime) -> None:
+        if self._in_flight > 0:
+            totals = self._minute(at)
+            totals.peak_requests_in_flight = max(totals.peak_requests_in_flight, self._in_flight)
+
+    def add_bytes(self, n: int) -> None:
+        with self._lock:
+            now = self._now()
+            self._minute(now).bytes += n
+            self._note_peak(now)
+
+    def request_started(self) -> None:
+        with self._lock:
+            self._in_flight += 1
+            self._note_peak(self._now())
+
+    def request_ended(self) -> None:
+        with self._lock:
+            self._in_flight -= 1
+
+    def event(self, event: NetworkEvent) -> None:
+        with self._lock:
+            self._events.append(event)
+            totals = self._minute(event.at)
+            counter = CAUSE_COUNTERS.get(event.kind)
+            if counter is not None:
+                setattr(totals, counter, getattr(totals, counter) + 1)
+            elif event.kind is EventKind.RETRY:
+                totals.retries += 1
+            elif event.kind is EventKind.BACKOFF:
+                totals.backoff_seconds += event.wait_seconds or 0.0
+
+    def take(self) -> tuple[dict[datetime, MinuteTotals], list[NetworkEvent]]:
+        """What is pending, now cleared; the current minute's peak counts requests still
+        in flight."""
+        with self._lock:
+            self._note_peak(self._now())
+            minutes = {m: t for m, t in self._minutes.items() if t.any()}
+            events = self._events
+            self._minutes, self._events = {}, []
+            return minutes, events
+
+    def give_back(self, minutes: dict[datetime, MinuteTotals], events: list[NetworkEvent]) -> None:
+        """Return what a failed write took, so the next write carries it."""
+        with self._lock:
+            for minute, totals in minutes.items():
+                self._minute(minute).merge(totals)
+            self._events[:0] = events

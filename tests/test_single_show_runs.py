@@ -336,7 +336,7 @@ def _refuse_download(monkeypatch: pytest.MonkeyPatch, identifier: str) -> None:
 
     def fetch(self, ident, files, dest_dir):
         if ident == identifier:
-            return FetchResult(success=False, bytes_downloaded=0, error="refused",
+            return FetchResult(success=False, error="refused",
                                unavailable=True)
         return real_fetch(self, ident, files, dest_dir)
 

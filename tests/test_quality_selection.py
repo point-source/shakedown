@@ -716,7 +716,7 @@ def test_reconform_counts_a_show_failed_once(
     monkeypatch.setattr(
         FakePlugin, "fetch",
         lambda self, identifier, files, dest_dir: FetchResult(
-            success=False, bytes_downloaded=0, error="connection reset"
+            success=False, error="connection reset"
         ),
     )
 

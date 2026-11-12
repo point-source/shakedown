@@ -140,7 +140,6 @@ a change in the set of file names is detectable.
 ```python
 FetchResult(
     success: bool,
-    bytes_downloaded: int,
     error: str | None = None,
     retriable: bool = False,
     retry_after: float | None = None,
@@ -152,8 +151,6 @@ FetchResult(
 
 - `success` — `True` only if every given file was written to `dest_dir` and
   passed the source's checksum. Otherwise `False`.
-- `bytes_downloaded` — total bytes written this call, for run stats. Report your
-  best count even on failure.
 - `error` — a short message when `success` is `False`; recorded and shown in
   `status`.
 - `retriable` — on failure, `True` for a *transient* fault the core should retry
@@ -330,7 +327,7 @@ from shakedown.plugins.base import (
 def _failed(exc: Exception) -> FetchResult:
     cause = failure_cause(exc)
     return FetchResult(
-        success=False, bytes_downloaded=0, error=str(exc),
+        success=False, error=str(exc),
         retriable=cause in TRANSIENT_CAUSES,
         retry_after=retry_after_seconds(exc),
         cause=cause, http_status=http_status(exc),
@@ -570,19 +567,16 @@ class ExamplePlugin(SourcePlugin):
     def fetch(
         self, identifier: str, files: Sequence[ManifestFile], dest_dir: Path
     ) -> FetchResult:
-        total = 0
         for mf in files:
             # Never write a remote-supplied name outside the item directory.
             if not _contained(dest_dir, mf.name):
                 return FetchResult(
-                    success=False, bytes_downloaded=total,
-                    error=f"unsafe file name: {mf.name!r}", retriable=False,
+                    success=False, error=f"unsafe file name: {mf.name!r}", retriable=False,
                 )
             out = dest_dir / mf.name
             out.parent.mkdir(parents=True, exist_ok=True)
             # Keep a file an earlier attempt finished; fetch anything else.
             if reusable_leftover(out, mf):
-                total += out.stat().st_size
                 continue
             try:
                 r = self._http.get(f"{API}/items/{identifier}/{mf.name}", timeout=60)
@@ -591,12 +585,11 @@ class ExamplePlugin(SourcePlugin):
                 cause = failure_cause(e)
                 if cause is FailureCause.REFUSED:
                     return FetchResult(
-                        success=False, bytes_downloaded=total,
-                        error="download refused by the source", unavailable=True,
+                        success=False, error="download refused by the source", unavailable=True,
                         cause=cause, http_status=403,
                     )
                 return FetchResult(
-                    success=False, bytes_downloaded=total, error=str(e),
+                    success=False, error=str(e),
                     retriable=cause in TRANSIENT_CAUSES,
                     retry_after=retry_after_seconds(e),
                     cause=cause, http_status=http_status(e),
@@ -606,13 +599,11 @@ class ExamplePlugin(SourcePlugin):
             if mf.md5 is not None and hashlib.md5(data).hexdigest() != mf.md5:
                 # Checksum mismatch is a transient fault worth another attempt.
                 return FetchResult(
-                    success=False, bytes_downloaded=total,
-                    error=f"checksum mismatch for {mf.name}", retriable=True,
+                    success=False, error=f"checksum mismatch for {mf.name}", retriable=True,
                 )
             out.write_bytes(data)
-            total += len(data)
 
-        return FetchResult(success=True, bytes_downloaded=total)
+        return FetchResult(success=True)
 
     def verify(self, files: Sequence[ManifestFile], archive_path: Path) -> VerifyResult:
         missing = [f.name for f in files if not (archive_path / f.name).is_file()]

@@ -222,7 +222,6 @@ class EtreePlugin(SourcePlugin):
     def fetch(
         self, identifier: str, files: Sequence[ManifestFile], dest_dir: Path
     ) -> FetchResult:
-        total = 0
         for mf in files:
             # Trust boundary: the file name comes from the remote source. Refuse
             # to write anything that would escape the item directory. The core
@@ -231,7 +230,6 @@ class EtreePlugin(SourcePlugin):
             if not _is_contained(dest_dir, mf.name):
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=total,
                     error=f"unsafe file name escapes item directory: {mf.name!r}",
                     retriable=False,
                 )
@@ -242,14 +240,12 @@ class EtreePlugin(SourcePlugin):
             # A file an earlier attempt left behind is kept only once it matches the
             # manifest's size and md5; one we cannot check is fetched again.
             if reusable_leftover(out, mf):
-                total += out.stat().st_size
                 continue
 
             # Stream to disk while hashing, so a multi-GB file never lands in
             # memory in full (etree FLAC sets are large and fetches run
             # concurrently).
             hasher = hashlib.md5()
-            written = 0
             try:
                 with self._client.stream(
                     "GET", f"/download/{quote(identifier)}/{quote(mf.name)}"
@@ -259,14 +255,12 @@ class EtreePlugin(SourcePlugin):
                         for chunk in resp.iter_bytes():
                             fh.write(chunk)
                             hasher.update(chunk)
-                            written += len(chunk)
             except httpx.HTTPError as exc:
                 if http_status(exc) == 403:
                     # archive.org serves some shows stream-only with no restriction
                     # flag in their metadata; the refusal is the only signal.
                     return FetchResult(
                         success=False,
-                        bytes_downloaded=total,
                         error=DOWNLOAD_REFUSED_REASON,
                         unavailable=True,
                         cause=FailureCause.REFUSED,
@@ -275,7 +269,6 @@ class EtreePlugin(SourcePlugin):
                 retriable, retry_after, message = _classify(exc)
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=total,
                     error=f"{mf.name}: {message}",
                     retriable=retriable,
                     retry_after=retry_after,
@@ -289,14 +282,11 @@ class EtreePlugin(SourcePlugin):
                 out.unlink(missing_ok=True)
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=total,
                     error=f"checksum mismatch for {mf.name}",
                     retriable=True,
                 )
 
-            total += written
-
-        return FetchResult(success=True, bytes_downloaded=total)
+        return FetchResult(success=True)
 
     # -- verify -------------------------------------------------------------
 

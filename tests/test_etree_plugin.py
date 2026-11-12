@@ -270,7 +270,7 @@ def _item_with_files(files: list[ManifestFile]) -> ItemDescriptor:
     return ItemDescriptor(identifier="gd77", manifest=Manifest(files=tuple(files)))
 
 
-def test_fetch_writes_files_and_reports_bytes(tmp_path: Path) -> None:
+def test_fetch_writes_files(tmp_path: Path) -> None:
     content = b"flac-bytes"
     md5 = hashlib.md5(content).hexdigest()
 
@@ -283,7 +283,6 @@ def test_fetch_writes_files_and_reports_bytes(tmp_path: Path) -> None:
     result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is True
-    assert result.bytes_downloaded == len(content)
     assert (tmp_path / "show.flac").read_bytes() == content
 
 
@@ -408,7 +407,7 @@ def test_fetch_is_idempotent_over_existing_file(tmp_path: Path) -> None:
     result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
 
     assert result.success is True
-    assert result.bytes_downloaded == len(content)
+    assert (tmp_path / "show.flac").read_bytes() == content
 
 
 # -- verify -----------------------------------------------------------------

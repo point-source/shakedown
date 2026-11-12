@@ -284,7 +284,7 @@ def test_short_file_is_retried_and_never_recorded_complete(
         attempts["n"] += 1
         dest_dir.mkdir(parents=True, exist_ok=True)
         (dest_dir / "a.flac").write_bytes(b"full")  # truncated, but claims success
-        return FetchResult(success=True, bytes_downloaded=4)
+        return FetchResult(success=True)
 
     monkeypatch.setattr(FakePlugin, "fetch", short_fetch)
 
@@ -381,7 +381,7 @@ def test_abandoned_temp_dirs_are_removed_but_failed_shows_keep_theirs(
 
     def fail_c(self, identifier, files, dest_dir):
         (dest_dir / "gd-c.flac").write_bytes(b"hello")  # partial, kept for resume
-        return FetchResult(success=False, bytes_downloaded=5, error="timeout", retriable=True)
+        return FetchResult(success=False, error="timeout", retriable=True)
 
     monkeypatch.setattr(FakePlugin, "fetch", fail_c)
 
@@ -425,8 +425,8 @@ def test_download_is_recorded_and_linked_before_discovery_finishes(
     fetched = {"gd-a": threading.Event(), "gd-b": threading.Event()}
     real_fetch_one = sync_module._fetch_one
 
-    def fetch_one(plugin, target, archive_root, collection):
-        outcome = real_fetch_one(plugin, target, archive_root, collection)
+    def fetch_one(plugin, target, archive_root, collection, progress=None):
+        outcome = real_fetch_one(plugin, target, archive_root, collection, progress)
         if target.descriptor.identifier in fetched:
             fetched[target.descriptor.identifier].set()
         return outcome

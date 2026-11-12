@@ -49,6 +49,7 @@ from shakedown.models import (
     Run,
     RunKind,
 )
+from shakedown.network import EventKind
 from shakedown.notify import (
     SyncCompletePayload,
     SyncFailedPayload,
@@ -62,7 +63,7 @@ from shakedown.placement import (
     log_separations,
 )
 from shakedown.plugins import registry
-from shakedown.plugins.base import FetchResult, ListedItem, SourcePlugin
+from shakedown.plugins.base import FailureCause, FetchResult, ListedItem, SourcePlugin
 from shakedown.reschedule import record_skipped
 from shakedown.staging import (
     METADATA_SIDECAR,
@@ -178,7 +179,6 @@ class CollectionSyncStats:
     new: int = 0
     updated: int = 0
     failed: int = 0
-    bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items left untouched
     # Fetches the source refused (recorded unavailable, not failed).
@@ -200,6 +200,12 @@ class CollectionSyncStats:
     # The run's live progress hooks (§spec:run-activity); detached — recording
     # nowhere — unless the run opened an activity entry.
     progress: Progress = field(default_factory=lambda: Progress(ActivityKind.SYNC))
+
+    @property
+    def bytes_downloaded(self) -> int:
+        """The bytes this run fetched from the source, measured by the core
+        (§spec:network-activity "Bytes downloaded means bytes fetched")."""
+        return self.progress.bytes_fetched()
 
 
 def run_sync(
@@ -1518,7 +1524,6 @@ def _process_fetch_result(
         _record_failed(items, source.name, collection, desc, outcome.error)
         return
 
-    stats.bytes_downloaded += outcome.bytes_downloaded
     if target.action == PlanAction.NEW:
         stats.new += 1
     else:
@@ -1537,7 +1542,6 @@ def _process_fetch_result(
 class _FetchOutcome:
     success: bool
     archive_path: Path
-    bytes_downloaded: int = 0
     error: str | None = None
     unavailable: bool = False  # the source refuses to serve the item
     # What tagging the downloaded files recorded, per file; None when nothing was tagged.
@@ -1563,6 +1567,7 @@ def _fetch_with_retries(
     *,
     files: Sequence[ManifestFile] | None = None,
     max_attempts: int = _MAX_FETCH_ATTEMPTS,
+    progress: Progress | None = None,
 ) -> FetchResult:
     """Call plugin.fetch with bounded retries and backoff (SPEC §spec:failure-behavior).
 
@@ -1577,12 +1582,17 @@ def _fetch_with_retries(
     a file to fetch is removed before each attempt.
 
     ``files`` are the files to download (default: the whole manifest).
+
+    ``progress`` measures each attempt's bytes in the temp dir and records each failed
+    attempt's cause, the retry, and the wait (§spec:network-activity).
     """
+    progress = progress or Progress(ActivityKind.SYNC)
     wanted = desc.manifest.files if files is None else tuple(files)
     for attempt in range(1, max_attempts + 1):
         _prepare_tmp_dir(wanted, tmp_dir)
 
-        result = plugin.fetch(desc.identifier, wanted, tmp_dir)
+        with progress.fetch_attempt(desc.identifier, tmp_dir):
+            result = plugin.fetch(desc.identifier, wanted, tmp_dir)
         if result.success:
             short = _size_mismatches(wanted, tmp_dir)
             if short:
@@ -1591,10 +1601,11 @@ def _fetch_with_retries(
                 # truncated download.
                 result = FetchResult(
                     success=False,
-                    bytes_downloaded=result.bytes_downloaded,
                     error=f"size differs from the source after fetch: {short[:5]}",
                     retriable=True,
                 )
+        if not result.success:
+            _record_failed_attempt(progress, desc.identifier, result)
         if result.success or not result.retriable or attempt == max_attempts:
             return result
 
@@ -1610,8 +1621,27 @@ def _fetch_with_retries(
             "fetch attempt %d/%d for %s failed (%s); retrying in %.1fs",
             attempt, max_attempts, desc.identifier, result.error, delay,
         )
+        progress.network_event(EventKind.RETRY, identifier=desc.identifier, detail=result.error)
+        progress.network_event(EventKind.BACKOFF, identifier=desc.identifier, wait_seconds=delay)
         time.sleep(delay)
     raise AssertionError("unreachable: max_attempts must be >= 1")
+
+
+def _record_failed_attempt(progress: Progress, identifier: str, result: FetchResult) -> None:
+    """A failed fetch attempt's cause, as the plugin reported it, is a network event;
+    a refusal is one even without a cause. A failure that was not a request (a
+    checksum or size mismatch) has none."""
+    cause = FailureCause.REFUSED if result.unavailable else result.cause
+    if cause is None:
+        return
+    kind = EventKind(cause.value)
+    progress.network_event(
+        kind,
+        identifier=identifier,
+        http_status=result.http_status,
+        wait_seconds=result.retry_after if kind is EventKind.RATE_LIMITED else None,
+        detail=result.error,
+    )
 
 
 def _prepare_tmp_dir(files: Sequence[ManifestFile], tmp_dir: Path) -> None:
@@ -1693,15 +1723,14 @@ def _fetch_one_budgeted(
     upstream connection. ``progress`` lists the show as worked on while it holds the
     slot (§spec:run-activity).
     """
-    with budget.slot():
+    with budget.slot(), progress.request():
         assert target.descriptor is not None
         identifier = target.descriptor.identifier
         progress.working(identifier)
-        progress.fetch_started(identifier, archive_root / f"{_TMP_PREFIX}{identifier}")
         try:
-            return _fetch_one(plugin, target, archive_root, collection)
+            return _fetch_one(plugin, target, archive_root, collection, progress)
         finally:
-            progress.fetch_finished(identifier)
+            progress.fetch_finished()
             progress.idle(identifier)
 
 
@@ -1710,6 +1739,7 @@ def _fetch_one(
     target: PlannedItem,
     archive_root: Path,
     collection: CollectionConfig,
+    progress: Progress | None = None,
 ) -> _FetchOutcome:
     """Core-owned atomic fetch into <archive_root>/<identifier>/ (SPEC §spec:sync-workflow).
 
@@ -1769,7 +1799,7 @@ def _fetch_one(
         )
 
     fetch = desc.manifest.files if target.fetch is None else target.fetch
-    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, files=fetch)
+    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, files=fetch, progress=progress)
     if fetch_result.unavailable:
         # Nothing will resume a download the source refuses; the archive copy (if
         # any) is untouched.
@@ -1783,7 +1813,6 @@ def _fetch_one(
         return _FetchOutcome(
             success=False,
             archive_path=dest,
-            bytes_downloaded=fetch_result.bytes_downloaded,
             error=fetch_result.error,
         )
 
@@ -1801,7 +1830,6 @@ def _fetch_one(
         return _FetchOutcome(
             success=False,
             archive_path=dest,
-            bytes_downloaded=fetch_result.bytes_downloaded,
             error=f"missing after fetch: {verified.missing_files[:5]}",
         )
 
@@ -1820,7 +1848,6 @@ def _fetch_one(
                 return _FetchOutcome(
                     success=False,
                     archive_path=dest,
-                    bytes_downloaded=fetch_result.bytes_downloaded,
                     error=tag_failure(name, e),
                 )
 
@@ -1846,7 +1873,6 @@ def _fetch_one(
     return _FetchOutcome(
         success=True,
         archive_path=dest,
-        bytes_downloaded=fetch_result.bytes_downloaded,
         tag_records=tag_records,
     )
 

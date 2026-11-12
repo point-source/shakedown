@@ -294,7 +294,6 @@ def test_fetch_writes_files_directly_into_dest(archive, tmp_path: Path) -> None:
     result = plugin.fetch(desc.identifier, desc.manifest.files, dest)
 
     assert result.success
-    assert result.bytes_downloaded == 5
     final = dest / "d1t01.flac"
     assert final.is_file()
     assert final.read_bytes() == b"audio"
