@@ -23,6 +23,6 @@ htmlcov/
 *.swp
 
 # Local data + secrets
-data/
+/data/
 shakedown.yaml
 .env
