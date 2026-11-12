@@ -27,7 +27,7 @@ from prometheus_client import (
 
 from shakedown import __version__
 from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope, load
-from shakedown.db import connect
+from shakedown.db import connect_reader
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
 from shakedown.trigger import DEFAULT_ARGV_PREFIX, Busy, ExitedEarly, Failed, launch
@@ -158,7 +158,7 @@ def build_app(
     @app.get("/status")
     def status() -> JSONResponse:
         config = current_config()
-        with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
             items = ItemRepo(conn)
             runs = RunRepo(conn)
             drift = DriftRepo(conn)
@@ -180,7 +180,7 @@ def build_app(
         # collection removed from the config stops reporting.
         for gauge in (g_items, g_bytes, g_drift):
             gauge.clear()
-        with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
             items = ItemRepo(conn)
             drift = DriftRepo(conn)
             runs = RunRepo(conn)

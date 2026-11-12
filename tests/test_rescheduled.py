@@ -375,3 +375,63 @@ def test_status_text_shows_the_rescheduled_collection(
     assert out.count(line) == 1
     section = out.split(f"=== {SRC}/b ===")[1].split("===")[0]
     assert line in section
+
+
+# --- reading an older schema --------------------------------------------------------
+
+
+def _roll_back_to_v8(config: Config) -> None:
+    """The database as the previous release left it: at v8, with no rescheduled
+    record."""
+    assert config.state_db is not None
+    with closing(sqlite3.connect(config.state_db)) as conn:
+        conn.execute("DROP TABLE rescheduled_syncs")
+        conn.execute("UPDATE schema_version SET version = 8")
+        conn.commit()
+
+
+def test_status_reads_an_older_schema_without_migrating_it(
+    config: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only writers holding the writer lock migrate: `status` run while the previous
+    release still writes leaves the database at its version and reports no
+    rescheduled entries (Q-1-1, operator 2026-11-12)."""
+    import json
+
+    from shakedown.status import print_status, show_item
+
+    _seed()
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 0
+    _roll_back_to_v8(config)
+    capsys.readouterr()
+
+    print_status(config, as_json=True)
+    summaries = {
+        (s["source"], s["collection"]): s for s in json.loads(capsys.readouterr().out)
+    }
+    print_status(config, as_json=False)
+    text = capsys.readouterr().out
+    show_item(config, "gd-1")
+    shown = capsys.readouterr().out
+
+    assert config.state_db is not None
+    assert _version(config.state_db) == 8
+    assert all(s["rescheduled"] is None for s in summaries.values())
+    b = summaries[(SRC, "b")]
+    assert b["counts"]["complete"] == 1
+    assert b["last_run"] is not None and b["last_run"]["items_new"] == 1
+    assert summaries[(SRC, "a")]["last_run"] is None
+    assert "rescheduled" not in text
+    assert f"=== {SRC}/b ===" in text and "last run: never" in text
+    assert f"=== {SRC}/b/gd-1 ===" in shown
+
+
+def test_status_on_a_new_install_creates_the_database(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No run has written a database yet: status still answers."""
+    from shakedown.status import print_status
+
+    cfg = _config(*tmp_roots)
+    print_status(cfg, as_json=False)
+    assert "last run: never" in capsys.readouterr().out

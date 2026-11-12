@@ -261,6 +261,18 @@ def open_unmigrated(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_reader(db_path: Path) -> sqlite3.Connection:
+    """Open the state DB for a command that only reads it (`status`, `item show`,
+    serve's `GET /status` and `/metrics`). Only writers holding the writer lock
+    migrate: a reader that migrated under a run of an older release would make that
+    run refuse the database the next time it opens it. Readers therefore tolerate an
+    older schema. A missing database is created at the current schema: no run has
+    written one yet."""
+    if not db_path.exists():
+        return connect(db_path)
+    return open_unmigrated(db_path)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     # CREATE TABLE IF NOT EXISTS brings a fresh DB fully up to date; for an
     # existing DB it is a no-op and the version-gated steps below apply the delta.

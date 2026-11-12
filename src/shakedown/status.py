@@ -7,7 +7,7 @@ from typing import Any
 import click
 
 from shakedown.config import Config
-from shakedown.db import connect
+from shakedown.db import connect_reader
 from shakedown.models import ItemStatus, OperationOutcome, RunKind
 from shakedown.state import (
     DriftRepo,
@@ -151,7 +151,7 @@ def _summarize_recovery(outcome: OperationOutcome) -> dict[str, Any]:
 
 
 def print_status(config: Config, *, as_json: bool) -> None:
-    conn = connect(config.state_db)  # type: ignore[arg-type]
+    conn = connect_reader(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     runs = RunRepo(conn)
     drift = DriftRepo(conn)
@@ -257,7 +257,7 @@ def _echo_capped(rows: list[str], cap: int = 10) -> None:
 
 
 def show_item(config: Config, identifier: str) -> None:
-    conn = connect(config.state_db)  # type: ignore[arg-type]
+    conn = connect_reader(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     found = False
     for source in config.sources:

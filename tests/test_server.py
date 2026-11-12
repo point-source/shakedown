@@ -258,14 +258,14 @@ async def test_status_and_metrics_read_sizes_from_the_db(
 
     monkeypatch.setattr(ItemRepo, "list_for_collection", no_full_rows)
     opened: list[sqlite3.Connection] = []
-    real_connect = server_module.connect
+    real_connect = server_module.connect_reader
 
     def tracking_connect(*args, **kwargs):
         conn = real_connect(*args, **kwargs)
         opened.append(conn)
         return conn
 
-    monkeypatch.setattr(server_module, "connect", tracking_connect)
+    monkeypatch.setattr(server_module, "connect_reader", tracking_connect)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app(config)),
@@ -283,6 +283,42 @@ async def test_status_and_metrics_read_sizes_from_the_db(
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_status_and_metrics_read_an_older_schema_without_migrating_it(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """serve never migrates the database: GET /status and /metrics while the previous
+    release still writes leave it at its version, with no rescheduled entries
+    (Q-1-1, operator 2026-11-12)."""
+    import sqlite3
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"audio")]
+    )
+    assert run_sync(config) == 0
+    assert config.state_db is not None
+    with closing(sqlite3.connect(config.state_db)) as conn:
+        conn.execute("DROP TABLE rescheduled_syncs")
+        conn.execute("UPDATE schema_version SET version = 8")
+        conn.commit()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(config)), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/status")
+        assert r.status_code == 200
+        assert r.json()[0]["counts"]["complete"] == 1
+        assert r.json()[0]["rescheduled"] is None
+        r = await client.get("/metrics")
+        assert r.status_code == 200
+        assert 'shakedown_bytes_on_disk{collection="coll1",source="fake-src"} 5.0' in r.text
+
+    with closing(sqlite3.connect(config.state_db)) as conn:
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 8
 
 
 @pytest.mark.asyncio

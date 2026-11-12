@@ -827,10 +827,19 @@ class PendingHandoffRepo:
 class RescheduledRepo:
     """Per collection whose sync was skipped because another run held the writer lock,
     the time of its oldest skip (§spec:rescheduled-syncs): shown in `status` until a
-    sync finishes the collection."""
+    sync finishes the collection. A reader of an older schema, which has no record,
+    sees no entries."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+        self._present: bool | None = None
+
+    def _has_table(self) -> bool:
+        if self._present is None:
+            self._present = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rescheduled_syncs'"
+            ).fetchone() is not None
+        return self._present
 
     def record(self, source: str, collection: str, at: datetime) -> datetime:
         """Record a skip and return the collection's oldest skip time: an entry already
@@ -848,6 +857,8 @@ class RescheduledRepo:
         return since
 
     def get(self, source: str, collection: str) -> datetime | None:
+        if not self._has_table():
+            return None
         row = self.conn.execute(
             "SELECT since FROM rescheduled_syncs WHERE source_name=? AND collection_name=?",
             (source, collection),
