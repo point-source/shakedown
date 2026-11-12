@@ -2306,7 +2306,7 @@ the test plugin: it appears with no dashboard change.
 
 ## Run history §spec:run-history
 
-*Status: in progress — the run list is complete (`GET /api/runs`); last good sync ships with §spec:library-stats*
+*Status: complete*
 
 The dashboard lists the last 30 days of runs and, per collection, when
 it last synced successfully (§req:success-criteria #30;
