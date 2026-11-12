@@ -37,9 +37,12 @@ def _collection_summary(
 ) -> dict[str, Any]:
     counts = items.count_by_status(source_name, collection_name)
     last = runs.latest(source_name, collection_name)
-    # Only a sync lists the source, so only a sync can leave the collection stale or
-    # clear it; a later single-show run does neither (§spec:failure-behavior).
-    last_sync = runs.latest(source_name, collection_name, kind=RunKind.SYNC)
+    # Only a sync (or a catch-up sync) lists the source, so only a sync can leave the
+    # collection stale or clear it; a later single-show run does neither
+    # (§spec:failure-behavior).
+    last_sync = runs.latest(
+        source_name, collection_name, kind=(RunKind.SYNC, RunKind.CATCH_UP)
+    )
     recovery = outcomes.latest_actionable(source_name, collection_name)
     bytes_on_disk = items.archived_bytes(source_name, collection_name)
 

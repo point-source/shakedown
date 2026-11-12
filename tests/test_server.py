@@ -454,7 +454,7 @@ async def test_triggered_sync_catches_up_rescheduled_collections_after_its_own(
     assert status["coll1"]["last_run"]["run_id"] == run_ids[0]
     caught_up = status["coll2"]["last_run"]
     assert caught_up["run_id"] not in run_ids
-    assert caught_up["kind"] == "sync" and caught_up["finished_at"] is not None
+    assert caught_up["kind"] == "catch_up" and caught_up["finished_at"] is not None
     assert caught_up["items_new"] == 1
     assert status["coll1"]["rescheduled"] is None and status["coll2"]["rescheduled"] is None
     assert 'shakedown_sync_runs_total{result="ok"} 1.0' in metrics

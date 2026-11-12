@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import requests
@@ -30,6 +30,9 @@ from shakedown.plugins.base import (
     retry_after_seconds,
 )
 from shakedown.selection import select
+
+if TYPE_CHECKING:
+    from shakedown.activity import Progress
 
 # The per-item lookup envelope, matched to archive.org's real latency
 # (SPEC §spec:slow-metadata): a slow, 5xx, or 429 answer costs a bounded wait.
@@ -356,6 +359,7 @@ def stream_items(
     enumerated: set[str],
     *,
     look_up: Callable[[ListedItem], bool] | None = None,
+    progress: Progress | None = None,
 ) -> Iterator[ItemDescriptor | LookupFailure]:
     """List the collection, then look its items up in parallel across the shared
     budget, yielding each description (or lookup failure) as it resolves
@@ -368,23 +372,59 @@ def stream_items(
 
     ``look_up`` decides per listed item whether to look it up (default: all) — the
     incremental fast path skips unchanged items.
+
+    ``progress`` hears how many items were listed and are to look up, each lookup
+    while it runs, and each one looked up (§spec:run-activity).
     """
     listing = list(plugin.list_items(collection))
     enumerated.update(row.identifier for row in listing)
     rows = [row for row in listing if look_up is None or look_up(row)]
-    yield from _windowed(rows, budget, lambda row: look_up_one(plugin, row, budget))
+    if progress is None:
+        yield from _windowed(rows, budget, lambda row: look_up_one(plugin, row, budget))
+        return
+    from shakedown.activity import Phase
+
+    progress.listed(len(listing))
+    progress.to_look_up(len(rows))
+    progress.phase(Phase.DISCOVERING)
+
+    def work(row: ListedItem) -> ItemDescriptor | LookupFailure:
+        progress.working(row.identifier)
+        try:
+            return look_up_one(plugin, row, budget)
+        finally:
+            progress.idle(row.identifier)
+
+    for found in _windowed(rows, budget, work):
+        progress.looked_up()
+        yield found
 
 
 def look_up_rows(
-    plugin: SourcePlugin, identifiers: Sequence[str], budget: SourceBudget
+    plugin: SourcePlugin,
+    identifiers: Sequence[str],
+    budget: SourceBudget,
+    progress: Progress | None = None,
 ) -> Iterator[tuple[str, ItemDetails | LookupFailure]]:
     """Look up just these items — no listing — in parallel across the shared budget,
     yielding each identifier with its validated lookup (every file the source lists,
     before selection) or its failure. A single-show run acts on the shows it names
-    (§spec:single-show-runs) and a reconform needs files outside the selection."""
-    yield from _windowed(
-        list(identifiers), budget, lambda identifier: (identifier, lookup(plugin, identifier, budget))
-    )
+    (§spec:single-show-runs) and a reconform needs files outside the selection.
+    ``progress`` hears each lookup while it runs and each one looked up."""
+
+    def work(identifier: str) -> tuple[str, ItemDetails | LookupFailure]:
+        if progress is not None:
+            progress.working(identifier)
+        try:
+            return identifier, lookup(plugin, identifier, budget)
+        finally:
+            if progress is not None:
+                progress.idle(identifier)
+
+    for found in _windowed(list(identifiers), budget, work):
+        if progress is not None:
+            progress.looked_up()
+        yield found
 
 
 def _windowed[T, R](rows: Sequence[T], budget: SourceBudget, work: Callable[[T], R]) -> Iterator[R]:

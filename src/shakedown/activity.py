@@ -329,6 +329,8 @@ class Progress:
         self._own_bytes = 0
         self._reported_bytes = 0
         self._last_progress_at: datetime | None = None
+        self._last_from_run: tuple[int, int] | None = None
+        self._fetches_finished = 0
         self._first_fetch_at: float | None = None
         self._samples: deque[tuple[float, int]] = deque()
 
@@ -409,8 +411,9 @@ class Progress:
     def fetch_started(self, identifier: str, tmp_dir: Path) -> None:
         """A fetch begins writing into its core-owned temp folder: its bytes are
         measured from what lands there (§spec:network-activity), not counting files
-        kept from an earlier attempt."""
-        baseline = _tree_size(tmp_dir)
+        kept from an earlier attempt. Leftovers the fetch then removes lower the
+        baseline when the timer next measures."""
+        baseline = _tree_size(tmp_dir) if tmp_dir.exists() else 0
         with self._lock:
             self._in_flight[identifier] = (tmp_dir, baseline)
             if self._first_fetch_at is None:
@@ -419,6 +422,7 @@ class Progress:
     def fetch_finished(self, identifier: str) -> None:
         with self._lock:
             self._in_flight.pop(identifier, None)
+            self._fetches_finished += 1
 
     # -- the recorder's side --------------------------------------------------------
 
@@ -426,10 +430,18 @@ class Progress:
         """Cumulative progress now. Measures in-flight temp folders, so it runs on
         the recorder's timer, outside the run's own work."""
         with self._lock:
-            in_flight = list(self._in_flight.values())
-        measured = 0 if final else sum(
-            max(_tree_size(tmp_dir) - baseline, 0) for tmp_dir, baseline in in_flight
-        )
+            in_flight = list(self._in_flight.items())
+        measured = 0
+        for identifier, (tmp_dir, baseline) in ([] if final else in_flight):
+            size = _tree_size(tmp_dir)
+            if size < baseline:
+                # The fetch removed leftovers it does not reuse: they were never
+                # this run's bytes.
+                baseline = size
+                with self._lock:
+                    if identifier in self._in_flight:
+                        self._in_flight[identifier] = (tmp_dir, size)
+            measured += size - baseline
         counts = self.run_counts() if self.run_counts is not None else None
         now_t = self._clock()
         with self._lock:
@@ -449,6 +461,15 @@ class Progress:
             speed = self._speed(now_t, SPEED_WINDOW_S)
             eta_speed = self._speed(now_t, ETA_WINDOW_S)
             values: dict[str, int | None] = {c: self._counts.get(c) for c in _COUNTERS}
+            if counts is not None:
+                # Done and failed are the run record's own figures, so the entry and
+                # `status` always agree (§spec:run-activity "status agrees").
+                from_run = (counts.items_new + counts.items_updated, counts.items_failed)
+                values["items_done"], values["items_failed"] = from_run
+                if from_run != self._last_from_run:
+                    if self._last_from_run is not None:
+                        self._last_progress_at = self._now()
+                    self._last_from_run = from_run
             if not self._enumerated and self.kind in _DOWNLOADING_KINDS:
                 values["items_to_fetch"] = None
             bytes_to_fetch = (
@@ -457,7 +478,7 @@ class Progress:
             )
             eta = None
             if downloading and self._enumerated and not final:
-                handled = self._counts["items_done"] + self._counts["items_failed"]
+                handled = self._fetches_finished
                 elapsed = now_t - self._first_fetch_at if self._first_fetch_at else 0.0
                 eta = estimate_eta(
                     bytes_to_fetch=bytes_to_fetch,
@@ -535,12 +556,12 @@ class ActivityRecorder:
         *,
         now: Callable[[], datetime] = datetime.now,
         clock: Callable[[], float] = time.monotonic,
-        tick_s: float = TICK_S,
+        tick_s: float | None = None,
         start_timer: bool = True,
     ) -> None:
         self._now = now
         self._clock = clock
-        self._tick_s = tick_s
+        self._tick_s = TICK_S if tick_s is None else tick_s
         self._lock = threading.Lock()
         self._entries: list[Progress] = []
         self._warned = False

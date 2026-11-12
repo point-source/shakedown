@@ -28,9 +28,12 @@ class OperationType(StrEnum):
 
 
 class RunKind(StrEnum):
-    """What a run did: a sync of the whole collection, or a single-show run that
-    fetched only the shows it acts on (§spec:single-show-runs)."""
+    """What a run did: a sync of the whole collection — `catch_up` when it caught up a
+    sync skipped while another run held the writer lock (§spec:rescheduled-syncs) —
+    or a single-show run that fetched only the shows it acts on
+    (§spec:single-show-runs)."""
     SYNC = "sync"
+    CATCH_UP = "catch_up"
     REFETCH = "refetch"
     RECONFORM = "reconform"
 

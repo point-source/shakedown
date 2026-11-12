@@ -21,6 +21,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress, RunCounts
 from shakedown.config import CollectionConfig, Config, ConfigError, SourceConfig
 from shakedown.config import load as load_config
 from shakedown.db import connect, connect_reader, transaction
@@ -98,6 +99,7 @@ NO_FILES_REASON = "source lists no audio files"
 # The command that retries a run of each kind, for its outcome's next safe action.
 _RERUN = {
     RunKind.SYNC: "sync",
+    RunKind.CATCH_UP: "sync",
     RunKind.REFETCH: "item refetch",
     RunKind.RECONFORM: "verify --deep --reconform",
 }
@@ -194,6 +196,9 @@ class CollectionSyncStats:
     # Items fetched and staged this run, for the sync.complete batch payload
     # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
     staged: list[dict[str, str]] = field(default_factory=list)
+    # The run's live progress hooks (§spec:run-activity); detached — recording
+    # nowhere — unless the run opened an activity entry.
+    progress: Progress = field(default_factory=lambda: Progress(ActivityKind.SYNC))
 
 
 def run_sync(
@@ -359,10 +364,27 @@ def _run_sync(
         announce_started([])
         return _run_refresh(config, work, budgets)
 
-    opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = (
-        {} if dry_run else _open_runs(config, work)
-    )
+    if dry_run:
+        return _sync_all(config, work, budgets, {}, None, dry_run=True, catch_up=None)
+    kind = RunKind.SYNC if catch_up is None else RunKind.CATCH_UP
+    with ActivityRecorder(config.state_db) as recorder:  # type: ignore[arg-type]
+        opened = _open_runs(config, work, kind, recorder)
+        return _sync_all(
+            config, work, budgets, opened, recorder, dry_run=False, catch_up=catch_up
+        )
 
+
+def _sync_all(
+    config: Config,
+    work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]],
+    budgets: dict[str, SourceBudget],
+    opened: dict[tuple[str, str], tuple[Run, OperationOutcome, Progress]],
+    recorder: ActivityRecorder | None,
+    *,
+    dry_run: bool,
+    catch_up: dict[tuple[str, str], datetime] | None,
+) -> int:
+    """Run each collection's sync on the bounded collection pool; 1 if any failed."""
     overall_failed = 0
     max_workers = min(config.max_concurrent_collections, len(work))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -372,6 +394,7 @@ def _run_sync(
                 dry_run=dry_run, budget=budgets[source.name],
                 opened=opened.get((source.name, collection.name)),
                 catch_up_note=_catch_up_note(catch_up, source, collection),
+                recorder=recorder,
             ): (source, collection)
             for source, collection, plugin in work
         }
@@ -423,21 +446,25 @@ def _clear_rescheduled(config: Config, source: SourceConfig, collection: Collect
 
 
 def _open_runs(
-    config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
-) -> dict[tuple[str, str], tuple[Run, OperationOutcome]]:
-    """Open every collection's run record and outcome before any collection starts,
-    then announce them to `serve` if it started this run (§spec:api-sync-runs): serve
+    config: Config,
+    work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]],
+    kind: RunKind,
+    recorder: ActivityRecorder,
+) -> dict[tuple[str, str], tuple[Run, OperationOutcome, Progress]]:
+    """Open every collection's run record, outcome, and activity entry before any
+    collection starts — a collection waiting for the collection pool heartbeats like
+    one at work (§spec:run-activity) — then announce them to `serve` if it started this run (§spec:api-sync-runs): serve
     answers a trigger with the run ids, so they must exist before the first collection
     begins. Each collection resets its start time when it actually begins. Only the
     first announce reaches serve, so a catch-up's runs, opened after the run's own,
     are not in its answer; they show in `GET /status` like any run."""
     started = datetime.now()
-    opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = {}
+    opened: dict[tuple[str, str], tuple[Run, OperationOutcome, Progress]] = {}
     with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
         runs = RunRepo(conn)
         outcomes = OperationOutcomeRepo(conn)
         for source, collection, _plugin in work:
-            run = runs.start(source.name, collection.name, started)
+            run = runs.start(source.name, collection.name, started, kind=kind)
             outcome = outcomes.start(
                 OperationType.SYNC,
                 source.name,
@@ -446,7 +473,10 @@ def _open_runs(
                 phase="discover",
                 safe_next_action="restore source access and rerun sync",
             )
-            opened[(source.name, collection.name)] = (run, outcome)
+            progress = recorder.open_entry(
+                source.name, collection.name, ActivityKind(kind.value), run_id=run.id
+            )
+            opened[(source.name, collection.name)] = (run, outcome, progress)
     announce_started([
         {
             "run_id": run.id,
@@ -454,7 +484,7 @@ def _open_runs(
             "source": run.source_name,
             "collection": run.collection_name,
         }
-        for run, outcome in opened.values()
+        for run, outcome, _progress in opened.values()
     ])
     return opened
 
@@ -638,6 +668,17 @@ def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: d
     runs.finish(run)
 
 
+def _run_counts(stats: CollectionSyncStats) -> RunCounts:
+    """The run record's figures now: what `_finish_run` would write."""
+    return RunCounts(
+        items_discovered=stats.discovered,
+        items_new=stats.new,
+        items_updated=stats.updated,
+        items_failed=stats.failed,
+        bytes_downloaded=stats.bytes_downloaded,
+    )
+
+
 def _completed_work(stats: CollectionSyncStats) -> dict[str, int]:
     return {
         "items_discovered": stats.discovered,
@@ -669,8 +710,9 @@ def _sync_collection(
     *,
     dry_run: bool,
     budget: SourceBudget,
-    opened: tuple[Run, OperationOutcome] | None = None,
+    opened: tuple[Run, OperationOutcome, Progress] | None = None,
     catch_up_note: str = "",
+    recorder: ActivityRecorder | None = None,
 ) -> CollectionSyncStats:
     """Sync one (source, collection) end-to-end.
 
@@ -691,22 +733,32 @@ def _sync_collection(
 
     run: Run | None = None
     outcome: OperationOutcome | None = None
+    stats = CollectionSyncStats()
     if opened is not None:
         # Opened up front by `_open_runs`; time the run from when this collection
         # actually begins, not from when it was queued behind the others.
-        run, outcome = opened
+        run, outcome, stats.progress = opened
         runs.mark_started(run, started)
         outcomes.mark_started(outcome, started)
+        if recorder is not None:
+            recorder.restart(stats.progress)
+        stats.progress.run_counts = lambda: _run_counts(stats)
 
-    stats = CollectionSyncStats()
     try:
-        return _sync_collection_phases(
+        _sync_collection_phases(
             config, source, collection, plugin, items, runs, outcomes, run, outcome,
             stats, started, dry_run=dry_run, budget=budget,
         )
     except Exception as e:
         _close_crashed(runs, run, outcomes, outcome, stats, collection, e, RunKind.SYNC)
+        if recorder is not None:
+            recorder.end(stats.progress, OperationStatus.FAILED_BEFORE_COMPLETION)
         raise
+    if recorder is not None:
+        recorder.end(
+            stats.progress, outcome.status if outcome is not None else OperationStatus.COMPLETED
+        )
+    return stats
 
 
 def _close_crashed(
@@ -852,6 +904,7 @@ def _sync_collection_phases(
     planner = (
         TagPlanner(items, source.name, collection.name) if collection.fill_tags else None
     )
+    stats.progress.phase(Phase.LISTING)
     enumerated_identifiers, deferred, enum_error = _pipelined_discover_and_fetch(
         config, source, collection, plugin, items, stats, placement, budget, by_identifier,
         planner,
@@ -870,13 +923,17 @@ def _sync_collection_phases(
         stats.stale = True
         stats.errors.append(f"source enumeration failed: {enum_error}")
         # Shows fetched before the failure are valid; stage them. Nothing is pruned.
+        stats.progress.phase(Phase.TAGGING)
         tag_issues = _fill_tags(config, source.name, collection, items)
+        stats.progress.phase(Phase.STAGING)
         report = placement.finish()
         _apply_placement_report(stats, report, tag_issues)
         finished = datetime.now()
+        stats.progress.phase(Phase.NOTIFYING)
         _fire_notifications(
             config, items, source, collection, stats, started, finished, report.folder_of
         )
+        stats.progress.phase(Phase.FINISHING)
         if run is not None:
             _finish_run(runs, run, stats, finished)
         if outcome is not None:
@@ -954,18 +1011,22 @@ def _sync_collection_phases(
     # no longer placed (a pruned show, an old layout or name) removed
     # (§spec:library-ownership, §spec:library-cleanup). Tags are filled first, so the
     # library sees each show's files once, already tagged (§spec:tag-filling).
+    stats.progress.phase(Phase.TAGGING)
     tag_issues = _fill_tags(config, source.name, collection, items)
+    stats.progress.phase(Phase.STAGING)
     report = placement.finish()
     _apply_placement_report(stats, report, tag_issues)
 
     # Phase 5: notify. Fire before recording so an undelivered notice is captured
     # in the run's errors but never aborts the sync (§spec:durable-handoff).
     finished = datetime.now()
+    stats.progress.phase(Phase.NOTIFYING)
     _fire_notifications(
         config, items, source, collection, stats, started, finished, report.folder_of
     )
 
     # Phase 6: record run
+    stats.progress.phase(Phase.FINISHING)
     if run is not None:
         _finish_run(runs, run, stats, finished)
     if outcome is not None:
@@ -1019,6 +1080,7 @@ def _pipelined_discover_and_fetch(
     enumerated: set[str] = set()
     deferred: list[PlannedItem] = []
     enum_error: Exception | None = None
+    progress = stats.progress
 
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetch_futures: dict[Future[_FetchOutcome], PlannedItem] = {}
@@ -1035,8 +1097,10 @@ def _pipelined_discover_and_fetch(
                         desc.identifier, desc.metadata, planned.descriptor.manifest
                     )
                 archive_root.mkdir(parents=True, exist_ok=True)
+                progress.to_fetch(_fetch_size(planned))
                 fut = fetch_pool.submit(
-                    _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
+                    _fetch_one_budgeted, budget, plugin, planned, archive_root, collection,
+                    progress,
                 )
                 fetch_futures[fut] = planned
                 fut.add_done_callback(finished.put)
@@ -1089,7 +1153,7 @@ def _pipelined_discover_and_fetch(
             return True
 
         descriptor_stream = stream_items(
-            plugin, collection, budget, enumerated, look_up=look_up
+            plugin, collection, budget, enumerated, look_up=look_up, progress=progress
         )
         def process(fut: Future[_FetchOutcome]) -> None:
             _process_fetch_result(
@@ -1108,6 +1172,9 @@ def _pipelined_discover_and_fetch(
                 # fetches each immediately, so downloads overlap the enumeration.
                 desc = next(descriptors, None)
                 if desc is None:
+                    # The listing's lookups are done: shows to fetch, and their bytes,
+                    # are known (§spec:run-activity "Honest totals").
+                    progress.enumeration_done()
                     break
                 if isinstance(desc, LookupFailure):
                     _record_lookup_failure(items, source.name, collection.name, desc, stats)
@@ -1126,6 +1193,7 @@ def _pipelined_discover_and_fetch(
         # the enumeration completed, and recording them keeps the archive and DB
         # consistent (SPEC §spec:discovery-pipeline: an item may be fetched and staged
         # before discovery completes).
+        progress.phase(Phase.DOWNLOADING)
         for fut in as_completed(list(fetch_futures)):
             process(fut)
 
@@ -1601,20 +1669,41 @@ def _is_single_folder_name(name: str) -> bool:
     return bool(name) and not name.startswith(".") and not any(sep in name for sep in separators)
 
 
+def _fetch_size(target: PlannedItem) -> int | None:
+    """The bytes a fetch downloads, or None when the source lists a file's size as
+    unknown."""
+    assert target.descriptor is not None
+    files = target.descriptor.manifest.files if target.fetch is None else target.fetch
+    sizes = [mf.size for mf in files]
+    return None if any(size is None for size in sizes) else sum(s for s in sizes if s)
+
+
 def _fetch_one_budgeted(
     budget: SourceBudget,
     plugin: SourcePlugin,
     target: PlannedItem,
     archive_root: Path,
     collection: CollectionConfig,
+    progress: Progress | None = None,
 ) -> _FetchOutcome:
     """Acquire a per-source budget slot around the whole fetch (SPEC §spec:source-budget).
 
     The slot is held for the entire ``_fetch_one`` call so it counts as one live
-    upstream connection.
+    upstream connection. ``progress`` lists the show as worked on while it holds the
+    slot (§spec:run-activity).
     """
     with budget.slot():
-        return _fetch_one(plugin, target, archive_root, collection)
+        if progress is None:
+            return _fetch_one(plugin, target, archive_root, collection)
+        assert target.descriptor is not None
+        identifier = target.descriptor.identifier
+        progress.working(identifier)
+        progress.fetch_started(identifier, archive_root / f"{_TMP_PREFIX}{identifier}")
+        try:
+            return _fetch_one(plugin, target, archive_root, collection)
+        finally:
+            progress.fetch_finished(identifier)
+            progress.idle(identifier)
 
 
 def _fetch_one(

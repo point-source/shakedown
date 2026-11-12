@@ -308,16 +308,23 @@ class RunRepo:
         ]
 
     def latest(
-        self, source: str, collection: str, *, kind: RunKind | None = None
+        self,
+        source: str,
+        collection: str,
+        *,
+        kind: RunKind | tuple[RunKind, ...] | None = None,
     ) -> Run | None:
-        """The collection's latest run, or its latest run of ``kind``."""
+        """The collection's latest run, or its latest run of ``kind`` (one or any of
+        several)."""
+        kinds = (kind,) if isinstance(kind, RunKind) else (kind or ())
+        filter_kinds = f"AND kind IN ({', '.join('?' * len(kinds))})" if kinds else ""
         cur = self.conn.execute(
-            """
+            f"""
             SELECT * FROM runs
-            WHERE source_name=? AND collection_name=? AND (? IS NULL OR kind=?)
+            WHERE source_name=? AND collection_name=? {filter_kinds}
             ORDER BY started_at DESC LIMIT 1
             """,
-            (source, collection, kind and kind.value, kind and kind.value),
+            (source, collection, *(k.value for k in kinds)),
         )
         row = cur.fetchone()
         if not row:
