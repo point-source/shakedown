@@ -55,7 +55,7 @@ def record_skipped(config: Config, scope: Sequence[tuple[str, str]]) -> None:
     for source, collection, since in recorded:
         log.warning(
             "%s/%s: sync rescheduled: another run holds the writer lock; "
-            "oldest skip %s",
+            "oldest skip %s; it runs when that run finishes, no rerun needed",
             source, collection, since.isoformat(),
         )
 
