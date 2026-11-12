@@ -22,11 +22,6 @@ ASSET_CACHE = "public, max-age=31536000, immutable"
 
 
 class _Assets(StaticFiles):
-    async def check_config(self) -> None:
-        # Starlette raises on a missing folder; without a build, assets are 404s.
-        if Path(str(self.directory)).is_dir():
-            await super().check_config()
-
     async def get_response(self, path: str, scope: Scope) -> Response:
         response = await super().get_response(path, scope)
         if response.status_code == 200:
@@ -45,6 +40,8 @@ def register_page(app: FastAPI, page_dir: Path) -> None:
             raise HTTPException(404)
         # no-cache: after an upgrade the browser loads the new page, never a stale
         # one against the newer API.
-        return FileResponse(index, media_type="text/html", headers={"Cache-Control": "no-cache"})
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
-    app.mount("/assets", _Assets(directory=page_dir / "assets", check_dir=False))
+    # Without a build there is no mount, so /assets/* is the router's JSON 404.
+    if (page_dir / "assets").is_dir():
+        app.mount("/assets", _Assets(directory=page_dir / "assets"))
