@@ -238,3 +238,86 @@ def test_entries_written_by_the_repo_read_back_as_times(config: Config) -> None:
         since = RescheduledRepo(conn).get(SRC, "b")
     assert isinstance(since, datetime)
     assert since.isoformat() == _entries(config)[(SRC, "b")]
+
+
+# --- clearing ---------------------------------------------------------------------
+
+
+def _mark(config: Config, *scope: tuple[str, str]) -> None:
+    assert config.state_db is not None
+    with closing(connect(config.state_db)) as conn:
+        repo = RescheduledRepo(conn)
+        for source, collection in scope:
+            repo.record(source, collection, datetime(2026, 11, 10, 3, 0, 0))
+
+
+def test_finishing_the_collection_clears_only_its_entry(config: Config) -> None:
+    """Operator acceptance (4): the entry clears when a sync finishes the collection."""
+    _seed()
+    _mark(config, (SRC, "b"), (SRC, "c"))
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 0
+    assert set(_entries(config)) == {(SRC, "c")}
+
+
+def test_completed_with_item_issues_clears_the_entry(config: Config) -> None:
+    """A complete enumeration with item issues clears: the next sync retries the
+    failed items anyway."""
+    FakePlugin.items["evil"] = FakeItem(
+        identifier="evil", files=[FakeFile(name="../../escape.flac", content=b"x")],
+    )
+    _mark(config, (SRC, "b"))
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 1
+    assert _entries(config) == {}
+
+
+def test_stale_enumeration_keeps_the_entry(config: Config) -> None:
+    FakePlugin.unreachable_sources.add(SRC)
+    _mark(config, (SRC, "b"))
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 1
+    assert set(_entries(config)) == {(SRC, "b")}
+
+
+def test_crashed_collection_keeps_the_entry(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crash(*_args: object) -> dict[str, list[str]]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("shakedown.sync._fill_tags", crash)
+    _mark(config, (SRC, "b"))
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 1
+    assert set(_entries(config)) == {(SRC, "b")}
+
+
+def test_skip_recorded_while_the_run_goes_is_cleared_when_it_finishes(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shakedown import sync
+
+    real = sync._fill_tags
+
+    def skip_arrives(*args: object) -> dict[str, list[str]]:
+        _mark(config, (SRC, "b"))
+        return real(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("shakedown.sync._fill_tags", skip_arrives)
+    _seed()
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 0
+    assert _entries(config) == {}
+
+
+def test_all_collections_sync_clears_every_finished_collection(config: Config) -> None:
+    _seed()
+    _mark(config, (SRC, "b"), (SRC, "c"), ("other-src", "b"))
+    assert run_sync(config) == 0
+    assert _entries(config) == {}
+
+
+def test_refresh_metadata_and_dry_run_keep_the_entry(config: Config) -> None:
+    """Neither finishes the collection with a complete enumeration of its own."""
+    _seed()
+    _mark(config, (SRC, "b"))
+    assert run_sync(config, source_filter=SRC, collection_filter="b",
+                    refresh_metadata=True) == 0
+    assert run_sync(config, source_filter=SRC, collection_filter="b", dry_run=True) == 0
+    assert set(_entries(config)) == {(SRC, "b")}

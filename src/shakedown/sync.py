@@ -70,6 +70,7 @@ from shakedown.state import (
     ItemRepo,
     OperationOutcomeRepo,
     PendingHandoffRepo,
+    RescheduledRepo,
     RunRepo,
     TagRecord,
     TagRepo,
@@ -865,6 +866,9 @@ def _sync_collection_phases(
         _finish_run(runs, run, stats, finished)
     if outcome is not None:
         _finish_outcome(outcomes, outcome, stats, collection, finished, RunKind.SYNC)
+    # The collection is finished with a complete enumeration, so a skip recorded for
+    # it — before or during this run — is done (§spec:rescheduled-syncs).
+    RescheduledRepo(conn).clear(source.name, collection.name)
 
     return stats
 
