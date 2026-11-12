@@ -666,3 +666,91 @@ async def test_status_lists_shows_removed_upstream_from_the_db(
     [removed] = r.json()[0]["removed_upstream"]
     assert removed["identifier"] == "gd-gone"
     assert removed["removed_on"] in {before.isoformat(), after.isoformat()}
+
+
+# --- dashboard read endpoints: shared answers, GET only, no CORS (§spec:dashboard) --
+
+class _Clock:
+    """A monotonic clock the test moves by hand, so an interval passes without sleeping."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _probe_app(config, clock):  # type: ignore[no-untyped-def]
+    """serve with one extra dashboard view that counts how often it is computed."""
+    from shakedown.dashboard import VIEW_TTL_S, register_api
+
+    app = build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock)
+    app.state.probe_builds = 0
+
+    def probe(ctx):  # type: ignore[no-untyped-def]
+        app.state.probe_builds += 1
+        tables = ctx.conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
+        return {"collections": [c.name for s in ctx.config.sources for c in s.collections],
+                "tables": tables}
+
+    register_api(app, "/api/probe", VIEW_TTL_S, probe)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_api_answer_is_shared_until_its_interval_passes(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Ten viewers cost what one does: within the refresh interval every request gets
+    the one computed answer, with the same generated_at; after it, a fresh one."""
+    from shakedown.dashboard import VIEW_TTL_S
+
+    archive, library = tmp_roots
+    clock = _Clock()
+    app = _probe_app(make_config(archive, library), clock)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        first = (await client.get("/api/probe")).json()
+        assert first["collections"] == ["coll1"] and first["tables"] > 0
+        assert datetime.fromisoformat(first["generated_at"]).tzinfo is not None
+        clock.now = VIEW_TTL_S - 0.1
+        assert (await client.get("/api/probe")).json() == first
+        assert app.state.probe_builds == 1
+
+        clock.now = VIEW_TTL_S
+        second = (await client.get("/api/probe")).json()
+        assert app.state.probe_builds == 2
+        assert second["generated_at"] != first["generated_at"]
+
+
+@pytest.mark.asyncio
+async def test_api_views_are_get_only_and_send_no_cors_allowance(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    archive, library = tmp_roots
+    app = _probe_app(make_config(archive, library), _Clock())
+    origin = {"Origin": "https://elsewhere.example"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/probe", headers=origin)
+        assert r.status_code == 200
+        assert not [h for h in r.headers if h.lower().startswith("access-control-")]
+        assert (await client.post("/api/probe")).status_code == 405
+        r = await client.options(
+            "/api/probe", headers={**origin, "Access-Control-Request-Method": "GET"}
+        )
+        assert r.status_code == 405
+        assert not [h for h in r.headers if h.lower().startswith("access-control-")]
+
+
+def test_iso_carries_the_utc_offset() -> None:
+    from shakedown.dashboard import iso
+
+    stamp = iso(datetime(2026, 11, 12, 3, 0, 0))
+    assert stamp is not None
+    parsed = datetime.fromisoformat(stamp)
+    assert parsed.tzinfo is not None
+    assert parsed.replace(tzinfo=None) == datetime(2026, 11, 12, 3, 0, 0)
+    assert iso(None) is None

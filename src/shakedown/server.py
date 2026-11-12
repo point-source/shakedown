@@ -10,6 +10,7 @@ import hmac
 import json
 import logging
 import os
+import time
 from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
@@ -27,6 +28,7 @@ from prometheus_client import (
 
 from shakedown import __version__
 from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope, load
+from shakedown.dashboard import SharedAnswers
 from shakedown.db import connect_reader
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
@@ -44,12 +46,15 @@ def build_app(
     *,
     argv_prefix: tuple[str, ...] = DEFAULT_ARGV_PREFIX,
     child_env: dict[str, str] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     """The control plane over the config file at ``config_path``. Every endpoint
     that needs the config reads the file as it is at the request, so an edit takes
     effect without a restart, and a broken file is a 503 naming the problem rather
-    than a crash (§spec:api-sync-runs)."""
+    than a crash (§spec:api-sync-runs). ``clock`` times the dashboard's shared
+    answers (§spec:dashboard)."""
     app = FastAPI(title="shakedown", version=__version__)
+    app.state.answers = SharedAnswers(clock)
     # Runs this serve started that may still be going, newest last; each one's
     # watcher sets `done` when it exits.
     app.state.triggered = []
@@ -144,6 +149,8 @@ def build_app(
             return load(config_path)
         except ConfigError as e:
             raise HTTPException(503, str(e)) from e
+
+    app.state.dashboard_config = current_config
 
     def require_scope(config: Config, source: str | None, collection: str | None) -> None:
         try:
