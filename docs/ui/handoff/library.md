@@ -21,7 +21,7 @@ How big is it all: what each collection holds, disk used and left,
 | Recently mirrored (first 10) | `recently_mirrored[]` | title (or show ID when null), "<age> ago", collection · show ID mono | "Shows show up here as they are mirrored." |
 | Library health, per collection with any fact | `attention.health[]` | "N shows restricted" + first 3 "id: reason"; "N shows disappeared from the source, kept here" + "id · missing since 2 Nov"; "Drift: N files changed since Shakedown recorded them"; "N shows have no playable copy" + "id: reason"; "N shows are kept as the original plus a playable copy" + IDs | "Every mirrored show is complete and playable." |
 
-`disk.full_in_days` is not shown (operator decision 2026-11-12).
+The page shows no disk-full estimate (operator decision 2026-11-12); the API no longer sends one.
 
 ## Layout
 

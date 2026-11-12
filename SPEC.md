@@ -2681,10 +2681,17 @@ Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
 - Running now lists only running runs. An ended run shows in Recent
   runs and on the Runs tab; a killed one also in Needs attention. The
   ended entries `/api/activity` keeps for ten minutes are not shown.
-- A running run whose `last_progress_at` is more than 5 minutes old
-  gets a `warning` Badge "No progress for <time>". This threshold is a
-  page decision; the API carries no verdict (§spec:run-activity).
-- The disk-full estimate (`disk.full_in_days`) is not shown.
+- **No-progress rule.** The page marks a running run with no progress
+  for 5 minutes: when now minus `last_progress_at` exceeds 5 minutes, the
+  run's row in Running now gets a `warning` Badge "No progress for
+  <time>" beside its phase. The API carries no verdict on progress
+  (§spec:run-activity).
+- **A run that stopped reporting** shows, as soon as `/api/attention`
+  lists it, as a Needs attention entry "<Kind> stopped reporting at
+  <time>" with its next step, and in Recent runs and on the Runs tab with
+  a `danger` Badge "Stopped reporting".
+- The page shows no disk-full estimate (operator decision); the API no
+  longer computes one (§spec:library-stats).
 - On desktop (1024 px and up) Running now sits left of Needs attention;
   below 1024 px Needs attention comes first.
 
@@ -2767,6 +2774,9 @@ Spec and code names in the last column never appear on screen.
 | No playable copy | A show with no audio file a player can read. | broken, unplayable | `not_playable` |
 | Original plus a playable copy | A show kept as its unplayable original beside a staged playable copy. | duplicate, converted | `playable_copies` |
 | Last completed sync | The end of a collection's latest sync that finished Completed or Completed, some shows failed. | last good sync, last success | `last_successful_sync_at` |
+| Valid (config) | shakedown.yaml loads right now. | OK, fine, good | `health.config.valid: true` |
+| Has an error (config) | shakedown.yaml does not load right now; the error names the key. | broken, invalid, failed | `health.config.valid: false` |
+| Next step | The action `status` suggests for an unfinished or failed operation, shown as the server words it. | fix, action, hint | `safe_next_action` |
 
 ### Screens
 
@@ -2810,6 +2820,72 @@ is one route (`GET /`) with four tabs.
   same every time.
 - Handoff specs live in `docs/ui/handoff/`, one per screen, from
   `docs/ui/handoff/_template.md`.
+
+## Dashboard page delivery §spec:dashboard-page
+
+*Status: not started*
+
+How the approved page (§spec:ui-kit) gets from `web/` to the operator's
+browser: built into the image, served by `serve` at its root, and
+checked in CI (§req:constraints: UI line, the dashboard lives in serve,
+no Node at runtime; §req:success-criteria #28–#33; §req:quality-attributes:
+phone and desktop alike).
+
+Observable behavior:
+
+- **`serve` answers the page at `/`.** `GET /` returns the built
+  `index.html`; its scripts, styles, and fonts are served under the same
+  root from the build's `assets/` folder. The page's own requests
+  (`./api/*`) and the existing routes (`/api/*`, `/healthz`, `/status`,
+  `/metrics`, the mutating endpoints) keep precedence: the page's files
+  are matched last. Every page file is a `GET` with no authentication,
+  like `GET /status` (§spec:dashboard). `index.html` is sent with
+  `Cache-Control: no-cache` so an upgrade shows the new page at once;
+  the content-hashed files under `assets/` may be cached.
+- **Works under a path prefix.** The build addresses every asset and
+  endpoint relatively (Vite `base: "./"`), so the page works at
+  `http://host:8080/` and behind a proxy at `/shakedown/` with no
+  setting (§spec:dashboard).
+- **Built into the image, never at runtime.** The Dockerfile gains a
+  Node build stage (Node 24, `npm ci` from `web/package-lock.json`, then
+  `npm run build`). Its `web/dist/` output is copied into the Python
+  package (`shakedown/dashboard_web/`) before the package is installed,
+  so it ships as package data and `serve` finds it with
+  `importlib.resources`. The runtime image contains no Node.
+- **A source checkout without a build still serves the API.** When
+  `dashboard_web/` holds no `index.html`, `GET /` answers `404` and every
+  other route works as before; tests and development runs of `serve`
+  need no Node.
+- **CI checks the page.** A `web` job runs `npm ci`, `npm run
+  typecheck`, `npm run build`, and `npm run test:screens` (the
+  screenshot tests of §spec:ui-kit Harness) in the environment the
+  baselines were rendered in; the image build depends on it like it
+  depends on the Python tests.
+
+**Decision and constraint.** Package data, not a separate directory in
+the image, because `serve` then finds the page the same way in the image
+and in any installed wheel, with no path setting. A static mount matched
+after the API routes, because the page is one route with hash tabs
+(`#runs`) and needs no server-side routing. `no-cache` on `index.html`
+because a stale page against a newer API would draw wrong figures after
+an upgrade.
+
+**Alternatives rejected.** *Serving from a path set in config* — one more
+setting for every operator, for a location only the image decides.
+*Building the page when `serve` starts* — puts Node in the runtime
+image, which §req:constraints rules out. *A catch-all route returning
+`index.html` for every unknown path* — the page has one route, and a
+catch-all would answer API typos with HTML.
+
+**Tradeoffs.** A `serve` started from a source checkout shows no page
+until `npm run build` has run and its output is copied in.
+
+**User-level test path.** Build the image and run `serve`: `GET /`
+returns the page, and the browser's network panel shows only requests to
+the same host. Put it behind a proxy under `/shakedown/`: the page loads
+and polls `./api/*` there. `GET /status` and `GET /api/health` answer as
+before. Upgrade the image with the page open and reload: the new page
+loads.
 
 ## Deployment §spec:deployment
 
