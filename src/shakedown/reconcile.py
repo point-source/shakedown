@@ -15,6 +15,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
 from shakedown.discovery import (
@@ -30,6 +31,7 @@ from shakedown.models import (
     ItemStatus,
     Manifest,
     ManifestFile,
+    OperationOutcome,
     OperationStatus,
     OperationType,
 )
@@ -53,13 +55,26 @@ def _run_reconcile(config: Config) -> int:
     outcomes = OperationOutcomeRepo(conn)
     failed = 0
 
-    for source in config.sources:
-        plugin = registry.for_source(source)
-        budget = source_budgets(config, [(source, plugin)])[source.name]
-        for collection in source.collections:
-            failed += _reconcile_collection(
-                config, source, collection, plugin, budget, items, outcomes, conn
-            )
+    with ActivityRecorder(config.state_db) as recorder:  # type: ignore[arg-type]
+        for source in config.sources:
+            plugin = registry.for_source(source)
+            budget = source_budgets(config, [(source, plugin)])[source.name]
+            for collection in source.collections:
+                # Reconcile lists and looks up, but fetches nothing (§spec:run-activity).
+                progress = recorder.open_entry(
+                    source.name, collection.name, ActivityKind.RECONCILE
+                )
+                try:
+                    outcome = _reconcile_collection(
+                        config, source, collection, plugin, budget, items, outcomes, conn,
+                        progress,
+                    )
+                except BaseException:
+                    recorder.end(progress, OperationStatus.FAILED_BEFORE_COMPLETION)
+                    raise
+                recorder.end(progress, outcome.status)
+                if outcome.status != OperationStatus.COMPLETED:
+                    failed += 1
     return 0 if failed == 0 else 1
 
 
@@ -72,7 +87,9 @@ def _reconcile_collection(
     items: ItemRepo,
     outcomes: OperationOutcomeRepo,
     conn,
-) -> int:
+    progress: Progress,
+) -> OperationOutcome:
+    """Rebuild one collection's rows and close its outcome."""
     started = datetime.now()
     outcome = outcomes.start(
         OperationType.RECONCILE,
@@ -95,10 +112,12 @@ def _reconcile_collection(
     descriptors_by_id: dict[str, ItemDescriptor] = {}
     lookup_failures: list[LookupFailure] = []
     source_error: Exception | None = None
+    progress.phase(Phase.LISTING)
     try:
         for found in stream_items(
             plugin, collection, budget, listed,
             look_up=lambda row: row.identifier in on_disk_ids,
+            progress=progress,
         ):
             if isinstance(found, LookupFailure):
                 lookup_failures.append(found)
@@ -114,6 +133,7 @@ def _reconcile_collection(
             source.name, collection.name,
         )
 
+    progress.phase(Phase.FINISHING)
     log.info(
         "[%s/%s] reconciling %d on-disk items (%d also seen upstream)",
         source.name, collection.name, len(on_disk_ids),
@@ -235,7 +255,7 @@ def _reconcile_collection(
             safe_next_action="restore source access and rerun reconcile",
             errors=[str(source_error)],
         )
-        return 1
+        return outcome
     if lookup_failures:
         outcomes.finish(
             outcome,
@@ -249,7 +269,7 @@ def _reconcile_collection(
             safe_next_action="restore source access and rerun reconcile",
             errors=[f"{f.identifier}: {f.reason}" for f in lookup_failures],
         )
-        return 1
+        return outcome
     outcomes.finish(
         outcome,
         OperationStatus.COMPLETED,
@@ -262,7 +282,7 @@ def _reconcile_collection(
     outcomes.resolve_actionable(
         OperationType.RECONCILE, source.name, collection.name, finished
     )
-    return 0
+    return outcome
 
 
 def _with_files_on_disk(selected: Manifest, archive_path: Path, existing: Item | None) -> Manifest:

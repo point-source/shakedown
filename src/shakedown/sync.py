@@ -2172,11 +2172,23 @@ def run_single_shows(
     if not work:
         return 0
     budgets = source_budgets(config, [(s, p) for s, _, p, _ in work])
+    with ActivityRecorder(config.state_db) as recorder:  # type: ignore[arg-type]
+        return _run_single_show_collections(config, work, kind, budgets, recorder)
+
+
+def _run_single_show_collections(
+    config: Config,
+    work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin, SingleShows]],
+    kind: RunKind,
+    budgets: dict[str, SourceBudget],
+    recorder: ActivityRecorder,
+) -> int:
     failed = 0
     for source, collection, plugin, shows in work:
         try:
             stats = _single_show_collection(
-                config, source, collection, plugin, shows, kind, budgets[source.name]
+                config, source, collection, plugin, shows, kind, budgets[source.name],
+                recorder,
             )
         except Exception:
             log.exception("%s failed for %s/%s", kind.value, source.name, collection.name)
@@ -2261,9 +2273,10 @@ def _single_show_collection(
     shows: SingleShows,
     kind: RunKind,
     budget: SourceBudget,
+    recorder: ActivityRecorder,
 ) -> CollectionSyncStats:
-    """One collection's single-show run, recorded like a sync's: a run record and an
-    outcome, closed even if the run crashes."""
+    """One collection's single-show run, recorded like a sync's: a run record, an
+    outcome, and an activity entry, closed even if the run crashes."""
     started = datetime.now()
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
@@ -2279,6 +2292,10 @@ def _single_show_collection(
         safe_next_action=f"restore source access and rerun {_RERUN[kind]}",
     )
     stats = CollectionSyncStats()
+    stats.progress = recorder.open_entry(
+        source.name, collection.name, ActivityKind(kind.value), run_id=run.id
+    )
+    stats.progress.run_counts = lambda: _run_counts(stats)
     try:
         _single_show_phases(
             config, source, collection, plugin, shows, kind, budget,
@@ -2286,7 +2303,9 @@ def _single_show_collection(
         )
     except Exception as e:
         _close_crashed(runs, run, outcomes, outcome, stats, collection, e, kind)
+        recorder.end(stats.progress, OperationStatus.FAILED_BEFORE_COMPLETION)
         raise
+    recorder.end(stats.progress, outcome.status)
     return stats
 
 
@@ -2323,10 +2342,15 @@ def _single_show_phases(
     planner = (
         TagPlanner(items, source.name, collection.name) if collection.fill_tags else None
     )
+    progress = stats.progress
+    # The collection is never listed: the shows to look up are known up front, and
+    # lookups overlap the downloads they start (§spec:run-activity).
+    progress.to_look_up(len(shows))
+    progress.phase(Phase.DISCOVERING)
     unrepaired: set[str] = set()
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetches: dict[Future[_FetchOutcome], PlannedItem] = {}
-        for identifier, details in look_up_rows(plugin, list(shows), budget):
+        for identifier, details in look_up_rows(plugin, list(shows), budget, progress):
             if isinstance(details, LookupFailure):
                 _note_lookup_failure(stats, source.name, collection.name, details)
                 continue
@@ -2374,10 +2398,14 @@ def _single_show_phases(
                 # gaps again (§spec:verify-drift).
                 planned.tags = planner.plan(identifier, found.metadata, manifest)
             archive_root.mkdir(parents=True, exist_ok=True)
+            progress.to_fetch(_fetch_size(planned))
             fut = fetch_pool.submit(
-                _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
+                _fetch_one_budgeted, budget, plugin, planned, archive_root, collection,
+                progress,
             )
             fetches[fut] = planned
+        progress.enumeration_done()
+        progress.phase(Phase.DOWNLOADING)
         for fut in as_completed(fetches):
             # The sync's own fetch handling: record, link into the library, count.
             failed_before = stats.failed
@@ -2397,15 +2425,19 @@ def _single_show_phases(
     # downloads were tagged before entering the archive (a reconform refills the gaps
     # of the source bytes it restored), and the pass below follows any clash change
     # the fetched shows brought (§spec:tag-filling).
+    progress.phase(Phase.TAGGING)
     tag_issues = _fill_tags(config, source.name, collection, items)
+    progress.phase(Phase.STAGING)
     report = placement.finish()
     _apply_placement_report(stats, report, tag_issues)
 
     # The collection's handoff, exactly as a sync sends it, including shows still
     # pending from earlier runs (§spec:durable-handoff).
     finished = datetime.now()
+    progress.phase(Phase.NOTIFYING)
     _fire_notifications(
         config, items, source, collection, stats, started, finished, report.folder_of
     )
+    progress.phase(Phase.FINISHING)
     _finish_run(runs, run, stats, finished)
     _finish_outcome(outcomes, outcome, stats, collection, finished, kind, shows)
