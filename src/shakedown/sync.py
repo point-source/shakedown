@@ -381,11 +381,10 @@ def _run_sync(
             except Exception:
                 log.exception("sync failed for %s/%s%s", source.name, collection.name, note)
                 overall_failed += 1
+                continue
+            finally:
                 if catch_up is not None:
                     _clear_rescheduled(config, source, collection)
-                continue
-            if catch_up is not None:
-                _clear_rescheduled(config, source, collection)
             if stats.stale:
                 log.warning(
                     "%s/%s: STALE (source enumeration failed)%s",

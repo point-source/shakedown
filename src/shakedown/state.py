@@ -864,9 +864,8 @@ class RescheduledRepo:
 
     def list(self) -> list[tuple[str, str, datetime]]:
         """Every entry as (source, collection, oldest skip), oldest skip first: the
-        order a finishing sync catches them up in."""
-        if not self._has_table():
-            return []
+        order a finishing sync catches them up in. Read only by a lock holder, whose
+        database is migrated."""
         rows = self.conn.execute(
             "SELECT source_name, collection_name, since FROM rescheduled_syncs"
             " ORDER BY since, source_name, collection_name"
