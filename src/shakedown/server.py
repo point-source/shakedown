@@ -42,8 +42,8 @@ from shakedown.dashboard_health import health_answer
 from shakedown.dashboard_library import library_answer
 from shakedown.dashboard_runs import MAX_DAYS, runs_answer
 from shakedown.db import connect_reader
-from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
-from shakedown.status import _collection_summary
+from shakedown.state import ItemRepo
+from shakedown.status import collection_summaries
 from shakedown.trigger import DEFAULT_ARGV_PREFIX, Busy, ExitedEarly, Failed, launch
 from shakedown.validate import validate_config
 
@@ -192,18 +192,7 @@ def build_app(
     def status() -> JSONResponse:
         config = current_config()
         with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
-            items = ItemRepo(conn)
-            runs = RunRepo(conn)
-            drift = DriftRepo(conn)
-            outcomes = OperationOutcomeRepo(conn)
-            summaries: list[dict[str, Any]] = []
-            for source in config.sources:
-                for collection in source.collections:
-                    summaries.append(
-                        _collection_summary(
-                            config, source.name, collection.name, items, runs, drift, outcomes
-                        )
-                    )
+            summaries = collection_summaries(config, conn)
         return JSONResponse(json.loads(json.dumps(summaries, default=str)))
 
     @app.get("/metrics")
@@ -215,19 +204,12 @@ def build_app(
             gauge.clear()
         with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
             items = ItemRepo(conn)
-            drift = DriftRepo(conn)
-            runs = RunRepo(conn)
-            outcomes = OperationOutcomeRepo(conn)
-            for source in config.sources:
-                for collection in source.collections:
-                    counts = items.count_by_status(source.name, collection.name)
-                    for status_, n in counts.items():
-                        g_items.labels(source.name, collection.name, status_.value).set(n)
-                    summary = _collection_summary(
-                        config, source.name, collection.name, items, runs, drift, outcomes
-                    )
-                    g_bytes.labels(source.name, collection.name).set(summary["bytes_on_disk"])
-                    g_drift.labels(source.name, collection.name).set(summary["drift_files"])
+            for summary in collection_summaries(config, conn):
+                scope = (summary["source"], summary["collection"])
+                for status_, n in items.count_by_status(*scope).items():
+                    g_items.labels(*scope, status_.value).set(n)
+                g_bytes.labels(*scope).set(summary["bytes_on_disk"])
+                g_drift.labels(*scope).set(summary["drift_files"])
         body = generate_latest(registry)
         return PlainTextResponse(body.decode(), media_type=CONTENT_TYPE_LATEST)
 
