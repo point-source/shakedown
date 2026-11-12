@@ -404,7 +404,7 @@ def look_up_rows(
     plugin: SourcePlugin,
     identifiers: Sequence[str],
     budget: SourceBudget,
-    progress: Progress | None = None,
+    progress: Progress,
 ) -> Iterator[tuple[str, ItemDetails | LookupFailure]]:
     """Look up just these items — no listing — in parallel across the shared budget,
     yielding each identifier with its validated lookup (every file the source lists,
@@ -413,17 +413,14 @@ def look_up_rows(
     ``progress`` hears each lookup while it runs and each one looked up."""
 
     def work(identifier: str) -> tuple[str, ItemDetails | LookupFailure]:
-        if progress is not None:
-            progress.working(identifier)
+        progress.working(identifier)
         try:
             return identifier, lookup(plugin, identifier, budget)
         finally:
-            if progress is not None:
-                progress.idle(identifier)
+            progress.idle(identifier)
 
     for found in _windowed(list(identifiers), budget, work):
-        if progress is not None:
-            progress.looked_up()
+        progress.looked_up()
         yield found
 
 

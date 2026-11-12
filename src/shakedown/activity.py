@@ -212,8 +212,6 @@ class ActivityRepo:
         result: str,
         finished_at: datetime,
         snap: Snapshot | None = None,
-        *,
-        end_reason: str | None = None,
     ) -> None:
         """Record an entry's result. Its last progress stays; nothing is in flight
         any more, so speed, time left, and current items clear."""
@@ -221,13 +219,12 @@ class ActivityRepo:
             self.write(activity_id, snap, finished_at)
         self.conn.execute(
             """
-            UPDATE run_activity SET state=?, result=?, end_reason=?, finished_at=?,
+            UPDATE run_activity SET state=?, result=?, finished_at=?,
                 last_heartbeat_at=?, current_items='[]', speed_bytes_per_second=NULL,
                 eta_seconds=NULL
             WHERE id=? AND state=?
             """,
-            (ENDED, result, end_reason, _iso(finished_at), _iso(finished_at),
-             activity_id, RUNNING),
+            (ENDED, result, _iso(finished_at), _iso(finished_at), activity_id, RUNNING),
         )
 
     def last_heartbeat_for_run(self, run_id: int) -> datetime | None:
@@ -372,13 +369,13 @@ class Progress:
         self,
         kind: ActivityKind,
         *,
-        activity_id: int | None = None,
         run_id: int | None = None,
         now: Callable[[], datetime] = datetime.now,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.kind = kind
-        self.activity_id = activity_id
+        # Set by the recorder once the entry is written; None while recording is off.
+        self.activity_id: int | None = None
         self.run_id = run_id
         # A run with a run record supplies its figures; they move at this entry's
         # cadence (§spec:run-activity "status agrees").

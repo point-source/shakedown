@@ -1685,7 +1685,7 @@ def _fetch_one_budgeted(
     target: PlannedItem,
     archive_root: Path,
     collection: CollectionConfig,
-    progress: Progress | None = None,
+    progress: Progress,
 ) -> _FetchOutcome:
     """Acquire a per-source budget slot around the whole fetch (SPEC §spec:source-budget).
 
@@ -1694,8 +1694,6 @@ def _fetch_one_budgeted(
     slot (§spec:run-activity).
     """
     with budget.slot():
-        if progress is None:
-            return _fetch_one(plugin, target, archive_root, collection)
         assert target.descriptor is not None
         identifier = target.descriptor.identifier
         progress.working(identifier)
