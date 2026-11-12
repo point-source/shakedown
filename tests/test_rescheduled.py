@@ -497,3 +497,19 @@ def test_validate_reads_an_older_schema_without_migrating_it(
             "SELECT COUNT(*) FROM operation_outcomes WHERE operation='validate'"
         ).fetchone()[0]
     assert recorded > 0
+
+
+def test_serve_closing_a_run_that_opened_no_records_leaves_the_schema_alone(
+    config: Config,
+) -> None:
+    """A verify started by serve without `--reconform` takes no lock and announces no
+    run records. When it exits, serve has nothing to close, so it must not open the
+    database with a migrating connection while the previous release still writes."""
+    from shakedown.trigger import close_abandoned
+
+    _seed()
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 0
+    _roll_back_to_v8(config)
+    assert config.state_db is not None
+    close_abandoned(config.state_db, [], 0)
+    assert _version(config.state_db) == 8
