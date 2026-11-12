@@ -35,6 +35,8 @@ Division of labor:
   - the atomic promotion of a completed fetch into the archive,
   - bounded retries with exponential backoff for transient faults,
   - a post-fetch completeness guard,
+  - measuring network activity for the dashboard — bytes, requests in flight,
+    failures, retries, and back-off,
   - library staging (hardlinks), the state database, planning
     (change detection), and notifications.
 
@@ -143,6 +145,8 @@ FetchResult(
     retriable: bool = False,
     retry_after: float | None = None,
     unavailable: bool = False,
+    cause: FailureCause | None = None,
+    http_status: int | None = None,
 )
 ```
 
@@ -161,6 +165,12 @@ FetchResult(
 - `unavailable` — `True` when the source refuses to serve the item at all (e.g.
   an HTTP 403 on a stream-only item). The core records it `unavailable` with
   `error` as the reason and keeps any archive copy.
+- `cause` — on a failed request, why it failed: a `FailureCause`
+  (`rate_limited`, `server_error`, `timeout`, `connection_error`, `refused`).
+  Use `failure_cause(exc)`. Leave `None` for a failure that was not a request,
+  such as a checksum mismatch.
+- `http_status` — the HTTP status of a failed request, if it had one. Use
+  `http_status(exc)`.
 
 ### `VerifyResult`
 
@@ -209,7 +219,22 @@ reached) is a failed listing too. Raise rather than yield the short list; the
 bundled `etree` plugin does this.
 
 The listing is the only request without a core retry around it. If your client
-library retries a search itself, keep that retry bounded and capped.
+library retries a search itself, keep that retry bounded and capped, and report
+each retry to the core with `self.report_listing_retry(...)`:
+
+```python
+self.report_listing_retry(
+    cause=failure_cause(exc),     # or status_cause(status) when you only have a status
+    http_status=http_status(exc),
+    wait_seconds=wait,            # how long you wait before the next attempt
+    detail=str(exc),
+)
+```
+
+Call it from the thread that iterates `list_items`, once per retry, before you
+wait. It never raises. The core shows these retries with every other network
+event. The bundled `ia` plugin reports the retries of its urllib3 `Retry` this
+way. A plugin whose listing does not retry, like `etree`, has nothing to report.
 
 ### `lookup_item(identifier, timeout)`
 
@@ -283,23 +308,42 @@ retrying:
   retry cannot fix.
 
 When the source hands you an explicit wait (an HTTP `Retry-After` delta-seconds
-header), put it in `retry_after` so the core waits exactly that long. Two helpers
-in `shakedown.plugins.base` read both requests- and httpx-style errors:
-`http_status(exc)` gives the response's status (or `None`), and
-`retry_after_seconds(exc)` gives a usable `Retry-After` (or `None` for a missing,
-date-form, negative, or non-finite value):
+header), put it in `retry_after` so the core waits exactly that long.
+
+For a failed request, also say what failed: `cause` and `http_status`. Helpers
+in `shakedown.plugins.base` read requests-, httpx-, and urllib3-style errors:
+
+- `failure_cause(exc)` gives the `FailureCause`: 429 is `rate_limited`, 5xx is
+  `server_error`, 403 is `refused`, timeouts are `timeout`, and connection
+  errors (including a file cut off mid-stream) are `connection_error`. It gives
+  `None` for anything else.
+- `http_status(exc)` gives the response's status (or `None`).
+- `retry_after_seconds(exc)` gives a usable `Retry-After` (or `None` for a
+  missing, date-form, negative, or non-finite value).
+- `TRANSIENT_CAUSES` holds the causes worth retrying.
 
 ```python
-from shakedown.plugins.base import http_status, retry_after_seconds
+from shakedown.plugins.base import (
+    TRANSIENT_CAUSES, FetchResult, failure_cause, http_status, retry_after_seconds,
+)
 
-def _classify(exc: Exception) -> tuple[bool, float | None]:
-    status = http_status(exc)
-    retriable = status == 429 or (status is not None and 500 <= status < 600)
-    return retriable, retry_after_seconds(exc)
+def _failed(exc: Exception) -> FetchResult:
+    cause = failure_cause(exc)
+    return FetchResult(
+        success=False, bytes_downloaded=0, error=str(exc),
+        retriable=cause in TRANSIENT_CAUSES,
+        retry_after=retry_after_seconds(exc),
+        cause=cause, http_status=http_status(exc),
+    )
 ```
 
 A 403 on a download usually means the source refuses to serve the item: report
 `unavailable=True` rather than a failure.
+
+These fields are all the dashboard needs from you. The core measures the rest
+itself: bytes from what lands in `dest_dir`, requests in flight from the work it
+runs under the politeness budget, and failures, retries, and back-off from each
+attempt. You never report bytes or timings.
 
 ### `verify(files, archive_path)`
 
@@ -418,6 +462,13 @@ plugin must not reimplement any of them.
   `verify()` against the temp dir before promoting it. If a file is missing,
   promotion is aborted and the item fails. This is why `verify` must be honest
   and cheap.
+- **Network activity, measured by the core.** The dashboard shows, per source,
+  download speed, requests in flight, and every rate limit, server error,
+  timeout, connection error, refusal, retry, and back-off. The core measures all
+  of it at the seams it owns: the temp dirs, the politeness budget, and each
+  attempt's outcome. You need nothing dashboard-specific. The one exception is a
+  listing your client retries itself: report each retry (see
+  [When listing fails](#when-listing-fails)).
 - **No byte hashing for change detection.** Planning compares recorded manifest
   against current manifest (§spec:sync-identity). The only content hashing in the
   whole system is the operator-invoked `verify --deep`, in the core.
@@ -449,6 +500,9 @@ from shakedown.plugins.base import (
     ListedItem,
     SourcePlugin,
     VerifyResult,
+    TRANSIENT_CAUSES,
+    FailureCause,
+    failure_cause,
     http_status,
     retry_after_seconds,
     reusable_leftover,
@@ -533,23 +587,19 @@ class ExamplePlugin(SourcePlugin):
             try:
                 r = self._http.get(f"{API}/items/{identifier}/{mf.name}", timeout=60)
                 r.raise_for_status()
-            except requests.HTTPError as e:
-                status = http_status(e)
-                if status == 403:
+            except requests.RequestException as e:
+                cause = failure_cause(e)
+                if cause is FailureCause.REFUSED:
                     return FetchResult(
                         success=False, bytes_downloaded=total,
                         error="download refused by the source", unavailable=True,
+                        cause=cause, http_status=403,
                     )
                 return FetchResult(
                     success=False, bytes_downloaded=total, error=str(e),
-                    retriable=status == 429 or (status is not None and 500 <= status < 600),
+                    retriable=cause in TRANSIENT_CAUSES,
                     retry_after=retry_after_seconds(e),
-                )
-            except requests.RequestException as e:
-                # Connection reset / timeout: transient.
-                return FetchResult(
-                    success=False, bytes_downloaded=total,
-                    error=str(e), retriable=True,
+                    cause=cause, http_status=http_status(e),
                 )
 
             data = r.content

@@ -548,3 +548,31 @@ def test_files_index_is_mirrored_without_its_unmatchable_checksum() -> None:
     by_name = {f.name: f for f in item.manifest.files}
     assert by_name["gd77_files.xml"].md5 is None
     assert by_name["show.flac"].md5 == MD5
+
+
+@pytest.mark.parametrize(
+    ("response", "cause", "status"),
+    [
+        (httpx.Response(503, text="busy"), "server_error", 503),
+        (httpx.Response(429, text="slow", headers={"Retry-After": "4"}), "rate_limited", 429),
+        (httpx.Response(403, text="Forbidden"), "refused", 403),
+        (httpx.Response(404, text="gone"), None, 404),
+    ],
+)
+def test_a_failed_download_names_its_cause(
+    tmp_path: Path, response: httpx.Response, cause: str | None, status: int
+) -> None:
+    plugin = _make_plugin(lambda request: response)
+    item = _item_with_files([ManifestFile("show.flac", None, None)])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
+    assert (result.success, result.cause, result.http_status) == (False, cause, status)
+
+
+def test_a_timed_out_download_names_its_cause(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    plugin = _make_plugin(handler)
+    item = _item_with_files([ManifestFile("show.flac", None, None)])
+    result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
+    assert (result.retriable, result.cause, result.http_status) == (True, "timeout", None)

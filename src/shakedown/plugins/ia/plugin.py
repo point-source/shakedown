@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import quote
 
 import internetarchive as ia
@@ -17,15 +17,18 @@ from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
+    FailureCause,
     FetchResult,
     ItemLookup,
     ListedItem,
     SourcePlugin,
     VerifyResult,
     downloaded_file_mismatch,
+    failure_cause,
     http_status,
     retry_after_seconds,
     reusable_leftover,
+    status_cause,
 )
 from shakedown.plugins.registry import register
 from shakedown.selection import DOWNLOAD_REFUSED_REASON
@@ -48,8 +51,37 @@ _SEARCH_BACKOFF_BASE_SECONDS = 1.0
 _SEARCH_MAX_BACKOFF_SECONDS = 30.0
 
 
-def _search_retry() -> Retry:
-    return Retry(
+class _ReportingRetry(Retry):
+    """The search's urllib3 retry, reporting each retry to the core with its cause and
+    the wait urllib3 takes before the next attempt (§spec:network-activity)."""
+
+    report: Callable[..., None] | None = None
+
+    def new(self, **kw: Any) -> Self:
+        retry = super().new(**kw)
+        retry.report = self.report
+        return retry
+
+    def sleep(self, response: Any = None) -> None:
+        if self.report is not None and self.history:
+            last = self.history[-1]
+            wait: float | None = None
+            if self.respect_retry_after_header and response is not None:
+                wait = self.get_retry_after(response)
+            if not wait:
+                wait = self.get_backoff_time()
+            if last.status is not None:
+                cause = status_cause(last.status)
+                detail = f"HTTP {last.status}"
+            else:
+                cause = failure_cause(last.error) if last.error is not None else None
+                detail = str(last.error) if last.error is not None else None
+            self.report(cause=cause, http_status=last.status, wait_seconds=wait, detail=detail)
+        super().sleep(response)
+
+
+def _search_retry(report: Callable[..., None] | None = None) -> Retry:
+    retry = _ReportingRetry(
         total=_SEARCH_RETRIES,
         connect=_SEARCH_RETRIES,
         read=_SEARCH_RETRIES,
@@ -61,6 +93,8 @@ def _search_retry() -> Retry:
         respect_retry_after_header=True,
         retry_after_max=int(_SEARCH_MAX_BACKOFF_SECONDS),
     )
+    retry.report = report
+    return retry
 
 
 def _get_ia_session(source_config: SourceConfig) -> ia.ArchiveSession:
@@ -144,7 +178,7 @@ class IAPlugin(SourcePlugin):
         search = self._search_session.search_items(
             collection.query,
             fields=["identifier", "oai_updatedate", "item_size"],
-            max_retries=_search_retry(),
+            max_retries=_search_retry(self.report_listing_retry),
         )
         for hit in search:
             yield ListedItem(hit["identifier"], _combine_change_signal(hit))
@@ -204,6 +238,8 @@ class IAPlugin(SourcePlugin):
                     bytes_downloaded=0,
                     error=DOWNLOAD_REFUSED_REASON,
                     unavailable=True,
+                    cause=FailureCause.REFUSED,
+                    http_status=403,
                 )
             log.warning("IA download failed for %s: %s", identifier, e)
             return FetchResult(
@@ -212,6 +248,8 @@ class IAPlugin(SourcePlugin):
                 error=str(e),
                 retriable=_is_retriable(e),
                 retry_after=retry_after_seconds(e),
+                cause=failure_cause(e),
+                http_status=http_status(e),
             )
 
         # Every manifest file is now on disk: reused above or just written.

@@ -17,15 +17,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import httpx
-import requests
-
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.models import Manifest, SourceFile
 from shakedown.plugins.base import (
+    TRANSIENT_CAUSES,
+    FailureCause,
     ItemLookup,
     ListedItem,
     SourcePlugin,
+    failure_cause,
     http_status,
     retry_after_seconds,
 )
@@ -235,25 +235,19 @@ class LookupFailure:
     reason: str
 
 
-_TIMEOUTS = (requests.Timeout, httpx.TimeoutException, TimeoutError)
-_CONNECTION_ERRORS = (requests.ConnectionError, httpx.TransportError, ConnectionError)
-
-
-def _describe_fault(exc: BaseException) -> tuple[bool, str]:
-    """(transient, plain-language description) for a fault a lookup raised.
-
-    Transient: 429, 5xx, timeouts, connection errors (SPEC §spec:slow-metadata).
-    Everything else fails at once.
-    """
+def _describe_fault(exc: BaseException) -> tuple[FailureCause | None, str]:
+    """(cause, plain-language description) for a fault a lookup raised. Transient
+    causes — 429, 5xx, timeouts, connection errors — are retried (SPEC
+    §spec:slow-metadata); everything else fails at once."""
+    cause = failure_cause(exc)
     status = http_status(exc)
     if status is not None:
-        return status == 429 or 500 <= status < 600, f"HTTP {status}"
-    # requests.Timeout subclasses requests.ConnectionError: check timeouts first.
-    if isinstance(exc, _TIMEOUTS):
-        return True, "timed out"
-    if isinstance(exc, _CONNECTION_ERRORS):
-        return True, "connection error"
-    return False, f"{type(exc).__name__}: {exc}"
+        return cause, f"HTTP {status}"
+    if cause is FailureCause.TIMEOUT:
+        return cause, "timed out"
+    if cause is FailureCause.CONNECTION_ERROR:
+        return cause, "connection error"
+    return cause, f"{type(exc).__name__}: {exc}"
 
 
 def _backoff_seconds(attempt: int, exc: BaseException) -> float:
@@ -289,8 +283,8 @@ def lookup(
         except MalformedLookup as e:
             return LookupFailure(identifier, str(e))
         except Exception as e:
-            transient, said = _describe_fault(e)
-            if not transient:
+            cause, said = _describe_fault(e)
+            if cause not in TRANSIENT_CAUSES:
                 return LookupFailure(identifier, f"lookup failed: {said}")
             if attempt == LOOKUP_ATTEMPTS:
                 return LookupFailure(

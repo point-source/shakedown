@@ -5,8 +5,21 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import httpx
+import pytest
+import requests
+import urllib3.exceptions
+
+from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.db import connect
 from shakedown.network import EventKind, MinuteTotals, NetworkEvent, NetworkRepo
+from shakedown.plugins.base import (
+    FailureCause,
+    ListingRetry,
+    failure_cause,
+    listing_retries_to,
+)
+from tests.fake_plugin import FakePlugin
 
 
 def _repo(tmp_path: Path) -> NetworkRepo:
@@ -83,3 +96,64 @@ def test_a_pre_v10_database_has_no_network_tables(tmp_path: Path) -> None:
     conn.execute("DROP TABLE network_events")
     repo = NetworkRepo(conn)
     assert not repo.has_tables()
+
+
+# --- the failure causes a plugin reports (§spec:source-plugins) ----------------------
+
+
+
+def _status_error(status: int) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError(f"{status}", response=response)
+
+
+@pytest.mark.parametrize(
+    ("exc", "cause"),
+    [
+        (_status_error(429), FailureCause.RATE_LIMITED),
+        (_status_error(503), FailureCause.SERVER_ERROR),
+        (_status_error(403), FailureCause.REFUSED),
+        (_status_error(404), None),
+        (requests.Timeout("read timed out"), FailureCause.TIMEOUT),
+        (requests.ConnectTimeout("connect timed out"), FailureCause.TIMEOUT),
+        (httpx.ReadTimeout("slow"), FailureCause.TIMEOUT),
+        (TimeoutError("slow"), FailureCause.TIMEOUT),
+        (urllib3.exceptions.ReadTimeoutError(None, "/", "slow"), FailureCause.TIMEOUT),
+        (requests.ConnectionError("reset"), FailureCause.CONNECTION_ERROR),
+        (requests.exceptions.ChunkedEncodingError("Connection broken"),
+         FailureCause.CONNECTION_ERROR),
+        (httpx.ConnectError("refused"), FailureCause.CONNECTION_ERROR),
+        (ConnectionResetError("reset"), FailureCause.CONNECTION_ERROR),
+        (urllib3.exceptions.NewConnectionError(None, "no route"),  # type: ignore[arg-type]
+         FailureCause.CONNECTION_ERROR),
+        (urllib3.exceptions.ProtocolError("Connection aborted"), FailureCause.CONNECTION_ERROR),
+        (ValueError("bad json"), None),
+    ],
+)
+def test_failure_cause_names_what_went_wrong(exc: BaseException, cause: FailureCause | None) -> None:
+    assert failure_cause(exc) == cause
+
+
+def _fake() -> FakePlugin:
+    return FakePlugin(SourceConfig(name="f", type="fake",
+                                   collections=[CollectionConfig(name="c", query="*")]))
+
+
+def test_a_listing_retry_reaches_the_core_only_while_it_listens() -> None:
+    plugin = _fake()
+    heard: list[ListingRetry] = []
+    plugin.report_listing_retry(cause=FailureCause.TIMEOUT)  # nobody listening: no-op
+    with listing_retries_to(heard.append):
+        plugin.report_listing_retry(cause=FailureCause.RATE_LIMITED, http_status=429,
+                                    wait_seconds=3.0, detail="HTTP 429")
+    plugin.report_listing_retry(cause=FailureCause.TIMEOUT)
+    assert heard == [ListingRetry(FailureCause.RATE_LIMITED, 429, 3.0, "HTTP 429")]
+
+
+def test_a_failing_listener_never_fails_the_listing() -> None:
+    def broken(_retry: ListingRetry) -> None:
+        raise RuntimeError("database busy")
+
+    with listing_retries_to(broken):
+        _fake().report_listing_retry(cause=FailureCause.SERVER_ERROR)

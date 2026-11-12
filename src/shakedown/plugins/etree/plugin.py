@@ -27,11 +27,13 @@ from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
+    FailureCause,
     FetchResult,
     ItemLookup,
     ListedItem,
     SourcePlugin,
     VerifyResult,
+    failure_cause,
     http_status,
     retry_after_seconds,
     reusable_leftover,
@@ -267,6 +269,8 @@ class EtreePlugin(SourcePlugin):
                         bytes_downloaded=total,
                         error=DOWNLOAD_REFUSED_REASON,
                         unavailable=True,
+                        cause=FailureCause.REFUSED,
+                        http_status=403,
                     )
                 retriable, retry_after, message = _classify(exc)
                 return FetchResult(
@@ -275,6 +279,8 @@ class EtreePlugin(SourcePlugin):
                     error=f"{mf.name}: {message}",
                     retriable=retriable,
                     retry_after=retry_after,
+                    cause=failure_cause(exc),
+                    http_status=http_status(exc),
                 )
 
             if mf.md5 is not None and hasher.hexdigest() != mf.md5:
