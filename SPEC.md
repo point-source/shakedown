@@ -2563,6 +2563,200 @@ Introduce a typo in a config key: the page shows the error naming it,
 and the other views keep showing data. Run `shakedown validate`: the
 result and time appear per collection.
 
+## Dashboard UI kit §spec:ui-kit
+
+*Status: in progress (kit, token set B, and Terms approved 2026-11-12; screens not started)*
+
+The visual kit, terms, and design authority for the read-only web
+dashboard (§spec:dashboard). §spec:dashboard and the endpoint sections
+fix behavior and data; this section fixes how the page looks and what it
+calls things. Every screen is built only from the tokens and components
+recorded here. A value the kit lacks is a kit change, made here first.
+
+**Platform and track.** Web, track A (conventional): a familiar
+admin-dashboard look from a standard component kit (§req:constraints: UI
+line). Light and dark themes follow the device setting (operator
+decision, 2026-11-12).
+
+**Base system.** shadcn/ui (new-york style, components copied into
+`web/src/components/ui/`) on Tailwind CSS 4, React 19, TypeScript, built
+by Vite (operator decision, 2026-11-12). Charts are shadcn charts on
+Recharts. Icons are lucide-react. The page is a static build: `npm run
+build` in `web/` writes `web/dist/`, which the image's Node build stage
+produces and `serve` serves. Node never runs in the runtime image.
+Vite's `base: "./"` keeps every asset URL relative (§spec:dashboard:
+works behind a proxy). Fonts are bundled from `@fontsource-variable`
+packages; nothing loads from a third party (§spec:dashboard:
+self-contained). Every web dependency is pinned to an exact version in
+`web/package.json` and `web/package-lock.json`.
+
+**Tokens.** CSS variables in `web/src/index.css`, mapped into Tailwind
+through `@theme inline`; this file is the single source of truth.
+Components use Tailwind utilities that resolve to these variables, never
+literal colors, sizes, radii, shadows, or fonts.
+
+| Token | Light | Dark | Use |
+| --- | --- | --- | --- |
+| `--background`, `--foreground` | shadcn neutral | shadcn neutral | page |
+| `--card`, `--card-foreground` | shadcn neutral | shadcn neutral | cards |
+| `--muted`, `--muted-foreground` | shadcn neutral | shadcn neutral | labels, secondary text, tracks |
+| `--border`, `--input`, `--ring` | shadcn neutral | shadcn neutral | dividers, focus |
+| `--primary`, `--primary-foreground` | `oklch(0.546 0.245 262.881)` on `oklch(0.985 0 0)` | `oklch(0.707 0.165 254.624)` on `oklch(0.145 0 0)` | progress, chart series 1, focus ring (`--ring` = primary) |
+| `--destructive` | `oklch(0.505 0.213 27.518)` | `oklch(0.704 0.191 22.216)` | failed, stopped reporting, config error |
+| `--success` (kit addition) | `oklch(0.448 0.119 151.328)` | `oklch(0.792 0.209 151.711)` | completed, healthy |
+| `--warning` (kit addition) | `oklch(0.473 0.137 46.201)` | `oklch(0.828 0.189 84.429)` | no progress, delayed, old data |
+| `--chart-1` … `--chart-5` | `--chart-1` = primary; shadcn 2–5 | shadcn | chart series |
+| `--radius` | `0.5rem` | — | `rounded-sm/md/lg/xl` derive from it |
+| `--density` | `0.225rem` (compact) | — | Tailwind `--spacing`: every `p-*`, `gap-*`, `m-*` step |
+| `--font-sans`, `--font-mono` | Inter Variable; Geist Mono Variable (both bundled) | — | text; mono for show IDs only |
+
+`--success` and `--warning` exist because a monitoring page needs "fine"
+and "look at this" beside shadcn's "destructive". In the light theme the
+three status tones sit one step darker than Tailwind's 600 shades so
+12 px badge text on its tint passes WCAG AA (at least 4.5:1); checked
+2026-11-12.
+
+**Type scale.** Page title `text-xl` semibold. Figures (stat values)
+`text-2xl` semibold, `tabular-nums`. Card titles `text-base` semibold.
+Body `text-base`. Labels and secondary text `text-sm` muted-foreground.
+Show IDs `font-mono text-xs`. Every number that updates in place uses
+`tabular-nums` so it does not jitter.
+
+**Spacing and radius.** Tailwind's spacing scale multiplied by
+`--density`; radius steps from `--radius`. No arbitrary values
+(`p-[13px]`).
+
+**Target sizes.** 390×844 (phone), 768×1024 (tablet), 1440×900
+(desktop). Every screen state renders at all three in both themes.
+
+**Components.** From shadcn/ui: Card (with CardHeader, CardTitle,
+CardDescription, CardAction, CardContent), Badge, Progress, Table,
+Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
+
+- Badge variants `success`, `warning`, `danger`: tinted background, text
+  in the tone. Used for run results and run states.
+- Alert variant `warning`: page-wide notices (data is old, cannot reach
+  Shakedown). `destructive` carries a broken config.
+- Skeleton is the loading state of any card whose first answer has not
+  arrived.
+- CardTitle renders an `h2` (kit change), so screen readers can jump
+  between cards. A figure inside a card is plain text, never a CardTitle.
+
+**Usage rules.**
+
+- Badge tones carry outcomes and states only: `success` for Completed,
+  `warning` for No progress, delayed, or partly failed, `danger` for
+  Failed and Stopped reporting. A run's phase uses `secondary` (neutral);
+  it is not an outcome.
+- Color never carries meaning alone; every badge and dot has its words.
+- Sizes use decimal units: 1 GB = 10^9 bytes, 1 TB = 10^12 (operator
+  decision, 2026-11-12), formatted by `web/src/lib/format.ts`.
+- A chart has an `aria-label` naming what it plots and its window, and
+  the current value it summarises is also on screen as text.
+- Show IDs and other source text render as plain React text (never
+  `dangerouslySetInnerHTML`), in `font-mono text-xs`.
+- The page's content sits in one `main` landmark.
+
+The kit sheet (`web/src/KitSheet.tsx`, `?view=kit`) shows every token
+and component state. The operator approved it on 2026-11-12 (round 2);
+its goldens are `web/tests/__screenshots__/kit-<size>-<theme>.png`.
+`web/src/KitPreview.tsx` is the representative screen the token sets
+were compared on; it is not a designed screen and the Screens step
+replaces it.
+
+**Direction.** Track A: no bespoke direction. Three token sets were
+compared on one representative screen (round 1, 2026-11-12): A neutral
+(black primary, 10 px radius, standard density, Geist), B blue (8 px,
+compact, Inter), C teal (4 px, roomy, Inter). The operator chose B
+(2026-11-12): more fits on a phone, and the blue accent marks progress
+and the speed chart clearly. A was rejected because its black accent
+barely separates progress from text; C because its roomy spacing makes
+the phone page longest.
+
+**Design authority.** No design sources existed before this kit
+(design state none), so no conflicts were settled. Entries are added
+here as `Design authority: <area> — <winner> — <reason> — <date>`.
+
+### Terms
+
+UI copy uses only these words for these things (one name per thing).
+Spec and code names in the last column never appear on screen.
+
+| Term | Meaning | Never call it | Replaces (internal) |
+| --- | --- | --- | --- |
+| Shakedown | The app this page belongs to. | the server, serve | `serve`, shakedown |
+| Show | One concert recording as the source lists it. | item, recording, entry | item |
+| Show ID | The source's identifier for a show. | item ID | `identifier` |
+| Collection | A set of shows Shakedown mirrors from one source under one name. | library, set | collection |
+| Source | A site Shakedown mirrors from, as named in the config. | plugin, provider | source block, plugin |
+| Archive | Shakedown's own copy of every downloaded file. | mirror, store, disk | archive tree, `archive_bytes`, `bytes_on_disk` |
+| Library | The folders your music tools read. Its files are links into the archive and take no extra space. | staging, archive | library tree, `library_bytes` |
+| Free space | Space left on the drive that holds the archive. | available, disk free | `disk.free_bytes` |
+| Run | One piece of work Shakedown does on one collection. | job, task, activity | activity entry, run record |
+| Sync | A run that checks the source and downloads new and changed shows. | update, refresh | `sync` |
+| Catch-up sync | A sync that waited for another run to finish, then ran. | retry, rescheduled sync | `catch_up` |
+| Refetch | A run that downloads one show again. | redownload | `refetch` |
+| Reconform | A run that puts one show's files back the way Shakedown recorded them. | repair, reset | `reconform` |
+| Restage | A run that rebuilds the library folders from the archive. | rebuild, relink | `restage` |
+| Verify | A run that checks archive files against what Shakedown recorded. | scan, audit | `verify` |
+| Reconcile | A run that rebuilds Shakedown's records from the archive. | rescan, recover | `reconcile` |
+| Validation | A check that the config, sources, and handoff targets work, run with `shakedown validate`. | test, preflight | readiness validation |
+| Release | The Shakedown version answering this page. | version, build | `release` |
+| Running | A run that is working and reporting. | active, in progress | `state: running` |
+| No progress for *time* | A running run whose counts have not moved for that long. | stuck, stalled, hung | `last_progress_at` |
+| Stopped reporting | A run that stopped sending updates: killed, crashed, or the host went down. | crashed, lost, ended unexpectedly | `end_reason: stopped_reporting`, ended unexpectedly |
+| Completed | The run finished and every show it worked on succeeded. | done, succeeded, OK | `completed` |
+| Completed, some shows failed | The run finished; some shows failed and the next sync retries them. | partial, partly failed | `completed_with_item_issues` |
+| Failed | The run ended before it finished. | error, aborted | `failed_before_completion` |
+| Listing incomplete | The source's list of shows did not load, so nothing was removed. | stale | `stale_enumeration`, stale |
+| Estimating | A total or time left that is not known yet. | unknown, calculating, — | null `items_to_fetch`, `bytes_to_fetch`, `eta_seconds` |
+| Time left | Estimated time until the run finishes. | ETA | `eta_seconds` |
+| Mirrored | A show whose files are all in the archive. | complete, downloaded, done | `complete` |
+| Pending | A show waiting to be downloaded. | queued, to do | `pending` |
+| Failed (show) | A show whose download failed; the next sync retries it. | errored, broken | `failed` |
+| Restricted | A show the source does not let Shakedown download. | unavailable, blocked, locked | `unavailable`, `restricted` |
+| Disappeared | A show the source no longer lists. Shakedown keeps its copy. | removed, deleted, gone | `disappeared`, removed upstream |
+| Needs attention | Things waiting on the operator, one entry per collection and kind. | issues, alerts, problems | attention entries |
+| Library health | Facts about the library that need no action. | warnings | health |
+| Handoff notice | The message that tells your music tools new shows arrived. | notification, webhook, ping | handoff |
+| Failure notice | The message Shakedown sends when a run fails. | alert, error email | failure notice |
+| Requests in flight | Requests to a source that are open right now. | connections, active requests | `requests_in_flight` |
+| Rate limited | The source asked Shakedown to slow down (HTTP 429). | throttled, blocked | `rate_limited` |
+| Server error | The source answered with an error (HTTP 5xx). | failure, outage | `server_error` |
+| Back-off | A wait Shakedown adds before trying again. | pause, delay, cooldown | `backoff`, `Retry-After` |
+| Retry | Another attempt at a request that failed. | redo | `retry` |
+| Drift | Archive files that changed after Shakedown recorded them. | corruption, mismatch | drift, `drift_files` |
+| Phases | Starting · Listing · Discovering · Downloading · Tagging · Updating library · Sending notices · Verifying · Finishing | — | `phase` codes; `staging` → Updating library, `notifying` → Sending notices |
+
+### Screens
+
+Each approved screen lists its handoff spec, its goldens
+(`web/tests/__screenshots__/`), and the round it was approved in.
+
+*None yet.*
+
+### Harness
+
+- `npm run render -- <outDir> [sets] [view]` in `web/` builds the page
+  and captures every size × theme with headless Chromium (Playwright,
+  same version as the mise-managed one) into a review folder outside
+  git.
+- `npm run test:screens` runs the Playwright screenshot tests
+  (`web/tests/*.spec.ts`, config `web/playwright.config.ts`): one project
+  per size × theme, `maxDiffPixels: 0`, `threshold: 0.05`, animations and
+  caret off, UTC clock, `en-US` locale. Baselines are committed only for
+  approved screens and the approved kit sheet. Baselines come from the
+  environment CI renders in; a font or renderer difference is a finding,
+  never a reason to loosen the threshold. The kit baselines were
+  generated on Linux x86-64 with Playwright 1.65.0's Chromium and the
+  bundled fonts; CI has no web job yet, and the job that adds it renders
+  in that same setup or regenerates the baselines as an environment
+  change for the operator.
+- Fixtures (`web/src/fixtures/`) hold answers in the exact shape of the
+  `/api/*` endpoints (`web/src/api/types.ts`), with a fixed clock.
+- Handoff specs live in `docs/ui/handoff/`, one per screen, from
+  `docs/ui/handoff/_template.md`.
+
 ## Deployment §spec:deployment
 
 *Status: complete*
