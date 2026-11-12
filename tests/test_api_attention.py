@@ -444,6 +444,77 @@ def test_a_pre_v10_database_answers_without_migrating(tmp_roots: tuple[Path, Pat
         assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 9
 
 
+# --- the batch's user-level path -----------------------------------------------------
+
+
+def test_four_problems_are_listed_by_collection_and_each_leaves_once_resolved(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§spec:needs-attention user-level test path: a failed show, a blocked handoff, a
+    skipped tick, and a stray library file, each named by collection and show and
+    matching status; resolving each removes its entry."""
+    archive, library = tmp_roots
+    blocked = _two_collections(archive, library, on_complete=WebhookHandoff(webhook=DOWN))
+    hooks = _Webhooks()
+
+    def sync(config: Config, collection: str) -> int:
+        with patch("shakedown.notify.httpx.post", side_effect=hooks):
+            return run_sync(config, source_filter=SRC, collection_filter=collection)
+
+    _show("gd-a")
+    _show("gd-bad")
+    # coll2: its handoff target is down.
+    assert sync(blocked, "coll2") == 0
+    # coll1: gd-bad fails; a file I put in gd-a's library folder is found once gd-a's
+    # files change upstream.
+    FakePlugin.lookup_faults["gd-bad"] = [RuntimeError("source said no")]
+    assert sync(blocked, "coll1") == 1
+    stray = library / SRC / "coll1" / "gd-a" / "my-notes.txt"
+    stray.write_text("mine")
+    _show("gd-a", ("gd-a-remaster.flac", b"new", "Flac"))
+    assert sync(blocked, "coll1") == 1
+    # coll2's tick is skipped behind another run. Last: a finishing coll1 sync would
+    # catch it up.
+    with writer_lock(blocked):
+        assert sync(blocked, "coll2") == 1
+
+    answer = _attention(blocked)
+    status = _status(blocked, capsys)
+    # The failed show's sync also leaves status a `recovery` (completed_with_item_issues);
+    # reported as status reports it, pending Q-6-1.
+    assert _kinds(answer) == [
+        ("coll1", "failed_shows"), ("coll1", "recovery"), ("coll1", "unplaced_files"),
+        ("coll2", "rescheduled"), ("coll2", "handoff_pending"),
+    ]
+    one, two = _summary(status, "coll1"), _summary(status, "coll2")
+    assert _entry(answer, "failed_shows")["identifiers"] == ["gd-bad"]
+    assert one["counts"]["failed"] == 1
+    assert _entry(answer, "recovery")["detail"]["affected_item"] == "gd-bad"
+    assert _entry(answer, "unplaced_files")["detail"]["unplaced_files"] == (
+        one["unplaced_files"]
+    ) == [str(stray)]
+    assert _same_instant(_entry(answer, "rescheduled", "coll2")["since"],
+                         two["rescheduled"]["since"])
+    handoff = _entry(answer, "handoff_pending", "coll2")
+    assert handoff["identifiers"] == two["handoff_pending"]["identifiers"] == ["gd-a", "gd-bad"]
+
+    FakePlugin.lookup_faults.clear()  # the source serves gd-bad again
+    assert sync(blocked, "coll2") == 0  # its handoff target is still down
+    assert ("coll2", "rescheduled") not in _kinds(_attention(blocked))
+    assert ("coll2", "handoff_pending") in _kinds(_attention(blocked))
+
+    assert sync(blocked, "coll1") == 0
+    assert {k for c, k in _kinds(_attention(blocked)) if c == "coll1"} == {"unplaced_files"}
+
+    stray.unlink()
+    assert sync(blocked, "coll1") == 0
+    assert _kinds(_attention(blocked)) == [("coll2", "handoff_pending")]
+
+    fixed = _two_collections(archive, library, on_complete=WebhookHandoff(webhook=GOOD))
+    assert sync(fixed, "coll2") == 0
+    assert _attention(fixed)["entries"] == []
+
+
 # --- library health -----------------------------------------------------------------
 
 
