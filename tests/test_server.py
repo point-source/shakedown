@@ -996,3 +996,16 @@ async def test_api_health_contains_no_token_or_credential(
         assert r.json()["config"]["valid"] is False
         assert "webhok" in r.json()["config"]["error"]
         assert secret not in r.text
+
+
+def test_example_compose_runs_serve_for_the_dashboard() -> None:
+    """The example stack runs serve enabled, since the dashboard needs it; its token
+    stays optional (empty disables only the mutating endpoints) (§spec:deployment)."""
+    import yaml
+
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.example.yaml").read_text())
+    serve = compose["services"]["shakedown-serve"]
+    assert serve["command"][0] == "serve"
+    assert serve["restart"] == "unless-stopped"
+    assert "SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN:-}" in serve["environment"]
+    assert "/share/data:/data" in serve["volumes"]
