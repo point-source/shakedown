@@ -143,6 +143,25 @@ export const runs: RunsAnswer = {
   ],
 }
 
+// One row per collection per day for 30 days; a day with no run repeats the day before.
+function growth(): LibraryAnswer["growth"] {
+  const rows: LibraryAnswer["growth"] = []
+  const cols: [string, string, number, number, number, number][] = [
+    ["internetarchive", "grateful-dead", 12_900, 14_318, 6_810e9, 7_512e9],
+    ["internetarchive", "phish", 4_060, 4_097, 1_590e9, 1_604e9],
+    ["etree-lma", "etree-lma", 12_700, 12_789, 718e9, 725e9],
+  ]
+  for (let i = 29; i >= 0; i--) {
+    const date = new Date(Date.parse(NOW) - i * 86_400_000).toISOString().slice(0, 10)
+    const f = (29 - i) / 29
+    for (const [source, collection, c0, c1, b0, b1] of cols) {
+      const step = Math.floor(f * 6) / 6 // runs on some days only
+      rows.push({ date, source, collection, complete: Math.round(c0 + (c1 - c0) * step), archive_bytes: Math.round(b0 + (b1 - b0) * step) })
+    }
+  }
+  return rows
+}
+
 const counts = (complete: number, pending: number, failed: number, unavailable: number, disappeared: number) =>
   ({ pending, downloading: 0, complete, failed, unavailable, disappeared, pruned: 0 })
 
@@ -164,11 +183,17 @@ export const library: LibraryAnswer = {
       restricted: 7, archive_bytes: 725_000_000_000, library_bytes: 511_000_000_000,
       last_successful_sync_at: at(2533) },
   ],
-  growth: [],
+  growth: growth(),
   recently_mirrored: [
-    { source: "internetarchive", collection: "grateful-dead", identifier: "gd1977-05-07.sbd.miller.97060.flac16",
-      title: "Grateful Dead Live at Boston Garden on 1977-05-07", downloaded_at: at(1) },
-  ],
+    ["gd1977-05-07.sbd.miller.97060.flac16", "Grateful Dead Live at Boston Garden on 1977-05-07", 1],
+    ["gd1977-05-05.sbd.hicks.4983.sbeok.shnf", "Grateful Dead Live at Veterans Memorial Coliseum on 1977-05-05", 3],
+    ["gd1977-05-04.aud.vernon.82548.flac16", null, 6],
+    ["gd1977-05-03.sbd.miller.30411.flac16", "Grateful Dead Live at The Palladium on 1977-05-03", 9],
+    ["gd1977-05-01.sbd.unknown.1231.flac16", "Grateful Dead Live at The Palladium on 1977-05-01", 13],
+  ].map(([identifier, title, m]) => ({
+    source: "internetarchive", collection: "grateful-dead", identifier: identifier as string,
+    title: title as string | null, downloaded_at: at(m as number),
+  })),
 }
 
 export const attention: AttentionAnswer = {
@@ -177,13 +202,36 @@ export const attention: AttentionAnswer = {
     { kind: "failed_shows", source: "internetarchive", collection: "grateful-dead", since: null,
       identifiers: ["gd1970-02-13.aud.unknown.1234.flac16", "gd1980-10-25.sbd.miller.7.flac16", "gd1991-06-14.mtx.seamons.flac16"],
       detail: {} },
+    { kind: "ended_unexpectedly", source: "internetarchive", collection: "phish", since: at(6),
+      identifiers: [], detail: { runs: [{ run_id: 487, activity_id: 910, kind: "refetch", finished_at: at(6) }] } },
     { kind: "rescheduled", source: "internetarchive", collection: "phish", since: at(90),
       identifiers: [], detail: {} },
     { kind: "handoff_pending", source: "etree-lma", collection: "etree-lma", since: at(2533),
       identifiers: ["lma-ph2003-07-12", "lma-ph2003-07-13"],
       detail: { shows: 2, last_reason: "connection refused (beets:8337)" } },
   ],
-  health: [],
+  health: [
+    { source: "internetarchive", collection: "grateful-dead",
+      restricted: [
+        { identifier: "gd1977-05-08.sbd.betty.flac16", reason: "stream only" },
+        { identifier: "gd1969-02-27.sbd.lemieux.flac24", reason: "stream only" },
+        { identifier: "gd1973-06-10.aud.unknown.shnf", reason: "access restricted by the uploader" },
+      ].concat(Array.from({ length: 185 }, (_, i) => ({ identifier: `gd19${70 + (i % 25)}-01-${String(1 + (i % 28)).padStart(2, "0")}.sbd.r${i}.flac16`, reason: "stream only" }))),
+      removed_upstream: [
+        { identifier: "gd1972-05-04.sbd.unknown.flac16", removed_on: "2026-11-02" },
+        { identifier: "gd1985-06-14.aud.vernon.shnf", removed_on: "2026-10-28" },
+      ],
+      drift_files: 0, not_playable: [], playable_copies: [] },
+    { source: "internetarchive", collection: "phish",
+      restricted: Array.from({ length: 16 }, (_, i) => ({ identifier: `ph199${i % 10}-12-${String(10 + i).padStart(2, "0")}.sbd.flac16`, reason: "stream only" })),
+      removed_upstream: [], drift_files: 3, not_playable: [],
+      playable_copies: ["ph1989-05-28.shnf", "ph1990-04-05.shnf"] },
+    { source: "etree-lma", collection: "etree-lma",
+      restricted: Array.from({ length: 7 }, (_, i) => ({ identifier: `lma-gd19${80 + i}-03-0${1 + i}`, reason: "access restricted by the uploader" })),
+      removed_upstream: [], drift_files: 0,
+      not_playable: [{ identifier: "lma-ph1991-11-19", reason: "only SHN audio, which no player here reads" }],
+      playable_copies: [] },
+  ],
 }
 
 export const health: HealthAnswer = {
@@ -192,5 +240,7 @@ export const health: HealthAnswer = {
   config: { valid: true, error: null, last_loaded_at: at(0) },
   validation: [
     { source: "internetarchive", collection: "grateful-dead", status: "completed", at: at(20_160) },
+    { source: "internetarchive", collection: "phish", status: "completed_with_item_issues", at: at(20_150) },
+    { source: "etree-lma", collection: "etree-lma", status: null, at: null },
   ],
 }

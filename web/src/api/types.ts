@@ -143,6 +143,28 @@ export type AttentionKind =
   | "failed_shows" | "recovery" | "ended_unexpectedly" | "stale" | "rescheduled"
   | "handoff_pending" | "failure_notice_undelivered" | "separations" | "unplaced_files"
 
+export type OperationStatus =
+  | "not_started" | "in_progress" | "completed" | "completed_with_item_issues"
+  | "failed_before_completion" | "stale_enumeration"
+
+// `status`'s recovery summary; rides on an entry as detail.recovery, or is the
+// detail of a `recovery` entry (§spec:needs-attention).
+export interface Recovery {
+  operation: string
+  status: OperationStatus
+  started_at: Iso
+  updated_at: Iso
+  finished_at: Iso | null
+  phase: string | null
+  affected_item: string | null
+  affected_path: string | null
+  completed_work: unknown
+  preservation_context: unknown
+  deletion_context: unknown
+  safe_next_action: string | null
+  errors: string[] | null
+}
+
 export interface AttentionEntry {
   kind: AttentionKind
   source: string
@@ -170,5 +192,5 @@ export interface HealthAnswer {
   generated_at: Iso
   release: string
   config: { valid: boolean; error: string | null; last_loaded_at: Iso | null }
-  validation: { source: string; collection: string; status: string | null; at: Iso | null }[]
+  validation: { source: string; collection: string; status: OperationStatus | null; at: Iso | null }[]
 }
