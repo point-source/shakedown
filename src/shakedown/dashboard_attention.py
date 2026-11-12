@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from shakedown.activity import STOPPED_REPORTING, ActivityRepo
 from shakedown.dashboard import DashboardContext, iso
 from shakedown.models import ItemStatus
 from shakedown.state import ItemRepo
@@ -41,7 +42,32 @@ def _entry(
     }
 
 
-def _entries(summary: dict[str, Any], items: ItemRepo) -> list[dict[str, Any]]:
+def _unexpected_ends(
+    summary: dict[str, Any], activity: ActivityRepo, now: datetime
+) -> list[dict[str, Any]]:
+    """The collection's runs that ended unexpectedly and were not followed by a good
+    run of their kind, from their activity entries, plus a run `status` reports as
+    stopped reporting that has no entry (its start is its last sign of life)."""
+    runs = [
+        {**run, "finished_at": iso(run["finished_at"])}
+        for run in activity.unexpected_ends(summary["source"], summary["collection"], now)
+    ]
+    last_run = summary["last_run"]
+    if (
+        last_run
+        and last_run["end_reason"] == STOPPED_REPORTING
+        and last_run["run_id"] not in {run["run_id"] for run in runs}
+    ):
+        runs.append(
+            {"run_id": last_run["run_id"], "activity_id": None, "kind": last_run["kind"],
+             "finished_at": None}
+        )
+    return runs
+
+
+def _entries(
+    summary: dict[str, Any], items: ItemRepo, activity: ActivityRepo, now: datetime
+) -> list[dict[str, Any]]:
     """The collection's entries, in the kind order of §spec:needs-attention."""
     source, collection = summary["source"], summary["collection"]
     entries: list[dict[str, Any]] = []
@@ -62,6 +88,15 @@ def _entries(summary: dict[str, Any], items: ItemRepo) -> list[dict[str, Any]]:
                 identifiers=[recovery["affected_item"]] if recovery["affected_item"] else [],
                 detail=detail,
             )
+        )
+    ended = _unexpected_ends(summary, activity, now)
+    if ended:
+        times = [run["finished_at"] for run in ended if run["finished_at"]]
+        entries.append(
+            {
+                **_entry("ended_unexpectedly", summary, detail={"runs": ended}),
+                "since": min(times, key=datetime.fromisoformat) if times else None,
+            }
         )
     if summary["stale"]:
         entries.append(_entry("stale", summary))
@@ -127,8 +162,10 @@ def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
     its health, in config order. Lists are complete; the page decides how many to
     show."""
     items = ItemRepo(ctx.conn)
+    activity = ActivityRepo(ctx.conn)
+    now = datetime.now()
     summaries = collection_summaries(ctx.config, ctx.conn)
     return {
-        "entries": [entry for s in summaries for entry in _entries(s, items)],
+        "entries": [entry for s in summaries for entry in _entries(s, items, activity, now)],
         "health": [_health(s) for s in summaries],
     }

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,11 +17,12 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+from shakedown.activity import ActivityKind, ActivityRepo
 from shakedown.config import CollectionConfig, Config, SourceConfig, WebhookHandoff
 from shakedown.dashboard import VIEW_TTL_S
 from shakedown.db import connect
 from shakedown.lock import writer_lock
-from shakedown.models import Item, ItemStatus, OperationStatus, OperationType
+from shakedown.models import Item, ItemStatus, OperationStatus, OperationType, RunKind
 from shakedown.server import build_app
 from shakedown.state import ItemRepo, OperationOutcomeRepo, PlacementRepo, RunRepo
 from shakedown.status import print_status
@@ -306,6 +308,140 @@ def test_separations_and_unplaced_files_match_status(
     assert unplaced["detail"] == {"unplaced_files": summary["unplaced_files"]}
     # Entries keep the spec's kind order within a collection.
     assert _kinds(answer) == [("coll1", "separations"), ("coll1", "unplaced_files")]
+
+
+# --- runs that ended unexpectedly ---------------------------------------------------
+
+
+def _killed(conn: sqlite3.Connection, kind: ActivityKind, *, heartbeat: datetime,
+            collection: str = "coll1", run: bool = True) -> tuple[int | None, int]:
+    """An entry (and, for kinds that have one, an open run record) whose run stopped
+    reporting at ``heartbeat``: as a SIGKILL leaves them."""
+    run_id = None
+    if run:
+        run_id = RunRepo(conn).start(SRC, collection, heartbeat - timedelta(minutes=5),
+                                     kind=RunKind(kind.value)).id
+    activity_id = ActivityRepo(conn).create(
+        SRC, collection, kind, run_id=run_id, started_by_serve=False,
+        at=heartbeat - timedelta(minutes=5),
+    )
+    conn.execute("UPDATE run_activity SET last_heartbeat_at=? WHERE id=?",
+                 (heartbeat.isoformat(), activity_id))
+    return run_id, activity_id
+
+
+def _ended(conn: sqlite3.Connection, kind: ActivityKind, result: str, *,
+           at: datetime) -> None:
+    repo = ActivityRepo(conn)
+    activity_id = repo.create(SRC, "coll1", kind, run_id=None, started_by_serve=False,
+                              at=at - timedelta(minutes=1))
+    repo.end(activity_id, result, at)
+
+
+def test_a_killed_sync_is_listed_until_the_next_good_sync(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = make_config(*tmp_roots)
+    heartbeat = datetime.now() - timedelta(seconds=30)
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        run_id, activity_id = _killed(conn, ActivityKind.SYNC, heartbeat=heartbeat)
+        conn.commit()
+
+    entry = _entry(_attention(config), "ended_unexpectedly")
+    assert _summary(_status(config, capsys))["last_run"]["end_reason"] == "stopped_reporting"
+    assert entry["identifiers"] == []
+    assert entry["detail"] == {
+        "runs": [{"run_id": run_id, "activity_id": activity_id, "kind": "sync",
+                  "finished_at": entry["since"]}],
+    }
+    assert datetime.fromisoformat(entry["since"]) == heartbeat.astimezone()
+
+    _show("gd-a")
+    assert run_sync(config) == 0  # closes the killed run, then ends `completed`
+    assert _attention(config)["entries"] == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "result", "clears"),
+    [
+        (ActivityKind.SYNC, "completed", True),
+        (ActivityKind.CATCH_UP, "completed_with_item_issues", True),
+        (ActivityKind.SYNC, "failed_before_completion", False),
+        (ActivityKind.SYNC, "stale_enumeration", False),
+        (ActivityKind.VERIFY, "completed", False),
+    ],
+)
+def test_only_a_good_run_of_the_same_kind_clears_it(
+    tmp_roots: tuple[Path, Path], kind: ActivityKind, result: str, clears: bool
+) -> None:
+    config = make_config(*tmp_roots)
+    now = datetime.now()
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        _killed(conn, ActivityKind.SYNC, heartbeat=now - timedelta(hours=2), run=False)
+        ActivityRepo(conn).close_stale(now - timedelta(hours=1))  # as the next locked run
+        _ended(conn, kind, result, at=now - timedelta(minutes=10))
+        conn.commit()
+
+    kinds = {e["kind"] for e in _attention(config)["entries"]}
+    assert ("ended_unexpectedly" not in kinds) is clears
+
+
+def test_a_killed_restage_is_listed_by_its_activity_entry(tmp_roots: tuple[Path, Path]) -> None:
+    config = make_config(*tmp_roots)
+    now = datetime.now()
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        _, activity_id = _killed(conn, ActivityKind.RESTAGE,
+                                 heartbeat=now - timedelta(minutes=30), run=False)
+        conn.commit()
+
+    [run] = _entry(_attention(config), "ended_unexpectedly")["detail"]["runs"]
+    assert (run["run_id"], run["activity_id"], run["kind"]) == (None, activity_id, "restage")
+
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        _ended(conn, ActivityKind.RESTAGE, "completed", at=now - timedelta(minutes=1))
+        conn.commit()
+    assert _attention(config)["entries"] == []
+
+
+def test_an_unexpected_end_older_than_thirty_days_is_dropped(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    config = make_config(*tmp_roots)
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        _killed(conn, ActivityKind.VERIFY, heartbeat=datetime.now() - timedelta(days=31),
+                run=False)
+        conn.commit()
+
+    assert _attention(config)["entries"] == []
+
+
+def test_an_open_run_with_no_entry_matches_status(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run record whose entry was never written: status falls back to its start."""
+    config = make_config(*tmp_roots)
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        run_id = RunRepo(conn).start(SRC, "coll1", datetime.now() - timedelta(minutes=2)).id
+        conn.commit()
+
+    entry = _entry(_attention(config), "ended_unexpectedly")
+    assert _summary(_status(config, capsys))["last_run"]["end_reason"] == "stopped_reporting"
+    assert entry["since"] is None
+    assert entry["detail"]["runs"] == [
+        {"run_id": run_id, "activity_id": None, "kind": "sync", "finished_at": None}
+    ]
+
+
+def test_a_pre_v10_database_answers_without_migrating(tmp_roots: tuple[Path, Path]) -> None:
+    config = make_config(*tmp_roots)
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        conn.execute("DROP TABLE run_activity")
+        conn.execute("UPDATE schema_version SET version = 9")
+        conn.commit()
+
+    assert _attention(config)["entries"] == []
+    with closing(sqlite3.connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 9
 
 
 # --- library health -----------------------------------------------------------------
