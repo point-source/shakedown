@@ -42,6 +42,7 @@ from shakedown.dashboard_attention import attention_answer
 from shakedown.dashboard_health import health_answer
 from shakedown.dashboard_library import library_answer
 from shakedown.dashboard_network import network_answer
+from shakedown.dashboard_page import PAGE_DIR, register_page
 from shakedown.dashboard_runs import runs_answer
 from shakedown.db import connect_reader
 from shakedown.state import ItemRepo
@@ -61,12 +62,14 @@ def build_app(
     argv_prefix: tuple[str, ...] = DEFAULT_ARGV_PREFIX,
     child_env: dict[str, str] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    page_dir: Path = PAGE_DIR,
 ) -> FastAPI:
     """The control plane over the config file at ``config_path``. Every endpoint
     that needs the config reads the file as it is at the request, so an edit takes
     effect without a restart, and a broken file is a 503 naming the problem rather
     than a crash (§spec:api-sync-runs). ``clock`` times the dashboard's shared
-    answers (§spec:dashboard)."""
+    answers (§spec:dashboard). ``page_dir`` holds the built dashboard page
+    (§spec:dashboard-page)."""
     app = FastAPI(title="shakedown", version=__version__)
     app.state.answers = SharedAnswers(clock)
     # Every load goes through the tracker, so the dashboard knows the last config
@@ -282,6 +285,7 @@ def build_app(
         )
         return JSONResponse(json.loads(json.dumps(report.to_dict(), default=str)))
 
+    register_page(app, page_dir)
     return app
 
 
