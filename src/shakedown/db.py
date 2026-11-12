@@ -268,7 +268,8 @@ _ACTIVITY_SCHEMA = [
         bytes_downloaded        INTEGER,
         bytes_to_fetch          INTEGER,
         speed_bytes_per_second  REAL,
-        eta_seconds             INTEGER
+        eta_seconds             INTEGER,
+        requests_in_flight      INTEGER
     )
     """,
     """
@@ -305,6 +306,44 @@ _GROWTH_SCHEMA = [
     """,
 ]
 _SCHEMA += _GROWTH_SCHEMA
+
+# Network activity (§spec:network-activity): per source and minute, the totals a run
+# measured; and each network event. Kept 30 days, like the activity entries.
+_NETWORK_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS network_minutes (
+        source_name              TEXT NOT NULL,
+        minute                   TEXT NOT NULL,
+        bytes                    INTEGER NOT NULL DEFAULT 0,
+        peak_requests_in_flight  INTEGER NOT NULL DEFAULT 0,
+        rate_limited             INTEGER NOT NULL DEFAULT 0,
+        server_errors            INTEGER NOT NULL DEFAULT 0,
+        timeouts                 INTEGER NOT NULL DEFAULT 0,
+        connection_errors        INTEGER NOT NULL DEFAULT 0,
+        retries                  INTEGER NOT NULL DEFAULT 0,
+        backoff_seconds          REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_name, minute)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS network_events (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name      TEXT NOT NULL,
+        at               TEXT NOT NULL,
+        kind             TEXT NOT NULL,
+        http_status      INTEGER,
+        collection_name  TEXT,
+        identifier       TEXT,
+        wait_seconds     REAL,
+        detail           TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS network_events_source_idx
+        ON network_events (source_name, at DESC)
+    """,
+]
+_SCHEMA += _NETWORK_SCHEMA
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -491,11 +530,11 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
 def _migrate_to_10(conn: sqlite3.Connection) -> None:
     """v9 → v10, the one migration of the dashboard increment (§spec:state): add the
     activity entries (§spec:run-activity), each naming the outcome of a run with no run
-    record (§spec:run-history), and the growth snapshots (§spec:library-stats),
-    recording the first snapshot of every collection the database holds shows for.
-    Additive: nothing else changes. Later parts of the increment (network activity)
-    add their tables here too — the increment moves the schema forward exactly once."""
-    for stmt in _ACTIVITY_SCHEMA + _GROWTH_SCHEMA:
+    record (§spec:run-history); the network history (§spec:network-activity); and the
+    growth snapshots (§spec:library-stats), recording the first snapshot of every
+    collection the database holds shows for. Additive: nothing else changes — the
+    increment moves the schema forward exactly once."""
+    for stmt in _ACTIVITY_SCHEMA + _NETWORK_SCHEMA + _GROWTH_SCHEMA:
         conn.execute(stmt)
     # Imported here: growth reads items through state, which imports this module.
     from shakedown.growth import GrowthRepo

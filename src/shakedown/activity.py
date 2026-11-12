@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -21,6 +21,8 @@ from typing import Any
 
 from shakedown.db import ACTIVITY_SINCE_VERSION, transaction
 from shakedown.models import ENDED_UNEXPECTEDLY, OperationStatus
+from shakedown.network import EventKind, NetworkEvent, NetworkMeter, NetworkRepo
+from shakedown.plugins.base import ListingRetry, failure_cause, http_status, listing_retries_to
 from shakedown.state import OperationOutcomeRepo, RunRepo
 
 log = logging.getLogger(__name__)
@@ -90,6 +92,7 @@ class Snapshot:
     bytes_to_fetch: int | None = None
     speed_bytes_per_second: float | None = None
     eta_seconds: int | None = None
+    requests_in_flight: int | None = None
     run_counts: RunCounts | None = None
     # The operation outcome of a run with no run record (restage, reconcile), whose
     # errors the run history shows (§spec:run-history); None until it opens one.
@@ -103,7 +106,7 @@ _COUNTER_COLUMNS = (
 _PROGRESS_COLUMNS = (
     "phase", "items_listed", "items_to_look_up", "items_looked_up", "items_to_fetch",
     "items_done", "items_failed", "bytes_downloaded", "bytes_to_fetch",
-    "speed_bytes_per_second", "eta_seconds",
+    "speed_bytes_per_second", "eta_seconds", "requests_in_flight",
 )
 
 
@@ -243,7 +246,7 @@ class ActivityRepo:
             """
             UPDATE run_activity SET state=?, result=?, finished_at=?,
                 last_heartbeat_at=?, current_items='[]', speed_bytes_per_second=NULL,
-                eta_seconds=NULL
+                eta_seconds=NULL, requests_in_flight=NULL
             WHERE id=? AND state=?
             """,
             (ENDED, result, _iso(finished_at), _iso(finished_at), activity_id, RUNNING),
@@ -263,7 +266,7 @@ class ActivityRepo:
             """
             UPDATE run_activity SET state=?, result=?, end_reason=?,
                 finished_at=last_heartbeat_at, current_items='[]',
-                speed_bytes_per_second=NULL, eta_seconds=NULL
+                speed_bytes_per_second=NULL, eta_seconds=NULL, requests_in_flight=NULL
             WHERE state=? AND last_heartbeat_at < ?
             """,
             (ENDED, OperationStatus.FAILED_BEFORE_COMPLETION.value, STOPPED_REPORTING,
@@ -274,7 +277,8 @@ class ActivityRepo:
         """The live view (§spec:run-activity): running entries, then entries that
         ended in the last ten minutes, newest first. A running entry that stopped
         reporting reads as ended at its last heartbeat. Times are datetimes; every
-        other value is as the API answers it. Empty before schema v10."""
+        other value is as the API answers it, plus each entry's
+        ``requests_in_flight`` for the network view. Empty before schema v10."""
         if not self.has_table():
             return []
         cutoff = now - timedelta(seconds=LIVE_ENDED_S)
@@ -285,7 +289,8 @@ class ActivityRepo:
         running: list[dict[str, Any]] = []
         ended: list[dict[str, Any]] = []
         for row in rows:
-            entry = _as_seen(_live_entry(row), now)
+            entry = {**_as_seen(_live_entry(row), now),
+                     "requests_in_flight": row["requests_in_flight"]}
             if entry["state"] == ENDED and entry["finished_at"] < cutoff:
                 continue  # stopped reporting before the live view's horizon
             (running if entry["state"] == RUNNING else ended).append(entry)
@@ -318,13 +323,14 @@ class ActivityRepo:
         ]
 
     def trim(self, now: datetime) -> None:
-        """Drop ended entries older than the history window."""
+        """Drop ended entries, and network history, older than the history window."""
         cutoff = now - timedelta(days=HISTORY_DAYS)
         with transaction(self.conn):
             self.conn.execute(
                 "DELETE FROM run_activity WHERE state=? AND finished_at < ?",
                 (ENDED, _iso(cutoff)),
             )
+            NetworkRepo(self.conn).trim(cutoff)
 
 
 # How often a run writes its progress and heartbeat (§spec:run-activity: "every few
@@ -393,21 +399,42 @@ def _tree_size(path: Path) -> int:
     return total
 
 
+@dataclass
+class _Fetch:
+    """One fetch attempt's temp folder, measured by sampling: each growth since the
+    last sample is fetched bytes; a shrink (a file the plugin dropped) only moves the
+    baseline."""
+    tmp_dir: Path
+    last_size: int
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    closed: bool = False
+
+
 class Progress:
     """One entry's live progress: the hooks a run calls. Every hook is an in-memory
     update under a lock — never a database write and never an exception — so
     recording costs the run nothing (§spec:run-activity). The recorder's timer reads
-    it every few seconds."""
+    it every few seconds.
+
+    It also measures the entry's network activity (§spec:network-activity) into its
+    source's ``meter``: bytes landing in fetch temp folders, requests in flight, and
+    network events."""
 
     def __init__(
         self,
         kind: ActivityKind,
         *,
+        source: str = "",
+        collection: str = "",
+        meter: NetworkMeter | None = None,
         run_id: int | None = None,
         now: Callable[[], datetime] = datetime.now,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.kind = kind
+        self.collection = collection
+        # A detached entry (recording off) still measures; its meter is never written.
+        self.meter = meter if meter is not None else NetworkMeter(source, now)
         # Set by the recorder once the entry is written; None while recording is off.
         self.activity_id: int | None = None
         self.run_id = run_id
@@ -425,8 +452,9 @@ class Progress:
         self._bytes_to_fetch = 0
         self._sizes_known = True
         self._working: dict[str, int] = {}
-        self._in_flight: dict[str, tuple[Path, int]] = {}
-        self._reported_bytes = 0
+        self._fetches: list[_Fetch] = []
+        self._fetched_bytes = 0
+        self._requests = 0
         self._last_progress_at: datetime | None = None
         self._last_from_run: tuple[int, int] | None = None
         self._fetches_finished = 0
@@ -502,55 +530,118 @@ class Progress:
             else:
                 self._working.pop(identifier, None)
 
-    def fetch_started(self, identifier: str, tmp_dir: Path) -> None:
-        """A fetch begins writing into its core-owned temp folder: its bytes are
-        measured from what lands there (§spec:network-activity), not counting files
-        kept from an earlier attempt. Leftovers the fetch then removes lower the
-        baseline when the timer next measures."""
-        baseline = _tree_size(tmp_dir) if tmp_dir.exists() else 0
+    @contextlib.contextmanager
+    def fetch_attempt(self, identifier: str, tmp_dir: Path) -> Iterator[None]:
+        """One plugin fetch attempt writing into its core-owned temp folder: its bytes
+        are what lands there (§spec:network-activity), sampled by the timer and once
+        more when the attempt returns. Files already there — kept from an earlier
+        attempt — are not counted; neither is anything the core adds afterwards."""
+        fetch = _Fetch(tmp_dir, _tree_size(tmp_dir) if tmp_dir.exists() else 0)
         with self._lock:
-            self._in_flight[identifier] = (tmp_dir, baseline)
+            self._fetches.append(fetch)
             if self._first_fetch_at is None:
                 self._first_fetch_at = self._clock()
+        try:
+            yield
+        finally:
+            self._sample(fetch, close=True)
+            with self._lock:
+                self._fetches.remove(fetch)
 
-    def fetch_finished(self, identifier: str) -> None:
+    def _sample(self, fetch: _Fetch, *, close: bool = False) -> None:
+        with fetch.lock:
+            if fetch.closed:
+                return
+            size = _tree_size(fetch.tmp_dir) if fetch.tmp_dir.exists() else 0
+            grown = size - fetch.last_size
+            fetch.last_size = size
+            fetch.closed = close
+        if grown > 0:
+            with self._lock:
+                self._fetched_bytes += grown
+                self._last_progress_at = self._now()
+            self.meter.add_bytes(grown)
+
+    def fetch_finished(self) -> None:
+        """A show's fetch is done, however it ended (for the pace estimate)."""
         with self._lock:
-            self._in_flight.pop(identifier, None)
             self._fetches_finished += 1
+
+    def bytes_fetched(self) -> int:
+        """Bytes this entry fetched from the source so far (§spec:network-activity
+        "Bytes downloaded means bytes fetched")."""
+        with self._lock:
+            return self._fetched_bytes
+
+    @contextlib.contextmanager
+    def request(self) -> Iterator[None]:
+        """Work held under the source's request budget: one request in flight."""
+        with self._lock:
+            self._requests += 1
+        self.meter.request_started()
+        try:
+            yield
+        finally:
+            self.meter.request_ended()
+            with self._lock:
+                self._requests -= 1
+
+    def network_event(
+        self,
+        kind: EventKind,
+        *,
+        identifier: str | None = None,
+        http_status: int | None = None,
+        wait_seconds: float | None = None,
+        detail: str | None = None,
+    ) -> None:
+        self.meter.event(NetworkEvent(
+            at=self._now(), kind=kind, http_status=http_status,
+            collection=self.collection or None, identifier=identifier,
+            wait_seconds=wait_seconds, detail=detail,
+        ))
+
+    def _listing_retry(self, retry: ListingRetry, heard: list[ListingRetry]) -> None:
+        heard.append(retry)
+        if retry.cause is not None:
+            self.network_event(EventKind(retry.cause.value), http_status=retry.http_status,
+                               detail=retry.detail)
+        if retry.gave_up:
+            return
+        self.network_event(EventKind.RETRY, detail=retry.detail)
+        if retry.wait_seconds:
+            self.network_event(EventKind.BACKOFF, wait_seconds=retry.wait_seconds)
+
+    @contextlib.contextmanager
+    def listing(self) -> Iterator[None]:
+        """The collection listing, running: one request in flight, hearing the
+        plugin's own retries of it. A listing that fails records its cause, unless
+        the plugin already reported giving up on it."""
+        heard: list[ListingRetry] = []
+        with self.request(), listing_retries_to(lambda r: self._listing_retry(r, heard)):
+            try:
+                yield
+            except Exception as e:
+                cause = failure_cause(e)
+                if cause is not None and not any(r.gave_up for r in heard):
+                    self.network_event(EventKind(cause.value), http_status=http_status(e),
+                                       detail=str(e))
+                raise
 
     # -- the recorder's side --------------------------------------------------------
 
     def snapshot(self, *, final: bool = False) -> Snapshot:
-        """Cumulative progress now. Measures in-flight temp folders, so it runs on
+        """Cumulative progress now. Samples in-flight temp folders, so it runs on
         the recorder's timer, outside the run's own work."""
         with self._lock:
-            in_flight = list(self._in_flight.items())
-        measured = 0
-        for identifier, (tmp_dir, baseline) in ([] if final else in_flight):
-            size = _tree_size(tmp_dir)
-            if size < baseline:
-                # The fetch removed leftovers it does not reuse: they were never
-                # this run's bytes.
-                baseline = size
-                with self._lock:
-                    if identifier in self._in_flight:
-                        self._in_flight[identifier] = (tmp_dir, size)
-            measured += size - baseline
+            fetches = list(self._fetches)
+        for fetch in fetches:
+            self._sample(fetch)
         counts = self.run_counts() if self.run_counts is not None else None
         now_t = self._clock()
         with self._lock:
             downloading = self.kind in _DOWNLOADING_KINDS
-            # A downloading run supplies its run counts; their bytes are the
-            # finished fetches.
-            completed = counts.bytes_downloaded if counts is not None else 0
-            total = completed + measured
-            if not final:
-                # No dip in the instant between a fetch returning and its bytes
-                # landing in the run's counts.
-                total = max(total, self._reported_bytes)
-            if total > self._reported_bytes:
-                self._last_progress_at = self._now()
-            self._reported_bytes = total
+            total = self._fetched_bytes
             self._samples.append((now_t, total))
             while self._samples and self._samples[0][0] < now_t - ETA_WINDOW_S:
                 self._samples.popleft()
@@ -600,6 +691,7 @@ class Progress:
                 bytes_to_fetch=bytes_to_fetch,
                 speed_bytes_per_second=(None if final else speed) if downloading else None,
                 eta_seconds=eta,
+                requests_in_flight=None if final else self._requests,
                 run_counts=counts,
                 outcome_id=self.outcome_id,
                 **values,
@@ -661,6 +753,8 @@ class ActivityRecorder:
         self._tick_s = TICK_S if tick_s is None else tick_s
         self._lock = threading.Lock()
         self._entries: list[Progress] = []
+        # One meter per configured source, shared by its collections' entries.
+        self._meters: dict[str, NetworkMeter] = {}
         self._warned = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -708,9 +802,13 @@ class ActivityRecorder:
     ) -> Progress:
         """Start an entry for one collection; returns its hooks. With recording off
         the hooks still work and simply go nowhere."""
-        progress = Progress(kind, run_id=run_id, now=self._now, clock=self._clock)
         if self._conn is None:
-            return progress
+            return Progress(kind, source=source, collection=collection, run_id=run_id,
+                            now=self._now, clock=self._clock)
+        with self._lock:
+            meter = self._meters.setdefault(source, NetworkMeter(source, self._now))
+        progress = Progress(kind, source=source, collection=collection, meter=meter,
+                            run_id=run_id, now=self._now, clock=self._clock)
         try:
             with self._lock:
                 repo = ActivityRepo(self._conn)
@@ -747,12 +845,30 @@ class ActivityRecorder:
                 snaps = [(p, p.snapshot()) for p in entries]
                 now = self._now()
                 repo = ActivityRepo(self._conn)
-                with transaction(self._conn):
+                with self._writing_network(self._conn):
                     for progress, snap in snaps:
                         assert progress.activity_id is not None
                         repo.write(progress.activity_id, snap, now, progress.run_id)
         except Exception as e:
             self._warn(e)
+
+    @contextlib.contextmanager
+    def _writing_network(self, conn: sqlite3.Connection) -> Iterator[None]:
+        """One transaction holding the caller's writes and every source's pending
+        network totals and events. When it cannot land, what it took goes back to the
+        meters, so the next write carries it and nothing drifts."""
+        taken = [(meter, *meter.take()) for meter in self._meters.values()]
+        try:
+            with transaction(conn):
+                yield
+                repo = NetworkRepo(conn)
+                for meter, minutes, events in taken:
+                    repo.add_minutes(meter.source, minutes)
+                    repo.add_events(meter.source, events)
+        except BaseException:
+            for meter, minutes, events in taken:
+                meter.give_back(minutes, events)
+            raise
 
     def end(self, progress: Progress, result: str) -> None:
         """Record the entry's result with its final figures."""
@@ -765,7 +881,7 @@ class ActivityRecorder:
                 snap = progress.snapshot(final=True)
                 self._conn.execute(f"PRAGMA busy_timeout={_END_BUSY_TIMEOUT_MS}")
                 try:
-                    with transaction(self._conn):
+                    with self._writing_network(self._conn):
                         ActivityRepo(self._conn).end(
                             progress.activity_id, result, self._now(), snap
                         )
@@ -775,8 +891,9 @@ class ActivityRecorder:
             self._warn(e)
 
     def close(self) -> None:
-        """Stop the timer and trim history older than 30 days. An entry still open
-        here was never ended; it reads as stopped reporting once its heartbeat ages."""
+        """Stop the timer, write any network activity still pending, and trim history
+        older than 30 days. An entry still open here was never ended; it reads as
+        stopped reporting once its heartbeat ages."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join()
@@ -784,6 +901,9 @@ class ActivityRecorder:
             return
         try:
             with self._lock:
+                self._conn.execute(f"PRAGMA busy_timeout={_END_BUSY_TIMEOUT_MS}")
+                with self._writing_network(self._conn):
+                    pass
                 ActivityRepo(self._conn).trim(self._now())
         except Exception as e:
             self._warn(e)

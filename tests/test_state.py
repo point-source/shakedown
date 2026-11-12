@@ -553,7 +553,8 @@ def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
     migrated = connect(db_path)
     for table in ("items", "runs", "library_placements", "library_folders",
                   "library_unplaced", "library_adoption", "handoff_pending",
-                  "tag_files", "tag_shows", "run_activity", "growth_snapshots"):
+                  "tag_files", "tag_shows", "run_activity", "growth_snapshots",
+                  "network_minutes", "network_events"):
         assert _columns(fresh, table) == _columns(migrated, table), table
 
 
@@ -854,14 +855,17 @@ def test_v9_db_gains_empty_run_activity(tmp_path: Path) -> None:
     conn = connect(db_path)
     ItemRepo(conn).upsert(_make_item())
     run = RunRepo(conn).start("s", "c", datetime(2026, 11, 1))
-    conn.execute("DROP TABLE run_activity")
+    for table in ("run_activity", "network_minutes", "network_events"):
+        conn.execute(f"DROP TABLE {table}")
     conn.execute("UPDATE schema_version SET version = 9")
     conn.close()
 
     conn = connect(db_path)
     assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 10
-    assert "run_activity" in _tables(conn)
-    assert conn.execute("SELECT COUNT(*) AS n FROM run_activity").fetchone()["n"] == 0
+    for table in ("run_activity", "network_minutes", "network_events"):
+        assert table in _tables(conn), table
+        assert conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"] == 0
+    assert "requests_in_flight" in _columns(conn, "run_activity")
     assert ItemRepo(conn).get("s", "c", "x") is not None
     latest = RunRepo(conn).latest("s", "c")
     assert latest is not None and latest.id == run.id

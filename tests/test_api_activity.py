@@ -23,6 +23,7 @@ pytest.importorskip("fastapi")
 from shakedown.activity import ABANDONED_ERROR, ActivityKind, ActivityRepo
 from shakedown.dashboard import LIVE_TTL_S
 from shakedown.db import connect
+from shakedown.network import EventKind, NetworkEvent, NetworkRepo
 from shakedown.server import TOKEN_ENV, build_app
 from shakedown.state import RunRepo
 from shakedown.status import print_status
@@ -90,7 +91,7 @@ async def test_live_view_lists_running_then_recently_ended_newest_first(
                     heartbeat=now - timedelta(minutes=12))  # stopped reporting long ago
 
     body = await _get(_app(config, _Clock()))
-    assert body["network"] == []
+    assert [n["source"] for n in body["network"]] == ["fake-src"]
     runs = body["runs"]
     assert [r["activity_id"] for r in runs] == [newer_running, running, stale, ended]
     for entry in runs:
@@ -251,3 +252,61 @@ async def test_a_killed_run_outside_serve_reads_ended_and_the_next_sync_closes_i
         assert RunRepo(conn).latest("fake-src", "coll1") is not None
     assert row["finished_at"] == heartbeat.isoformat()
     assert json.loads(row["errors"]) == [ABANDONED_ERROR]
+
+
+def _running(conn: sqlite3.Connection, source: str, *, started: datetime, speed: float | None,
+             in_flight: int | None, heartbeat: datetime | None = None) -> int:
+    repo = ActivityRepo(conn)
+    activity_id = repo.create(source, "coll1", ActivityKind.SYNC, run_id=None,
+                              started_by_serve=False, at=started)
+    conn.execute(
+        "UPDATE run_activity SET speed_bytes_per_second=?, requests_in_flight=?, "
+        "last_heartbeat_at=? WHERE id=?",
+        (speed, in_flight, (heartbeat or datetime.now()).isoformat(), activity_id),
+    )
+    return activity_id
+
+
+@pytest.mark.asyncio
+async def test_network_now_lists_each_source_with_a_run_in_progress(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Per source with a run in progress: its speed and requests in flight now, and
+    the last network event of that run (§spec:network-activity)."""
+    config = make_config(*tmp_roots)
+    now = datetime.now()
+    with closing(connect(config.state_db)) as conn:
+        _running(conn, "ia", started=now - timedelta(minutes=5), speed=1000.0, in_flight=2)
+        _running(conn, "ia", started=now - timedelta(minutes=2), speed=500.0, in_flight=1)
+        _running(conn, "etree", started=now - timedelta(minutes=1), speed=None, in_flight=None)
+        _running(conn, "gone", started=now - timedelta(minutes=9), speed=9.0, in_flight=9,
+                 heartbeat=now - timedelta(minutes=1))  # stopped reporting
+        ended = _running(conn, "phish", started=now - timedelta(minutes=3), speed=1.0,
+                         in_flight=1)
+        ActivityRepo(conn).end(ended, "completed", now)
+        repo = NetworkRepo(conn)
+        repo.add_events("ia", [
+            NetworkEvent(at=now - timedelta(minutes=4), kind=EventKind.RETRY,
+                         collection="coll1", identifier="gd1"),
+            NetworkEvent(at=now - timedelta(minutes=3), kind=EventKind.RATE_LIMITED,
+                         http_status=429, collection="coll1", identifier="gd2",
+                         wait_seconds=30.0, detail="HTTP 429"),
+        ])
+        # From an earlier run: not this run's last event.
+        repo.add_events("etree", [NetworkEvent(at=now - timedelta(hours=2),
+                                               kind=EventKind.TIMEOUT)])
+
+    body = await _get(_app(config, _Clock()))
+
+    network = {n["source"]: n for n in body["network"]}
+    assert set(network) == {"ia", "etree"}
+    assert network["etree"] == {"source": "etree", "speed_bytes_per_second": 0.0,
+                                "requests_in_flight": 0, "last_event": None}
+    ia = network["ia"]
+    assert (ia["speed_bytes_per_second"], ia["requests_in_flight"]) == (1500.0, 3)
+    last = ia["last_event"]
+    assert {k: v for k, v in last.items() if k != "at"} == {
+        "kind": "rate_limited", "http_status": 429, "collection": "coll1",
+        "identifier": "gd2", "wait_seconds": 30.0, "detail": "HTTP 429",
+    }
+    assert datetime.fromisoformat(last["at"]).tzinfo is not None

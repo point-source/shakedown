@@ -140,32 +140,37 @@ def test_in_flight_bytes_measured_from_the_temp_folder_without_kept_files(
     tmp_dir = tmp_path / ".tmp-show-a"
     tmp_dir.mkdir()
     (tmp_dir / "kept.flac").write_bytes(b"k" * 500)  # left by an earlier attempt
-    p.fetch_started("show-a", tmp_dir)
-    (tmp_dir / "new.flac").write_bytes(b"n" * 1000)
-    t.advance(5)
-    rec.tick()
-    assert _row(db, p.activity_id)["bytes_downloaded"] == 1000
+    with p.fetch_attempt("show-a", tmp_dir):
+        (tmp_dir / "new.flac").write_bytes(b"n" * 1000)
+        t.advance(5)
+        rec.tick()
+        assert _row(db, p.activity_id)["bytes_downloaded"] == 1000
 
-    (tmp_dir / "new2.flac").write_bytes(b"n" * 2000)
-    t.advance(5)
-    rec.tick()
-    row = _row(db, p.activity_id)
-    assert row["bytes_downloaded"] == 3000
-    assert row["speed_bytes_per_second"] == pytest.approx(300.0)
+        (tmp_dir / "new2.flac").write_bytes(b"n" * 2000)
+        t.advance(5)
+        rec.tick()
+        row = _row(db, p.activity_id)
+        assert row["bytes_downloaded"] == 3000
+        assert row["speed_bytes_per_second"] == pytest.approx(300.0)
     rec.close()
 
 
-def test_run_record_figures_move_with_the_entry(db: Path) -> None:
+def test_run_record_figures_move_with_the_entry(db: Path, tmp_path: Path) -> None:
     """A run record's counts move at the entry's cadence, so `status` and the
-    dashboard agree mid-run (§spec:run-activity)."""
+    dashboard agree mid-run (§spec:run-activity). Its bytes are the bytes the entry
+    measured (§spec:network-activity)."""
     t = _Time()
     with closing(connect(db)) as conn:
         run = RunRepo(conn).start("src", "coll", t.now())
     rec = _recorder(db, t)
     p = rec.open_entry("src", "coll", ActivityKind.SYNC, run_id=run.id)
-    p.run_counts = lambda: RunCounts(10, 3, 1, 2, 4096)
+    p.run_counts = lambda: RunCounts(10, 3, 1, 2, 0)
     p.done(4)
     p.failed(2)
+    tmp_dir = tmp_path / ".tmp-show"
+    tmp_dir.mkdir()
+    with p.fetch_attempt("show", tmp_dir):
+        (tmp_dir / "a.flac").write_bytes(b"a" * 4096)
     rec.tick()
 
     with closing(connect(db)) as conn:

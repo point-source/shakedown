@@ -559,8 +559,8 @@ what is preserved.
 ## Source plugins §spec:source-plugins
 
 *Status: complete, including the core-owned listing/lookup contract
-(§spec:per-item-isolation); network measurement for the dashboard
-(§spec:network-activity) is not started.*
+(§spec:per-item-isolation) and network measurement for the dashboard
+(§spec:network-activity).*
 
 Sources are pluggable so that new archives can be added without core
 changes (§req:constraints). A plugin lists a collection, looks up one
@@ -2210,7 +2210,7 @@ unexpectedly; the next sync closes the record. Run `restage` and
 
 ## Network activity §spec:network-activity
 
-*Status: not started*
+*Status: complete*
 
 The dashboard shows, per source, download speed and requests in flight
 now; download speed over the past 30 days; and every rate-limit hit,
@@ -2241,8 +2241,8 @@ Observable behavior:
   is the bytes this run fetched from the source, including a file
   fetched again after a failed checksum, and excluding files kept from
   an earlier interrupted attempt. The speed graph sums to the same
-  total. Today the IA plugin counts kept files as downloaded; this
-  replaces that count.
+  total. Before this, the IA plugin counted kept files as downloaded;
+  the core's measurement replaced that count.
 - **Grouped by source block.** "Source" is a configured source block
   (`status`'s `source`), so two blocks of the same type show
   separately.
