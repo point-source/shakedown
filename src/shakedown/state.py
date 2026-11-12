@@ -1,5 +1,5 @@
-"""DB-backed repositories for items, runs, drift, library placement, pending handoffs, and
-tag-filling records."""
+"""DB-backed repositories for items, runs, drift, library placement, pending handoffs,
+tag-filling records, and rescheduled syncs."""
 from __future__ import annotations
 
 import json
@@ -820,6 +820,44 @@ class PendingHandoffRepo:
         """Forget the collection's whole list (its handoff was removed from config)."""
         self.conn.execute(
             "DELETE FROM handoff_pending WHERE source_name=? AND collection_name=?",
+            (source, collection),
+        )
+
+
+class RescheduledRepo:
+    """Per collection whose sync was skipped because another run held the writer lock,
+    the time of its oldest skip (§spec:rescheduled-syncs): shown in `status` until a
+    sync finishes the collection."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def record(self, source: str, collection: str, at: datetime) -> datetime:
+        """Record a skip and return the collection's oldest skip time: an entry already
+        there keeps its time."""
+        self.conn.execute(
+            """
+            INSERT INTO rescheduled_syncs (source_name, collection_name, since)
+            VALUES (?, ?, ?)
+            ON CONFLICT (source_name, collection_name) DO NOTHING
+            """,
+            (source, collection, _iso(at)),
+        )
+        since = self.get(source, collection)
+        assert since is not None  # inserted above or already there
+        return since
+
+    def get(self, source: str, collection: str) -> datetime | None:
+        row = self.conn.execute(
+            "SELECT since FROM rescheduled_syncs WHERE source_name=? AND collection_name=?",
+            (source, collection),
+        ).fetchone()
+        return datetime.fromisoformat(row["since"]) if row else None
+
+    def clear(self, source: str, collection: str) -> None:
+        """Forget the collection's entry: a sync finished it."""
+        self.conn.execute(
+            "DELETE FROM rescheduled_syncs WHERE source_name=? AND collection_name=?",
             (source, collection),
         )
 
