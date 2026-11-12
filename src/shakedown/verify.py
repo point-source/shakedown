@@ -14,7 +14,7 @@ from pathlib import Path
 import click
 
 from shakedown.config import Config
-from shakedown.db import connect, transaction
+from shakedown.db import connect, connect_reader, transaction
 from shakedown.lock import run_exclusive
 from shakedown.models import Item, ItemStatus, RunKind
 from shakedown.plugins import registry
@@ -118,7 +118,9 @@ def _run_verify(
     # for a reconform, that it holds the writer lock) (§spec:api-sync-runs). A
     # reconform's runs are opened once the hash pass knows what drifted.
     announce_started([])
-    conn = connect(config.state_db)  # type: ignore[arg-type]
+    # Only a reconform holds the writer lock, so only it may migrate the database: a
+    # verify while a run of an older release writes leaves its schema alone.
+    conn = (connect if reconform else connect_reader)(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     drift_repo = DriftRepo(conn)
     tags = TagRepo(conn)

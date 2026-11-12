@@ -27,7 +27,7 @@ import click
 from shakedown import config as config_module
 from shakedown import notify
 from shakedown.config import Config
-from shakedown.db import connect, transaction
+from shakedown.db import connect_reader, transaction
 from shakedown.filesystem import FilesystemError, check_writable, ensure_hardlinkable
 from shakedown.models import OperationStatus, OperationType
 from shakedown.plugins import registry
@@ -298,7 +298,8 @@ def _record_outcomes(config: Config, report: Report) -> None:
     opened (e.g. the archive path under validation is itself broken), we skip recording —
     the printed report and exit code remain the authoritative result."""
     try:
-        conn = connect(config.state_db)  # type: ignore[arg-type]
+        # validate takes no writer lock, so it never migrates the database.
+        conn = connect_reader(config.state_db)  # type: ignore[arg-type]
     except Exception as e:  # best-effort: a broken state path never blocks the report
         log.warning("validate: could not open state DB to record outcomes: %s", e)
         return

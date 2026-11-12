@@ -462,3 +462,38 @@ def test_skip_is_recorded_when_the_state_path_needs_escaping(tmp_path: Path) -> 
         assert run_sync(cfg, source_filter=SRC, collection_filter="b") == 1
     assert set(_entries(cfg)) == {(SRC, "b")}
     assert sorted(p.name for p in tmp_path.iterdir()) == ["a#1", "library"]
+
+
+def test_verify_without_reconform_reads_an_older_schema_without_migrating_it(
+    config: Config,
+) -> None:
+    """Only writers holding the writer lock migrate (Q-1-1, Q-1-2): a shallow or deep
+    verify while the previous release still writes leaves the database at v8."""
+    _seed()
+    assert run_sync(config, source_filter=SRC, collection_filter="b") == 0
+    _roll_back_to_v8(config)
+    for deep in (False, True):
+        assert run_verify(
+            config, source_filter=None, collection_filter=None, deep=deep,
+            reconform=False, list_drift=False, assume_yes=False,
+        ) == 0
+    assert config.state_db is not None
+    assert _version(config.state_db) == 8
+
+
+def test_validate_reads_an_older_schema_without_migrating_it(
+    config: Config, tmp_path: Path
+) -> None:
+    """validate still records its outcome, but never migrates (Q-1-2)."""
+    from shakedown.validate import run_validate
+    from tests.conftest import write_config
+
+    _roll_back_to_v8(config)
+    run_validate(write_config(tmp_path / "cfg.yaml", config))
+    assert config.state_db is not None
+    assert _version(config.state_db) == 8
+    with closing(sqlite3.connect(config.state_db)) as conn:
+        recorded = conn.execute(
+            "SELECT COUNT(*) FROM operation_outcomes WHERE operation='validate'"
+        ).fetchone()[0]
+    assert recorded > 0
