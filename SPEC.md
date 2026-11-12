@@ -1476,6 +1476,15 @@ Sync state lives in a single-file embedded SQLite database at
   entry per collection (§spec:rescheduled-syncs). Schema v9 adds it as
   an additive migration; a database rebuilt by `reconcile` starts with
   none.
+- Only a command that holds the writer lock migrates the database.
+  Commands that take no lock — `status`, `item show`, `sync --dry-run`,
+  `verify` without `--reconform`, `validate`, and `serve`'s
+  `GET /status` and `GET /metrics` — open it at whatever schema version
+  it has; on an older version they show what that version records (no
+  rescheduled entries before v9). A reader that migrated while a run of
+  the previous release still writes would make that run refuse the
+  database the next time it opens it. With no database yet, they create
+  one at the current version.
 - `shakedown reconcile` rebuilds the database from scratch by walking
   the archive tree and re-fetching **manifests only** (never content)
   from the source. Because archive paths mirror source identifiers
@@ -1813,7 +1822,8 @@ Observable behavior:
   clears its entry whatever its result; a stale or crashed catch-up
   shows in `status` like any failed sync, and the collection's next tick
   retries it. A sync that is not a catch-up and ends stale or crashed
-  keeps the entry, so the next finishing sync catches it up. A run
+  keeps the entry, so the next finishing sync catches it up — which can
+  be that same run: its catch-up retries the collection once. A run
   killed before it finishes a collection clears nothing. A finishing
   run clears its collection's entry even when that skip was recorded
   while the run was going.
@@ -1834,8 +1844,10 @@ Observable behavior:
   stays open like a killed scheduled run's; the entry is still there,
   so the next finishing sync runs that collection again and its new run
   replaces the open one in `status`.
-- **Rebuilds.** A database rebuilt by `reconcile` starts with no
-  entries; each collection's next tick runs as usual.
+- **Rebuilds.** A database rebuilt by `reconcile` after it was lost or
+  reset starts with no entries; each collection's next tick runs as
+  usual. `reconcile` over an existing database leaves its entries in
+  place, as it does placement records.
 
 **Decision and constraint.** Record the skip and let the next lock
 holder catch it up, because §req:success-criteria #27 requires a long
@@ -2271,7 +2283,7 @@ degrade a single item or a single run, never the archive.
 | Item disappears upstream | Files retained by default; flagged `disappeared` (§spec:item-lifecycle) |
 | Source permanently gone | Existing items retained; collection reported stale in `status` |
 | Two writing commands overlap (scheduler tick, API trigger, manual run) | The second exits non-zero naming the writer lock; the first continues untouched (§spec:cli). A second `sync --collection` from the CLI or scheduler is also recorded as rescheduled, once per collection, and caught up when the first sync finishes (§spec:rescheduled-syncs) |
-| A sync is skipped while the previous release's run still writes (upgrade mid-run) | Nothing is recorded and the database is not migrated under the running writer; the tick exits 1 as before (§spec:rescheduled-syncs) |
+| A sync is skipped while the previous release's run still writes (upgrade mid-run) | Nothing is recorded and the database is not migrated under the running writer; the tick exits 1 as before (§spec:rescheduled-syncs). `status`, `serve`'s reads, and the other commands that take no lock do not migrate it either (§spec:state) |
 | Config invalid when a catch-up is due | Catch-up not run; every rescheduled entry kept; error logged; the run exits non-zero (§spec:rescheduled-syncs) |
 | Run killed during a catch-up | Entries not yet cleared stay; the next finishing sync catches them up (§spec:rescheduled-syncs) |
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
