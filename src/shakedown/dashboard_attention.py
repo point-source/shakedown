@@ -13,6 +13,7 @@ from typing import Any
 from shakedown.activity import STOPPED_REPORTING, ActivityRepo
 from shakedown.dashboard import DashboardContext, iso
 from shakedown.models import ItemStatus
+from shakedown.selection import keeps_unplayable_original
 from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries
 
@@ -144,8 +145,15 @@ def _entries(
     return entries
 
 
-def _health(summary: dict[str, Any]) -> dict[str, Any]:
+def _health(summary: dict[str, Any], items: ItemRepo) -> dict[str, Any]:
     """The collection's library facts: not to-dos, so apart from the entries."""
+    kept_twice = [
+        identifier
+        for identifier, manifest in items.list_archive_only_manifests(
+            summary["source"], summary["collection"]
+        )
+        if keeps_unplayable_original(manifest)
+    ]
     return {
         "source": summary["source"],
         "collection": summary["collection"],
@@ -153,7 +161,7 @@ def _health(summary: dict[str, Any]) -> dict[str, Any]:
         "removed_upstream": summary["removed_upstream"],
         "drift_files": summary["drift_files"],
         "not_playable": summary["not_playable"],
-        "playable_copies": [],
+        "playable_copies": kept_twice,
     }
 
 
@@ -167,5 +175,5 @@ def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
     summaries = collection_summaries(ctx.config, ctx.conn)
     return {
         "entries": [entry for s in summaries for entry in _entries(s, items, activity, now)],
-        "health": [_health(s) for s in summaries],
+        "health": [_health(s, items) for s in summaries],
     }

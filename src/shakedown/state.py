@@ -220,6 +220,28 @@ class ItemRepo:
         )
         return [row["identifier"] for row in cur]
 
+    def list_archive_only_manifests(
+        self, source: str, collection: str
+    ) -> list[tuple[str, Manifest]]:
+        """(identifier, recorded manifest) of the collection's complete shows whose
+        manifest keeps at least one file out of the library, in order."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier, recorded_manifest FROM items
+            WHERE source_name=? AND collection_name=? AND status=?
+              AND EXISTS (
+                  SELECT 1 FROM json_each(items.recorded_manifest) AS f
+                  WHERE json_extract(f.value, '$.library') = 0
+              )
+            ORDER BY identifier
+            """,
+            (source, collection, ItemStatus.COMPLETE.value),
+        )
+        return [
+            (row["identifier"], Manifest.from_json(json.loads(row["recorded_manifest"])))
+            for row in cur
+        ]
+
     def count_by_status(self, source: str, collection: str) -> dict[ItemStatus, int]:
         cur = self.conn.execute(
             """

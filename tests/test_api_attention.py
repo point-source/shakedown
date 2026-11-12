@@ -472,6 +472,22 @@ def test_health_carries_status_library_facts(
     assert health["removed_upstream"] == [{"identifier": "gd-gone", "removed_on": "2026-11-01"}]
 
 
+def test_a_show_kept_as_an_unplayable_original_and_a_playable_copy_is_listed(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = make_config(*tmp_roots)
+    _show("gd-shn-mp3", ("t01.shn", b"lossless", "Shorten"), ("t01.mp3", b"mp3", "VBR MP3"))
+    _show("gd-flac", ("t01.flac", b"flac", "Flac"), ("t01.mp3", b"mp3", "VBR MP3"))
+    _show("gd-shn-only", ("t01.shn", b"only", "Shorten"))
+    assert run_sync(config) == 0
+
+    [health] = _attention(config)["health"]
+
+    assert health["playable_copies"] == ["gd-shn-mp3"]
+    assert health["not_playable"] == _summary(_status(config, capsys))["not_playable"]
+    assert [r["identifier"] for r in health["not_playable"]] == ["gd-shn-only"]
+
+
 # --- serving ------------------------------------------------------------------------
 
 

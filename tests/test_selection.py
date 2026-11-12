@@ -18,6 +18,7 @@ from shakedown.selection import (
     LOSSLESS_REFUSED_REASON,
     NOT_PLAYABLE_SHN_REASON,
     NOT_PLAYABLE_UNRECOGNISED_REASON,
+    keeps_unplayable_original,
     select,
 )
 
@@ -515,3 +516,34 @@ def test_uploaded_logs_track_lengths_notes_checksums_and_images_are_staged() -> 
     chosen = select(files, None)
     assert _names(chosen, library=True) == sorted([*kept, "t01.flac"])
     assert _names(chosen, library=False) == []
+
+
+# --- an unplayable original kept beside a playable copy (§spec:needs-attention) ------
+
+
+def _manifest(*files: tuple[str, bool]) -> Manifest:
+    return Manifest(tuple(ManifestFile(name, 1, None, library=library) for name, library in files))
+
+
+def test_an_archive_only_shn_beside_a_staged_mp3_is_a_kept_original() -> None:
+    assert keeps_unplayable_original(
+        _manifest(("t01.shn", False), ("t01.mp3", True), ("info.txt", True))
+    )
+
+
+def test_unrecognised_audio_beside_a_staged_copy_is_a_kept_original() -> None:
+    assert keeps_unplayable_original(_manifest(("t01.ape", False), ("t01.mp3", True)))
+
+
+def test_shows_without_an_unplayable_original_beside_a_playable_copy() -> None:
+    assert not keeps_unplayable_original(_manifest(("t01.flac", True), ("t01.ffp", True)))
+    # The only copy is unplayable: listed as not playable instead.
+    assert not keeps_unplayable_original(_manifest(("t01.shn", True)))
+    # A lossy copy left over from older filters, beside staged FLAC.
+    assert not keeps_unplayable_original(_manifest(("t01.flac", True), ("t01.mp3", False)))
+    # Archive-only files that are not audio.
+    assert not keeps_unplayable_original(
+        _manifest(("t01.flac", True), ("t01.ffp", False), ("t01_spectrogram.png", False))
+    )
+    # A resource fork named like a track is not audio.
+    assert not keeps_unplayable_original(_manifest(("t01.mp3", True), ("._t01.shn", False)))
