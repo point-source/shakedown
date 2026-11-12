@@ -243,8 +243,8 @@ def _validate_layouts(config: Config) -> None:
                 )
             if not referenced:
                 raise ConfigError(
-                    f"{source.name}/{collection.name}: library_layout "
-                    f"{collection.library_layout!r} references no source field, so every "
+                    f"{source.name}/{collection.name}: library_layout references no "
+                    f"source field, so every "
                     f"item renders to the same path; include a per-item field such as "
                     f"{{identifier}}"
                 )

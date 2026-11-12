@@ -397,3 +397,23 @@ token: *hunter2-not-an-alias
     message = str(exc_info.value)
     assert "line 3" in message
     assert "hunter2" not in message
+
+
+def test_a_layout_with_no_field_is_named_but_not_quoted(tmp_path: Path) -> None:
+    """A layout pasted with a credential in it must not reach the dashboard's error."""
+    p = _write(tmp_path, f"""
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'q'
+        library_layout: 'shows-{SECRET}'
+""")
+    with pytest.raises(ConfigError) as exc_info:
+        load(p)
+    message = str(exc_info.value)
+    assert "library_layout references no source field" in message
+    assert SECRET not in message
