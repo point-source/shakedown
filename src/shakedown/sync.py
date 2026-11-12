@@ -60,6 +60,7 @@ from shakedown.placement import (
 )
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ListedItem, SourcePlugin
+from shakedown.reschedule import record_skipped
 from shakedown.staging import (
     METADATA_SIDECAR,
     manifest_reserves_sidecar_name,
@@ -83,7 +84,7 @@ from shakedown.tagging import (
     recover_interrupted_tagging,
     tag_failure,
 )
-from shakedown.trigger import announce_started
+from shakedown.trigger import announce_started, launched_by_serve
 
 log = logging.getLogger(__name__)
 
@@ -213,14 +214,42 @@ def run_sync(
     media (§spec:metadata-preservation).
 
     Every run except a dry run holds the writer lock (`shakedown.lock`): a second
-    concurrent writer exits non-zero instead of racing this one.
+    concurrent writer exits non-zero instead of racing this one. A refused sync
+    scoped with ``collection_filter`` — from the CLI or the scheduler, not `serve`,
+    and not ``refresh_metadata`` — is also recorded as rescheduled
+    (§spec:rescheduled-syncs).
     """
     if dry_run:
         return _run_sync(config, source_filter, collection_filter, True, refresh_metadata)
+    # Asked now: refusing the run tells serve it was busy, which consumes the variable.
+    reschedule = (
+        collection_filter is not None and not refresh_metadata and not launched_by_serve()
+    )
+
+    def record() -> None:
+        record_skipped(config, [
+            (source.name, collection.name)
+            for source, collection in _scope(config, source_filter, collection_filter)
+        ])
+
     return run_exclusive(
         config,
         lambda: _run_sync(config, source_filter, collection_filter, False, refresh_metadata),
+        on_busy=record if reschedule else None,
     )
+
+
+def _scope(
+    config: Config, source_filter: str | None, collection_filter: str | None
+) -> list[tuple[SourceConfig, CollectionConfig]]:
+    """The (source, collection) pairs a sync with these filters covers."""
+    return [
+        (source, collection)
+        for source in config.sources
+        if not source_filter or source.name == source_filter
+        for collection in source.collections
+        if not collection_filter or collection.name == collection_filter
+    ]
 
 
 def _run_sync(
@@ -230,15 +259,12 @@ def _run_sync(
     dry_run: bool,
     refresh_metadata: bool,
 ) -> int:
+    plugins: dict[str, SourcePlugin] = {}
     work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
-    for source in config.sources:
-        if source_filter and source.name != source_filter:
-            continue
-        plugin = registry.for_source(source)
-        for collection in source.collections:
-            if collection_filter and collection.name != collection_filter:
-                continue
-            work.append((source, collection, plugin))
+    for source, collection in _scope(config, source_filter, collection_filter):
+        if source.name not in plugins:
+            plugins[source.name] = registry.for_source(source)
+        work.append((source, collection, plugins[source.name]))
 
     if not work:
         if not dry_run:

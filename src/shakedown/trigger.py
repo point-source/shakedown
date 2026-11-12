@@ -54,6 +54,12 @@ def _announce(message: dict[str, Any]) -> None:
             os.close(fd)
 
 
+def launched_by_serve() -> bool:
+    """Whether `serve` started this run. Ask before the first announce, which
+    consumes the variable."""
+    return READY_FD_ENV in os.environ
+
+
 def announce_busy() -> None:
     _announce({"state": "busy"})
 

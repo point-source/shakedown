@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import httpx
@@ -11,7 +12,9 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+from shakedown.db import connect
 from shakedown.server import TOKEN_ENV, build_app
+from shakedown.state import RescheduledRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -432,16 +435,23 @@ async def test_sync_is_refused_while_a_cli_run_holds_the_lock(
         )],
     )
     app = build_app(write_config(archive.parent / "cfg.yaml", config))
+    assert config.state_db is not None
+    connect(config.state_db).close()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         with writer_lock(config):
             r = await client.post("/sync", headers=AUTH)
             assert (r.status_code, r.json()["detail"]) == (409, BUSY)
+            # A refused API sync is not rescheduled (§spec:rescheduled-syncs).
+            r = await client.post("/sync", params={"collection": "gd"}, headers=AUTH)
+            assert (r.status_code, r.json()["detail"]) == (409, BUSY)
             r = await client.post(
                 "/verify", params={"deep": True, "reconform": True}, headers=AUTH
             )
             assert (r.status_code, r.json()["detail"]) == (409, BUSY)
+    with closing(connect(config.state_db)) as conn:
+        assert RescheduledRepo(conn).get("ia", "gd") is None
 
 
 @pytest.mark.asyncio
