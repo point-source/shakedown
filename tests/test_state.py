@@ -553,7 +553,7 @@ def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
     migrated = connect(db_path)
     for table in ("items", "runs", "library_placements", "library_folders",
                   "library_unplaced", "library_adoption", "handoff_pending",
-                  "tag_files", "tag_shows", "run_activity"):
+                  "tag_files", "tag_shows", "run_activity", "growth_snapshots"):
         assert _columns(fresh, table) == _columns(migrated, table), table
 
 

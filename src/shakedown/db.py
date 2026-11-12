@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 SCHEMA_VERSION = 10
@@ -284,6 +285,27 @@ _ACTIVITY_SCHEMA = [
 ]
 _SCHEMA += _ACTIVITY_SCHEMA
 
+# Per collection, its complete shows and archive bytes at the end of each run that
+# holds the writer lock, the first taken by the v10 migration (§spec:library-stats
+# "Growth"). History of its own, kept 30 days (§spec:state).
+_GROWTH_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS growth_snapshots (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        taken_at         TEXT NOT NULL,
+        complete         INTEGER NOT NULL,
+        archive_bytes    INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS growth_snapshots_collection_idx
+        ON growth_snapshots (source_name, collection_name, taken_at)
+    """,
+]
+_SCHEMA += _GROWTH_SCHEMA
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and lazily create) the state DB at db_path."""
@@ -469,11 +491,16 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
 def _migrate_to_10(conn: sqlite3.Connection) -> None:
     """v9 → v10, the one migration of the dashboard increment (§spec:state): add the
     activity entries (§spec:run-activity), each naming the outcome of a run with no run
-    record (§spec:run-history). Additive: it starts empty, and nothing else
-    changes. Later parts of the increment (network activity, growth snapshots) add
-    their tables here too — the increment moves the schema forward exactly once."""
-    for stmt in _ACTIVITY_SCHEMA:
+    record (§spec:run-history), and the growth snapshots (§spec:library-stats),
+    recording the first snapshot of every collection the database holds shows for.
+    Additive: nothing else changes. Later parts of the increment (network activity)
+    add their tables here too — the increment moves the schema forward exactly once."""
+    for stmt in _ACTIVITY_SCHEMA + _GROWTH_SCHEMA:
         conn.execute(stmt)
+    # Imported here: growth reads items through state, which imports this module.
+    from shakedown.growth import GrowthRepo
+
+    GrowthRepo(conn).record(datetime.now(), scopes=None)
 
 
 # Version-gated, forward-only upgrade steps keyed by the version they produce.

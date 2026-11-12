@@ -20,6 +20,7 @@ from pathlib import Path
 from shakedown import activity
 from shakedown.config import Config
 from shakedown.db import connect
+from shakedown.growth import GrowthRepo
 from shakedown.trigger import announce_busy
 
 log = logging.getLogger(__name__)
@@ -62,11 +63,15 @@ def run_exclusive(
 ) -> int:
     """Run a writing command under the writer lock; return 1 with a logged error
     when another run holds it, after calling ``on_busy`` if given. Taking the lock
-    first closes what killed runs left open (§spec:run-activity)."""
+    first closes what killed runs left open (§spec:run-activity); its end records
+    the library's growth (§spec:library-stats)."""
     try:
         with writer_lock(config):
             _close_abandoned(config)
-            return command()
+            try:
+                return command()
+            finally:
+                _record_growth(config)
     except LockHeld as e:
         log.error("%s", e)
         announce_busy()
@@ -83,3 +88,19 @@ def _close_abandoned(config: Config) -> None:
             activity.close_abandoned(conn, datetime.now())
     except Exception as e:
         log.warning("could not close runs that ended unexpectedly: %s", e)
+
+
+def _record_growth(config: Config) -> None:
+    """Snapshot every configured collection's figures and keep 30 days of them. Best
+    effort: a run's result never depends on it."""
+    try:
+        with contextlib.closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+            growth = GrowthRepo(conn)
+            now = datetime.now()
+            growth.record(
+                now,
+                scopes=[(s.name, c.name) for s in config.sources for c in s.collections],
+            )
+            growth.trim(now)
+    except Exception as e:
+        log.warning("could not record library growth: %s", e)
