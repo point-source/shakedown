@@ -393,7 +393,6 @@ class Progress:
         self._sizes_known = True
         self._working: dict[str, int] = {}
         self._in_flight: dict[str, tuple[Path, int]] = {}
-        self._own_bytes = 0
         self._reported_bytes = 0
         self._last_progress_at: datetime | None = None
         self._last_from_run: tuple[int, int] | None = None
@@ -458,11 +457,6 @@ class Progress:
         with self._lock:
             self._bump("items_failed", n)
 
-    def add_bytes(self, n: int) -> None:
-        """Bytes of a finished fetch, for a run that supplies no run counts."""
-        with self._lock:
-            self._own_bytes += n
-
     def working(self, identifier: str) -> None:
         with self._lock:
             self._working[identifier] = self._working.get(identifier, 0) + 1
@@ -513,7 +507,9 @@ class Progress:
         now_t = self._clock()
         with self._lock:
             downloading = self.kind in _DOWNLOADING_KINDS
-            completed = counts.bytes_downloaded if counts is not None else self._own_bytes
+            # A downloading run supplies its run counts; their bytes are the
+            # finished fetches.
+            completed = counts.bytes_downloaded if counts is not None else 0
             total = completed + measured
             if not final:
                 # No dip in the instant between a fetch returning and its bytes
