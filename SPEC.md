@@ -2108,8 +2108,9 @@ Observable behavior:
 - **Is it stuck?** Each entry carries `last_progress_at` — the last
   time any counter or byte count moved — next to `last_heartbeat_at`.
   "Alive but no progress for 40 minutes" and "stopped reporting" are
-  different facts and the page shows them differently. No threshold
-  turns either into a verdict.
+  different facts and the page shows them differently. The API carries
+  no verdict on progress; the page marks a running run with no progress
+  for 5 minutes (§spec:ui-kit).
 - **Ends are never missed.** A running entry updates its heartbeat every
   few seconds. When a run finishes it records its result, using the
   outcome codes `status` already uses (`completed`,
