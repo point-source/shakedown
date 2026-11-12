@@ -1487,7 +1487,9 @@ Sync state lives in a single-file embedded SQLite database at
   none.
 - The dashboard increment adds, as schema v10 (an additive migration):
   per run and collection, an activity entry with its kind, phase,
-  progress counters, heartbeat, and result (§spec:run-activity); per
+  progress counters, heartbeat, and result, and — for a restage or
+  reconcile — the operation outcome holding its errors
+  (§spec:run-activity, §spec:run-history); per
   source and minute, network totals, and each network event
   (§spec:network-activity); per collection, growth snapshots taken at
   the end of each locked run, the first by the migration itself
@@ -2304,7 +2306,7 @@ the test plugin: it appears with no dashboard change.
 
 ## Run history §spec:run-history
 
-*Status: the list is complete (`GET /api/runs`); last good sync is not started (it ships with §spec:library-stats)*
+*Status: in progress — the run list is complete (`GET /api/runs`); last good sync ships with §spec:library-stats*
 
 The dashboard lists the last 30 days of runs and, per collection, when
 it last synced successfully (§req:success-criteria #30;
