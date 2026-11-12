@@ -7,10 +7,10 @@ facts; the page words the next action.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from shakedown.activity import STOPPED_REPORTING, ActivityRepo
+from shakedown.activity import HISTORY_DAYS, STOPPED_REPORTING, ActivityRepo
 from shakedown.dashboard import DashboardContext, iso
 from shakedown.models import ItemStatus
 from shakedown.selection import keeps_unplayable_original
@@ -57,7 +57,9 @@ def _unexpected_ends(
     if (
         last_run
         and last_run["end_reason"] == STOPPED_REPORTING
-        and last_run["run_id"] not in {run["run_id"] for run in runs}
+        # status's own fallback: a record with no entry is judged by its start
+        and activity.last_heartbeat_for_run(last_run["run_id"]) is None
+        and datetime.fromisoformat(last_run["started_at"]) >= now - timedelta(days=HISTORY_DAYS)
     ):
         runs.append(
             {"run_id": last_run["run_id"], "activity_id": None, "kind": last_run["kind"],

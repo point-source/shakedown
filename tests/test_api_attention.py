@@ -415,6 +415,23 @@ def test_an_unexpected_end_older_than_thirty_days_is_dropped(
     assert _attention(config)["entries"] == []
 
 
+def test_a_killed_sync_older_than_thirty_days_is_dropped_even_while_still_latest(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A collection that has not run since: its run record is still the latest run."""
+    config = make_config(*tmp_roots)
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        _killed(conn, ActivityKind.SYNC, heartbeat=datetime.now() - timedelta(days=31))
+        conn.commit()
+    assert _attention(config)["entries"] == []
+
+    # Its entry trimmed away, the open record alone is still older than 30 days.
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        conn.execute("DELETE FROM run_activity")
+        conn.commit()
+    assert _attention(config)["entries"] == []
+
+
 def test_an_open_run_with_no_entry_matches_status(
     tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
