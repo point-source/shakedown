@@ -425,6 +425,42 @@ async def test_sync_starts_a_fresh_run_on_the_config_as_edited(
 
 
 @pytest.mark.asyncio
+async def test_triggered_sync_catches_up_rescheduled_collections_after_its_own(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A triggered sync catches up like any sync (§spec:api-sync-runs,
+    §spec:rescheduled-syncs): the 202 lists only the requested collection's run; the
+    catch-up shows in /status as that collection's latest run, its entry gone."""
+    from shakedown.config import CollectionConfig
+
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    config.sources[0].collections.append(CollectionConfig(name="coll2", query="*"))
+    assert config.state_db is not None
+    with closing(connect(config.state_db)) as conn:
+        RescheduledRepo(conn).record("fake-src", "coll2", datetime(2026, 11, 10, 3, 0, 0))
+    app = _child_app(config, items={"gd-x": {"x.flac": "audio"}})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.post("/sync", params={"collection": "coll1"}, headers=AUTH)
+        assert r.status_code == 202
+        run_ids = r.json()["run_ids"]
+        assert len(run_ids) == 1
+        await _finish(app)
+        status = {c["collection"]: c for c in (await client.get("/status")).json()}
+        metrics = (await client.get("/metrics")).text
+    assert status["coll1"]["last_run"]["run_id"] == run_ids[0]
+    caught_up = status["coll2"]["last_run"]
+    assert caught_up["run_id"] not in run_ids
+    assert caught_up["kind"] == "sync" and caught_up["finished_at"] is not None
+    assert caught_up["items_new"] == 1
+    assert status["coll1"]["rescheduled"] is None and status["coll2"]["rescheduled"] is None
+    assert 'shakedown_sync_runs_total{result="ok"} 1.0' in metrics
+
+
+@pytest.mark.asyncio
 async def test_sync_while_a_run_holds_the_lock_is_refused_and_nothing_is_queued(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
