@@ -4,11 +4,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from shakedown.activity import HISTORY_DAYS
 from shakedown.dashboard import Builder, DashboardContext, iso
 from shakedown.history import run_history
 
-# The history window `days` may name, in days; outside it the request is a `422`.
-MAX_DAYS = 30
+# The longest window `days` may name: the history runs keep (restages, verifies, and
+# reconciles exist only as activity entries). Outside 1..MAX_DAYS the request is a 422.
+MAX_DAYS = HISTORY_DAYS
 
 
 def runs_answer(days: int) -> Builder:

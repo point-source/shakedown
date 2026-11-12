@@ -116,7 +116,8 @@ def _from_entry(entry: dict[str, Any], outcomes: OperationOutcomeRepo) -> dict[s
         "duration_seconds": _duration(entry["started_at"], entry["finished_at"]),
         "result": entry["result"],
         "end_reason": entry["end_reason"],
-        # A sync's shows discovered are the shows its listing found.
+        # A run's shows discovered are the shows its listing found (a restage or
+        # verify lists none).
         "items_discovered": entry["items_listed"],
         "items_new": None,
         "items_updated": None,
