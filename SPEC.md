@@ -1455,7 +1455,7 @@ Sync state lives in a single-file embedded SQLite database at
   For collections using incremental discovery it also records the
   item's last-seen source change signal (§spec:incremental-discovery),
   the token a later sync matches against to skip a metadata fetch.
-  Per run: its kind (a sync, refetch, or reconform), counts, bytes
+  Per run: its kind (a sync, catch-up, refetch, or reconform), counts, bytes
   downloaded, errors, and timing — the raw material for `status`.
 - The ownership, handoff, and discovery increment adds: each show's
   library placement — its folder and the files shakedown placed there
@@ -2123,10 +2123,11 @@ Observable behavior:
   killed run is reported by `status` as ended unexpectedly as soon as
   its heartbeat goes stale, and the next run that takes the writer lock
   closes it with the time of its last heartbeat and the error "run ended
-  unexpectedly (stopped reporting)". Today such a record stays open
-  forever when ofelia's run is killed — only runs `serve` started were
-  closed (§spec:api-sync-runs) — which contradicts §spec:failure-behavior
-  ("the run record is always closed, even on a crash").
+  unexpectedly (stopped reporting)", together with any outcome it left
+  in progress. Before this, a killed scheduled run's record stayed open
+  forever — only runs `serve` started were closed (§spec:api-sync-runs) —
+  contradicting §spec:failure-behavior ("the run record is always
+  closed, even on a crash").
 - **Recording never costs a run anything.** Progress is written in small
   updates every few seconds, not per event, from outside the run's own
   work. A write that cannot land (database busy) is skipped; the next
