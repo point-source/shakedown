@@ -328,24 +328,36 @@ class RunRepo:
             (source, collection, *(k.value for k in kinds)),
         )
         row = cur.fetchone()
-        if not row:
-            return None
-        return Run(
-            id=row["id"],
-            source_name=row["source_name"],
-            collection_name=row["collection_name"],
-            started_at=_parse_iso(row["started_at"]),  # type: ignore[arg-type]
-            finished_at=_parse_iso(row["finished_at"]),
-            items_discovered=row["items_discovered"],
-            items_new=row["items_new"],
-            items_updated=row["items_updated"],
-            items_failed=row["items_failed"],
-            bytes_downloaded=row["bytes_downloaded"],
-            errors=json.loads(row["errors"]),
-            stale=bool(row["stale"]),
-            failure_notice_error=row["failure_notice_error"],
-            kind=RunKind(row["kind"]),
-        )
+        return _row_to_run(row) if row else None
+
+    def since(self, started_at: datetime) -> list[Run]:
+        """Every run record, of every collection, started at or after
+        ``started_at``."""
+        return [
+            _row_to_run(row)
+            for row in self.conn.execute(
+                "SELECT * FROM runs WHERE started_at >= ?", (_iso(started_at),)
+            )
+        ]
+
+
+def _row_to_run(row: sqlite3.Row) -> Run:
+    return Run(
+        id=row["id"],
+        source_name=row["source_name"],
+        collection_name=row["collection_name"],
+        started_at=_parse_iso(row["started_at"]),  # type: ignore[arg-type]
+        finished_at=_parse_iso(row["finished_at"]),
+        items_discovered=row["items_discovered"],
+        items_new=row["items_new"],
+        items_updated=row["items_updated"],
+        items_failed=row["items_failed"],
+        bytes_downloaded=row["bytes_downloaded"],
+        errors=json.loads(row["errors"]),
+        stale=bool(row["stale"]),
+        failure_notice_error=row["failure_notice_error"],
+        kind=RunKind(row["kind"]),
+    )
 
 
 class OperationOutcomeRepo:

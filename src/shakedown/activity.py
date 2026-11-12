@@ -137,6 +137,23 @@ def _live_entry(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _as_seen(entry: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """A running entry that stopped reporting reads as ended at its last heartbeat,
+    with ``failed_before_completion`` and ``stopped_reporting`` — before any closer
+    has written that end (§spec:run-activity "Ends are never missed")."""
+    if entry["state"] == RUNNING and stopped_reporting(entry["last_heartbeat_at"], now):
+        entry.update(
+            state=ENDED,
+            result=OperationStatus.FAILED_BEFORE_COMPLETION.value,
+            end_reason=STOPPED_REPORTING,
+            finished_at=entry["last_heartbeat_at"],
+            current_items=[],
+            speed_bytes_per_second=None,
+            eta_seconds=None,
+        )
+    return entry
+
+
 class ActivityRepo:
     """The `run_activity` table (schema v10). A reader of an older schema has no
     table and sees no entries."""
@@ -263,25 +280,24 @@ class ActivityRepo:
         running: list[dict[str, Any]] = []
         ended: list[dict[str, Any]] = []
         for row in rows:
-            entry = _live_entry(row)
-            if entry["state"] == RUNNING and stopped_reporting(
-                entry["last_heartbeat_at"], now
-            ):
-                entry.update(
-                    state=ENDED,
-                    result=OperationStatus.FAILED_BEFORE_COMPLETION.value,
-                    end_reason=STOPPED_REPORTING,
-                    finished_at=entry["last_heartbeat_at"],
-                    current_items=[],
-                    speed_bytes_per_second=None,
-                    eta_seconds=None,
-                )
-                if entry["finished_at"] < cutoff:
-                    continue
+            entry = _as_seen(_live_entry(row), now)
+            if entry["state"] == ENDED and entry["finished_at"] < cutoff:
+                continue  # stopped reporting before the live view's horizon
             (running if entry["state"] == RUNNING else ended).append(entry)
         running.sort(key=lambda e: (e["started_at"], e["activity_id"]), reverse=True)
         ended.sort(key=lambda e: (e["finished_at"], e["activity_id"]), reverse=True)
         return running + ended
+
+    def since(self, started_at: datetime, now: datetime) -> list[dict[str, Any]]:
+        """Every entry started at or after ``started_at``, as the live view reads it
+        (a running entry that stopped reporting reads as ended). Empty before schema
+        v10."""
+        if not self.has_table():
+            return []
+        rows = self.conn.execute(
+            "SELECT * FROM run_activity WHERE started_at >= ?", (_iso(started_at),)
+        ).fetchall()
+        return [_as_seen(_live_entry(row), now) for row in rows]
 
     def trim(self, now: datetime) -> None:
         """Drop ended entries older than the history window."""
