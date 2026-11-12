@@ -156,3 +156,31 @@ def test_a_restage_counts_a_show_with_an_issue_as_failed_not_done(mirrored) -> N
     [entry] = _entries(mirrored, "restage")
     assert entry["result"] == "completed_with_item_issues"
     assert _values(entry, FETCHING) == (2, 1, 1)
+
+
+def test_a_restage_counts_a_show_whose_old_file_cannot_be_removed_as_failed(
+    mirrored,
+) -> None:
+    """An issue removing a show's old placement makes it failed, though its links
+    are fine: the activity agrees with the outcome's item issues."""
+    from unittest.mock import patch
+
+    from shakedown.state import PlacementRepo
+
+    old = mirrored.library_root / "fake-src" / "coll1" / "gd-a" / "old.flac"
+    old.write_bytes(b"left from an earlier layout")
+    with closing(connect(mirrored.state_db)) as conn:
+        PlacementRepo(conn).add_placement("fake-src", "coll1", "gd-a", "gd-a/old.flac",
+                                          old.stat().st_ino)
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, *args, **kwargs) -> None:
+        if self == old:
+            raise PermissionError("read-only")
+        real_unlink(self, *args, **kwargs)
+
+    with patch.object(Path, "unlink", unlink):
+        assert run_restage(mirrored) == 1
+    [entry] = _entries(mirrored, "restage")
+    assert entry["result"] == "completed_with_item_issues"
+    assert _values(entry, FETCHING) == (2, 1, 1)

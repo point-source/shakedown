@@ -384,3 +384,16 @@ hook: {{url: {SECRET}
     message = str(exc_info.value)
     assert "line 3" in message
     assert SECRET not in message
+
+
+def test_yaml_error_never_quotes_an_undefined_alias(tmp_path: Path) -> None:
+    """PyYAML's own message names an undefined alias's text, which can be a secret."""
+    p = _write(tmp_path, """archive_root: /a
+library_root: /l
+token: *hunter2-not-an-alias
+""")
+    with pytest.raises(ConfigError) as exc_info:
+        load(p)
+    message = str(exc_info.value)
+    assert "line 3" in message
+    assert "hunter2" not in message

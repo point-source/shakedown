@@ -41,11 +41,17 @@ def run_end(run: Run, entry: dict[str, Any] | None, now: datetime) -> RunEnd:
     """How a run record's run ended, from its activity entry (as
     `ActivityRepo.since` reads it) when that has ended, else from the record. Shared
     with the last good sync (§spec:library-stats)."""
-    if entry is not None and entry["state"] == ENDED:
+    if (
+        entry is not None
+        and entry["state"] == ENDED
+        and not (run.finished_at is not None and entry["end_reason"] == STOPPED_REPORTING)
+    ):
         return RunEnd(entry["result"], entry["end_reason"],
                       run.finished_at or entry["finished_at"])
     if entry is not None and run.finished_at is None:
         return _RUNNING  # its entry still reports
+    # A finished record whose entry stopped reporting: the run finished but its entry
+    # missed its own end, or it was killed and closed, which the record's error says.
     return _record_end(run, now)
 
 
