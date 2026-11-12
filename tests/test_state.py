@@ -178,6 +178,32 @@ def test_operation_outcome_round_trip_and_latest_actionable(tmp_path: Path) -> N
     assert latest.errors == ["source enumeration failed: unreachable"]
 
 
+def test_operation_outcome_latest_is_the_newest_of_one_operation(tmp_path: Path) -> None:
+    """The dashboard's last validation per collection (§spec:dashboard-health): the
+    newest outcome of that operation, resolved or not, ignoring other operations."""
+    conn = connect(tmp_path / "s.db")
+    repo = OperationOutcomeRepo(conn)
+    assert repo.latest(OperationType.VALIDATE, "s", "c") is None
+
+    first = datetime(2026, 11, 1, 9, 0)
+    failed = repo.start(OperationType.VALIDATE, "s", "c", first)
+    repo.finish(failed, OperationStatus.FAILED_BEFORE_COMPLETION, first)
+    second = datetime(2026, 11, 2, 9, 0)
+    passed = repo.start(OperationType.VALIDATE, "s", "c", second)
+    repo.finish(passed, OperationStatus.COMPLETED, second)
+    repo.resolve_actionable(OperationType.VALIDATE, "s", "c", second)
+    later_sync = repo.start(OperationType.SYNC, "s", "c", datetime(2026, 11, 3))
+    repo.finish(later_sync, OperationStatus.COMPLETED, datetime(2026, 11, 3))
+    other = repo.start(OperationType.VALIDATE, "s", "other", datetime(2026, 11, 4))
+    repo.finish(other, OperationStatus.FAILED_BEFORE_COMPLETION, datetime(2026, 11, 4))
+
+    latest = repo.latest(OperationType.VALIDATE, "s", "c")
+    assert latest is not None
+    assert latest.id == passed.id
+    assert latest.status == OperationStatus.COMPLETED
+    assert latest.finished_at == second
+
+
 def test_operation_outcome_resolution_is_scoped(tmp_path: Path) -> None:
     conn = connect(tmp_path / "s.db")
     repo = OperationOutcomeRepo(conn)

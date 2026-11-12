@@ -818,3 +818,181 @@ async def test_api_on_a_serve_that_never_loaded_a_valid_config_is_503(
         # a failure is never the cached answer: fixed file, next request answers
         cfg_path.write_text(good)
         assert (await client.get("/api/probe")).status_code == 200
+
+
+# --- GET /api/health (§spec:dashboard-health) ---------------------------------------
+
+def _health_app(config, clock, *, append: str = ""):  # type: ignore[no-untyped-def]
+    cfg_path = write_config(config.archive_root.parent / "cfg.yaml", config)
+    cfg_path.write_text(cfg_path.read_text() + append)
+    return build_app(cfg_path, clock=clock)
+
+
+@pytest.mark.asyncio
+async def test_api_health_reports_release_config_and_last_validation(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Release, config valid, validation null; after `validate`, each collection's
+    outcome and time once the refresh interval passes. Rapid requests share one
+    answer; the view is GET only and sends no CORS allowance."""
+    from importlib.metadata import version
+
+    from shakedown.dashboard import VIEW_TTL_S
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    clock = _Clock()
+    app = _health_app(config, clock)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/health", headers={"Origin": "https://elsewhere.example"})
+        assert r.status_code == 200
+        assert not [h for h in r.headers if h.lower().startswith("access-control-")]
+        body = r.json()
+        assert set(body) == {"generated_at", "release", "config", "validation"}
+        assert body["release"] == version("shakedown")
+        assert body["config"]["valid"] is True and body["config"]["error"] is None
+        assert datetime.fromisoformat(body["config"]["last_loaded_at"]).tzinfo is not None
+        assert body["validation"] == [
+            {"source": "fake-src", "collection": "coll1", "status": None, "at": None}
+        ]
+        assert (await client.get("/api/health")).json() == body
+        assert (await client.post("/api/health")).status_code == 405
+
+        assert (await client.post("/validate")).json()["ready"] is True
+        assert (await client.get("/api/health")).json() == body  # same shared answer
+        clock.now += VIEW_TTL_S
+        after = (await client.get("/api/health")).json()
+        assert after["generated_at"] != body["generated_at"]
+        [entry] = after["validation"]
+        assert entry["status"] == "completed"
+        assert datetime.fromisoformat(entry["at"]).tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_api_health_shows_a_failed_validation(tmp_roots: tuple[Path, Path]) -> None:
+    from shakedown.models import OperationStatus, OperationType
+    from shakedown.state import OperationOutcomeRepo
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    assert config.state_db is not None
+    at = datetime(2026, 11, 12, 3, 0, 0)
+    with closing(connect(config.state_db)) as conn:
+        outcomes = OperationOutcomeRepo(conn)
+        outcome = outcomes.start(OperationType.VALIDATE, "fake-src", "coll1", at)
+        outcomes.finish(outcome, OperationStatus.FAILED_BEFORE_COMPLETION, at)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_health_app(config, _Clock())),
+        base_url="http://testserver",
+    ) as client:
+        [entry] = (await client.get("/api/health")).json()["validation"]
+    assert entry["status"] == "failed_before_completion"
+    assert datetime.fromisoformat(entry["at"]).replace(tzinfo=None) == at
+
+
+@pytest.mark.asyncio
+async def test_api_health_reports_a_broken_config_and_when_it_last_loaded(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A typo'd key: 200 with config.valid false, the error naming the key, and the
+    time of the last good load. A fresh serve on the broken file: 503 naming it."""
+    from shakedown.dashboard import VIEW_TTL_S
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    clock = _Clock()
+    app = _health_app(config, clock)
+    cfg_path = archive.parent / "cfg.yaml"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        loaded_at = (await client.get("/api/health")).json()["config"]["last_loaded_at"]
+        cfg_path.write_text(cfg_path.read_text() + TYPO)
+        clock.now += VIEW_TTL_S
+        r = await client.get("/api/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["config"]["valid"] is False
+        assert "archive_rot" in body["config"]["error"]
+        assert body["config"]["last_loaded_at"] == loaded_at
+        assert [v["collection"] for v in body["validation"]] == ["coll1"]
+
+    fresh = _health_app(config, _Clock(), append=TYPO)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fresh), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/health")
+        assert r.status_code == 503
+        assert "archive_rot" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_api_health_never_writes_or_waits_for_the_writer_lock(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Answering reads only: it answers while a run holds the writer lock, and the
+    state database holds exactly what it held. (Compared by content: closing a
+    reader may checkpoint SQLite's WAL into the main file, which changes bytes but
+    no data.)"""
+    import sqlite3
+
+    from shakedown.lock import writer_lock
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    assert run_sync(config) == 0
+    db = config.state_db
+    assert db is not None
+
+    def dump() -> list[str]:
+        with closing(sqlite3.connect(db)) as conn:
+            return list(conn.iterdump())
+
+    before = dump()
+    app = _health_app(config, _Clock())
+    with writer_lock(config):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            assert (await client.get("/api/health")).status_code == 200
+    assert dump() == before
+
+
+@pytest.mark.asyncio
+async def test_api_health_contains_no_token_or_credential(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Operational data only (§spec:dashboard): neither the API token, the source
+    credentials in env, nor a secret in the config file reaches the answer — not
+    even in the error for a broken file."""
+    from shakedown.config import WebhookHandoff
+    from shakedown.dashboard import VIEW_TTL_S
+
+    secret = "SECRET-7f3a"
+    monkeypatch.setenv(TOKEN_ENV, f"token-{secret}")
+    monkeypatch.setenv("IA_EMAIL", f"email-{secret}")
+    monkeypatch.setenv("IA_PASSWORD", f"password-{secret}")
+    archive, library = tmp_roots
+    config = make_config(
+        archive, library, on_complete=WebhookHandoff(webhook=f"https://hooks.example/{secret}")
+    )
+    clock = _Clock()
+    app = _health_app(config, clock)
+    cfg_path = archive.parent / "cfg.yaml"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        assert (await client.post("/validate")).status_code == 200
+        clock.now += VIEW_TTL_S
+        r = await client.get("/api/health")
+        assert r.status_code == 200 and secret not in r.text
+        broken = cfg_path.read_text().replace("webhook:", "webhok:")
+        assert "webhok" in broken
+        cfg_path.write_text(broken)
+        clock.now += VIEW_TTL_S
+        r = await client.get("/api/health")
+        assert r.json()["config"]["valid"] is False
+        assert "webhok" in r.json()["config"]["error"]
+        assert secret not in r.text

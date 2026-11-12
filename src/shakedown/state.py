@@ -517,6 +517,22 @@ class OperationOutcomeRepo:
         row = cur.fetchone()
         return _row_to_operation_outcome(row) if row else None
 
+    def latest(
+        self, operation: OperationType, source: str, collection: str
+    ) -> OperationOutcome | None:
+        """The newest outcome of ``operation`` for the collection, resolved or not."""
+        cur = self.conn.execute(
+            """
+            SELECT * FROM operation_outcomes
+            WHERE operation=? AND source_name=? AND collection_name=?
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            """,
+            (operation.value, source, collection),
+        )
+        row = cur.fetchone()
+        return _row_to_operation_outcome(row) if row else None
+
     def get(self, outcome_id: int) -> OperationOutcome | None:
         cur = self.conn.execute(
             "SELECT * FROM operation_outcomes WHERE id=?",

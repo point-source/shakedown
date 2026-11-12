@@ -28,7 +28,8 @@ from prometheus_client import (
 
 from shakedown import __version__
 from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope
-from shakedown.dashboard import ConfigTracker, SharedAnswers
+from shakedown.dashboard import VIEW_TTL_S, ConfigTracker, SharedAnswers, register_api
+from shakedown.dashboard_health import health_answer
 from shakedown.db import connect_reader
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
 from shakedown.status import _collection_summary
@@ -161,6 +162,9 @@ def build_app(
             check_scope(config, source, collection)
         except UnknownScopeError as e:
             raise HTTPException(404, str(e)) from e
+
+    # The dashboard's read views (§spec:dashboard).
+    register_api(app, "/api/health", VIEW_TTL_S, health_answer)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
