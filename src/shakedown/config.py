@@ -154,15 +154,42 @@ def load(path: Path) -> Config:
     try:
         raw = yaml.safe_load(path.read_text())
     except yaml.YAMLError as e:
-        raise ConfigError(f"failed to parse YAML at {path}: {e}") from e
+        raise ConfigError(f"failed to parse YAML at {path}: {_yaml_problem(e)}") from e
     if not isinstance(raw, dict):
         raise ConfigError(f"config root must be a mapping, got {type(raw).__name__}")
     try:
         config = Config.model_validate(raw)
     except ValidationError as e:
-        raise ConfigError(f"config validation failed:\n{e}") from e
+        raise ConfigError(f"config validation failed:\n{_validation_problems(e)}") from e
     _validate_layouts(config)
     return config
+
+
+# A config error reaches anyone who can open serve's read endpoints (§spec:dashboard:
+# never credentials, tokens, or secrets), so it names the key and the problem but
+# never echoes a value from the file: a webhook URL often embeds its token.
+
+
+def _validation_problems(e: ValidationError) -> str:
+    return "\n".join(
+        f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+        for err in e.errors(include_url=False, include_input=False, include_context=False)
+    )
+
+
+def _yaml_problem(e: yaml.YAMLError) -> str:
+    if not isinstance(e, yaml.MarkedYAMLError):
+        return type(e).__name__
+
+    def at(mark: yaml.Mark | None) -> str:
+        return f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+
+    parts = []
+    if e.context:
+        parts.append(f"{e.context}{at(e.context_mark)}")
+    if e.problem:
+        parts.append(f"{e.problem}{at(e.problem_mark)}")
+    return ": ".join(parts) or "invalid YAML"
 
 
 def _validate_layouts(config: Config) -> None:

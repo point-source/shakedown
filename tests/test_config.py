@@ -344,3 +344,43 @@ sources:
 """)
     with pytest.raises(ConfigError, match=key):
         load(p)
+
+
+# A config error is shown by `serve` to anyone who can open the dashboard and
+# `GET /status` (§spec:dashboard: never credentials, tokens, or secrets), so it names
+# the key and the problem but never echoes a value from the file: a webhook URL
+# often embeds its token.
+SECRET = "SECRET-TOKEN-7f3a"
+
+
+def test_validation_error_names_the_key_but_not_its_value(tmp_path: Path) -> None:
+    p = _write(tmp_path, f"""
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: q
+        on_complete:
+          webhok: "https://hooks.example/{SECRET}"
+""")
+    with pytest.raises(ConfigError) as exc_info:
+        load(p)
+    message = str(exc_info.value)
+    assert "on_complete" in message and "webhok" in message
+    assert SECRET not in message
+    assert "errors.pydantic.dev" not in message
+
+
+def test_yaml_error_names_the_line_but_not_its_text(tmp_path: Path) -> None:
+    p = _write(tmp_path, f"""archive_root: /a
+library_root: /l
+hook: {{url: {SECRET}
+""")
+    with pytest.raises(ConfigError) as exc_info:
+        load(p)
+    message = str(exc_info.value)
+    assert "line 3" in message
+    assert SECRET not in message
