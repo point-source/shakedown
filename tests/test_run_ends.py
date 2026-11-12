@@ -149,3 +149,29 @@ def test_a_closer_failure_never_stops_the_locked_run(
 
     monkeypatch.setattr(activity, "close_abandoned", boom)
     assert run_restage(config) == 0
+
+
+@pytest.mark.parametrize(
+    ("operation", "command"),
+    [
+        (OperationType.RESTAGE, "restage"),
+        (OperationType.RECONCILE, "reconcile"),
+        (OperationType.REFETCH, "item refetch"),
+        (OperationType.RECONFORM, "verify --deep --reconform"),
+        (OperationType.SYNC, "sync"),
+    ],
+)
+def test_a_closed_outcome_names_the_command_that_reruns_it(
+    config, operation: OperationType, command: str
+) -> None:
+    """A killed restage is not fixed by rerunning sync: the closed outcome's next step
+    names its own command."""
+    with closing(connect(config.state_db)) as conn:
+        outcome = OperationOutcomeRepo(conn).start(
+            operation, "fake-src", "coll1", datetime.now() - timedelta(minutes=1))
+        close_abandoned(conn, datetime.now())
+        assert outcome.id is not None
+        closed = OperationOutcomeRepo(conn).get(outcome.id)
+    assert closed is not None
+    assert closed.status == OperationStatus.FAILED_BEFORE_COMPLETION
+    assert closed.safe_next_action == f"check the logged error and rerun {command}"

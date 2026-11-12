@@ -38,6 +38,7 @@ from shakedown.discovery import (
 from shakedown.filesystem import FilesystemError, ensure_hardlinkable, is_within
 from shakedown.lock import run_exclusive
 from shakedown.models import (
+    RERUN_COMMAND,
     Item,
     ItemStatus,
     Manifest,
@@ -98,10 +99,10 @@ NO_FILES_REASON = "source lists no audio files"
 
 # The command that retries a run of each kind, for its outcome's next safe action.
 _RERUN = {
-    RunKind.SYNC: "sync",
-    RunKind.CATCH_UP: "sync",
-    RunKind.REFETCH: "item refetch",
-    RunKind.RECONFORM: "verify --deep --reconform",
+    RunKind.SYNC: RERUN_COMMAND[OperationType.SYNC],
+    RunKind.CATCH_UP: RERUN_COMMAND[OperationType.SYNC],
+    RunKind.REFETCH: RERUN_COMMAND[OperationType.REFETCH],
+    RunKind.RECONFORM: RERUN_COMMAND[OperationType.RECONFORM],
 }
 
 

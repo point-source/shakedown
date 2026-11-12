@@ -27,6 +27,17 @@ class OperationType(StrEnum):
     RECONFORM = "reconform"
 
 
+# The command that reruns each operation, for an outcome's next safe action.
+RERUN_COMMAND = {
+    OperationType.SYNC: "sync",
+    OperationType.RESTAGE: "restage",
+    OperationType.RECONCILE: "reconcile",
+    OperationType.VALIDATE: "validate",
+    OperationType.REFETCH: "item refetch",
+    OperationType.RECONFORM: "verify --deep --reconform",
+}
+
+
 class RunKind(StrEnum):
     """What a run did: a sync of the whole collection — `catch_up` when it caught up a
     sync skipped while another run held the writer lock (§spec:rescheduled-syncs) —

@@ -12,6 +12,7 @@ from typing import Any
 
 from shakedown.db import transaction
 from shakedown.models import (
+    RERUN_COMMAND,
     Item,
     ItemStatus,
     Manifest,
@@ -481,7 +482,9 @@ class OperationOutcomeRepo:
             completed_work=outcome.completed_work,
             preservation_context="completed archive work retained",
             deletion_context=outcome.deletion_context,
-            safe_next_action="check the logged error and rerun sync",
+            safe_next_action=(
+                f"check the logged error and rerun {RERUN_COMMAND[outcome.operation]}"
+            ),
             errors=[*outcome.errors, reason],
         )
 
