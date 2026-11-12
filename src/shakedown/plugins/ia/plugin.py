@@ -3,29 +3,33 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import quote
 
 import internetarchive as ia
 from internetarchive.auth import S3Auth
 from urllib3 import Retry
+from urllib3.exceptions import MaxRetryError
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
+    FailureCause,
     FetchResult,
     ItemLookup,
     ListedItem,
     SourcePlugin,
     VerifyResult,
     downloaded_file_mismatch,
+    failure_cause,
     http_status,
     retry_after_seconds,
     reusable_leftover,
+    status_cause,
 )
 from shakedown.plugins.registry import register
 from shakedown.selection import DOWNLOAD_REFUSED_REASON
@@ -48,8 +52,60 @@ _SEARCH_BACKOFF_BASE_SECONDS = 1.0
 _SEARCH_MAX_BACKOFF_SECONDS = 30.0
 
 
-def _search_retry() -> Retry:
-    return Retry(
+def _attempt(status: int | None, error: Exception | None) -> dict[str, Any]:
+    """What a failed search attempt was, as `report_listing_retry` takes it."""
+    if status is not None:
+        return {"cause": status_cause(status), "http_status": status, "detail": f"HTTP {status}"}
+    return {
+        "cause": failure_cause(error) if error is not None else None,
+        "http_status": None,
+        "detail": str(error) if error is not None else None,
+    }
+
+
+class _ReportingRetry(Retry):
+    """The search's urllib3 retry, reporting each failed attempt to the core: its cause
+    and the wait urllib3 takes before the retry, or that it gave up
+    (§spec:network-activity)."""
+
+    report: Callable[..., None] | None = None
+
+    def new(self, **kw: Any) -> Self:
+        retry = super().new(**kw)
+        retry.report = self.report
+        return retry
+
+    def increment(
+        self,
+        method: str | None = None,
+        url: str | None = None,
+        response: Any = None,
+        error: Exception | None = None,
+        _pool: Any = None,
+        _stacktrace: Any = None,
+    ) -> Self:
+        try:
+            return super().increment(method, url, response, error, _pool, _stacktrace)
+        except MaxRetryError:
+            if self.report is not None:
+                status = response.status if response is not None and error is None else None
+                self.report(**_attempt(status, error), gave_up=True)
+            raise
+
+    def sleep(self, response: Any = None) -> None:
+        if self.report is not None and self.history:
+            last = self.history[-1]
+            wait: float | None = None
+            if self.respect_retry_after_header and response is not None:
+                wait = self.get_retry_after(response)
+            if not wait:
+                wait = self.get_backoff_time()
+            self.report(**_attempt(last.status, last.error), wait_seconds=wait)
+        super().sleep(response)
+
+
+def _search_retry(report: Callable[..., None] | None = None) -> Retry:
+    retry = _ReportingRetry(
         total=_SEARCH_RETRIES,
         connect=_SEARCH_RETRIES,
         read=_SEARCH_RETRIES,
@@ -61,6 +117,8 @@ def _search_retry() -> Retry:
         respect_retry_after_header=True,
         retry_after_max=int(_SEARCH_MAX_BACKOFF_SECONDS),
     )
+    retry.report = report
+    return retry
 
 
 def _get_ia_session(source_config: SourceConfig) -> ia.ArchiveSession:
@@ -144,7 +202,7 @@ class IAPlugin(SourcePlugin):
         search = self._search_session.search_items(
             collection.query,
             fields=["identifier", "oai_updatedate", "item_size"],
-            max_retries=_search_retry(),
+            max_retries=_search_retry(self.report_listing_retry),
         )
         for hit in search:
             yield ListedItem(hit["identifier"], _combine_change_signal(hit))
@@ -201,21 +259,20 @@ class IAPlugin(SourcePlugin):
                 log.info("IA download refused for %s: %s", identifier, e)
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=0,
                     error=DOWNLOAD_REFUSED_REASON,
                     unavailable=True,
+                    cause=FailureCause.REFUSED,
+                    http_status=403,
                 )
             log.warning("IA download failed for %s: %s", identifier, e)
             return FetchResult(
                 success=False,
-                bytes_downloaded=0,
                 error=str(e),
                 retriable=_is_retriable(e),
                 retry_after=retry_after_seconds(e),
+                cause=failure_cause(e),
+                http_status=http_status(e),
             )
-
-        # Every manifest file is now on disk: reused above or just written.
-        bytes_downloaded = sum((dest_dir / mf.name).stat().st_size for mf in files)
 
         # Check every downloaded file against the manifest (reused leftovers were
         # checked above). A corrupt file is removed and the fetch retried.
@@ -225,12 +282,11 @@ class IAPlugin(SourcePlugin):
                 (dest_dir / mf.name).unlink()
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=bytes_downloaded,
                     error=mismatch,
                     retriable=True,
                 )
 
-        return FetchResult(success=True, bytes_downloaded=bytes_downloaded)
+        return FetchResult(success=True)
 
     def _download_file(self, identifier: str, name: str, path: Path) -> None:
         """Stream one file straight to its place in the temp dir, so every finished

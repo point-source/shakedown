@@ -30,6 +30,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from shakedown.config import CollectionConfig, Config
 from shakedown.db import transaction
@@ -45,6 +46,9 @@ from shakedown.staging import (
 from shakedown.state import ItemRepo, PlacementRepo
 from shakedown.utils.sanitize import path_safe
 from shakedown.utils.templates import TemplateError
+
+if TYPE_CHECKING:
+    from shakedown.activity import Progress
 
 log = logging.getLogger(__name__)
 
@@ -105,8 +109,12 @@ class LibraryPlacement:
         collection: CollectionConfig,
         source_name: str,
         items: ItemRepo,
+        *,
+        progress: Progress | None = None,
     ) -> None:
         self.config = config
+        # A restage reports each show its full pass stages (§spec:run-activity).
+        self._progress = progress
         self.collection = collection
         self.source = source_name
         self.items = items
@@ -161,6 +169,10 @@ class LibraryPlacement:
         if self._render_error is not None:
             self._report.render_error = self._render_error
             return self._report
+        if self._progress is not None:
+            # A show refused an unsafe path is part of the work, and failed.
+            self._progress.work_total(len(self._bare) + len(self._refused))
+            self._progress.failed(len(self._refused))
         self._apply(sorted(self._bare), full=True)
         self._refresh_unplaced()
         report = self._report
@@ -257,6 +269,8 @@ class LibraryPlacement:
         (and, in a full pass, for every show that no longer stages). Writes only what
         changed: a pass over an up-to-date library reads and stats, nothing more."""
         touched: set[Path] = set()
+        # Issues from removing, moving, or linking alike make a show failed.
+        issues_before = {i: len(self._report.issues.get(i, ())) for i in identifiers}
         folders = self.repo.folders(self.source, self.collection.name)
         for identifier in identifiers:
             item = self.items.get(self.source, self.collection.name, identifier)
@@ -283,11 +297,23 @@ class LibraryPlacement:
         self._prune_dirs(touched)
 
         folders = self.repo.folders(self.source, self.collection.name)
+        progress = self._progress if full else None
         for identifier in identifiers:
             item = self.items.get(self.source, self.collection.name, identifier)
             if item is None:
                 continue
-            self._link_show(item, folders.get(identifier))
+            if progress is None:
+                self._link_show(item, folders.get(identifier))
+                continue
+            progress.working(identifier)
+            try:
+                self._link_show(item, folders.get(identifier))
+            finally:
+                progress.idle(identifier)
+            if len(self._report.issues.get(identifier, ())) > issues_before[identifier]:
+                progress.failed()
+            else:
+                progress.done()
 
     def _last_copy_moves(
         self, item: Item, desired: dict[str, str], stale: list[str], old_folder: str | None

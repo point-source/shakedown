@@ -4,13 +4,19 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
 RESCHEDULED_SINCE_VERSION = 9
+
+# The schema version that added `run_activity`: a run that takes no writer lock
+# (`verify`) records its progress only into a database already at this version or
+# later — it never migrates (§spec:run-activity, §spec:state).
+ACTIVITY_SINCE_VERSION = 10
 
 # How long any connection waits on another writer's SQLite lock before giving up.
 BUSY_TIMEOUT_MS = 5000
@@ -230,6 +236,115 @@ _RESCHEDULE_SCHEMA = [
 ]
 _SCHEMA += _RESCHEDULE_SCHEMA
 
+# Per run and collection, its live progress and result (§spec:run-activity): one row
+# per collection a run works on. History of its own — trimmed to 30 days without
+# touching item, run, or placement records (§spec:state). No foreign key to `runs`:
+# `run_id` is null for kinds without a run record (restage, verify, reconcile).
+_ACTIVITY_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS run_activity (
+        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name             TEXT NOT NULL,
+        collection_name         TEXT NOT NULL,
+        kind                    TEXT NOT NULL,
+        started_by_serve        INTEGER NOT NULL DEFAULT 0,
+        run_id                  INTEGER,
+        outcome_id              INTEGER,
+        started_at              TEXT NOT NULL,
+        finished_at             TEXT,
+        last_heartbeat_at       TEXT NOT NULL,
+        last_progress_at        TEXT NOT NULL,
+        state                   TEXT NOT NULL,
+        result                  TEXT,
+        end_reason              TEXT,
+        phase                   TEXT,
+        items_listed            INTEGER,
+        items_to_look_up        INTEGER,
+        items_looked_up         INTEGER,
+        items_to_fetch          INTEGER,
+        items_done              INTEGER,
+        items_failed            INTEGER,
+        current_items           TEXT NOT NULL DEFAULT '[]',
+        bytes_downloaded        INTEGER,
+        bytes_to_fetch          INTEGER,
+        speed_bytes_per_second  REAL,
+        eta_seconds             INTEGER,
+        requests_in_flight      INTEGER
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS run_activity_live_idx
+        ON run_activity (state, finished_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS run_activity_collection_idx
+        ON run_activity (source_name, collection_name, started_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS run_activity_run_idx ON run_activity (run_id)
+    """,
+]
+_SCHEMA += _ACTIVITY_SCHEMA
+
+# Per collection, its complete shows and archive bytes at the end of each run that
+# holds the writer lock, the first taken by the v10 migration (§spec:library-stats
+# "Growth"). History of its own, kept 30 days (§spec:state).
+_GROWTH_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS growth_snapshots (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        taken_at         TEXT NOT NULL,
+        complete         INTEGER NOT NULL,
+        archive_bytes    INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS growth_snapshots_collection_idx
+        ON growth_snapshots (source_name, collection_name, taken_at)
+    """,
+]
+_SCHEMA += _GROWTH_SCHEMA
+
+# Network activity (§spec:network-activity): per source and minute, the totals a run
+# measured; and each network event. Kept 30 days, like the activity entries.
+_NETWORK_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS network_minutes (
+        source_name              TEXT NOT NULL,
+        minute                   TEXT NOT NULL,
+        bytes                    INTEGER NOT NULL DEFAULT 0,
+        peak_requests_in_flight  INTEGER NOT NULL DEFAULT 0,
+        rate_limited             INTEGER NOT NULL DEFAULT 0,
+        server_errors            INTEGER NOT NULL DEFAULT 0,
+        timeouts                 INTEGER NOT NULL DEFAULT 0,
+        connection_errors        INTEGER NOT NULL DEFAULT 0,
+        retries                  INTEGER NOT NULL DEFAULT 0,
+        backoff_seconds          REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (source_name, minute)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS network_events (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name      TEXT NOT NULL,
+        at               TEXT NOT NULL,
+        kind             TEXT NOT NULL,
+        http_status      INTEGER,
+        collection_name  TEXT,
+        identifier       TEXT,
+        wait_seconds     REAL,
+        detail           TEXT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS network_events_source_idx
+        ON network_events (source_name, at DESC)
+    """,
+]
+_SCHEMA += _NETWORK_SCHEMA
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and lazily create) the state DB at db_path."""
@@ -258,6 +373,16 @@ def open_unmigrated(db_path: Path) -> sqlite3.Connection:
     )
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    return conn
+
+
+def connect_empty() -> sqlite3.Connection:
+    """An in-memory state DB at the current schema with nothing in it: what a reader
+    that must never create the database (the dashboard's GETs) reads before any run
+    has written one."""
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    _migrate(conn)
     return conn
 
 
@@ -412,6 +537,21 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+def _migrate_to_10(conn: sqlite3.Connection) -> None:
+    """v9 → v10, the one migration of the dashboard increment (§spec:state): add the
+    activity entries (§spec:run-activity), each naming the outcome of a run with no run
+    record (§spec:run-history); the network history (§spec:network-activity); and the
+    growth snapshots (§spec:library-stats), recording the first snapshot of every
+    collection the database holds shows for. Additive: nothing else changes — the
+    increment moves the schema forward exactly once."""
+    for stmt in _ACTIVITY_SCHEMA + _NETWORK_SCHEMA + _GROWTH_SCHEMA:
+        conn.execute(stmt)
+    # Imported here: growth reads items through state, which imports this module.
+    from shakedown.growth import GrowthRepo
+
+    GrowthRepo(conn).record(datetime.now(), scopes=None)
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -422,6 +562,7 @@ _MIGRATIONS = {
     7: _migrate_to_7,
     8: _migrate_to_8,
     9: _migrate_to_9,
+    10: _migrate_to_10,
 }
 
 

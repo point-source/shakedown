@@ -7,6 +7,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+# How every closer of a killed run starts the error it records: the next locked run
+# ("... (stopped reporting)") and serve, which saw its child die ("... (killed by
+# SIGKILL)").
+ENDED_UNEXPECTEDLY = "run ended unexpectedly"
+
 
 class ItemStatus(StrEnum):
     PENDING = "pending"
@@ -27,10 +32,24 @@ class OperationType(StrEnum):
     RECONFORM = "reconform"
 
 
+# The command that reruns each operation, for an outcome's next safe action.
+RERUN_COMMAND = {
+    OperationType.SYNC: "sync",
+    OperationType.RESTAGE: "restage",
+    OperationType.RECONCILE: "reconcile",
+    OperationType.VALIDATE: "validate",
+    OperationType.REFETCH: "item refetch",
+    OperationType.RECONFORM: "verify --deep --reconform",
+}
+
+
 class RunKind(StrEnum):
-    """What a run did: a sync of the whole collection, or a single-show run that
-    fetched only the shows it acts on (§spec:single-show-runs)."""
+    """What a run did: a sync of the whole collection — `catch_up` when it caught up a
+    sync skipped while another run held the writer lock (§spec:rescheduled-syncs) —
+    or a single-show run that fetched only the shows it acts on
+    (§spec:single-show-runs)."""
     SYNC = "sync"
+    CATCH_UP = "catch_up"
     REFETCH = "refetch"
     RECONFORM = "reconform"
 

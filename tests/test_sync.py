@@ -155,7 +155,7 @@ def _refuse_downloads_of(monkeypatch, *identifiers: str) -> None:
             FakePlugin.fetch_count[identifier] = FakePlugin.fetch_count.get(identifier, 0) + 1
             dest_dir.mkdir(parents=True, exist_ok=True)
             return FetchResult(
-                success=False, bytes_downloaded=0, error="refused", unavailable=True
+                success=False, error="refused", unavailable=True
             )
         return real_fetch(self, identifier, files, dest_dir)
 
@@ -769,7 +769,7 @@ def test_partial_fetch_is_not_promoted(tmp_roots: tuple[Path, Path], monkeypatch
     def partial_fetch(self, identifier, files, dest_dir):
         # Claim success but never write the manifest file into the temp dir.
         dest_dir.mkdir(parents=True, exist_ok=True)
-        return FetchResult(success=True, bytes_downloaded=0)
+        return FetchResult(success=True)
 
     monkeypatch.setattr(FakePlugin, "fetch", partial_fetch)
 
@@ -801,8 +801,7 @@ def test_retriable_fetch_failure_is_retried_then_succeeds(
         attempts["n"] += 1
         if attempts["n"] < 3:
             return FetchResult(
-                success=False, bytes_downloaded=0,
-                error="checksum mismatch", retriable=True,
+                success=False, error="checksum mismatch", retriable=True,
             )
         return real_fetch(self, identifier, files, dest_dir)
 
@@ -830,7 +829,7 @@ def test_retriable_fetch_failure_gives_up_after_bounded_attempts(
     def always_fail(self, identifier, files, dest_dir):
         attempts["n"] += 1
         return FetchResult(
-            success=False, bytes_downloaded=0, error="checksum mismatch", retriable=True,
+            success=False, error="checksum mismatch", retriable=True,
         )
 
     monkeypatch.setattr(FakePlugin, "fetch", always_fail)
@@ -854,7 +853,7 @@ def test_non_retriable_fetch_failure_is_not_retried(
     def hard_fail(self, identifier, files, dest_dir):
         attempts["n"] += 1
         return FetchResult(
-            success=False, bytes_downloaded=0, error="malformed metadata", retriable=False,
+            success=False, error="malformed metadata", retriable=False,
         )
 
     monkeypatch.setattr(FakePlugin, "fetch", hard_fail)
@@ -882,8 +881,7 @@ def test_retry_after_is_honored_over_backoff(
         attempts["n"] += 1
         if attempts["n"] == 1:
             return FetchResult(
-                success=False, bytes_downloaded=0,
-                error="429 too many requests", retriable=True, retry_after=7.5,
+                success=False, error="429 too many requests", retriable=True, retry_after=7.5,
             )
         return real_fetch(self, identifier, files, dest_dir)
 
@@ -913,8 +911,7 @@ def test_retry_after_is_clamped_to_backoff_cap(
         attempts["n"] += 1
         if attempts["n"] == 1:
             return FetchResult(
-                success=False, bytes_downloaded=0,
-                error="429 too many requests", retriable=True, retry_after=31_536_000.0,
+                success=False, error="429 too many requests", retriable=True, retry_after=31_536_000.0,
             )
         return real_fetch(self, identifier, files, dest_dir)
 

@@ -184,8 +184,10 @@ def inspect_handoff(
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             return (
                 False,
-                f"handoff webhook URL {handoff.webhook!r} is not an absolute http(s) URL, "
-                f"so the completed-collection handoff cannot be delivered",
+                # Never the URL itself: it can carry a token, and readiness errors are
+                # recorded and shown by the unauthenticated dashboard.
+                "on_complete.webhook is not an absolute http(s) URL, "
+                "so the completed-collection handoff cannot be delivered",
                 "set on_complete.webhook to a full http(s) URL",
             )
         return (True, None, None)
@@ -200,13 +202,13 @@ def inspect_handoff(
         except ValueError as e:
             return (
                 False,
-                f"handoff command {handoff.exec!r} could not be parsed: {e}",
+                f"on_complete.exec could not be parsed: {e}",
                 "fix the quoting in on_complete.exec",
             )
         if not argv:
             return (
                 False,
-                f"handoff command {handoff.exec!r} is empty",
+                "on_complete.exec is empty",
                 "set on_complete.exec to a runnable command",
             )
         if shutil.which(argv[0]) is None:

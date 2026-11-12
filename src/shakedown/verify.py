@@ -7,16 +7,18 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import click
 
-from shakedown.config import Config
+from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress
+from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, connect_reader, transaction
 from shakedown.lock import run_exclusive
-from shakedown.models import Item, ItemStatus, RunKind
+from shakedown.models import Item, ItemStatus, OperationStatus, RunKind
 from shakedown.plugins import registry
 from shakedown.state import DriftRepo, ItemRepo, TagRepo
 from shakedown.sync import run_single_shows
@@ -128,54 +130,43 @@ def _run_verify(
     all_drift: list[DriftRecord] = []
     missing_summary: dict[tuple[str, str], int] = {}
 
-    for source in config.sources:
-        if source_filter and source.name != source_filter:
-            continue
-        for collection in source.collections:
-            if collection_filter and collection.name != collection_filter:
+    with ActivityRecorder(config.state_db) as recorder:  # type: ignore[arg-type]
+        for source in config.sources:
+            if source_filter and source.name != source_filter:
                 continue
-            if reconform:
-                # Holding the writer lock, undo a tag write a crash cut short before
-                # hashing: the file is its original again, not drift to re-download
-                # (§spec:tag-filling). A plain verify holds no lock, so a backup may
-                # belong to a sync still writing; it only reports what it finds.
-                recover_interrupted_tagging(config.archive_root / source.name / collection.name)
-
-            for item in items.list_for_collection(source.name, collection.name):
-                if item.status != ItemStatus.COMPLETE:
+            for collection in source.collections:
+                if collection_filter and collection.name != collection_filter:
                     continue
-                if not deep:
-                    # cheap check: existence only, via plugin
-                    plugin = registry.for_source(source)
-                    files = item.recorded_manifest.files if item.recorded_manifest else ()
-                    result = plugin.verify(files, item.archive_path)  # type: ignore[arg-type]
-                    if not result.ok:
-                        missing_summary[(source.name, collection.name)] = (
-                            missing_summary.get((source.name, collection.name), 0)
-                            + len(result.missing_files)
-                        )
-                else:
-                    post_tag = {
-                        name: record.post_tag_md5
-                        for name, record in tags.file_records(
-                            item.source_name, item.collection_name, item.identifier
-                        ).items()
-                    }
-                    drifts = _scan_drift(item, post_tag)
-                    all_drift.extend(drifts)
-                    with transaction(conn):
-                        # Refresh drift table for this item.
-                        if item.recorded_manifest is not None:
-                            for mf in item.recorded_manifest.files:
-                                drift_repo.clear(
-                                    item.source_name, item.collection_name,
-                                    item.identifier, mf.name,
-                                )
-                        for d in drifts:
-                            drift_repo.record(
-                                d.source, d.collection, d.identifier, d.file_name,
-                                d.observed_md5, d.expected_md5, datetime.now(),
-                            )
+                if reconform:
+                    # Holding the writer lock, undo a tag write a crash cut short before
+                    # hashing: the file is its original again, not drift to re-download
+                    # (§spec:tag-filling). A plain verify holds no lock, so a backup may
+                    # belong to a sync still writing; it only reports what it finds.
+                    recover_interrupted_tagging(config.archive_root / source.name / collection.name)
+
+                # One activity entry per collection: the shows it checks
+                # (§spec:run-activity). Missing files are an item issue; drift is
+                # informational, not an error (§spec:verify-drift).
+                progress = recorder.open_entry(source.name, collection.name, ActivityKind.VERIFY)
+                progress.phase(Phase.VERIFYING)
+                progress.work_total(
+                    items.count_by_status(source.name, collection.name).get(ItemStatus.COMPLETE, 0)
+                )
+                try:
+                    missing_before = missing_summary.get((source.name, collection.name), 0)
+                    _verify_collection(
+                        source, collection, deep, items, tags, drift_repo, conn,
+                        all_drift, missing_summary, progress,
+                    )
+                except BaseException:
+                    recorder.end(progress, OperationStatus.FAILED_BEFORE_COMPLETION)
+                    raise
+                missing = missing_summary.get((source.name, collection.name), 0) > missing_before
+                recorder.end(
+                    progress,
+                    OperationStatus.COMPLETED_WITH_ITEM_ISSUES if missing
+                    else OperationStatus.COMPLETED,
+                )
 
     if not deep:
         if missing_summary:
@@ -229,3 +220,61 @@ def _reconform(config: Config, drifts: list[DriftRecord]) -> int:
         },
         RunKind.RECONFORM,
     )
+
+
+def _verify_collection(
+    source: SourceConfig,
+    collection: CollectionConfig,
+    deep: bool,
+    items: ItemRepo,
+    tags: TagRepo,
+    drift_repo: DriftRepo,
+    conn: sqlite3.Connection,
+    all_drift: list[DriftRecord],
+    missing_summary: dict[tuple[str, str], int],
+    progress: Progress,
+) -> None:
+    """Check one collection's complete shows: existence, or with ``deep`` their bytes."""
+    for item in items.list_for_collection(source.name, collection.name):
+        if item.status != ItemStatus.COMPLETE:
+            continue
+        progress.working(item.identifier)
+        problem = False
+        if not deep:
+            # cheap check: existence only, via plugin
+            plugin = registry.for_source(source)
+            files = item.recorded_manifest.files if item.recorded_manifest else ()
+            result = plugin.verify(files, item.archive_path)  # type: ignore[arg-type]
+            if not result.ok:
+                problem = True
+                missing_summary[(source.name, collection.name)] = (
+                    missing_summary.get((source.name, collection.name), 0)
+                    + len(result.missing_files)
+                )
+        else:
+            post_tag = {
+                name: record.post_tag_md5
+                for name, record in tags.file_records(
+                    item.source_name, item.collection_name, item.identifier
+                ).items()
+            }
+            drifts = _scan_drift(item, post_tag)
+            all_drift.extend(drifts)
+            with transaction(conn):
+                # Refresh drift table for this item.
+                if item.recorded_manifest is not None:
+                    for mf in item.recorded_manifest.files:
+                        drift_repo.clear(
+                            item.source_name, item.collection_name,
+                            item.identifier, mf.name,
+                        )
+                for d in drifts:
+                    drift_repo.record(
+                        d.source, d.collection, d.identifier, d.file_name,
+                        d.observed_md5, d.expected_md5, datetime.now(),
+                    )
+        progress.idle(item.identifier)
+        if problem:
+            progress.failed()
+        else:
+            progress.done()

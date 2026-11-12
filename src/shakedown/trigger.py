@@ -33,6 +33,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from shakedown.models import ENDED_UNEXPECTEDLY
+
 log = logging.getLogger(__name__)
 
 READY_FD_ENV = "SHAKEDOWN_READY_FD"
@@ -175,7 +177,7 @@ def _ended_reason(returncode: int) -> str:
             how = f"killed by signal {-returncode}"
     else:
         how = f"exit {returncode}"
-    return f"run ended unexpectedly ({how})"
+    return f"{ENDED_UNEXPECTEDLY} ({how})"
 
 
 def close_abandoned(state_db: Path, runs: list[dict[str, Any]], returncode: int) -> None:

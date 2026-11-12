@@ -154,15 +154,44 @@ def load(path: Path) -> Config:
     try:
         raw = yaml.safe_load(path.read_text())
     except yaml.YAMLError as e:
-        raise ConfigError(f"failed to parse YAML at {path}: {e}") from e
+        raise ConfigError(f"failed to parse YAML at {path}: {_yaml_problem(e)}") from e
     if not isinstance(raw, dict):
         raise ConfigError(f"config root must be a mapping, got {type(raw).__name__}")
     try:
         config = Config.model_validate(raw)
     except ValidationError as e:
-        raise ConfigError(f"config validation failed:\n{e}") from e
+        raise ConfigError(f"config validation failed:\n{_validation_problems(e)}") from e
     _validate_layouts(config)
     return config
+
+
+# A config error reaches anyone who can open serve's read endpoints (§spec:dashboard:
+# never credentials, tokens, or secrets), so it names the key and the problem but
+# never echoes a value from the file: a webhook URL often embeds its token.
+
+
+def _validation_problems(e: ValidationError) -> str:
+    return "\n".join(
+        f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+        for err in e.errors(include_url=False, include_input=False, include_context=False)
+    )
+
+
+def _yaml_problem(e: yaml.YAMLError) -> str:
+    if not isinstance(e, yaml.MarkedYAMLError):
+        return type(e).__name__
+
+    # Only where, never the parser's own words: those quote the input (an undefined
+    # alias or unknown tag names its text), and the text can be a secret. Where the
+    # broken construct starts, then where the parser noticed.
+    places = []
+    for mark in (e.context_mark, e.problem_mark):
+        place = f"line {mark.line + 1}, column {mark.column + 1}" if mark else None
+        if place and place not in places:
+            places.append(place)
+    if not places:
+        return "invalid YAML"
+    return f"invalid YAML at {places[0]}" + "".join(f" (found at {p})" for p in places[1:])
 
 
 def _validate_layouts(config: Config) -> None:
@@ -214,8 +243,8 @@ def _validate_layouts(config: Config) -> None:
                 )
             if not referenced:
                 raise ConfigError(
-                    f"{source.name}/{collection.name}: library_layout "
-                    f"{collection.library_layout!r} references no source field, so every "
+                    f"{source.name}/{collection.name}: library_layout references no "
+                    f"source field, so every "
                     f"item renders to the same path; include a per-item field such as "
                     f"{{identifier}}"
                 )

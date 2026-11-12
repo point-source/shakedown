@@ -10,8 +10,9 @@ import hmac
 import json
 import logging
 import os
+import time
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import closing, suppress
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +27,25 @@ from prometheus_client import (
 )
 
 from shakedown import __version__
-from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope, load
+from shakedown.activity import HISTORY_DAYS
+from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope
+from shakedown.dashboard import (
+    LIVE_TTL_S,
+    VIEW_TTL_S,
+    ConfigTracker,
+    SharedAnswers,
+    register_api,
+    shared_answer,
+)
+from shakedown.dashboard_activity import activity_answer
+from shakedown.dashboard_attention import attention_answer
+from shakedown.dashboard_health import health_answer
+from shakedown.dashboard_library import library_answer
+from shakedown.dashboard_network import network_answer
+from shakedown.dashboard_runs import runs_answer
 from shakedown.db import connect_reader
-from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
-from shakedown.status import _collection_summary
+from shakedown.state import ItemRepo
+from shakedown.status import collection_summaries
 from shakedown.trigger import DEFAULT_ARGV_PREFIX, Busy, ExitedEarly, Failed, launch
 from shakedown.validate import validate_config
 
@@ -44,12 +60,21 @@ def build_app(
     *,
     argv_prefix: tuple[str, ...] = DEFAULT_ARGV_PREFIX,
     child_env: dict[str, str] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     """The control plane over the config file at ``config_path``. Every endpoint
     that needs the config reads the file as it is at the request, so an edit takes
     effect without a restart, and a broken file is a 503 naming the problem rather
-    than a crash (§spec:api-sync-runs)."""
+    than a crash (§spec:api-sync-runs). ``clock`` times the dashboard's shared
+    answers (§spec:dashboard)."""
     app = FastAPI(title="shakedown", version=__version__)
+    app.state.answers = SharedAnswers(clock)
+    # Every load goes through the tracker, so the dashboard knows the last config
+    # this serve loaded, including the one at start-up.
+    configs = ConfigTracker(config_path)
+    app.state.configs = configs
+    with suppress(ConfigError):
+        configs.load_now()
     # Runs this serve started that may still be going, newest last; each one's
     # watcher sets `done` when it exits.
     app.state.triggered = []
@@ -141,7 +166,7 @@ def build_app(
 
     def current_config() -> Config:
         try:
-            return load(config_path)
+            return configs.load_now()
         except ConfigError as e:
             raise HTTPException(503, str(e)) from e
 
@@ -151,6 +176,22 @@ def build_app(
         except UnknownScopeError as e:
             raise HTTPException(404, str(e)) from e
 
+    # The dashboard's read views (§spec:dashboard).
+    register_api(app, "/api/health", VIEW_TTL_S, health_answer)
+    register_api(app, "/api/activity", LIVE_TTL_S, activity_answer)
+    register_api(app, "/api/library", VIEW_TTL_S, library_answer)
+    register_api(app, "/api/attention", VIEW_TTL_S, attention_answer)
+
+    # A window longer than the history runs keep would read as empty; outside 1..30
+    # the request is a 422, never a cache entry.
+    @app.get("/api/runs")
+    def runs(days: int = Query(HISTORY_DAYS, ge=1, le=HISTORY_DAYS)) -> dict[str, Any]:
+        return shared_answer(app, ("/api/runs", days), VIEW_TTL_S, runs_answer(days))
+
+    @app.get("/api/network")
+    def network(days: int = Query(HISTORY_DAYS, ge=1, le=HISTORY_DAYS)) -> dict[str, Any]:
+        return shared_answer(app, ("/api/network", days), VIEW_TTL_S, network_answer(days))
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -159,18 +200,7 @@ def build_app(
     def status() -> JSONResponse:
         config = current_config()
         with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
-            items = ItemRepo(conn)
-            runs = RunRepo(conn)
-            drift = DriftRepo(conn)
-            outcomes = OperationOutcomeRepo(conn)
-            summaries: list[dict[str, Any]] = []
-            for source in config.sources:
-                for collection in source.collections:
-                    summaries.append(
-                        _collection_summary(
-                            config, source.name, collection.name, items, runs, drift, outcomes
-                        )
-                    )
+            summaries = collection_summaries(config, conn)
         return JSONResponse(json.loads(json.dumps(summaries, default=str)))
 
     @app.get("/metrics")
@@ -182,19 +212,12 @@ def build_app(
             gauge.clear()
         with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
             items = ItemRepo(conn)
-            drift = DriftRepo(conn)
-            runs = RunRepo(conn)
-            outcomes = OperationOutcomeRepo(conn)
-            for source in config.sources:
-                for collection in source.collections:
-                    counts = items.count_by_status(source.name, collection.name)
-                    for status_, n in counts.items():
-                        g_items.labels(source.name, collection.name, status_.value).set(n)
-                    summary = _collection_summary(
-                        config, source.name, collection.name, items, runs, drift, outcomes
-                    )
-                    g_bytes.labels(source.name, collection.name).set(summary["bytes_on_disk"])
-                    g_drift.labels(source.name, collection.name).set(summary["drift_files"])
+            for summary in collection_summaries(config, conn):
+                scope = (summary["source"], summary["collection"])
+                for status_, n in items.count_by_status(*scope).items():
+                    g_items.labels(*scope, status_.value).set(n)
+                g_bytes.labels(*scope).set(summary["bytes_on_disk"])
+                g_drift.labels(*scope).set(summary["drift_files"])
         body = generate_latest(registry)
         return PlainTextResponse(body.decode(), media_type=CONTENT_TYPE_LATEST)
 

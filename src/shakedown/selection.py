@@ -78,22 +78,37 @@ def _clutter(name: str) -> bool:
     )
 
 
-def _audio_class(f: SourceFile) -> _Class | None:
-    """The file's audio class, or None for a non-audio file. Decided by extension, so
+_AUDIO = _LOSSLESS | _LOSSY | _EITHER | _OTHER_AUDIO
+
+
+def _audio_ext(name: str) -> str | None:
+    """The file's extension when it is audio, else None. Decided by extension, so
     archive.org's "Flac FingerPrint" (`.ffp`) stays a non-audio file, and so does a
     macOS resource fork named like a track (`._t01.flac`)."""
-    if _clutter(f.name):
+    if _clutter(name):
         return None
-    ext = _ext(f.name)
+    ext = _ext(name)
+    return ext if ext in _AUDIO else None
+
+
+def _playable_ext(ext: str) -> bool:
+    """Whether a common player reads audio with this extension: not SHN, and not a
+    format the product does not recognise."""
+    return ext not in _UNPLAYABLE and ext not in _OTHER_AUDIO
+
+
+def _audio_class(f: SourceFile) -> _Class | None:
+    """The file's audio class, or None for a non-audio file (see `_audio_ext`)."""
+    ext = _audio_ext(f.name)
+    if ext is None:
+        return None
     if ext in _LOSSLESS:
         return _Class.LOSSLESS
     if ext in _LOSSY:
         return _Class.LOSSY
     if ext in _EITHER:
         return _Class.LOSSLESS if "lossless" in (f.format or "").lower() else _Class.LOSSY
-    if ext in _OTHER_AUDIO:
-        return _Class.UNRECOGNISED
-    return None
+    return _Class.UNRECOGNISED
 
 
 @dataclass(frozen=True)
@@ -105,7 +120,7 @@ class _Format:
 
     @property
     def playable(self) -> bool:
-        return self.cls is not _Class.UNRECOGNISED and _ext(self.files[0].name) not in _UNPLAYABLE
+        return _playable_ext(_ext(self.files[0].name))
 
     @property
     def served(self) -> bool:
@@ -272,3 +287,21 @@ def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selec
             else NOT_PLAYABLE_SHN_REASON
         )
     return Selection(manifest, False, reason, not_playable)
+
+
+def keeps_unplayable_original(manifest: Manifest) -> bool:
+    """Whether a recorded manifest keeps an unplayable original (SHN or unrecognised
+    audio) archive-only beside a playable copy the library stages: the show is kept
+    twice, as an original and as a playable copy (§spec:needs-attention library
+    health, §spec:quality-selection "Where files land"). Read from the manifest's
+    `library` flags and file names; nothing else is stored."""
+    original = playable = False
+    for f in manifest.files:
+        ext = _audio_ext(f.name)
+        if ext is None:
+            continue
+        if f.library and _playable_ext(ext):
+            playable = True
+        elif not f.library and not _playable_ext(ext):
+            original = True
+    return original and playable

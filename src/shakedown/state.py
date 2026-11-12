@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Collection, Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +12,7 @@ from typing import Any
 
 from shakedown.db import transaction
 from shakedown.models import (
+    RERUN_COMMAND,
     Item,
     ItemStatus,
     Manifest,
@@ -50,6 +51,16 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         not_playable_reason=row["not_playable_reason"],
         disappeared_at=_parse_iso(row["disappeared_at"]),
     )
+
+
+def _title(row: sqlite3.Row) -> str | None:
+    """A source's title: text as it is, a list's first entry when that is text."""
+    if row["title_type"] == "text":
+        return row["title"]
+    if row["title_type"] == "array":
+        first = json.loads(row["title"])[0] if row["title"] != "[]" else None
+        return first if isinstance(first, str) else None
+    return None
 
 
 def _row_to_operation_outcome(row: sqlite3.Row) -> OperationOutcome:
@@ -196,6 +207,41 @@ class ItemRepo:
         )
         return [(row["identifier"], _parse_iso(row["disappeared_at"])) for row in cur]
 
+    def list_identifiers(self, source: str, collection: str, status: ItemStatus) -> list[str]:
+        """The collection's identifiers in ``status``, in order; as many as
+        `count_by_status` counts for it."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier FROM items
+            WHERE source_name=? AND collection_name=? AND status=?
+            ORDER BY identifier
+            """,
+            (source, collection, status.value),
+        )
+        return [row["identifier"] for row in cur]
+
+    def list_archive_only_manifests(
+        self, source: str, collection: str
+    ) -> list[tuple[str, Manifest]]:
+        """(identifier, recorded manifest) of the collection's complete shows whose
+        manifest keeps at least one file out of the library, in order."""
+        cur = self.conn.execute(
+            """
+            SELECT identifier, recorded_manifest FROM items
+            WHERE source_name=? AND collection_name=? AND status=?
+              AND EXISTS (
+                  SELECT 1 FROM json_each(items.recorded_manifest) AS f
+                  WHERE json_extract(f.value, '$.library') = 0
+              )
+            ORDER BY identifier
+            """,
+            (source, collection, ItemStatus.COMPLETE.value),
+        )
+        return [
+            (row["identifier"], Manifest.from_json(json.loads(row["recorded_manifest"])))
+            for row in cur
+        ]
+
     def count_by_status(self, source: str, collection: str) -> dict[ItemStatus, int]:
         cur = self.conn.execute(
             """
@@ -219,6 +265,49 @@ class ItemRepo:
             (source, collection),
         ).fetchone()
         return int(row["total"])
+
+    def library_bytes(self, source: str, collection: str) -> int:
+        """Total size of the files the library stages, from the same manifests as
+        ``archived_bytes``: every recorded file but archive-only ones, such as SHN
+        originals beside a playable copy (§spec:library-stats,
+        §spec:quality-selection). Library files are hardlinks: no disk of their own."""
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(json_extract(f.value, '$.size')), 0) AS total
+            FROM items, json_each(items.recorded_manifest) AS f
+            WHERE source_name=? AND collection_name=? AND archive_path IS NOT NULL
+              AND COALESCE(json_extract(f.value, '$.library'), 1) != 0
+            """,
+            (source, collection),
+        ).fetchone()
+        return int(row["total"])
+
+    def recently_downloaded(
+        self, scopes: Sequence[tuple[str, str]], limit: int
+    ) -> list[tuple[str, str, str, datetime, str | None]]:
+        """The shows of ``scopes`` downloaded most recently (new or re-fetched), newest
+        first: (source, collection, identifier, downloaded_at, title). The title is
+        the source's, or its first when it lists several; None when it lists none."""
+        if not scopes:
+            return []
+        in_scope = " OR ".join("(source_name=? AND collection_name=?)" for _ in scopes)
+        cur = self.conn.execute(
+            f"""
+            SELECT source_name, collection_name, identifier, downloaded_at,
+                   json_extract(source_metadata, '$.title') AS title,
+                   json_type(source_metadata, '$.title') AS title_type
+            FROM items
+            WHERE downloaded_at IS NOT NULL AND ({in_scope})
+            ORDER BY downloaded_at DESC, identifier
+            LIMIT ?
+            """,
+            (*(v for scope in scopes for v in scope), limit),
+        )
+        return [
+            (row["source_name"], row["collection_name"], row["identifier"],
+             datetime.fromisoformat(row["downloaded_at"]), _title(row))
+            for row in cur
+        ]
 
     def delete(self, source: str, collection: str, identifier: str) -> None:
         self.conn.execute(
@@ -298,37 +387,80 @@ class RunRepo:
             (_iso(finished_at), json.dumps(errors), run_id),
         )
 
+    def open_runs(self) -> list[tuple[int, datetime]]:
+        """Every run record not closed yet: (id, started_at)."""
+        return [
+            (row["id"], datetime.fromisoformat(row["started_at"]))
+            for row in self.conn.execute(
+                "SELECT id, started_at FROM runs WHERE finished_at IS NULL ORDER BY id"
+            )
+        ]
+
     def latest(
-        self, source: str, collection: str, *, kind: RunKind | None = None
+        self,
+        source: str,
+        collection: str,
+        *,
+        kind: RunKind | tuple[RunKind, ...] | None = None,
     ) -> Run | None:
-        """The collection's latest run, or its latest run of ``kind``."""
+        """The collection's latest run, or its latest run of ``kind`` (one or any of
+        several)."""
+        kinds = (kind,) if isinstance(kind, RunKind) else (kind or ())
+        filter_kinds = f"AND kind IN ({', '.join('?' * len(kinds))})" if kinds else ""
         cur = self.conn.execute(
-            """
+            f"""
             SELECT * FROM runs
-            WHERE source_name=? AND collection_name=? AND (? IS NULL OR kind=?)
+            WHERE source_name=? AND collection_name=? {filter_kinds}
             ORDER BY started_at DESC LIMIT 1
             """,
-            (source, collection, kind and kind.value, kind and kind.value),
+            (source, collection, *(k.value for k in kinds)),
         )
         row = cur.fetchone()
-        if not row:
-            return None
-        return Run(
-            id=row["id"],
-            source_name=row["source_name"],
-            collection_name=row["collection_name"],
-            started_at=_parse_iso(row["started_at"]),  # type: ignore[arg-type]
-            finished_at=_parse_iso(row["finished_at"]),
-            items_discovered=row["items_discovered"],
-            items_new=row["items_new"],
-            items_updated=row["items_updated"],
-            items_failed=row["items_failed"],
-            bytes_downloaded=row["bytes_downloaded"],
-            errors=json.loads(row["errors"]),
-            stale=bool(row["stale"]),
-            failure_notice_error=row["failure_notice_error"],
-            kind=RunKind(row["kind"]),
+        return _row_to_run(row) if row else None
+
+    def since(self, started_at: datetime) -> list[Run]:
+        """Every run record, of every collection, started at or after
+        ``started_at``."""
+        return [
+            _row_to_run(row)
+            for row in self.conn.execute(
+                "SELECT * FROM runs WHERE started_at >= ?", (_iso(started_at),)
+            )
+        ]
+
+    def finished(
+        self, source: str, collection: str, kinds: tuple[RunKind, ...]
+    ) -> Iterator[Run]:
+        """The collection's closed runs of ``kinds``, latest finish first."""
+        cur = self.conn.execute(
+            f"""
+            SELECT * FROM runs
+            WHERE source_name=? AND collection_name=? AND finished_at IS NOT NULL
+              AND kind IN ({', '.join('?' * len(kinds))})
+            ORDER BY finished_at DESC, id DESC
+            """,
+            (source, collection, *(k.value for k in kinds)),
         )
+        return (_row_to_run(row) for row in cur)
+
+
+def _row_to_run(row: sqlite3.Row) -> Run:
+    return Run(
+        id=row["id"],
+        source_name=row["source_name"],
+        collection_name=row["collection_name"],
+        started_at=_parse_iso(row["started_at"]),  # type: ignore[arg-type]
+        finished_at=_parse_iso(row["finished_at"]),
+        items_discovered=row["items_discovered"],
+        items_new=row["items_new"],
+        items_updated=row["items_updated"],
+        items_failed=row["items_failed"],
+        bytes_downloaded=row["bytes_downloaded"],
+        errors=json.loads(row["errors"]),
+        stale=bool(row["stale"]),
+        failure_notice_error=row["failure_notice_error"],
+        kind=RunKind(row["kind"]),
+    )
 
 
 class OperationOutcomeRepo:
@@ -441,6 +573,14 @@ class OperationOutcomeRepo:
             ),
         )
 
+    def in_progress(self) -> list[OperationOutcome]:
+        """Every outcome still in progress."""
+        rows = self.conn.execute(
+            "SELECT id FROM operation_outcomes WHERE status=? ORDER BY id",
+            (OperationStatus.IN_PROGRESS.value,),
+        ).fetchall()
+        return [o for o in (self.get(row["id"]) for row in rows) if o is not None]
+
     def close_abandoned(self, outcome_id: int, reason: str, finished_at: datetime) -> None:
         """Mark an outcome its process left in progress (it was killed) as failed
         before completion. An outcome that is already finished is left as it is."""
@@ -457,7 +597,9 @@ class OperationOutcomeRepo:
             completed_work=outcome.completed_work,
             preservation_context="completed archive work retained",
             deletion_context=outcome.deletion_context,
-            safe_next_action="check the logged error and rerun sync",
+            safe_next_action=(
+                f"check the logged error and rerun {RERUN_COMMAND[outcome.operation]}"
+            ),
             errors=[*outcome.errors, reason],
         )
 
@@ -513,6 +655,22 @@ class OperationOutcomeRepo:
             LIMIT 1
             """,
             (source, collection, *statuses),
+        )
+        row = cur.fetchone()
+        return _row_to_operation_outcome(row) if row else None
+
+    def latest(
+        self, operation: OperationType, source: str, collection: str
+    ) -> OperationOutcome | None:
+        """The newest outcome of ``operation`` for the collection, resolved or not."""
+        cur = self.conn.execute(
+            """
+            SELECT * FROM operation_outcomes
+            WHERE operation=? AND source_name=? AND collection_name=?
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            """,
+            (operation.value, source, collection),
         )
         row = cur.fetchone()
         return _row_to_operation_outcome(row) if row else None

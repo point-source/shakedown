@@ -559,7 +559,8 @@ what is preserved.
 ## Source plugins §spec:source-plugins
 
 *Status: complete, including the core-owned listing/lookup contract
-(§spec:per-item-isolation).*
+(§spec:per-item-isolation) and network measurement for the dashboard
+(§spec:network-activity).*
 
 Sources are pluggable so that new archives can be added without core
 changes (§req:constraints). A plugin lists a collection, looks up one
@@ -590,6 +591,15 @@ core parallelizes and pipelines them under the shared budget. A plugin whose sou
 may surface it on the descriptor so the core can offer incremental
 discovery for that source (§spec:incremental-discovery); a plugin that
 cannot is unaffected and simply always resolves full manifests.
+
+The core, not the plugin, measures network activity for the dashboard
+(§spec:network-activity): bytes from the core-owned temp folder, requests
+in flight from the budget, and events from attempt outcomes and the
+failure cause a plugin reports with each failed request, the same cause
+that drives retry decisions. A plugin
+needs nothing dashboard-specific; the one exception is a plugin that
+retries its collection listing itself, which reports each retry to the
+core (the IA plugin does).
 
 Plugins shipped in v1:
 
@@ -1446,7 +1456,7 @@ Sync state lives in a single-file embedded SQLite database at
   For collections using incremental discovery it also records the
   item's last-seen source change signal (§spec:incremental-discovery),
   the token a later sync matches against to skip a metadata fetch.
-  Per run: its kind (a sync, refetch, or reconform), counts, bytes
+  Per run: its kind (a sync, catch-up, refetch, or reconform), counts, bytes
   downloaded, errors, and timing — the raw material for `status`.
 - The ownership, handoff, and discovery increment adds: each show's
   library placement — its folder and the files shakedown placed there
@@ -1476,6 +1486,17 @@ Sync state lives in a single-file embedded SQLite database at
   entry per collection (§spec:rescheduled-syncs). Schema v9 adds it as
   an additive migration; a database rebuilt by `reconcile` starts with
   none.
+- The dashboard increment adds, as schema v10 (an additive migration):
+  per run and collection, an activity entry with its kind, phase,
+  progress counters, heartbeat, and result, and — for a restage or
+  reconcile — the operation outcome holding its errors
+  (§spec:run-activity, §spec:run-history); per
+  source and minute, network totals, and each network event
+  (§spec:network-activity); per collection, growth snapshots taken at
+  the end of each locked run, the first by the migration itself
+  (§spec:library-stats). These live in tables of their own; runs keep
+  them to 30 days and trimming never touches item, run, or placement
+  records. A database rebuilt by `reconcile` starts with no history.
 - Only a command that holds the writer lock migrates the database.
   Commands that take no lock — `status`, `item show`, `sync --dry-run`,
   `verify` without `--reconform`, `validate`, and `serve`'s
@@ -1644,7 +1665,8 @@ appears in Navidrome with no handoff configured.
 
 ## Serve control plane §spec:serve
 
-*Status: complete*
+*Status: complete; the dashboard's read endpoints are complete, its page is
+not started (§spec:dashboard)*
 
 An optional `shakedown serve` command exposes a small HTTP API for
 users who want ad-hoc triggers and monitoring without `docker exec`
@@ -1660,6 +1682,13 @@ scheduler (§req:constraints).
 | `POST /sync?source=&collection=` | Start an ad-hoc sync and answer at once (auth required; §spec:api-sync-runs) |
 | `POST /verify` | Start a verify run and answer at once (auth required; §spec:api-sync-runs) |
 | `POST /validate` | Run setup readiness validation; live handoff validation is auth required |
+| `GET /` | The read-only web dashboard (§spec:dashboard) |
+| `GET /api/activity` | Live runs and network now (§spec:run-activity, §spec:network-activity) |
+| `GET /api/network` | Per-source network history (§spec:network-activity) |
+| `GET /api/runs` | Runs of the last 30 days (§spec:run-history) |
+| `GET /api/library` | Library, database, disk, and growth (§spec:library-stats) |
+| `GET /api/attention` | Needs attention and library health (§spec:needs-attention) |
+| `GET /api/health` | Release, config validity, last validation (§spec:dashboard-health) |
 
 `POST /sync`, `/verify`, and `/validate` answer `404`, naming the
 configured sources or collections, when `source` or `collection` names
@@ -1673,8 +1702,12 @@ homelab reverse-proxy misconfiguration must not turn into an
 unauthenticated write API. Read endpoints (`/healthz`, `/status`,
 `/metrics`) are unauthenticated: they expose only operational
 metadata (paths, counts, timings — no credentials), and health/metrics
-scrapers generally can't send tokens. Most users won't run `serve` at
-all; it is not required for any success criterion.
+scrapers generally can't send tokens. The dashboard page and its
+`/api/*` endpoints are read endpoints under the same posture; the
+operator's reverse proxy decides who opens them (§spec:dashboard).
+`serve` is required for the dashboard (§req:success-criteria #28–#33)
+and for nothing else: syncs run and record their progress the same with
+`serve` stopped.
 
 ## API-triggered runs §spec:api-sync-runs
 
@@ -1923,6 +1956,624 @@ C and drops its entry. Start a skipped tick with the previous release
 still writing: it exits 1, records nothing, and the running sync
 finishes normally.
 
+## Read-only web dashboard §spec:dashboard
+
+*Status: complete on the server side (shared answers, `generated_at`, the
+read-only posture, the last-good config); the page is not started*
+
+Compatibility, from deployment status "deployed, no outside consumers"
+(§req:constraints, operator-confirmed 2026-11-12): HTTP API — free; CLI
+and `status` output — free; config — free; dashboard pages and their
+JSON — free; state database — moves forward by one additive migration
+and never forces a re-download.
+
+`shakedown serve` serves one read-only web dashboard at its root path
+(`GET /`), usable on a phone and on a desktop browser
+(§req:success-criteria #28–#33; §req:constraints: UI line, read-only
+dashboard, dashboard lives in serve, no login of its own). The page is
+a client of the JSON endpoints specified in §spec:run-activity,
+§spec:network-activity, §spec:run-history, §spec:library-stats,
+§spec:needs-attention, and §spec:dashboard-health; it shows nothing
+those endpoints do not supply. Visual design — component kit, layout,
+glossary, screen states — is owned by the Design task and recorded in
+§spec:ui-kit once approved; this section fixes only behavior.
+
+Observable behavior:
+
+- **It only looks.** The page has no control that starts a run, edits
+  config, or changes state — no "sync now" or "validate" even though
+  the API offers both (§req:constraints: read-only dashboard). Every
+  dashboard endpoint is a `GET`. Answering one never starts a run,
+  never sends a request to a source, never writes to the archive, the
+  library, or the state database, and never takes the writer lock. Its
+  only inputs are the state database, the config file, and the free
+  space of the data volume.
+- **Live where it matters, light everywhere.** The page refreshes the
+  live view (§spec:run-activity) every few seconds and the other views
+  about every 30 seconds, and stops refreshing while it is hidden (a
+  background tab, a locked phone). `serve` computes each endpoint's
+  answer at most once per refresh interval and hands the same answer to
+  every viewer, so ten open pages cost the NAS what one does
+  (§req:quality-attributes: live, but light).
+- **Old data is labelled, never passed off as current.** Every answer
+  carries `generated_at`, the time `serve` computed it. When a refresh
+  fails or the page's newest answer is older than twice its refresh
+  interval, the page says it cannot reach shakedown and shows how old
+  the data on screen is. A run that stopped reporting is shown as ended,
+  never as running (§spec:run-activity).
+- **No login of its own; same posture as `GET /status`.** The page and
+  its endpoints are unauthenticated, like the existing read endpoints;
+  the operator's reverse proxy (for example Authelia) decides who may
+  open them. They expose operational data only — counts, identifiers,
+  paths, timings, error text — never credentials, tokens, or secrets
+  (§req:quality-attributes: security of secrets). The mutating
+  endpoints keep their bearer token unchanged (§spec:serve).
+- **Works behind a proxy, at any path.** The page addresses its assets
+  and endpoints by relative URL, so it works at a host's root or under a
+  path prefix the proxy adds, with no setting.
+- **Self-contained.** Every asset the page needs ships inside the
+  shakedown image and is served by `serve`. The browser fetches nothing
+  from a third party (no CDN, fonts, or analytics), so the page works on
+  a LAN with no internet and tells no outside party it was opened.
+  `serve` sends no cross-origin (CORS) allowances.
+- **Source text is text.** Show identifiers, titles, folder names, and
+  error messages come from upstream metadata and servers; the page
+  renders every such string as plain text, never as markup. A crafted
+  title on archive.org cannot run script in the operator's browser.
+- **Codes, not copy.** Endpoints return enumerated codes (a run's
+  `kind`, `phase`, `result`; an attention entry's `kind`) and raw
+  values; the page owns every word a person reads. The one exception is
+  `safe_next_action`, which `status` already reports as text and the
+  page shows as `status` does.
+- **When the config is broken.** Each endpoint reads the config as it is
+  at the request (§spec:api-sync-runs). When the file is invalid, the
+  dashboard keeps answering from the last config this `serve` loaded
+  successfully and reports the error through §spec:dashboard-health; a
+  `serve` that has never loaded a valid config answers `503` with the
+  config error naming the key, as the other endpoints do.
+
+**Decision and constraint.** The dashboard is a static client served by
+the always-on `serve` process, reading JSON endpoints by polling. The
+operator placed it in `serve` and accepted running `serve` all the time
+(§req:constraints). Polling, not a push stream, because the page must
+work behind any reverse proxy and push streams (server-sent events,
+WebSockets) are buffered or cut by common proxy defaults unless the
+operator tunes the proxy; a few-second poll of a shared, cached answer
+meets "within a few seconds" at negligible cost. A JSON API under the
+page, rather than server-rendered pages, because the screens are
+designed separately against a stated contract, and the same endpoints
+serve Homepage-style widgets or scripts with no extra work.
+
+**Alternatives rejected.** *Server-sent events or WebSockets* — fresher
+by a second or two, but fragile behind Authelia/nginx defaults and a
+long-lived connection per open device. *A separate dashboard container*
+— another image and process to run for no gain; `serve` already has the
+mounts and the config. *Grafana on the Prometheus metrics* — shows
+counters, not a run's progress, the attention list, or history
+`status` holds, and adds two more services. *Loading the kit from a
+CDN* — breaks on a LAN without internet and leaks each page view.
+
+**Tradeoffs.** Up to a few seconds of lag on the live view. The page
+needs `serve` running; with `serve` down there is no dashboard, but
+nothing is lost (§spec:run-activity, §spec:network-activity record from
+the runs themselves). The unauthenticated page relies on the operator's
+proxy; anyone who reaches `serve`'s port directly sees operational data,
+the same exposure `GET /status` has today.
+
+**User-level test path.** Open the dashboard through the proxy on a phone and a
+desktop: the dashboard loads with no request leaving the LAN (browser
+network panel). It has no button that changes anything; every request it
+makes is a `GET`. Put it behind a proxy under `/shakedown/`: it still
+loads. Stop `serve` with the page open: within a minute the page says it
+cannot reach shakedown and shows the age of what it shows. Give a test
+show a title containing `<script>`: it renders as literal text. Break
+`shakedown.yaml`: the page stays up and shows the config error.
+
+## Live run progress §spec:run-activity
+
+*Status: complete*
+
+Every run reports its progress while it runs, and the dashboard shows
+it within seconds (§req:success-criteria #28, #33;
+§req:user-stories: is the long sync stuck?; §req:quality-attributes:
+the dashboard tells the same truth, live but light, nothing lost while
+the dashboard is down; §req:priorities #32).
+
+Observable behavior:
+
+- **Every kind of run reports.** A sync (scheduled, manual, or started
+  through `serve`), a catch-up sync (§spec:rescheduled-syncs), a
+  single-show refetch or reconform (§spec:single-show-runs), a restage,
+  a verify, and a reconcile each record one activity entry per
+  collection it works on. The run itself records it, into the state
+  database, so a run started by ofelia while `serve` is down shows the
+  moment `serve` starts.
+- **What an entry says.** Collection; kind (`sync`, `catch_up`,
+  `refetch`, `reconform`, `restage`, `verify`, `reconcile`); whether
+  `serve` started it; start time; current phase (`starting`, `listing`,
+  `discovering`, `downloading`, `tagging`, `staging`, `notifying`,
+  `verifying`, `finishing`); shows listed, shows to look up and looked
+  up; shows to fetch, done, and failed; the shows being worked on now;
+  bytes downloaded so far; current speed; and an estimated time left.
+  Kinds without a phase or counter leave it null (a restage lists
+  nothing). A sync's lookups and downloads overlap
+  (§spec:discovery-pipeline), so both counters show at once and the
+  phase reads `discovering` until the listing's lookups are done.
+- **Honest totals.** Shows to fetch, and their bytes, are only known once
+  enumeration ends; until then they are null and so is the estimate.
+  After that, time left is remaining bytes over the speed of the last
+  ten minutes, or remaining shows over the pace so far when the source
+  lists no sizes; it is null while speed is zero. The page shows null as
+  "estimating", never as a guess.
+- **Is it stuck?** Each entry carries `last_progress_at` — the last
+  time any counter or byte count moved — next to `last_heartbeat_at`.
+  "Alive but no progress for 40 minutes" and "stopped reporting" are
+  different facts and the page shows them differently. The API carries
+  no verdict on progress; the page marks a running run with no progress
+  for 5 minutes (§spec:ui-kit).
+- **Ends are never missed.** A running entry updates its heartbeat every
+  few seconds. When a run finishes it records its result, using the
+  outcome codes `status` already uses (`completed`,
+  `completed_with_item_issues`, `failed_before_completion`,
+  `stale_enumeration`). An entry whose heartbeat is more than about 20
+  seconds old is reported as `failed_before_completion` with end reason
+  `stopped_reporting` — killed, crashed, or the host went down. The live
+  view keeps each ended entry for ten minutes so its result and reason
+  are seen; after that it appears only in §spec:run-history.
+- **`status` agrees, during and after.** A sync's or single-show run's
+  counts in its run record (new, updated, failed, bytes downloaded)
+  move at the same cadence as the activity entry, so `status` and the
+  dashboard show the same numbers mid-run. A run record left open by a
+  killed run is reported by `status` as ended unexpectedly as soon as
+  its heartbeat goes stale, and the next run that takes the writer lock
+  closes it with the time of its last heartbeat and the error "run ended
+  unexpectedly (stopped reporting)", together with any outcome it left
+  in progress. Before this, a killed scheduled run's record stayed open
+  forever — only runs `serve` started were closed (§spec:api-sync-runs) —
+  contradicting §spec:failure-behavior ("the run record is always
+  closed, even on a crash").
+- **Recording never costs a run anything.** Progress is written in small
+  updates every few seconds, not per event, from outside the run's own
+  work. A write that cannot land (database busy) is skipped; the next
+  one carries cumulative totals, so nothing drifts. A recording failure
+  never fails, slows, or changes a run (§req:quality-attributes:
+  recording must not weaken correctness, idempotency, politeness, or
+  per-item isolation). A killed run loses at most the last few seconds
+  of its progress.
+
+API: `GET /api/activity` (unauthenticated; refreshed every few seconds)
+answers `{generated_at, runs: [...], network: [...]}`. `network` is
+specified in §spec:network-activity. Each `runs` entry:
+
+| Field | Meaning |
+| --- | --- |
+| `activity_id` | The entry's id |
+| `run_id` | The run record's id when the kind has one (sync, catch_up, refetch, reconform), else null — the id `status` and `POST /sync` report |
+| `source`, `collection` | The collection the entry covers |
+| `kind` | `sync`, `catch_up`, `refetch`, `reconform`, `restage`, `verify`, `reconcile` |
+| `started_by_serve` | true when `serve` launched the run |
+| `started_at`, `finished_at` | ISO times; `finished_at` null while running |
+| `last_heartbeat_at`, `last_progress_at` | ISO times |
+| `state` | `running` or `ended` |
+| `result` | null while running, else an outcome code above |
+| `end_reason` | null, or `stopped_reporting` |
+| `phase` | a phase code above, or null |
+| `items_listed`, `items_to_look_up`, `items_looked_up` | counts or null |
+| `items_to_fetch`, `items_done`, `items_failed` | counts; `items_to_fetch` null until known |
+| `current_items` | identifiers being worked on now |
+| `bytes_downloaded`, `bytes_to_fetch` | bytes; `bytes_to_fetch` null until known |
+| `speed_bytes_per_second` | over the last ~10 seconds |
+| `eta_seconds` | null when not computable |
+
+`runs` holds running entries and entries that ended in the last ten
+minutes, running first, then newest first.
+
+**Decision and constraint.** Runs record their own progress, into the
+state database, on a timer — because runs live in short-lived
+containers `serve` neither starts nor sees, and the history must be
+complete while `serve` is down (§req:quality-attributes: nothing lost
+while the dashboard is down). Liveness is a heartbeat because the
+writer lock cannot be tested without taking it (a reader that briefly
+took it would make a starting sync exit as busy), verify and validate
+run without it, and a SIGKILL'd run cannot write its own end. One
+database, not a separate history file (operator decision, 2026-11-12):
+it already runs in WAL mode with readers beside a writer, `verify`
+already writes to it without the lock, and the risks a second file
+would avoid are hypothetical at one operator's scale; the history lives
+in tables of its own, so trimming it never touches the records that
+drive sync identity (§req:quality-attributes: bounded history).
+
+**Alternatives rejected.** *Runs push progress to `serve`* — lost
+whenever `serve` is down; breaks the requirement outright. *A progress
+file per run* — the 30-day history needs queries, and readers race
+partial writes. *A separate history database* — isolates writes no one
+showed to conflict, at the cost of a second schema and connection path
+(operator decision, 2026-11-12). *Parsing the ofelia log* — ofelia's log
+is outside shakedown's volume and its format is not ours. *Liveness from
+the writer lock* — untestable without taking it; misses verify.
+
+**Tradeoffs.** A killed run shows as ended up to ~20 seconds late. A run
+on the previous release (upgrade mid-run) does not heartbeat, so its
+open record reads as ended unexpectedly while it still works; it closes
+itself normally when done. `verify` and `validate` take no lock and never
+migrate (§spec:state), so right after an upgrade they record no activity
+until the first locked run has migrated the database. History starts
+the day this release is installed.
+
+**User-level test path.** Start a long sync of a large collection with
+`serve` stopped; start `serve`: the dashboard shows the run with its
+phase, counts climbing on a phone and a desktop without reload, the
+current shows, bytes, speed, and — once enumeration ends — a time left.
+Compare its counts with `status --json`'s `last_run`: they match. Kill
+the sync container (`docker kill`): within ~20 seconds the run shows as
+ended with reason "stopped reporting"; `status` reports it ended
+unexpectedly; the next sync closes the record. Run `restage` and
+`verify`: each appears with its kind and progress.
+
+## Network activity §spec:network-activity
+
+*Status: complete*
+
+The dashboard shows, per source, download speed and requests in flight
+now; download speed over the past 30 days; and every rate-limit hit,
+server error, retry, and back-off with when it happened
+(§req:success-criteria #29; §req:user-stories: is the source throttling
+me?; §req:quality-attributes: source-neutral observability, nothing
+lost while the dashboard is down, bounded history;
+§req:priorities #34).
+
+Observable behavior:
+
+- **Measured by the core, the same for every source.** The core counts
+  bytes by watching the files a fetch writes into the core-owned temp
+  folder of each show it is fetching (§spec:source-plugins: plugins only
+  write there). It counts requests in flight from the work it holds
+  under the source's request budget (§spec:source-budget), plus a
+  listing while it runs. It records network events from what it already
+  sees: each lookup and fetch attempt's failure and the cause the plugin
+  reports so the core can decide on retries (rate-limited, server error,
+  timeout, connection error, refused), the `Retry-After` it honors, and
+  its own retries and back-off waits. A new plugin that follows the
+  authoring contract appears on the dashboard with no dashboard-specific
+  work. The one request a plugin may retry itself — the collection
+  listing (§spec:failure-behavior) — reports each of its own retries to
+  the core; the IA plugin does.
+- **"Bytes downloaded" means bytes fetched.** A run's
+  `bytes_downloaded` — in its run record, `status`, and the dashboard —
+  is the bytes this run fetched from the source, including a file
+  fetched again after a failed checksum, and excluding files kept from
+  an earlier interrupted attempt. The speed graph sums to the same
+  total. Before this, the IA plugin counted kept files as downloaded;
+  the core's measurement replaced that count.
+- **Grouped by source block.** "Source" is a configured source block
+  (`status`'s `source`), so two blocks of the same type show
+  separately.
+- **Recorded by the run, kept 30 days.** Runs record per-minute totals
+  (bytes, peak requests in flight, rate-limit hits, server errors,
+  timeouts and connection errors, retries, back-off seconds) and each
+  event individually, in the same few-second writes as
+  §spec:run-activity. A run that ends trims history older than 30 days.
+  `serve` only reads.
+
+API: `GET /api/activity`'s `network` lists, per source with a run in
+progress, `{source, speed_bytes_per_second, requests_in_flight,
+last_event}` (`last_event` as below, or null).
+
+`GET /api/network?days=N` (unauthenticated; `N` 1–30, default 30;
+outside that range `422`) answers `{generated_at, bucket_seconds,
+sources: [...]}`. Each source: `{source, series: [{t, bytes,
+peak_requests_in_flight, rate_limited, server_errors,
+timeouts, connection_errors, retries, backoff_seconds}], events: [...],
+events_total}`. `bucket_seconds` widens with the window so a series
+keeps every minute for one day (60) and beyond that holds at most 720
+points, using the narrowest of 120, 300, 600, 900, 1800, or 3600 (3600
+for 30). `events` holds
+the newest 500 in the window, newest first: `{at, kind, http_status,
+collection, identifier, wait_seconds, detail}` where `kind` is
+`rate_limited`, `server_error`, `timeout`, `connection_error`,
+`refused`, `retry`, or `backoff`, and absent values are null. A source
+with no activity in the window has an empty series.
+
+**Decision and constraint.** Measure at the seam the core already owns —
+temp folders, the request budget, and attempt outcomes — because the
+plugins make their own HTTP requests through different libraries and
+there is no single place every request passes (§req:quality-attributes:
+source-neutral; §req:constraints: source-agnostic by design). Per-minute
+totals plus individual events give "when it happened" to the minute and
+keep 30 days to tens of thousands of small rows per source.
+
+**Alternatives rejected.** *A core-supplied HTTP client every plugin
+must use* — exact per-request counts, but rewrites both plugins and
+forces the IA plugin off the `internetarchive` package
+(§spec:source-plugins: "those problems are solved"). *Hooking HTTP
+libraries process-wide* — sees only the libraries we patch, and breaks
+silently when they change. *Plugins report bytes as they stream* —
+dashboard-specific work for every plugin author, which the requirement
+rules out. *Keep the plugin's own byte count* — counts kept files and
+disagrees with the graph.
+
+**Tradeoffs.** Speed is measured as bytes landing on disk, sampled
+every second or two, so a file deleted between samples (a failed
+checksum) can undercount by its partial size. "Requests in flight"
+counts a show's fetch as one request; within a show the plugins fetch
+files one at a time, so this matches the wire. Network failures inside a
+plugin that the plugin swallows without reporting are invisible, as
+they are to the core's retries today.
+
+**User-level test path.** Stop `serve`. Run a sync against a source
+answering some requests with `429` and `Retry-After` (the fake archive
+in the test suite, or a throttled real run). Start `serve`: the 30-day
+view shows that sync's speed curve, its rate-limit hits and back-off at
+the minutes they happened, and the run's bytes equal the sum under its
+curve and `status`'s `bytes_downloaded`. Add a third source block using
+the test plugin: it appears with no dashboard change.
+
+## Run history §spec:run-history
+
+*Status: complete*
+
+The dashboard lists the last 30 days of runs and, per collection, when
+it last synced successfully (§req:success-criteria #30;
+§req:user-stories: the morning check; operator decision 2026-11-12:
+last good sync age).
+
+Observable behavior:
+
+- **Every run, one list.** Syncs, catch-ups, refetches, reconforms,
+  restages, verifies, and reconciles of the last 30 days, newest first,
+  each with kind, collection, start, duration, result, shows discovered,
+  new, updated, and failed, bytes downloaded, its errors, and an
+  undelivered failure notice. Runs that have a run record (sync,
+  catch_up, refetch, reconform) take every figure from it — the record
+  `status` reports — so the two always match. Runs before this release
+  appear from their run records; restages, verifies, and reconciles
+  appear from the release that records them on.
+- **Last good sync.** Per collection, the end time of its latest sync or
+  catch-up whose result is `completed` or `completed_with_item_issues`,
+  or null. A collection whose schedule silently stopped firing shows
+  its age growing; the dashboard shows the age, not a verdict.
+
+API: `GET /api/runs?days=N` (unauthenticated; `N` 1–30, default 30;
+otherwise `422`) answers `{generated_at, runs: [...]}`. Each run:
+`{run_id, activity_id, kind, source, collection, started_at,
+finished_at, duration_seconds, result, end_reason, items_discovered,
+items_new, items_updated, items_failed, bytes_downloaded, errors,
+failure_notice_error}`; `run_id` or `activity_id` is null when the run
+has none, and `duration_seconds` and `finished_at` are null while it
+runs. `last_successful_sync_at` is part of each collection in
+§spec:library-stats.
+
+**Decision and constraint.** Read sync figures from the run records
+because the dashboard must match `status` exactly
+(§req:quality-attributes: the dashboard tells the same truth); the
+activity entries add the kinds that have no run record. Kind uses
+§spec:run-activity's codes, so `catch_up` shows here as it does live.
+
+**Alternatives rejected.** *Give restage, verify, and reconcile run
+records* — changes what `status` calls the last run of a collection.
+*Flag collections with no good sync in N days* — N has no objective
+value; the age is the fact.
+
+**Tradeoffs.** Pre-upgrade restages and verifies are missing from the
+list; their outcomes still show through `status`'s recovery field.
+
+**User-level test path.** After a night with two scheduled syncs, a
+verify, and a failed catch-up, the list shows all four with matching
+figures in `status --json`. Disable one collection's ofelia job: its
+last-good-sync age keeps growing day by day.
+
+## Library, database, and disk §spec:library-stats
+
+*Status: complete*
+
+The dashboard shows, per collection and in total, what the mirror holds,
+how much disk it uses and has left, how it grew over 30 days, and what
+was mirrored most recently (§req:success-criteria #30;
+§req:user-stories: how big is it all?, the morning check; operator
+decisions 2026-11-12: recently added shows, no disk-full estimate;
+§req:priorities #35).
+
+Observable behavior:
+
+- **Counts and bytes that match `status`.** Per collection: show counts
+  by status (`status`'s `counts`), restricted shows (`status`'s
+  `restricted`), and disappeared shows; archive bytes (`status`'s
+  `bytes_on_disk`); and library bytes — the size of the files the
+  library stages. Library files are hardlinks to archive files
+  (§spec:system-shape), so library bytes use no disk of their own; the
+  figure says how much of the archive the library presents. Totals sum
+  the collections.
+- **Disk.** Total and free bytes of the filesystem holding the archive,
+  read from the operating system at the request — no walk of the tree.
+- **Growth.** Per day for the last 30 days, per collection and in total:
+  complete shows and archive bytes. Every run that holds the writer lock
+  records a snapshot at its end — the only runs that change these
+  figures — and the migration that installs this release records the
+  first one. A day with no run carries the previous day's figures.
+- **Recently mirrored.** The 20 shows most recently downloaded (new or
+  re-fetched), newest first, with collection, identifier, the source's
+  title when it lists one, and when.
+
+API: `GET /api/library` (unauthenticated) answers `{generated_at, disk:
+{total_bytes, free_bytes}, totals: {counts, restricted,
+archive_bytes, library_bytes}, collections: [{source, collection,
+counts, restricted, archive_bytes, library_bytes,
+last_successful_sync_at}], growth: [{date, source, collection,
+complete, archive_bytes}], recently_mirrored: [{source, collection,
+identifier, title, downloaded_at}]}`. `counts` has `status`'s keys;
+`restricted` is a count; `growth` has one row per collection per day,
+and the page sums them for totals.
+
+**Decision and constraint.** Every figure `status` also reports comes
+from the same computation `status` uses (§req:success-criteria #30:
+"matches it exactly"). Growth is snapshotted by the runs because only
+runs change it and the history must be complete with `serve` down;
+deriving it backwards from download dates cannot see prunes,
+replacements, or removals. Free space from the filesystem because
+nothing else knows it.
+
+**Alternatives rejected.** *Walking the archive tree for bytes* — tens
+of seconds on a NAS per refresh (§spec:state notes the same for
+`status`). *`serve` snapshotting growth on a timer* — misses days when
+`serve` is down. *A "new shows only" list* — the record does not
+distinguish a first download from a re-fetch; a re-fetched show is also
+news to the morning check. *A disk-full estimate* (free bytes over
+average daily growth) — the operator does not need the forecast
+(operator decision, 2026-11-12); free space and the growth graph
+answer "how big is it all?".
+
+**Tradeoffs.** Growth starts at the upgrade; there is no backfill.
+
+**User-level test path.** Compare every count and byte figure with
+`status --json`: identical. Compare free space with `df` on the NAS.
+Run a sync that adds shows: the next day's growth point rises by those
+shows, and they lead the recently-mirrored list.
+
+## Needs attention §spec:needs-attention
+
+*Status: complete on the server side (`GET /api/attention`); the page is not started*
+
+The dashboard has one list of what needs the operator, naming the
+collection or show affected and the next available action, and a
+library-health summary (§req:success-criteria #31; §req:user-stories:
+the morning check, how big is it all?; §req:priorities #33).
+
+Observable behavior:
+
+- **One entry per collection per kind**, carrying the affected shows,
+  so 300 failed shows are one entry, not 300. Kinds and the facts each
+  carries:
+
+  | `kind` | Source of truth | Carries |
+  | --- | --- | --- |
+  | `failed_shows` | shows in status `failed` | identifiers |
+  | `recovery` | `status`'s `recovery`, unless it explains another entry | operation, outcome, phase, affected item/path, `safe_next_action` |
+  | `ended_unexpectedly` | a run record or activity entry ended `stopped_reporting` in the last 30 days, not yet followed by a good run of that kind | run id, when |
+  | `stale` | `status`'s `stale` | — |
+  | `rescheduled` | `status`'s `rescheduled` | `since` |
+  | `handoff_pending` | `status`'s `handoff_pending` | shows, since, last reason |
+  | `failure_notice_undelivered` | latest run's `failure_notice_error` | the error |
+  | `separations` | `status`'s `separations` | identifiers and folders |
+  | `unplaced_files` | `status`'s `unplaced_files` | paths |
+
+  A good run is one whose result is `completed` or
+  `completed_with_item_issues`, the same as a good sync in
+  §spec:run-history. A catch-up counts as a sync. `ended_unexpectedly`
+  carries `detail.runs: [{run_id, activity_id, kind, finished_at}]`, so
+  runs without a run record (restage, verify, reconcile) are named too.
+  `recovery` lists its `affected_item` in `identifiers`.
+
+  A recovery that explains another entry rides on that entry as
+  `detail.recovery` (the same object) instead of listing the same
+  problem twice: a sync, refetch, or reconform that finished
+  `completed_with_item_issues` explains `failed_shows`, and an operation
+  still `in_progress` whose run ended `stopped_reporting` explains
+  `ended_unexpectedly`. A recovery still `in_progress` while a run of
+  that operation is still reporting is the run going, shown by the
+  live view (§spec:run-activity), so it is no entry. Any other
+  recovery is its own entry.
+
+  Each entry has `since` when the source records one: when the problem
+  began (the oldest skip, the first undelivered notice, the end of the
+  failed operation or run). Failed shows, stale collections,
+  separations, and unplaced files record no time, so their `since` is
+  null. The next action
+  for each kind is fixed by the kind (for example, failed shows are
+  retried by the next sync; a pending handoff is resent on the next
+  run), so the page words it; `recovery` carries `status`'s
+  `safe_next_action` text.
+- **Library health**, per collection: restricted shows with reason,
+  disappeared shows with the day first found missing, drift found by
+  the last `verify --deep` (file count), shows with no playable copy
+  with reason (`status`'s `not_playable`), and shows kept as an
+  unplayable original plus a playable copy (identifiers): complete shows
+  whose recorded manifest keeps SHN or unrecognised audio archive-only
+  beside a staged playable copy. A lossy copy left from older filters
+  beside staged FLAC is not one of them. These are
+  facts, not to-dos, so they sit apart from the attention list.
+- **Matches `status`.** Each entry and health figure comes from the same
+  computation `status` uses for the same thing.
+- **Empty is a state.** With nothing to attend to, `entries` is empty and
+  the page says so plainly.
+
+API: `GET /api/attention` (unauthenticated) answers `{generated_at,
+entries: [{kind, source, collection, since, identifiers, detail}],
+health: [{source, collection, restricted: [{identifier, reason}],
+removed_upstream: [{identifier, removed_on}], drift_files,
+not_playable: [{identifier, reason}], playable_copies: [identifier]}]}`.
+`detail` holds the kind's extra facts under `status`'s own field names;
+`identifiers` is empty for collection-wide kinds. Lists are complete;
+the page decides how many to show.
+
+**Decision and constraint.** Group by collection and kind because a
+long list of identical entries hides the one that matters
+(§req:user-stories: "a ten-second glance"). Reuse `status`'s
+computation because a disagreement is a defect
+(§req:quality-attributes: the dashboard tells the same truth). The
+action is a code the page words, not server text, so wording stays with
+the screens (§spec:dashboard: codes, not copy).
+
+**Alternatives rejected.** *One entry per show* — buries collection-wide
+problems under show noise. *Health facts in the attention list* — a
+restricted show needs nothing from the operator; mixing them makes the
+list never empty.
+
+**Tradeoffs.** `ended_unexpectedly` clears on the next good run of that
+kind, not on acknowledgement — the dashboard cannot acknowledge, being
+read-only.
+
+**User-level test path.** Make one show fail, block a handoff target,
+skip a collection's tick behind a long sync, and drop a stray file into
+a library folder: the list shows four entries naming each collection
+and show, matching `status`, the failed show's entry carrying the
+sync's recovery. Resolve each: its entry leaves. Kill a sync: one
+`ended_unexpectedly` entry carrying its unfinished recovery, gone after
+the next good sync. With a healthy mirror, the list says nothing needs
+attention.
+
+## Release and health §spec:dashboard-health
+
+*Status: complete*
+
+The dashboard shows which shakedown is running, whether its config is
+valid right now, and the last readiness validation
+(§req:success-criteria #32; §req:priorities #36).
+
+Observable behavior:
+
+- **Release.** The release of the `serve` process answering.
+- **Config now.** Whether `shakedown.yaml` loads at this request; when
+  it does not, the config error naming the offending key
+  (§spec:configuration), and the time of the last config this `serve`
+  loaded successfully, which the other views are answering from
+  (§spec:dashboard).
+- **Last validation.** Per collection, the outcome and time of the
+  latest readiness validation (`shakedown validate` or `POST
+  /validate`), from the outcomes validation already records
+  (§spec:recoverable-operation-reporting); null when none is recorded.
+
+API: `GET /api/health` (unauthenticated) answers `{generated_at,
+release, config: {valid, error, last_loaded_at}, validation: [{source,
+collection, status, at}]}` where `status` is an outcome code and absent
+values are null.
+
+**Decision and constraint.** Report the validation already recorded
+rather than run one, because visiting the dashboard must not touch
+sources or handoff targets (§req:success-criteria #33). The release is
+`serve`'s own because that is the process the operator is looking at.
+
+**Alternatives rejected.** *Run validation on page load* — makes network
+requests to sources; forbidden. *Warn when the last run used another
+release* — offered and declined (operator decision, 2026-11-12).
+
+**Tradeoffs.** A validation that could not open the database recorded
+nothing and does not show (§spec:recoverable-operation-reporting).
+
+**User-level test path.** Upgrade the image: the release shown changes.
+Introduce a typo in a config key: the page shows the error naming it,
+and the other views keep showing data. Run `shakedown validate`: the
+result and time appear per collection.
+
 ## Deployment §spec:deployment
 
 *Status: complete*
@@ -1955,9 +2606,17 @@ Long-running services in the stack:
   Every Shakedown container — ofelia jobs, `serve`, manual runs — runs
   as one configured user, so no path creates files another cannot
   write (ofelia's own default is root).
-- **`shakedown-serve`** *(optional)* — the only long-lived Shakedown
-  process, when present: the auth-protected control plane
-  (§spec:serve) for status/metrics and ad-hoc triggers without SSH.
+- **`shakedown-serve`** — the only long-lived Shakedown process: the
+  read-only web dashboard (§spec:dashboard) and the control plane
+  (§spec:serve) for status/metrics and ad-hoc triggers without SSH. The
+  example stack runs it enabled, since the dashboard needs it
+  (§req:constraints: the dashboard lives in the always-on serve
+  container); its bearer token stays optional and only unlocks the
+  mutating endpoints. The example notes that the operator's reverse
+  proxy guards the dashboard, and it publishes `serve`'s port on the
+  host's loopback only, so the proxy is the one way in (operator
+  decision, 2026-11-12). A stack without `serve` loses only the dashboard
+  and the triggers; syncs work exactly as before.
 - Library tool and streaming server (Beets, Navidrome, …) join the
   same stack, reading the library tree — the user's choice; Shakedown
   places no requirements on them.
@@ -2251,7 +2910,8 @@ listed.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: complete*
+*Status: complete, including the run-activity rows (§spec:run-activity); the
+dashboard row (§spec:dashboard) is not started*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
@@ -2264,7 +2924,7 @@ degrade a single item or a single run, never the archive.
 | Cross-filesystem archive/library | Hard error at startup; refuse to run (§spec:system-shape) |
 | State DB corrupted or lost | `reconcile` rebuilds it without re-downloading (§spec:state) |
 | Crash in the middle of swapping a re-fetched item into place | The next run finishes the swap: it moves the old copy back if the new one never landed, or discards the old copy if it did |
-| Disk full, or another disk error while linking into the library | That item counts as failed and the run continues; no partial commits reach the archive; the run record is always closed, even on a crash |
+| Disk full, or another disk error while linking into the library | That item counts as failed and the run continues; no partial commits reach the archive; the run record is always closed, even on a crash — by the run itself, or by the next locked run if the process was killed (§spec:run-activity) |
 | Source rate-limits | Core honors the plugin-surfaced `Retry-After` up to its back-off cap, backs off, resumes. Nothing retries underneath: each metadata or file request goes out once per core attempt; only the collection search, which has no core retry, keeps a bounded retry of its own under the same cap |
 | Slow/timing-out metadata during discovery | Bounded per-item timeout + back-off; other items proceed in parallel — one slow endpoint never stalls the run (§spec:slow-metadata) |
 | Discovery fails partway (pipelined) | Collection marked stale; nothing pruned — a partial enumeration is never read as items disappearing (§spec:discovery-pipeline) |
@@ -2286,6 +2946,10 @@ degrade a single item or a single run, never the archive.
 | A sync is skipped while the previous release's run still writes (upgrade mid-run) | Nothing is recorded and the database is not migrated under the running writer; the tick exits 1 as before (§spec:rescheduled-syncs). `status`, `serve`'s reads, and the other commands that take no lock do not migrate it either (§spec:state) |
 | Config invalid when a catch-up is due | Catch-up not run; every rescheduled entry kept; error logged; the run exits non-zero (§spec:rescheduled-syncs) |
 | Run killed during a catch-up | Entries not yet cleared stay; the next finishing sync catches them up (§spec:rescheduled-syncs) |
+| Run killed or crashed outside `serve` (SIGKILL, OOM, host down) | Its heartbeat stops; within ~20 seconds `status` and the dashboard report it ended unexpectedly; the next run that takes the writer lock closes its record (§spec:run-activity) |
+| Recording progress or network activity fails (database busy) | That write is skipped; the next carries cumulative totals; the run is unaffected (§spec:run-activity) |
+| `serve` down while runs happen | No dashboard meanwhile; nothing lost — runs record their own progress, network activity, and growth (§spec:run-activity, §spec:network-activity, §spec:library-stats) |
+| Dashboard cannot reach `serve` | The page says so and shows the age of the data on screen (§spec:dashboard) |
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
 | Handoff target down, failing, or slow | Slow: waited up to five minutes, then recorded undelivered. Failed: notice recorded undelivered, shown in `status`, resent on the collection's next run; the sync still succeeds (§spec:durable-handoff) |
 | API sync requested while a run holds the lock | `409` at once; nothing queued or rescheduled (§spec:api-sync-runs) |

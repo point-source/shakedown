@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime
 from typing import Any
 
 import click
 
+from shakedown.activity import STOPPED_REPORTING, ActivityRepo
 from shakedown.config import Config
 from shakedown.db import connect_reader
+from shakedown.history import run_end
 from shakedown.models import ItemStatus, OperationOutcome, RunKind
 from shakedown.state import (
     DriftRepo,
@@ -24,6 +28,21 @@ from shakedown.state import (
 REMOVED_UPSTREAM_LINE = "  removed upstream: {shows} (kept; dates in status --json)"
 
 
+def library_figures(items: ItemRepo, source_name: str, collection_name: str) -> dict[str, Any]:
+    """What a collection holds: show counts by status, restricted shows, and archive
+    bytes. `status` and the dashboard's library view both report these, so both
+    read them here (§spec:library-stats "Counts and bytes that match `status`")."""
+    counts = items.count_by_status(source_name, collection_name)
+    return {
+        "counts": {s.value: counts.get(s, 0) for s in ItemStatus},
+        "restricted": [
+            {"identifier": identifier, "reason": reason}
+            for identifier, reason in items.list_restricted(source_name, collection_name)
+        ],
+        "bytes_on_disk": items.archived_bytes(source_name, collection_name),
+    }
+
+
 def _collection_summary(
     config: Config,
     source_name: str,
@@ -33,18 +52,15 @@ def _collection_summary(
     drift: DriftRepo,
     outcomes: OperationOutcomeRepo,
 ) -> dict[str, Any]:
-    counts = items.count_by_status(source_name, collection_name)
+    figures = library_figures(items, source_name, collection_name)
     last = runs.latest(source_name, collection_name)
-    # Only a sync lists the source, so only a sync can leave the collection stale or
-    # clear it; a later single-show run does neither (§spec:failure-behavior).
-    last_sync = runs.latest(source_name, collection_name, kind=RunKind.SYNC)
+    # Only a sync (or a catch-up sync) lists the source, so only a sync can leave the
+    # collection stale or clear it; a later single-show run does neither
+    # (§spec:failure-behavior).
+    last_sync = runs.latest(
+        source_name, collection_name, kind=(RunKind.SYNC, RunKind.CATCH_UP)
+    )
     recovery = outcomes.latest_actionable(source_name, collection_name)
-    bytes_on_disk = items.archived_bytes(source_name, collection_name)
-
-    restricted = [
-        {"identifier": identifier, "reason": reason}
-        for identifier, reason in items.list_restricted(source_name, collection_name)
-    ]
     placements = PlacementRepo(items.conn)
     library_dir = config.library_root / source_name / collection_name
     rescheduled = RescheduledRepo(items.conn).get(source_name, collection_name)
@@ -52,12 +68,12 @@ def _collection_summary(
     return {
         "source": source_name,
         "collection": collection_name,
-        "counts": {s.value: counts.get(s, 0) for s in ItemStatus},
-        "bytes_on_disk": bytes_on_disk,
+        "counts": figures["counts"],
+        "bytes_on_disk": figures["bytes_on_disk"],
         "drift_files": drift.count(source_name, collection_name),
-        "last_run": _summarize_run(last) if last else None,
+        "last_run": _summarize_run(last, _end_reason(items.conn, last)) if last else None,
         "recovery": _summarize_recovery(recovery) if recovery else None,
-        "restricted": restricted,
+        "restricted": figures["restricted"],
         # Complete shows with no copy a common player reads (§spec:quality-selection).
         "not_playable": [
             {"identifier": identifier, "reason": reason}
@@ -112,7 +128,20 @@ def _handoff_pending(
     }
 
 
-def _summarize_run(run: Any) -> dict[str, Any]:
+def _end_reason(conn: Any, run: Any) -> str | None:
+    """``stopped_reporting`` for a run whose heartbeat went stale — killed, crashed,
+    or the host went down — whether its record is still open or was closed since,
+    else None (§spec:run-activity). A database before schema v10 records no
+    heartbeats, so it reports none."""
+    activity = ActivityRepo(conn)
+    if not activity.has_table():
+        return None
+    # The run list's own rule, so `status` and `GET /api/runs` always agree.
+    now = datetime.now()
+    return run_end(run, activity.for_run(run.id, now), now).end_reason
+
+
+def _summarize_run(run: Any, end_reason: str | None = None) -> dict[str, Any]:
     return {
         # The id a `serve` trigger answers with, so a caller can find its run here
         # (§spec:api-sync-runs).
@@ -129,6 +158,9 @@ def _summarize_run(run: Any) -> dict[str, Any]:
         "errors": run.errors,
         # Why this run's failure alert was not delivered (§spec:durable-handoff).
         "failure_notice_error": run.failure_notice_error,
+        # `stopped_reporting` when the run is still open but stopped reporting: it
+        # ended unexpectedly (§spec:run-activity).
+        "end_reason": end_reason,
     }
 
 
@@ -150,21 +182,24 @@ def _summarize_recovery(outcome: OperationOutcome) -> dict[str, Any]:
     }
 
 
-def print_status(config: Config, *, as_json: bool) -> None:
-    conn = connect_reader(config.state_db)  # type: ignore[arg-type]
+def collection_summaries(config: Config, conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every configured collection's `status --json` summary, in config order: the one
+    computation `status` and the dashboard's attention view share
+    (§spec:needs-attention "Matches status")."""
     items = ItemRepo(conn)
     runs = RunRepo(conn)
     drift = DriftRepo(conn)
     outcomes = OperationOutcomeRepo(conn)
+    return [
+        _collection_summary(config, source.name, collection.name, items, runs, drift, outcomes)
+        for source in config.sources
+        for collection in source.collections
+    ]
 
-    summaries = []
-    for source in config.sources:
-        for collection in source.collections:
-            summaries.append(
-                _collection_summary(
-                    config, source.name, collection.name, items, runs, drift, outcomes
-                )
-            )
+
+def print_status(config: Config, *, as_json: bool) -> None:
+    conn = connect_reader(config.state_db)  # type: ignore[arg-type]
+    summaries = collection_summaries(config, conn)
 
     if as_json:
         click.echo(json.dumps(summaries, indent=2, default=str))
@@ -204,6 +239,8 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 f"new={last['items_new']} updated={last['items_updated']} "
                 f"failed={last['items_failed']} bytes={last['bytes_downloaded']}"
             )
+            if last["end_reason"] == STOPPED_REPORTING:
+                click.echo("  run ended unexpectedly (stopped reporting)")
             if last["failure_notice_error"]:
                 click.echo(f"  failure notice not delivered: {last['failure_notice_error']}")
         else:
@@ -219,7 +256,7 @@ def print_status(config: Config, *, as_json: bool) -> None:
             click.echo(f"  handoff not delivered: {shows} since {handoff['since']}")
             click.echo(f"    last reason: {handoff['last_reason']}")
         click.echo("  items: " + ", ".join(f"{k}={v}" for k, v in s["counts"].items() if v))
-        click.echo(f"  disk:  {s['bytes_on_disk'] / 1e9:.2f} GiB")
+        click.echo(f"  disk:  {s['bytes_on_disk'] / 1e9:.2f} GB")
         separations = s["separations"]
         if separations:
             click.echo(

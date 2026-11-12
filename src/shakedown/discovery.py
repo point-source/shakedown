@@ -13,23 +13,27 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any
-
-import httpx
-import requests
+from typing import TYPE_CHECKING, Any
 
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.models import Manifest, SourceFile
+from shakedown.network import EventKind
 from shakedown.plugins.base import (
+    TRANSIENT_CAUSES,
+    FailureCause,
     ItemLookup,
     ListedItem,
     SourcePlugin,
+    failure_cause,
     http_status,
     retry_after_seconds,
 )
 from shakedown.selection import select
+
+if TYPE_CHECKING:
+    from shakedown.activity import Progress
 
 # The per-item lookup envelope, matched to archive.org's real latency
 # (SPEC §spec:slow-metadata): a slow, 5xx, or 429 answer costs a bounded wait.
@@ -232,25 +236,19 @@ class LookupFailure:
     reason: str
 
 
-_TIMEOUTS = (requests.Timeout, httpx.TimeoutException, TimeoutError)
-_CONNECTION_ERRORS = (requests.ConnectionError, httpx.TransportError, ConnectionError)
-
-
-def _describe_fault(exc: BaseException) -> tuple[bool, str]:
-    """(transient, plain-language description) for a fault a lookup raised.
-
-    Transient: 429, 5xx, timeouts, connection errors (SPEC §spec:slow-metadata).
-    Everything else fails at once.
-    """
+def _describe_fault(exc: BaseException) -> tuple[FailureCause | None, str]:
+    """(cause, plain-language description) for a fault a lookup raised. Transient
+    causes — 429, 5xx, timeouts, connection errors — are retried (SPEC
+    §spec:slow-metadata); everything else fails at once."""
+    cause = failure_cause(exc)
     status = http_status(exc)
     if status is not None:
-        return status == 429 or 500 <= status < 600, f"HTTP {status}"
-    # requests.Timeout subclasses requests.ConnectionError: check timeouts first.
-    if isinstance(exc, _TIMEOUTS):
-        return True, "timed out"
-    if isinstance(exc, _CONNECTION_ERRORS):
-        return True, "connection error"
-    return False, f"{type(exc).__name__}: {exc}"
+        return cause, f"HTTP {status}"
+    if cause is FailureCause.TIMEOUT:
+        return cause, "timed out"
+    if cause is FailureCause.CONNECTION_ERROR:
+        return cause, "connection error"
+    return cause, f"{type(exc).__name__}: {exc}"
 
 
 def _backoff_seconds(attempt: int, exc: BaseException) -> float:
@@ -270,6 +268,7 @@ def lookup(
     plugin: SourcePlugin,
     identifier: str,
     budget: SourceBudget,
+    progress: Progress | None = None,
 ) -> ItemDetails | LookupFailure:
     """Look up one item under the core's envelope (SPEC §spec:per-item-isolation).
 
@@ -277,23 +276,41 @@ def lookup(
     before any backoff, since a sleeping worker holds no connection. A transient fault
     is retried up to LOOKUP_ATTEMPTS; a malformed answer or any other exception fails
     at once. Never raises: a failure comes back as a LookupFailure with its reason.
+
+    ``progress`` counts each attempt as a request in flight and records each failed
+    attempt's cause, the retry, and the wait (§spec:network-activity).
     """
     for attempt in range(1, LOOKUP_ATTEMPTS + 1):
         try:
-            with budget.slot():
+            with budget.slot(), progress.request() if progress else nullcontext():
                 raw = plugin.lookup_item(identifier, LOOKUP_TIMEOUT)
             return validate_lookup(raw, identifier)
         except MalformedLookup as e:
             return LookupFailure(identifier, str(e))
         except Exception as e:
-            transient, said = _describe_fault(e)
-            if not transient:
+            cause, said = _describe_fault(e)
+            if progress is not None and cause is not None:
+                progress.network_event(
+                    EventKind(cause.value),
+                    identifier=identifier,
+                    http_status=http_status(e),
+                    wait_seconds=(
+                        retry_after_seconds(e) if cause is FailureCause.RATE_LIMITED else None
+                    ),
+                    detail=said,
+                )
+            if cause not in TRANSIENT_CAUSES:
                 return LookupFailure(identifier, f"lookup failed: {said}")
             if attempt == LOOKUP_ATTEMPTS:
                 return LookupFailure(
                     identifier, f"lookup failed after {LOOKUP_ATTEMPTS} attempts: {said}"
                 )
-            _sleep(_backoff_seconds(attempt, e))
+            delay = _backoff_seconds(attempt, e)
+            if progress is not None:
+                progress.network_event(EventKind.RETRY, identifier=identifier, detail=said)
+                progress.network_event(EventKind.BACKOFF, identifier=identifier,
+                                       wait_seconds=delay)
+            _sleep(delay)
     raise AssertionError("unreachable: LOOKUP_ATTEMPTS must be >= 1")
 
 
@@ -340,10 +357,13 @@ def describe(
 
 
 def look_up_one(
-    plugin: SourcePlugin, listed: ListedItem, budget: SourceBudget
+    plugin: SourcePlugin,
+    listed: ListedItem,
+    budget: SourceBudget,
+    progress: Progress | None = None,
 ) -> ItemDescriptor | LookupFailure:
     """Look up one listed item and describe it, or report why it could not be."""
-    result = lookup(plugin, listed.identifier, budget)
+    result = lookup(plugin, listed.identifier, budget, progress)
     if isinstance(result, LookupFailure):
         return result
     return describe(listed.identifier, result, listed.change_signal)
@@ -356,6 +376,7 @@ def stream_items(
     enumerated: set[str],
     *,
     look_up: Callable[[ListedItem], bool] | None = None,
+    progress: Progress | None = None,
 ) -> Iterator[ItemDescriptor | LookupFailure]:
     """List the collection, then look its items up in parallel across the shared
     budget, yielding each description (or lookup failure) as it resolves
@@ -368,23 +389,58 @@ def stream_items(
 
     ``look_up`` decides per listed item whether to look it up (default: all) — the
     incremental fast path skips unchanged items.
+
+    ``progress`` hears how many items were listed and are to look up, each lookup
+    while it runs, and each one looked up (§spec:run-activity); and measures the
+    listing and lookups as network activity (§spec:network-activity).
     """
-    listing = list(plugin.list_items(collection))
+    with progress.listing() if progress else nullcontext():
+        listing = list(plugin.list_items(collection))
     enumerated.update(row.identifier for row in listing)
     rows = [row for row in listing if look_up is None or look_up(row)]
-    yield from _windowed(rows, budget, lambda row: look_up_one(plugin, row, budget))
+    if progress is None:
+        yield from _windowed(rows, budget, lambda row: look_up_one(plugin, row, budget))
+        return
+    from shakedown.activity import Phase
+
+    progress.listed(len(listing))
+    progress.to_look_up(len(rows))
+    progress.phase(Phase.DISCOVERING)
+
+    def work(row: ListedItem) -> ItemDescriptor | LookupFailure:
+        progress.working(row.identifier)
+        try:
+            return look_up_one(plugin, row, budget, progress)
+        finally:
+            progress.idle(row.identifier)
+
+    for found in _windowed(rows, budget, work):
+        progress.looked_up()
+        yield found
 
 
 def look_up_rows(
-    plugin: SourcePlugin, identifiers: Sequence[str], budget: SourceBudget
+    plugin: SourcePlugin,
+    identifiers: Sequence[str],
+    budget: SourceBudget,
+    progress: Progress,
 ) -> Iterator[tuple[str, ItemDetails | LookupFailure]]:
     """Look up just these items — no listing — in parallel across the shared budget,
     yielding each identifier with its validated lookup (every file the source lists,
     before selection) or its failure. A single-show run acts on the shows it names
-    (§spec:single-show-runs) and a reconform needs files outside the selection."""
-    yield from _windowed(
-        list(identifiers), budget, lambda identifier: (identifier, lookup(plugin, identifier, budget))
-    )
+    (§spec:single-show-runs) and a reconform needs files outside the selection.
+    ``progress`` hears each lookup while it runs and each one looked up."""
+
+    def work(identifier: str) -> tuple[str, ItemDetails | LookupFailure]:
+        progress.working(identifier)
+        try:
+            return identifier, lookup(plugin, identifier, budget, progress)
+        finally:
+            progress.idle(identifier)
+
+    for found in _windowed(list(identifiers), budget, work):
+        progress.looked_up()
+        yield found
 
 
 def _windowed[T, R](rows: Sequence[T], budget: SourceBudget, work: Callable[[T], R]) -> Iterator[R]:

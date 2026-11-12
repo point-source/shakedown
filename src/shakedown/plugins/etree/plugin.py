@@ -27,11 +27,14 @@ from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
+    TRANSIENT_CAUSES,
+    FailureCause,
     FetchResult,
     ItemLookup,
     ListedItem,
     SourcePlugin,
     VerifyResult,
+    failure_cause,
     http_status,
     retry_after_seconds,
     reusable_leftover,
@@ -84,22 +87,15 @@ def _restriction_reason(meta: dict[str, Any]) -> str | None:
     return None
 
 
-def _classify(exc: httpx.HTTPError) -> tuple[bool, float | None, str]:
-    """Classify an httpx error into (retriable, retry_after, message).
-
-    Transient: 429, 5xx, connection reset, timeout. Permanent: other 4xx.
-    Honors a numeric ``Retry-After`` when present.
-    """
+def _describe(exc: httpx.HTTPError) -> str:
+    """A short message for a failed download."""
     if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        retriable = status == 429 or 500 <= status < 600
-        return retriable, retry_after_seconds(exc), f"HTTP {status}"
+        return f"HTTP {exc.response.status_code}"
     if isinstance(exc, httpx.TimeoutException):
-        return True, None, f"timeout: {exc}"
+        return f"timeout: {exc}"
     if isinstance(exc, httpx.TransportError):
-        # Connection reset and similar transport-level faults are transient.
-        return True, None, f"transport error: {exc}"
-    return False, None, str(exc)
+        return f"transport error: {exc}"
+    return str(exc)
 
 
 @register
@@ -220,7 +216,6 @@ class EtreePlugin(SourcePlugin):
     def fetch(
         self, identifier: str, files: Sequence[ManifestFile], dest_dir: Path
     ) -> FetchResult:
-        total = 0
         for mf in files:
             # Trust boundary: the file name comes from the remote source. Refuse
             # to write anything that would escape the item directory. The core
@@ -229,7 +224,6 @@ class EtreePlugin(SourcePlugin):
             if not _is_contained(dest_dir, mf.name):
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=total,
                     error=f"unsafe file name escapes item directory: {mf.name!r}",
                     retriable=False,
                 )
@@ -240,14 +234,12 @@ class EtreePlugin(SourcePlugin):
             # A file an earlier attempt left behind is kept only once it matches the
             # manifest's size and md5; one we cannot check is fetched again.
             if reusable_leftover(out, mf):
-                total += out.stat().st_size
                 continue
 
             # Stream to disk while hashing, so a multi-GB file never lands in
             # memory in full (etree FLAC sets are large and fetches run
             # concurrently).
             hasher = hashlib.md5()
-            written = 0
             try:
                 with self._client.stream(
                     "GET", f"/download/{quote(identifier)}/{quote(mf.name)}"
@@ -257,24 +249,25 @@ class EtreePlugin(SourcePlugin):
                         for chunk in resp.iter_bytes():
                             fh.write(chunk)
                             hasher.update(chunk)
-                            written += len(chunk)
             except httpx.HTTPError as exc:
                 if http_status(exc) == 403:
                     # archive.org serves some shows stream-only with no restriction
                     # flag in their metadata; the refusal is the only signal.
                     return FetchResult(
                         success=False,
-                        bytes_downloaded=total,
                         error=DOWNLOAD_REFUSED_REASON,
                         unavailable=True,
+                        cause=FailureCause.REFUSED,
+                        http_status=403,
                     )
-                retriable, retry_after, message = _classify(exc)
+                cause = failure_cause(exc)
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=total,
-                    error=f"{mf.name}: {message}",
-                    retriable=retriable,
-                    retry_after=retry_after,
+                    error=f"{mf.name}: {_describe(exc)}",
+                    retriable=cause in TRANSIENT_CAUSES,
+                    retry_after=retry_after_seconds(exc),
+                    cause=cause,
+                    http_status=http_status(exc),
                 )
 
             if mf.md5 is not None and hasher.hexdigest() != mf.md5:
@@ -283,14 +276,11 @@ class EtreePlugin(SourcePlugin):
                 out.unlink(missing_ok=True)
                 return FetchResult(
                     success=False,
-                    bytes_downloaded=total,
                     error=f"checksum mismatch for {mf.name}",
                     retriable=True,
                 )
 
-            total += written
-
-        return FetchResult(success=True, bytes_downloaded=total)
+        return FetchResult(success=True)
 
     # -- verify -------------------------------------------------------------
 

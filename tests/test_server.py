@@ -454,7 +454,7 @@ async def test_triggered_sync_catches_up_rescheduled_collections_after_its_own(
     assert status["coll1"]["last_run"]["run_id"] == run_ids[0]
     caught_up = status["coll2"]["last_run"]
     assert caught_up["run_id"] not in run_ids
-    assert caught_up["kind"] == "sync" and caught_up["finished_at"] is not None
+    assert caught_up["kind"] == "catch_up" and caught_up["finished_at"] is not None
     assert caught_up["items_new"] == 1
     assert status["coll1"]["rescheduled"] is None and status["coll2"]["rescheduled"] is None
     assert 'shakedown_sync_runs_total{result="ok"} 1.0' in metrics
@@ -666,3 +666,346 @@ async def test_status_lists_shows_removed_upstream_from_the_db(
     [removed] = r.json()[0]["removed_upstream"]
     assert removed["identifier"] == "gd-gone"
     assert removed["removed_on"] in {before.isoformat(), after.isoformat()}
+
+
+# --- dashboard read endpoints: shared answers, GET only, no CORS (§spec:dashboard) --
+
+class _Clock:
+    """A monotonic clock the test moves by hand, so an interval passes without sleeping."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _probe_app(config, clock, *, append: str = ""):  # type: ignore[no-untyped-def]
+    """serve with one extra dashboard view that counts how often it is computed,
+    over a config file holding ``config`` followed by ``append``."""
+    from shakedown.dashboard import VIEW_TTL_S, register_api
+
+    cfg_path = write_config(config.archive_root.parent / "cfg.yaml", config)
+    cfg_path.write_text(cfg_path.read_text() + append)
+    app = build_app(cfg_path, clock=clock)
+    app.state.probe_builds = 0
+
+    def probe(ctx):  # type: ignore[no-untyped-def]
+        app.state.probe_builds += 1
+        tables = ctx.conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
+        return {"collections": [c.name for s in ctx.config.sources for c in s.collections],
+                "tables": tables}
+
+    register_api(app, "/api/probe", VIEW_TTL_S, probe)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_api_answer_is_shared_until_its_interval_passes(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Ten viewers cost what one does: within the refresh interval every request gets
+    the one computed answer, with the same generated_at; after it, a fresh one."""
+    from shakedown.dashboard import VIEW_TTL_S
+
+    archive, library = tmp_roots
+    clock = _Clock()
+    app = _probe_app(make_config(archive, library), clock)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        first = (await client.get("/api/probe")).json()
+        assert first["collections"] == ["coll1"] and first["tables"] > 0
+        assert datetime.fromisoformat(first["generated_at"]).tzinfo is not None
+        clock.now = VIEW_TTL_S - 0.1
+        assert (await client.get("/api/probe")).json() == first
+        assert app.state.probe_builds == 1
+
+        clock.now = VIEW_TTL_S
+        second = (await client.get("/api/probe")).json()
+        assert app.state.probe_builds == 2
+        assert second["generated_at"] != first["generated_at"]
+
+
+@pytest.mark.asyncio
+async def test_api_views_are_get_only_and_send_no_cors_allowance(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    archive, library = tmp_roots
+    app = _probe_app(make_config(archive, library), _Clock())
+    origin = {"Origin": "https://elsewhere.example"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/probe", headers=origin)
+        assert r.status_code == 200
+        assert not [h for h in r.headers if h.lower().startswith("access-control-")]
+        assert (await client.post("/api/probe")).status_code == 405
+        r = await client.options(
+            "/api/probe", headers={**origin, "Access-Control-Request-Method": "GET"}
+        )
+        assert r.status_code == 405
+        assert not [h for h in r.headers if h.lower().startswith("access-control-")]
+
+
+def test_iso_carries_the_utc_offset() -> None:
+    from shakedown.dashboard import iso
+
+    stamp = iso(datetime(2026, 11, 12, 3, 0, 0))
+    assert stamp is not None
+    parsed = datetime.fromisoformat(stamp)
+    assert parsed.tzinfo is not None
+    assert parsed.replace(tzinfo=None) == datetime(2026, 11, 12, 3, 0, 0)
+    assert iso(None) is None
+
+
+# --- dashboard views on a broken config (§spec:dashboard "When the config is broken")
+
+TYPO = "archive_rot: /typo\n"  # a misspelled key: the config fails to load, naming it
+
+
+@pytest.mark.asyncio
+async def test_api_answers_from_the_last_good_config_while_the_file_is_broken(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Each view reads the config at the request; while the file is invalid it keeps
+    answering from the last config this serve loaded, and the other endpoints keep
+    their 503 naming the key."""
+    from shakedown.config import CollectionConfig
+    from shakedown.dashboard import VIEW_TTL_S
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    clock = _Clock()
+    app = _probe_app(config, clock)
+    cfg_path = archive.parent / "cfg.yaml"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        assert (await client.get("/api/probe")).json()["collections"] == ["coll1"]
+
+        config.sources[0].collections.append(CollectionConfig(name="coll2", query="*"))
+        write_config(cfg_path, config)
+        clock.now += VIEW_TTL_S
+        assert (await client.get("/api/probe")).json()["collections"] == ["coll1", "coll2"]
+
+        good = cfg_path.read_text()
+        cfg_path.write_text(good + TYPO)
+        clock.now += VIEW_TTL_S
+        r = await client.get("/api/probe")
+        assert r.status_code == 200
+        assert r.json()["collections"] == ["coll1", "coll2"]
+        assert app.state.probe_builds == 3
+        r = await client.get("/status")
+        assert r.status_code == 503 and "archive_rot" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_api_on_a_serve_that_never_loaded_a_valid_config_is_503(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    app = _probe_app(config, _Clock(), append=TYPO)
+    cfg_path = archive.parent / "cfg.yaml"
+    good = cfg_path.read_text().removesuffix(TYPO)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/probe")
+        assert r.status_code == 503
+        assert "archive_rot" in r.json()["detail"]
+        # a failure is never the cached answer: fixed file, next request answers
+        cfg_path.write_text(good)
+        assert (await client.get("/api/probe")).status_code == 200
+
+
+# --- GET /api/health (§spec:dashboard-health) ---------------------------------------
+
+def _health_app(config, clock, *, append: str = ""):  # type: ignore[no-untyped-def]
+    cfg_path = write_config(config.archive_root.parent / "cfg.yaml", config)
+    cfg_path.write_text(cfg_path.read_text() + append)
+    return build_app(cfg_path, clock=clock)
+
+
+@pytest.mark.asyncio
+async def test_api_health_reports_release_config_and_last_validation(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Release, config valid, validation null; after `validate`, each collection's
+    outcome and time once the refresh interval passes. Rapid requests share one
+    answer; the view is GET only and sends no CORS allowance."""
+    from importlib.metadata import version
+
+    from shakedown.dashboard import VIEW_TTL_S
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    clock = _Clock()
+    app = _health_app(config, clock)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/health", headers={"Origin": "https://elsewhere.example"})
+        assert r.status_code == 200
+        assert not [h for h in r.headers if h.lower().startswith("access-control-")]
+        body = r.json()
+        assert set(body) == {"generated_at", "release", "config", "validation"}
+        assert body["release"] == version("shakedown")
+        assert body["config"]["valid"] is True and body["config"]["error"] is None
+        assert datetime.fromisoformat(body["config"]["last_loaded_at"]).tzinfo is not None
+        assert body["validation"] == [
+            {"source": "fake-src", "collection": "coll1", "status": None, "at": None}
+        ]
+        assert (await client.get("/api/health")).json() == body
+        assert (await client.post("/api/health")).status_code == 405
+
+        assert (await client.post("/validate")).json()["ready"] is True
+        assert (await client.get("/api/health")).json() == body  # same shared answer
+        clock.now += VIEW_TTL_S
+        after = (await client.get("/api/health")).json()
+        assert after["generated_at"] != body["generated_at"]
+        [entry] = after["validation"]
+        assert entry["status"] == "completed"
+        assert datetime.fromisoformat(entry["at"]).tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_api_health_shows_a_failed_validation(tmp_roots: tuple[Path, Path]) -> None:
+    from shakedown.models import OperationStatus, OperationType
+    from shakedown.state import OperationOutcomeRepo
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    assert config.state_db is not None
+    at = datetime(2026, 11, 12, 3, 0, 0)
+    with closing(connect(config.state_db)) as conn:
+        outcomes = OperationOutcomeRepo(conn)
+        outcome = outcomes.start(OperationType.VALIDATE, "fake-src", "coll1", at)
+        outcomes.finish(outcome, OperationStatus.FAILED_BEFORE_COMPLETION, at)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_health_app(config, _Clock())),
+        base_url="http://testserver",
+    ) as client:
+        [entry] = (await client.get("/api/health")).json()["validation"]
+    assert entry["status"] == "failed_before_completion"
+    assert datetime.fromisoformat(entry["at"]).replace(tzinfo=None) == at
+
+
+@pytest.mark.asyncio
+async def test_api_health_reports_a_broken_config_and_when_it_last_loaded(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A typo'd key: 200 with config.valid false, the error naming the key, and the
+    time of the last good load. A fresh serve on the broken file: 503 naming it."""
+    from shakedown.dashboard import VIEW_TTL_S
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    clock = _Clock()
+    app = _health_app(config, clock)
+    cfg_path = archive.parent / "cfg.yaml"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        loaded_at = (await client.get("/api/health")).json()["config"]["last_loaded_at"]
+        cfg_path.write_text(cfg_path.read_text() + TYPO)
+        clock.now += VIEW_TTL_S
+        r = await client.get("/api/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["config"]["valid"] is False
+        assert "archive_rot" in body["config"]["error"]
+        assert body["config"]["last_loaded_at"] == loaded_at
+        assert [v["collection"] for v in body["validation"]] == ["coll1"]
+
+    fresh = _health_app(config, _Clock(), append=TYPO)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fresh), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/api/health")
+        assert r.status_code == 503
+        assert "archive_rot" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_api_health_never_writes_or_waits_for_the_writer_lock(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """Answering reads only: it answers while a run holds the writer lock, and the
+    state database holds exactly what it held. (Compared by content: closing a
+    reader may checkpoint SQLite's WAL into the main file, which changes bytes but
+    no data.)"""
+    import sqlite3
+
+    from shakedown.lock import writer_lock
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    assert run_sync(config) == 0
+    db = config.state_db
+    assert db is not None
+
+    def dump() -> list[str]:
+        with closing(sqlite3.connect(db)) as conn:
+            return list(conn.iterdump())
+
+    before = dump()
+    app = _health_app(config, _Clock())
+    with writer_lock(config):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            assert (await client.get("/api/health")).status_code == 200
+    assert dump() == before
+
+
+@pytest.mark.asyncio
+async def test_api_health_contains_no_token_or_credential(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """Operational data only (§spec:dashboard): neither the API token, the source
+    credentials in env, nor a secret in the config file reaches the answer — not
+    even in the error for a broken file."""
+    from shakedown.config import WebhookHandoff
+    from shakedown.dashboard import VIEW_TTL_S
+
+    secret = "SECRET-7f3a"
+    monkeypatch.setenv(TOKEN_ENV, f"token-{secret}")
+    monkeypatch.setenv("IA_EMAIL", f"email-{secret}")
+    monkeypatch.setenv("IA_PASSWORD", f"password-{secret}")
+    archive, library = tmp_roots
+    config = make_config(
+        archive, library, on_complete=WebhookHandoff(webhook=f"https://hooks.example/{secret}")
+    )
+    clock = _Clock()
+    app = _health_app(config, clock)
+    cfg_path = archive.parent / "cfg.yaml"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        assert (await client.post("/validate")).status_code == 200
+        clock.now += VIEW_TTL_S
+        r = await client.get("/api/health")
+        assert r.status_code == 200 and secret not in r.text
+        broken = cfg_path.read_text().replace("webhook:", "webhok:")
+        assert "webhok" in broken
+        cfg_path.write_text(broken)
+        clock.now += VIEW_TTL_S
+        r = await client.get("/api/health")
+        assert r.json()["config"]["valid"] is False
+        assert "webhok" in r.json()["config"]["error"]
+        assert secret not in r.text
+
+
+def test_example_compose_runs_serve_for_the_dashboard() -> None:
+    """The example stack runs serve enabled, since the dashboard needs it; its token
+    stays optional (empty disables only the mutating endpoints) (§spec:deployment)."""
+    import yaml
+
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.example.yaml").read_text())
+    serve = compose["services"]["shakedown-serve"]
+    assert serve["command"][0] == "serve"
+    assert serve["restart"] == "unless-stopped"
+    assert "SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN:-}" in serve["environment"]
+    assert "/share/data:/data" in serve["volumes"]

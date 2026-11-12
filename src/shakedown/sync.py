@@ -21,6 +21,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress, RunCounts
 from shakedown.config import CollectionConfig, Config, ConfigError, SourceConfig
 from shakedown.config import load as load_config
 from shakedown.db import connect, connect_reader, transaction
@@ -37,6 +38,7 @@ from shakedown.discovery import (
 from shakedown.filesystem import FilesystemError, ensure_hardlinkable, is_within
 from shakedown.lock import run_exclusive
 from shakedown.models import (
+    RERUN_COMMAND,
     Item,
     ItemStatus,
     Manifest,
@@ -47,6 +49,7 @@ from shakedown.models import (
     Run,
     RunKind,
 )
+from shakedown.network import EventKind
 from shakedown.notify import (
     SyncCompletePayload,
     SyncFailedPayload,
@@ -60,7 +63,7 @@ from shakedown.placement import (
     log_separations,
 )
 from shakedown.plugins import registry
-from shakedown.plugins.base import FetchResult, ListedItem, SourcePlugin
+from shakedown.plugins.base import FailureCause, FetchResult, ListedItem, SourcePlugin
 from shakedown.reschedule import record_skipped
 from shakedown.staging import (
     METADATA_SIDECAR,
@@ -97,9 +100,10 @@ NO_FILES_REASON = "source lists no audio files"
 
 # The command that retries a run of each kind, for its outcome's next safe action.
 _RERUN = {
-    RunKind.SYNC: "sync",
-    RunKind.REFETCH: "item refetch",
-    RunKind.RECONFORM: "verify --deep --reconform",
+    RunKind.SYNC: RERUN_COMMAND[OperationType.SYNC],
+    RunKind.CATCH_UP: RERUN_COMMAND[OperationType.SYNC],
+    RunKind.REFETCH: RERUN_COMMAND[OperationType.REFETCH],
+    RunKind.RECONFORM: RERUN_COMMAND[OperationType.RECONFORM],
 }
 
 
@@ -175,7 +179,6 @@ class CollectionSyncStats:
     new: int = 0
     updated: int = 0
     failed: int = 0
-    bytes_downloaded: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items left untouched
     # Fetches the source refused (recorded unavailable, not failed).
@@ -194,6 +197,15 @@ class CollectionSyncStats:
     # Items fetched and staged this run, for the sync.complete batch payload
     # (SPEC §spec:handoff). Each entry: {identifier, archive_path, staging_path}.
     staged: list[dict[str, str]] = field(default_factory=list)
+    # The run's live progress hooks (§spec:run-activity); detached — recording
+    # nowhere — unless the run opened an activity entry.
+    progress: Progress = field(default_factory=lambda: Progress(ActivityKind.SYNC))
+
+    @property
+    def bytes_downloaded(self) -> int:
+        """The bytes this run fetched from the source, measured by the core
+        (§spec:network-activity "Bytes downloaded means bytes fetched")."""
+        return self.progress.bytes_fetched()
 
 
 def run_sync(
@@ -359,10 +371,27 @@ def _run_sync(
         announce_started([])
         return _run_refresh(config, work, budgets)
 
-    opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = (
-        {} if dry_run else _open_runs(config, work)
-    )
+    if dry_run:
+        return _sync_all(config, work, budgets, {}, None, dry_run=True, catch_up=None)
+    kind = RunKind.SYNC if catch_up is None else RunKind.CATCH_UP
+    with ActivityRecorder(config.state_db) as recorder:  # type: ignore[arg-type]
+        opened = _open_runs(config, work, kind, recorder)
+        return _sync_all(
+            config, work, budgets, opened, recorder, dry_run=False, catch_up=catch_up
+        )
 
+
+def _sync_all(
+    config: Config,
+    work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]],
+    budgets: dict[str, SourceBudget],
+    opened: dict[tuple[str, str], tuple[Run, OperationOutcome, Progress]],
+    recorder: ActivityRecorder | None,
+    *,
+    dry_run: bool,
+    catch_up: dict[tuple[str, str], datetime] | None,
+) -> int:
+    """Run each collection's sync on the bounded collection pool; 1 if any failed."""
     overall_failed = 0
     max_workers = min(config.max_concurrent_collections, len(work))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -372,6 +401,7 @@ def _run_sync(
                 dry_run=dry_run, budget=budgets[source.name],
                 opened=opened.get((source.name, collection.name)),
                 catch_up_note=_catch_up_note(catch_up, source, collection),
+                recorder=recorder,
             ): (source, collection)
             for source, collection, plugin in work
         }
@@ -423,21 +453,25 @@ def _clear_rescheduled(config: Config, source: SourceConfig, collection: Collect
 
 
 def _open_runs(
-    config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
-) -> dict[tuple[str, str], tuple[Run, OperationOutcome]]:
-    """Open every collection's run record and outcome before any collection starts,
-    then announce them to `serve` if it started this run (§spec:api-sync-runs): serve
+    config: Config,
+    work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]],
+    kind: RunKind,
+    recorder: ActivityRecorder,
+) -> dict[tuple[str, str], tuple[Run, OperationOutcome, Progress]]:
+    """Open every collection's run record, outcome, and activity entry before any
+    collection starts — a collection waiting for the collection pool heartbeats like
+    one at work (§spec:run-activity) — then announce them to `serve` if it started this run (§spec:api-sync-runs): serve
     answers a trigger with the run ids, so they must exist before the first collection
     begins. Each collection resets its start time when it actually begins. Only the
     first announce reaches serve, so a catch-up's runs, opened after the run's own,
     are not in its answer; they show in `GET /status` like any run."""
     started = datetime.now()
-    opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = {}
+    opened: dict[tuple[str, str], tuple[Run, OperationOutcome, Progress]] = {}
     with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
         runs = RunRepo(conn)
         outcomes = OperationOutcomeRepo(conn)
         for source, collection, _plugin in work:
-            run = runs.start(source.name, collection.name, started)
+            run = runs.start(source.name, collection.name, started, kind=kind)
             outcome = outcomes.start(
                 OperationType.SYNC,
                 source.name,
@@ -446,7 +480,10 @@ def _open_runs(
                 phase="discover",
                 safe_next_action="restore source access and rerun sync",
             )
-            opened[(source.name, collection.name)] = (run, outcome)
+            progress = recorder.open_entry(
+                source.name, collection.name, ActivityKind(kind.value), run_id=run.id
+            )
+            opened[(source.name, collection.name)] = (run, outcome, progress)
     announce_started([
         {
             "run_id": run.id,
@@ -454,7 +491,7 @@ def _open_runs(
             "source": run.source_name,
             "collection": run.collection_name,
         }
-        for run, outcome in opened.values()
+        for run, outcome, _progress in opened.values()
     ])
     return opened
 
@@ -638,6 +675,17 @@ def _finish_run(runs: RunRepo, run: Run, stats: CollectionSyncStats, finished: d
     runs.finish(run)
 
 
+def _run_counts(stats: CollectionSyncStats) -> RunCounts:
+    """The run record's figures now: what `_finish_run` would write."""
+    return RunCounts(
+        items_discovered=stats.discovered,
+        items_new=stats.new,
+        items_updated=stats.updated,
+        items_failed=stats.failed,
+        bytes_downloaded=stats.bytes_downloaded,
+    )
+
+
 def _completed_work(stats: CollectionSyncStats) -> dict[str, int]:
     return {
         "items_discovered": stats.discovered,
@@ -669,8 +717,9 @@ def _sync_collection(
     *,
     dry_run: bool,
     budget: SourceBudget,
-    opened: tuple[Run, OperationOutcome] | None = None,
+    opened: tuple[Run, OperationOutcome, Progress] | None = None,
     catch_up_note: str = "",
+    recorder: ActivityRecorder | None = None,
 ) -> CollectionSyncStats:
     """Sync one (source, collection) end-to-end.
 
@@ -691,22 +740,32 @@ def _sync_collection(
 
     run: Run | None = None
     outcome: OperationOutcome | None = None
+    stats = CollectionSyncStats()
     if opened is not None:
         # Opened up front by `_open_runs`; time the run from when this collection
         # actually begins, not from when it was queued behind the others.
-        run, outcome = opened
+        run, outcome, stats.progress = opened
         runs.mark_started(run, started)
         outcomes.mark_started(outcome, started)
+        if recorder is not None:
+            recorder.restart(stats.progress)
+        stats.progress.run_counts = lambda: _run_counts(stats)
 
-    stats = CollectionSyncStats()
     try:
-        return _sync_collection_phases(
+        _sync_collection_phases(
             config, source, collection, plugin, items, runs, outcomes, run, outcome,
             stats, started, dry_run=dry_run, budget=budget,
         )
     except Exception as e:
         _close_crashed(runs, run, outcomes, outcome, stats, collection, e, RunKind.SYNC)
+        if recorder is not None:
+            recorder.end(stats.progress, OperationStatus.FAILED_BEFORE_COMPLETION)
         raise
+    if recorder is not None:
+        recorder.end(
+            stats.progress, outcome.status if outcome is not None else OperationStatus.COMPLETED
+        )
+    return stats
 
 
 def _close_crashed(
@@ -852,6 +911,7 @@ def _sync_collection_phases(
     planner = (
         TagPlanner(items, source.name, collection.name) if collection.fill_tags else None
     )
+    stats.progress.phase(Phase.LISTING)
     enumerated_identifiers, deferred, enum_error = _pipelined_discover_and_fetch(
         config, source, collection, plugin, items, stats, placement, budget, by_identifier,
         planner,
@@ -870,13 +930,17 @@ def _sync_collection_phases(
         stats.stale = True
         stats.errors.append(f"source enumeration failed: {enum_error}")
         # Shows fetched before the failure are valid; stage them. Nothing is pruned.
+        stats.progress.phase(Phase.TAGGING)
         tag_issues = _fill_tags(config, source.name, collection, items)
+        stats.progress.phase(Phase.STAGING)
         report = placement.finish()
         _apply_placement_report(stats, report, tag_issues)
         finished = datetime.now()
+        stats.progress.phase(Phase.NOTIFYING)
         _fire_notifications(
             config, items, source, collection, stats, started, finished, report.folder_of
         )
+        stats.progress.phase(Phase.FINISHING)
         if run is not None:
             _finish_run(runs, run, stats, finished)
         if outcome is not None:
@@ -954,18 +1018,22 @@ def _sync_collection_phases(
     # no longer placed (a pruned show, an old layout or name) removed
     # (§spec:library-ownership, §spec:library-cleanup). Tags are filled first, so the
     # library sees each show's files once, already tagged (§spec:tag-filling).
+    stats.progress.phase(Phase.TAGGING)
     tag_issues = _fill_tags(config, source.name, collection, items)
+    stats.progress.phase(Phase.STAGING)
     report = placement.finish()
     _apply_placement_report(stats, report, tag_issues)
 
     # Phase 5: notify. Fire before recording so an undelivered notice is captured
     # in the run's errors but never aborts the sync (§spec:durable-handoff).
     finished = datetime.now()
+    stats.progress.phase(Phase.NOTIFYING)
     _fire_notifications(
         config, items, source, collection, stats, started, finished, report.folder_of
     )
 
     # Phase 6: record run
+    stats.progress.phase(Phase.FINISHING)
     if run is not None:
         _finish_run(runs, run, stats, finished)
     if outcome is not None:
@@ -1019,6 +1087,7 @@ def _pipelined_discover_and_fetch(
     enumerated: set[str] = set()
     deferred: list[PlannedItem] = []
     enum_error: Exception | None = None
+    progress = stats.progress
 
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetch_futures: dict[Future[_FetchOutcome], PlannedItem] = {}
@@ -1035,8 +1104,10 @@ def _pipelined_discover_and_fetch(
                         desc.identifier, desc.metadata, planned.descriptor.manifest
                     )
                 archive_root.mkdir(parents=True, exist_ok=True)
+                progress.to_fetch(_fetch_size(planned))
                 fut = fetch_pool.submit(
-                    _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
+                    _fetch_one_budgeted, budget, plugin, planned, archive_root, collection,
+                    progress,
                 )
                 fetch_futures[fut] = planned
                 fut.add_done_callback(finished.put)
@@ -1089,7 +1160,7 @@ def _pipelined_discover_and_fetch(
             return True
 
         descriptor_stream = stream_items(
-            plugin, collection, budget, enumerated, look_up=look_up
+            plugin, collection, budget, enumerated, look_up=look_up, progress=progress
         )
         def process(fut: Future[_FetchOutcome]) -> None:
             _process_fetch_result(
@@ -1108,6 +1179,9 @@ def _pipelined_discover_and_fetch(
                 # fetches each immediately, so downloads overlap the enumeration.
                 desc = next(descriptors, None)
                 if desc is None:
+                    # The listing's lookups are done: shows to fetch, and their bytes,
+                    # are known (§spec:run-activity "Honest totals").
+                    progress.enumeration_done()
                     break
                 if isinstance(desc, LookupFailure):
                     _record_lookup_failure(items, source.name, collection.name, desc, stats)
@@ -1126,6 +1200,7 @@ def _pipelined_discover_and_fetch(
         # the enumeration completed, and recording them keeps the archive and DB
         # consistent (SPEC §spec:discovery-pipeline: an item may be fetched and staged
         # before discovery completes).
+        progress.phase(Phase.DOWNLOADING)
         for fut in as_completed(list(fetch_futures)):
             process(fut)
 
@@ -1449,7 +1524,6 @@ def _process_fetch_result(
         _record_failed(items, source.name, collection, desc, outcome.error)
         return
 
-    stats.bytes_downloaded += outcome.bytes_downloaded
     if target.action == PlanAction.NEW:
         stats.new += 1
     else:
@@ -1468,7 +1542,6 @@ def _process_fetch_result(
 class _FetchOutcome:
     success: bool
     archive_path: Path
-    bytes_downloaded: int = 0
     error: str | None = None
     unavailable: bool = False  # the source refuses to serve the item
     # What tagging the downloaded files recorded, per file; None when nothing was tagged.
@@ -1494,6 +1567,7 @@ def _fetch_with_retries(
     *,
     files: Sequence[ManifestFile] | None = None,
     max_attempts: int = _MAX_FETCH_ATTEMPTS,
+    progress: Progress | None = None,
 ) -> FetchResult:
     """Call plugin.fetch with bounded retries and backoff (SPEC §spec:failure-behavior).
 
@@ -1508,12 +1582,17 @@ def _fetch_with_retries(
     a file to fetch is removed before each attempt.
 
     ``files`` are the files to download (default: the whole manifest).
+
+    ``progress`` measures each attempt's bytes in the temp dir and records each failed
+    attempt's cause, the retry, and the wait (§spec:network-activity).
     """
+    progress = progress or Progress(ActivityKind.SYNC)
     wanted = desc.manifest.files if files is None else tuple(files)
     for attempt in range(1, max_attempts + 1):
         _prepare_tmp_dir(wanted, tmp_dir)
 
-        result = plugin.fetch(desc.identifier, wanted, tmp_dir)
+        with progress.fetch_attempt(desc.identifier, tmp_dir):
+            result = plugin.fetch(desc.identifier, wanted, tmp_dir)
         if result.success:
             short = _size_mismatches(wanted, tmp_dir)
             if short:
@@ -1522,10 +1601,11 @@ def _fetch_with_retries(
                 # truncated download.
                 result = FetchResult(
                     success=False,
-                    bytes_downloaded=result.bytes_downloaded,
                     error=f"size differs from the source after fetch: {short[:5]}",
                     retriable=True,
                 )
+        if not result.success:
+            _record_failed_attempt(progress, desc.identifier, result)
         if result.success or not result.retriable or attempt == max_attempts:
             return result
 
@@ -1541,8 +1621,27 @@ def _fetch_with_retries(
             "fetch attempt %d/%d for %s failed (%s); retrying in %.1fs",
             attempt, max_attempts, desc.identifier, result.error, delay,
         )
+        progress.network_event(EventKind.RETRY, identifier=desc.identifier, detail=result.error)
+        progress.network_event(EventKind.BACKOFF, identifier=desc.identifier, wait_seconds=delay)
         time.sleep(delay)
     raise AssertionError("unreachable: max_attempts must be >= 1")
+
+
+def _record_failed_attempt(progress: Progress, identifier: str, result: FetchResult) -> None:
+    """A failed fetch attempt's cause, as the plugin reported it, is a network event;
+    a refusal is one even without a cause. A failure that was not a request (a
+    checksum or size mismatch) has none."""
+    cause = FailureCause.REFUSED if result.unavailable else result.cause
+    if cause is None:
+        return
+    kind = EventKind(cause.value)
+    progress.network_event(
+        kind,
+        identifier=identifier,
+        http_status=result.http_status,
+        wait_seconds=result.retry_after if kind is EventKind.RATE_LIMITED else None,
+        detail=result.error,
+    )
 
 
 def _prepare_tmp_dir(files: Sequence[ManifestFile], tmp_dir: Path) -> None:
@@ -1601,20 +1700,38 @@ def _is_single_folder_name(name: str) -> bool:
     return bool(name) and not name.startswith(".") and not any(sep in name for sep in separators)
 
 
+def _fetch_size(target: PlannedItem) -> int | None:
+    """The bytes a fetch downloads, or None when the source lists a file's size as
+    unknown."""
+    assert target.descriptor is not None
+    files = target.descriptor.manifest.files if target.fetch is None else target.fetch
+    sizes = [mf.size for mf in files]
+    return None if any(size is None for size in sizes) else sum(s for s in sizes if s)
+
+
 def _fetch_one_budgeted(
     budget: SourceBudget,
     plugin: SourcePlugin,
     target: PlannedItem,
     archive_root: Path,
     collection: CollectionConfig,
+    progress: Progress,
 ) -> _FetchOutcome:
     """Acquire a per-source budget slot around the whole fetch (SPEC §spec:source-budget).
 
     The slot is held for the entire ``_fetch_one`` call so it counts as one live
-    upstream connection.
+    upstream connection. ``progress`` lists the show as worked on while it holds the
+    slot (§spec:run-activity).
     """
-    with budget.slot():
-        return _fetch_one(plugin, target, archive_root, collection)
+    with budget.slot(), progress.request():
+        assert target.descriptor is not None
+        identifier = target.descriptor.identifier
+        progress.working(identifier)
+        try:
+            return _fetch_one(plugin, target, archive_root, collection, progress)
+        finally:
+            progress.fetch_finished()
+            progress.idle(identifier)
 
 
 def _fetch_one(
@@ -1622,6 +1739,7 @@ def _fetch_one(
     target: PlannedItem,
     archive_root: Path,
     collection: CollectionConfig,
+    progress: Progress | None = None,
 ) -> _FetchOutcome:
     """Core-owned atomic fetch into <archive_root>/<identifier>/ (SPEC §spec:sync-workflow).
 
@@ -1681,7 +1799,7 @@ def _fetch_one(
         )
 
     fetch = desc.manifest.files if target.fetch is None else target.fetch
-    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, files=fetch)
+    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, files=fetch, progress=progress)
     if fetch_result.unavailable:
         # Nothing will resume a download the source refuses; the archive copy (if
         # any) is untouched.
@@ -1695,7 +1813,6 @@ def _fetch_one(
         return _FetchOutcome(
             success=False,
             archive_path=dest,
-            bytes_downloaded=fetch_result.bytes_downloaded,
             error=fetch_result.error,
         )
 
@@ -1713,7 +1830,6 @@ def _fetch_one(
         return _FetchOutcome(
             success=False,
             archive_path=dest,
-            bytes_downloaded=fetch_result.bytes_downloaded,
             error=f"missing after fetch: {verified.missing_files[:5]}",
         )
 
@@ -1732,7 +1848,6 @@ def _fetch_one(
                 return _FetchOutcome(
                     success=False,
                     archive_path=dest,
-                    bytes_downloaded=fetch_result.bytes_downloaded,
                     error=tag_failure(name, e),
                 )
 
@@ -1758,7 +1873,6 @@ def _fetch_one(
     return _FetchOutcome(
         success=True,
         archive_path=dest,
-        bytes_downloaded=fetch_result.bytes_downloaded,
         tag_records=tag_records,
     )
 
@@ -2083,11 +2197,23 @@ def run_single_shows(
     if not work:
         return 0
     budgets = source_budgets(config, [(s, p) for s, _, p, _ in work])
+    with ActivityRecorder(config.state_db) as recorder:  # type: ignore[arg-type]
+        return _run_single_show_collections(config, work, kind, budgets, recorder)
+
+
+def _run_single_show_collections(
+    config: Config,
+    work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin, SingleShows]],
+    kind: RunKind,
+    budgets: dict[str, SourceBudget],
+    recorder: ActivityRecorder,
+) -> int:
     failed = 0
     for source, collection, plugin, shows in work:
         try:
             stats = _single_show_collection(
-                config, source, collection, plugin, shows, kind, budgets[source.name]
+                config, source, collection, plugin, shows, kind, budgets[source.name],
+                recorder,
             )
         except Exception:
             log.exception("%s failed for %s/%s", kind.value, source.name, collection.name)
@@ -2172,9 +2298,10 @@ def _single_show_collection(
     shows: SingleShows,
     kind: RunKind,
     budget: SourceBudget,
+    recorder: ActivityRecorder,
 ) -> CollectionSyncStats:
-    """One collection's single-show run, recorded like a sync's: a run record and an
-    outcome, closed even if the run crashes."""
+    """One collection's single-show run, recorded like a sync's: a run record, an
+    outcome, and an activity entry, closed even if the run crashes."""
     started = datetime.now()
     conn = connect(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
@@ -2190,6 +2317,10 @@ def _single_show_collection(
         safe_next_action=f"restore source access and rerun {_RERUN[kind]}",
     )
     stats = CollectionSyncStats()
+    stats.progress = recorder.open_entry(
+        source.name, collection.name, ActivityKind(kind.value), run_id=run.id
+    )
+    stats.progress.run_counts = lambda: _run_counts(stats)
     try:
         _single_show_phases(
             config, source, collection, plugin, shows, kind, budget,
@@ -2197,7 +2328,9 @@ def _single_show_collection(
         )
     except Exception as e:
         _close_crashed(runs, run, outcomes, outcome, stats, collection, e, kind)
+        recorder.end(stats.progress, OperationStatus.FAILED_BEFORE_COMPLETION)
         raise
+    recorder.end(stats.progress, outcome.status)
     return stats
 
 
@@ -2234,10 +2367,15 @@ def _single_show_phases(
     planner = (
         TagPlanner(items, source.name, collection.name) if collection.fill_tags else None
     )
+    progress = stats.progress
+    # The collection is never listed: the shows to look up are known up front, and
+    # lookups overlap the downloads they start (§spec:run-activity).
+    progress.to_look_up(len(shows))
+    progress.phase(Phase.DISCOVERING)
     unrepaired: set[str] = set()
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetches: dict[Future[_FetchOutcome], PlannedItem] = {}
-        for identifier, details in look_up_rows(plugin, list(shows), budget):
+        for identifier, details in look_up_rows(plugin, list(shows), budget, progress):
             if isinstance(details, LookupFailure):
                 _note_lookup_failure(stats, source.name, collection.name, details)
                 continue
@@ -2285,10 +2423,14 @@ def _single_show_phases(
                 # gaps again (§spec:verify-drift).
                 planned.tags = planner.plan(identifier, found.metadata, manifest)
             archive_root.mkdir(parents=True, exist_ok=True)
+            progress.to_fetch(_fetch_size(planned))
             fut = fetch_pool.submit(
-                _fetch_one_budgeted, budget, plugin, planned, archive_root, collection
+                _fetch_one_budgeted, budget, plugin, planned, archive_root, collection,
+                progress,
             )
             fetches[fut] = planned
+        progress.enumeration_done()
+        progress.phase(Phase.DOWNLOADING)
         for fut in as_completed(fetches):
             # The sync's own fetch handling: record, link into the library, count.
             failed_before = stats.failed
@@ -2308,15 +2450,19 @@ def _single_show_phases(
     # downloads were tagged before entering the archive (a reconform refills the gaps
     # of the source bytes it restored), and the pass below follows any clash change
     # the fetched shows brought (§spec:tag-filling).
+    progress.phase(Phase.TAGGING)
     tag_issues = _fill_tags(config, source.name, collection, items)
+    progress.phase(Phase.STAGING)
     report = placement.finish()
     _apply_placement_report(stats, report, tag_issues)
 
     # The collection's handoff, exactly as a sync sends it, including shows still
     # pending from earlier runs (§spec:durable-handoff).
     finished = datetime.now()
+    progress.phase(Phase.NOTIFYING)
     _fire_notifications(
         config, items, source, collection, stats, started, finished, report.folder_of
     )
+    progress.phase(Phase.FINISHING)
     _finish_run(runs, run, stats, finished)
     _finish_outcome(outcomes, outcome, stats, collection, finished, kind, shows)

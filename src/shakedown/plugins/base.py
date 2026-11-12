@@ -1,15 +1,22 @@
 """Source plugin contract. PRD §7."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from enum import StrEnum
 from itertools import islice
 from pathlib import Path
 from typing import Any
+
+import httpx
+import requests
+import urllib3.exceptions
 
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
@@ -61,6 +68,94 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     if seconds is None or not math.isfinite(seconds) or seconds < 0:
         return None
     return seconds
+
+
+class FailureCause(StrEnum):
+    """Why a request to the source failed, as far as the core needs to know: it
+    decides retries and is recorded as network activity (§spec:network-activity)."""
+    RATE_LIMITED = "rate_limited"
+    SERVER_ERROR = "server_error"
+    TIMEOUT = "timeout"
+    CONNECTION_ERROR = "connection_error"
+    REFUSED = "refused"
+
+
+#: Causes worth another attempt; the rest fail at once.
+TRANSIENT_CAUSES = frozenset({
+    FailureCause.RATE_LIMITED, FailureCause.SERVER_ERROR, FailureCause.TIMEOUT,
+    FailureCause.CONNECTION_ERROR,
+})
+
+_TIMEOUTS = (
+    requests.Timeout, httpx.TimeoutException, TimeoutError, urllib3.exceptions.TimeoutError,
+)
+_CONNECTION_ERRORS = (
+    requests.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,  # a file cut off mid-stream
+    httpx.TransportError,
+    ConnectionError,
+    urllib3.exceptions.NewConnectionError,
+    urllib3.exceptions.ProtocolError,
+)
+
+
+def status_cause(status: int) -> FailureCause | None:
+    """The cause an HTTP error status stands for: 429 rate-limited, 5xx a server
+    error, 403 refused; None for any other status."""
+    if status == 429:
+        return FailureCause.RATE_LIMITED
+    if 500 <= status < 600:
+        return FailureCause.SERVER_ERROR
+    if status == 403:
+        return FailureCause.REFUSED
+    return None
+
+
+def failure_cause(exc: BaseException) -> FailureCause | None:
+    """The cause of a requests-, httpx-, or urllib3-style error: by its HTTP status
+    (`status_cause`), else timeouts and connection errors by type. None for anything
+    else (a bad answer)."""
+    status = http_status(exc)
+    if status is not None:
+        return status_cause(status)
+    # A refused connection is reported as a connect timeout by urllib3
+    # (NewConnectionError subclasses ConnectTimeoutError), and requests.ConnectTimeout
+    # is a ConnectionError: check what the error is before what it inherits.
+    if isinstance(exc, urllib3.exceptions.NewConnectionError):
+        return FailureCause.CONNECTION_ERROR
+    if isinstance(exc, _TIMEOUTS):
+        return FailureCause.TIMEOUT
+    if isinstance(exc, _CONNECTION_ERRORS):
+        return FailureCause.CONNECTION_ERROR
+    return None
+
+
+@dataclass(frozen=True)
+class ListingRetry:
+    """One failed attempt of a collection listing the plugin retries itself: a retry
+    follows after ``wait_seconds``, unless the plugin ``gave_up`` on this attempt."""
+    cause: FailureCause | None
+    http_status: int | None = None
+    wait_seconds: float | None = None
+    detail: str | None = None
+    gave_up: bool = False
+
+
+# Set by the core while it drives a listing; read by `report_listing_retry`. A context
+# variable, so concurrent listings on one plugin instance each reach their own run.
+_listing_retry_sink: ContextVar[Callable[[ListingRetry], None] | None] = ContextVar(
+    "shakedown_listing_retry_sink", default=None
+)
+
+
+@contextlib.contextmanager
+def listing_retries_to(sink: Callable[[ListingRetry], None]) -> Iterator[None]:
+    """Core side: hear every `report_listing_retry` made in this context."""
+    token = _listing_retry_sink.set(sink)
+    try:
+        yield
+    finally:
+        _listing_retry_sink.reset(token)
 
 
 def reusable_leftover(path: Path, expected: ManifestFile) -> bool:
@@ -121,13 +216,18 @@ class FetchResult:
       stream-only item whose metadata carries no restriction flag). The core records
       the item `unavailable` with `error` as the reason, keeps any archive copy, and
       does not count it as a failure.
+    - `cause` and `http_status` — what failed, when the fault was a request: use
+      `failure_cause(exc)` and `http_status(exc)`. The core records them as network
+      activity; leave them None for a fault that was not a request (a checksum
+      mismatch).
     """
     success: bool
-    bytes_downloaded: int
     error: str | None = None
     retriable: bool = False
     retry_after: float | None = None
     unavailable: bool = False
+    cause: FailureCause | None = None
+    http_status: int | None = None
 
 
 @dataclass
@@ -177,6 +277,27 @@ class SourcePlugin(ABC):
         prunes nothing. The listing must be complete or raise — a short list reads
         as items having left the collection.
         """
+
+    def report_listing_retry(
+        self,
+        *,
+        cause: FailureCause | None,
+        http_status: int | None = None,
+        wait_seconds: float | None = None,
+        detail: str | None = None,
+        gave_up: bool = False,
+    ) -> None:
+        """Tell the core about one failed attempt of the collection listing, the one
+        request a plugin may retry itself: its cause, the HTTP status when there was
+        one, and the seconds it waits before retrying. For the attempt that runs out
+        of retries, pass ``gave_up=True`` and no wait: the core counts it once, not
+        again from the exception the listing then raises. Call it from the thread
+        that iterates `list_items`. It never raises."""
+        sink = _listing_retry_sink.get()
+        if sink is None:
+            return
+        with contextlib.suppress(Exception):  # recording never fails a listing
+            sink(ListingRetry(cause, http_status, wait_seconds, detail, gave_up))
 
     @abstractmethod
     def lookup_item(self, identifier: str, timeout: float) -> ItemLookup:

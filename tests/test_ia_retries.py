@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 import requests
+import urllib3.exceptions
 from requests.adapters import HTTPAdapter
 
 import shakedown.sync as sync_module
@@ -171,3 +172,81 @@ def test_download_cut_off_mid_stream_is_retriable(archive, tmp_path: Path) -> No
 
     assert result.success is False
     assert result.retriable is True
+
+
+def test_search_retries_are_reported_to_the_core(archive) -> None:
+    """The listing is the one request the plugin retries itself; each retry reaches
+    the core with its cause and the wait urllib3 takes (§spec:network-activity)."""
+    from shakedown.plugins.base import FailureCause, ListingRetry, listing_retries_to
+
+    plugin = _plugin()
+    archive.route(
+        "/services/search/v1/scrape",
+        Reply(429, b"slow down", {"Retry-After": "3"}),
+        urllib3.exceptions.ProtocolError("Connection aborted"),
+        Reply(200, b'{"items": [{"identifier": "gd1"}], "count": 1, "total": 1}',
+              {"Content-Type": "application/json"}),
+    )
+    heard: list[ListingRetry] = []
+
+    with listing_retries_to(heard.append):
+        rows = list(plugin.list_items(COLLECTION))
+
+    assert [r.identifier for r in rows] == ["gd1"]
+    assert [(r.cause, r.http_status) for r in heard] == [
+        (FailureCause.RATE_LIMITED, 429),
+        (FailureCause.CONNECTION_ERROR, None),
+    ]
+    assert heard[0].wait_seconds == 3.0
+    assert archive.sleeps[0] == 3.0
+
+
+@pytest.mark.parametrize(
+    ("reply", "cause", "status"),
+    [
+        (Reply(503, b"busy"), "server_error", 503),
+        (Reply(429, b"slow", {"Retry-After": "5"}), "rate_limited", 429),
+        (Reply(403, b"Forbidden"), "refused", 403),
+    ],
+)
+def test_a_failed_download_names_its_cause(archive, tmp_path: Path, reply, cause, status) -> None:
+    plugin = _plugin()
+    archive.item("gd1", FILES)
+    archive.file("gd1", "d1t01.flac", reply)
+    desc = _search_then_describe(archive, plugin)
+    assert isinstance(desc, ItemDescriptor)
+
+    result = plugin.fetch(desc.identifier, desc.manifest.files, tmp_path / ".tmp-gd1")
+
+    assert (result.success, result.cause, result.http_status) == (False, cause, status)
+
+
+def test_a_download_cut_off_mid_stream_is_a_connection_error(archive, tmp_path: Path) -> None:
+    plugin = _plugin()
+    archive.item("gd1", FILES)
+    archive.file("gd1", "d1t01.flac", Reply(200, AUDIO[:3], {"Content-Length": "5"}))
+    desc = _search_then_describe(archive, plugin)
+    assert isinstance(desc, ItemDescriptor)
+
+    result = plugin.fetch(desc.identifier, desc.manifest.files, tmp_path / ".tmp-gd1")
+
+    assert result.cause == "connection_error"
+
+
+def test_a_search_that_runs_out_of_retries_reports_every_failed_attempt(archive) -> None:
+    """The attempt that exhausts the search's retries is a failure too, with no retry
+    or wait after it (§spec:network-activity)."""
+    from shakedown.plugins.base import FailureCause, ListingRetry, listing_retries_to
+
+    plugin = _plugin()
+    archive.route("/services/search/v1/scrape", Reply(503, b"busy"))
+    heard: list[ListingRetry] = []
+
+    with listing_retries_to(heard.append), pytest.raises(requests.exceptions.RetryError):
+        list(plugin.list_items(COLLECTION))
+
+    assert [(r.cause, r.http_status, r.gave_up) for r in heard] == (
+        [(FailureCause.SERVER_ERROR, 503, False)] * ia_plugin._SEARCH_RETRIES
+        + [(FailureCause.SERVER_ERROR, 503, True)]
+    )
+    assert heard[-1].wait_seconds is None

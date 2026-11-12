@@ -131,7 +131,7 @@ def test_finishing_sync_catches_up_every_entry_oldest_skip_first(
     assert _entries(config) == set()
     for source, collection in ((SRC, "b"), (SRC, "c"), (OTHER, "b")):
         run = _latest(config, source, collection)
-        assert run is not None and run.kind.value == "sync" and run.finished_at is not None
+        assert run is not None and run.kind.value == "catch_up" and run.finished_at is not None
     catch_up_lines = [r.getMessage() for r in caplog.records if "catch-up" in r.getMessage()]
     assert any("fake-src/b" in m and "2026-11-10T02:00:00" in m for m in catch_up_lines)
 

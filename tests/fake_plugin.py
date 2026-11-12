@@ -119,11 +119,9 @@ class FakePlugin(SourcePlugin):
         self.fetched_files.setdefault(identifier, []).extend(mf.name for mf in files)
         content = {f.name: f.content for f in self.items[identifier].files}
         dest_dir.mkdir(parents=True, exist_ok=True)
-        bytes_total = 0
         for mf in files:
             (dest_dir / mf.name).write_bytes(content[mf.name])
-            bytes_total += len(content[mf.name])
-        return FetchResult(success=True, bytes_downloaded=bytes_total)
+        return FetchResult(success=True)
 
     def verify(self, files: Sequence[ManifestFile], archive_path: Path) -> VerifyResult:
         missing = [f.name for f in files if not (archive_path / f.name).is_file()]
