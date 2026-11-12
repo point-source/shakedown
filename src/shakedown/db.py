@@ -6,7 +6,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+
+# The schema version that added `rescheduled_syncs`: a skipped sync records its entry
+# only into a database already at this version or later (§spec:rescheduled-syncs).
+RESCHEDULED_SINCE_VERSION = 9
+
+# How long any connection waits on another writer's SQLite lock before giving up.
+BUSY_TIMEOUT_MS = 5000
 
 _SCHEMA = [
     """
@@ -208,6 +215,21 @@ _TAG_SCHEMA = [
 ]
 _SCHEMA += _TAG_SCHEMA
 
+# Per collection whose sync was skipped because another run held the writer lock, the
+# time of its oldest skip (§spec:rescheduled-syncs). The primary key makes "one entry
+# per collection" a database invariant.
+_RESCHEDULE_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS rescheduled_syncs (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        since            TEXT NOT NULL,
+        PRIMARY KEY (source_name, collection_name)
+    )
+    """,
+]
+_SCHEMA += _RESCHEDULE_SCHEMA
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and lazily create) the state DB at db_path."""
@@ -218,12 +240,38 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # connections may contend for the single writer lock — including during the
     # WAL switch and migration below. Set the busy timeout FIRST so every later
     # statement waits instead of failing immediately with SQLITE_BUSY.
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     _migrate(conn)
     return conn
+
+
+def open_unmigrated(db_path: Path) -> sqlite3.Connection:
+    """Open an existing state DB as it is: no WAL switch, no migration, and never
+    created when missing (raises sqlite3.OperationalError instead). For a skipped
+    sync, which records its entry without the writer lock while a run of an older
+    release may still be writing (§spec:rescheduled-syncs)."""
+    conn = sqlite3.connect(
+        db_path.resolve().as_uri() + "?mode=rw", uri=True, isolation_level=None
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    return conn
+
+
+def connect_reader(db_path: Path) -> sqlite3.Connection:
+    """Open the state DB for a command that takes no writer lock (`status`, `item
+    show`, `sync --dry-run`, `verify` without `--reconform`, `validate`, serve's
+    `GET /status` and `/metrics`). Only writers holding the writer lock
+    migrate: a reader that migrated under a run of an older release would make that
+    run refuse the database the next time it opens it. Readers therefore tolerate an
+    older schema. A missing database is created at the current schema: no run has
+    written one yet."""
+    if not db_path.exists():
+        return connect(db_path)
+    return open_unmigrated(db_path)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -357,6 +405,13 @@ def _migrate_to_8(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE items SET change_signal = NULL")
 
 
+def _migrate_to_9(conn: sqlite3.Connection) -> None:
+    """v8 → v9: add the rescheduled-sync record (§spec:state, §spec:rescheduled-syncs).
+    Additive: it starts empty, and nothing else changes."""
+    for stmt in _RESCHEDULE_SCHEMA:
+        conn.execute(stmt)
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -366,6 +421,7 @@ _MIGRATIONS = {
     6: _migrate_to_6,
     7: _migrate_to_7,
     8: _migrate_to_8,
+    9: _migrate_to_9,
 }
 
 

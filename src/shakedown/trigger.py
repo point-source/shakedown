@@ -54,6 +54,12 @@ def _announce(message: dict[str, Any]) -> None:
             os.close(fd)
 
 
+def launched_by_serve() -> bool:
+    """Whether `serve` started this run. Ask before the first announce, which
+    consumes the variable."""
+    return READY_FD_ENV in os.environ
+
+
 def announce_busy() -> None:
     _announce({"state": "busy"})
 
@@ -178,8 +184,12 @@ def close_abandoned(state_db: Path, runs: list[dict[str, Any]], returncode: int)
     A run that ends normally closes its own records, so this changes nothing then. A
     killed run cannot, and its collections' `status` would show it running forever
     (§spec:failure-behavior: the run record always closes). Exact ids, never "the
-    open run of this collection": the next run may already hold the lock.
+    open run of this collection": the next run may already hold the lock. A run that
+    announced no records (a verify without `--reconform`) leaves nothing to close, and
+    the database is not opened: that run held no lock, so nothing may migrate it.
     """
+    if not runs:
+        return
     from shakedown.db import connect
     from shakedown.state import OperationOutcomeRepo, RunRepo
 

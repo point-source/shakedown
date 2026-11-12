@@ -80,9 +80,10 @@ def source_budgets(
     groups: dict[str, list[SourceConfig]] = {}
     group_of: dict[str, str] = {}
     for source, plugin in work:
-        if source.name in group_of:
-            continue
-        key = f"host:{plugin.upstream_host}" if plugin.upstream_host else f"source:{source.name}"
+        # Every block counts, including a later one sharing an earlier block's name.
+        key = group_of.get(source.name) or (
+            f"host:{plugin.upstream_host}" if plugin.upstream_host else f"source:{source.name}"
+        )
         groups.setdefault(key, []).append(source)
         group_of[source.name] = key
     shared = {

@@ -1,5 +1,5 @@
-"""DB-backed repositories for items, runs, drift, library placement, pending handoffs, and
-tag-filling records."""
+"""DB-backed repositories for items, runs, drift, library placement, pending handoffs,
+tag-filling records, and rescheduled syncs."""
 from __future__ import annotations
 
 import json
@@ -820,6 +820,65 @@ class PendingHandoffRepo:
         """Forget the collection's whole list (its handoff was removed from config)."""
         self.conn.execute(
             "DELETE FROM handoff_pending WHERE source_name=? AND collection_name=?",
+            (source, collection),
+        )
+
+
+class RescheduledRepo:
+    """Per collection whose sync was skipped because another run held the writer lock,
+    the time of its oldest skip (§spec:rescheduled-syncs): shown in `status` until a
+    sync finishes the collection. A reader of an older schema, which has no record,
+    sees no entries."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def _has_table(self) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rescheduled_syncs'"
+        ).fetchone() is not None
+
+    def record(self, source: str, collection: str, at: datetime) -> datetime:
+        """Record a skip and return the collection's oldest skip time: an entry already
+        there keeps its time."""
+        self.conn.execute(
+            """
+            INSERT INTO rescheduled_syncs (source_name, collection_name, since)
+            VALUES (?, ?, ?)
+            ON CONFLICT (source_name, collection_name) DO NOTHING
+            """,
+            (source, collection, _iso(at)),
+        )
+        since = self.get(source, collection)
+        assert since is not None  # inserted above or already there
+        return since
+
+    def get(self, source: str, collection: str) -> datetime | None:
+        if not self._has_table():
+            return None
+        row = self.conn.execute(
+            "SELECT since FROM rescheduled_syncs WHERE source_name=? AND collection_name=?",
+            (source, collection),
+        ).fetchone()
+        return datetime.fromisoformat(row["since"]) if row else None
+
+    def list(self) -> list[tuple[str, str, datetime]]:
+        """Every entry as (source, collection, oldest skip), oldest skip first: the
+        order a finishing sync catches them up in. Read only by a lock holder, whose
+        database is migrated."""
+        rows = self.conn.execute(
+            "SELECT source_name, collection_name, since FROM rescheduled_syncs"
+            " ORDER BY since, source_name, collection_name"
+        ).fetchall()
+        return [
+            (row["source_name"], row["collection_name"], datetime.fromisoformat(row["since"]))
+            for row in rows
+        ]
+
+    def clear(self, source: str, collection: str) -> None:
+        """Forget the collection's entry: a sync finished it."""
+        self.conn.execute(
+            "DELETE FROM rescheduled_syncs WHERE source_name=? AND collection_name=?",
             (source, collection),
         )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from shakedown.state import (
     OperationOutcomeRepo,
     PendingHandoffRepo,
     PlacementRepo,
+    RescheduledRepo,
     RunRepo,
     TagRecord,
     TagRepo,
@@ -747,3 +749,73 @@ def test_v7_db_reselects_every_show_once(tmp_path: Path) -> None:
     assert item.change_signal is None
     assert item.recorded_manifest is not None
     assert [(f.name, f.library) for f in item.recorded_manifest.files] == [("raw.zip", True)]
+
+
+def _tables(conn: sqlite3.Connection) -> set[str]:
+    return {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+
+def test_fresh_db_has_rescheduled_syncs(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "s.db")
+    assert "rescheduled_syncs" in _tables(conn)
+    assert RescheduledRepo(conn).get("s", "c") is None
+
+
+def test_v8_db_gains_empty_rescheduled_syncs(tmp_path: Path) -> None:
+    """v9 adds the rescheduled-sync record as an additive migration
+    (§spec:state, §spec:rescheduled-syncs): nothing else changes."""
+    db_path = tmp_path / "v8.db"
+    conn = connect(db_path)
+    ItemRepo(conn).upsert(_make_item())
+    conn.execute("DROP TABLE rescheduled_syncs")
+    conn.execute("UPDATE schema_version SET version = 8")
+    conn.close()
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+    assert SCHEMA_VERSION == 9
+    assert "rescheduled_syncs" in _tables(conn)
+    assert conn.execute("SELECT COUNT(*) AS n FROM rescheduled_syncs").fetchone()["n"] == 0
+    item = ItemRepo(conn).get("s", "c", "x")
+    assert item is not None
+    assert item.change_signal == "2024-05-01T00:00:00Z|12345"
+
+
+def test_rescheduled_keeps_the_oldest_skip_once_per_collection(tmp_path: Path) -> None:
+    """One entry per collection; a second skip neither adds an entry nor moves the
+    time (§spec:rescheduled-syncs)."""
+    repo = RescheduledRepo(connect(tmp_path / "s.db"))
+    first = datetime(2026, 11, 10, 3, 0, 0)
+    assert repo.record("s", "b", first) == first
+    assert repo.record("s", "b", datetime(2026, 11, 11, 3, 0, 0)) == first
+    assert repo.get("s", "b") == first
+    rows = repo.conn.execute("SELECT * FROM rescheduled_syncs").fetchall()
+    assert len(rows) == 1
+
+
+def test_rescheduled_clear_removes_only_its_collection(tmp_path: Path) -> None:
+    repo = RescheduledRepo(connect(tmp_path / "s.db"))
+    repo.record("s", "b", datetime(2026, 11, 10, 3, 0, 0))
+    repo.record("s", "c", datetime(2026, 11, 10, 4, 0, 0))
+    repo.record("t", "b", datetime(2026, 11, 10, 5, 0, 0))
+    repo.clear("s", "b")
+    assert repo.get("s", "b") is None
+    assert repo.get("s", "c") == datetime(2026, 11, 10, 4, 0, 0)
+    assert repo.get("t", "b") == datetime(2026, 11, 10, 5, 0, 0)
+
+
+def test_rescheduled_list_is_oldest_skip_first(tmp_path: Path) -> None:
+    """The catch-up order (§spec:rescheduled-syncs step 4)."""
+    repo = RescheduledRepo(connect(tmp_path / "s.db"))
+    assert repo.list() == []
+    repo.record("s", "c", datetime(2026, 11, 10, 4, 0, 0))
+    repo.record("t", "b", datetime(2026, 11, 10, 2, 0, 0))
+    repo.record("s", "b", datetime(2026, 11, 10, 3, 0, 0))
+    assert repo.list() == [
+        ("t", "b", datetime(2026, 11, 10, 2, 0, 0)),
+        ("s", "b", datetime(2026, 11, 10, 3, 0, 0)),
+        ("s", "c", datetime(2026, 11, 10, 4, 0, 0)),
+    ]

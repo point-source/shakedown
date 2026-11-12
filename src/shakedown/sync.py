@@ -21,8 +21,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from shakedown.config import CollectionConfig, Config, SourceConfig
-from shakedown.db import connect, transaction
+from shakedown.config import CollectionConfig, Config, ConfigError, SourceConfig
+from shakedown.config import load as load_config
+from shakedown.db import connect, connect_reader, transaction
 from shakedown.discovery import (
     ItemDescriptor,
     ItemDetails,
@@ -33,7 +34,7 @@ from shakedown.discovery import (
     source_budgets,
     stream_items,
 )
-from shakedown.filesystem import is_within
+from shakedown.filesystem import FilesystemError, ensure_hardlinkable, is_within
 from shakedown.lock import run_exclusive
 from shakedown.models import (
     Item,
@@ -60,6 +61,7 @@ from shakedown.placement import (
 )
 from shakedown.plugins import registry
 from shakedown.plugins.base import FetchResult, ListedItem, SourcePlugin
+from shakedown.reschedule import record_skipped
 from shakedown.staging import (
     METADATA_SIDECAR,
     manifest_reserves_sidecar_name,
@@ -69,6 +71,7 @@ from shakedown.state import (
     ItemRepo,
     OperationOutcomeRepo,
     PendingHandoffRepo,
+    RescheduledRepo,
     RunRepo,
     TagRecord,
     TagRepo,
@@ -83,7 +86,7 @@ from shakedown.tagging import (
     recover_interrupted_tagging,
     tag_failure,
 )
-from shakedown.trigger import announce_started
+from shakedown.trigger import announce_started, launched_by_serve
 
 log = logging.getLogger(__name__)
 
@@ -200,6 +203,7 @@ def run_sync(
     collection_filter: str | None = None,
     dry_run: bool = False,
     refresh_metadata: bool = False,
+    config_path: Path | None = None,
 ) -> int:
     """Top-level sync entrypoint. Returns process exit code.
 
@@ -213,32 +217,129 @@ def run_sync(
     media (§spec:metadata-preservation).
 
     Every run except a dry run holds the writer lock (`shakedown.lock`): a second
-    concurrent writer exits non-zero instead of racing this one.
+    concurrent writer exits non-zero instead of racing this one. A refused sync
+    scoped with ``collection_filter`` — from the CLI or the scheduler, not `serve`,
+    and not ``refresh_metadata`` — is also recorded as rescheduled
+    (§spec:rescheduled-syncs).
+
+    When its own work is done, a sync that holds the lock — except
+    ``refresh_metadata`` — catches up the rescheduled collections, still holding it
+    (`_catch_up`), re-reading the config from ``config_path``. Without a path (callers
+    that built their config in code) there is no file to re-read and no catch-up. The
+    run exits non-zero when its own work or any catch-up failed.
     """
     if dry_run:
-        return _run_sync(config, source_filter, collection_filter, True, refresh_metadata)
-    return run_exclusive(
-        config,
-        lambda: _run_sync(config, source_filter, collection_filter, False, refresh_metadata),
+        return _run_sync(
+            config, _scope(config, source_filter, collection_filter), True, refresh_metadata
+        )
+    # Asked now: refusing the run tells serve it was busy, which consumes the variable.
+    reschedule = (
+        collection_filter is not None and not refresh_metadata and not launched_by_serve()
     )
+
+    def record() -> None:
+        record_skipped(config, [
+            (source.name, collection.name)
+            for source, collection in _scope(config, source_filter, collection_filter)
+        ])
+
+    def own_work_then_catch_up() -> int:
+        own = _run_sync(
+            config, _scope(config, source_filter, collection_filter), False, refresh_metadata
+        )
+        if refresh_metadata or config_path is None:
+            return own
+        caught_up = _catch_up(config_path)
+        return 0 if own == 0 and caught_up == 0 else 1
+
+    return run_exclusive(
+        config, own_work_then_catch_up, on_busy=record if reschedule else None
+    )
+
+
+def _catch_up(config_path: Path) -> int:
+    """Catch up the rescheduled collections once a lock-holding sync has finished its
+    own work (§spec:rescheduled-syncs steps 2-5). Returns 1 when a catch-up failed or
+    could not run.
+
+    The config is read afresh: the finishing run may have loaded its own days ago, and
+    a collection added since must not be dropped as unknown. Only entries outstanding
+    now are taken, so the run ends even while skips keep arriving; later ones wait for
+    the next sync to finish. The rest sync as one multi-collection sync on the ordinary
+    bounded path, submitted oldest skip first so they start in that order. With an
+    invalid config nothing runs and every entry is kept.
+    """
+    try:
+        config = load_config(config_path)
+        ensure_hardlinkable(config.archive_root, config.library_root)
+    except (ConfigError, FilesystemError) as e:
+        log.error(
+            "catch-up not run: %s; rescheduled syncs kept for the next sync to finish", e
+        )
+        return 1
+    configured = {(s.name, c.name): (s, c) for s, c in _scope(config, None, None)}
+    due: list[tuple[SourceConfig, CollectionConfig, datetime]] = []
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        rescheduled = RescheduledRepo(conn)
+        for source_name, collection_name, since in rescheduled.list():
+            pair = configured.get((source_name, collection_name))
+            if pair is None:
+                rescheduled.clear(source_name, collection_name)
+                log.warning(
+                    "%s/%s: rescheduled sync dropped: no longer in the config",
+                    source_name, collection_name,
+                )
+                continue
+            due.append((*pair, since))
+    if not due:
+        return 0
+    log.info(
+        "catching up %d rescheduled collection(s), oldest skip first: %s",
+        len(due),
+        ", ".join(f"{s.name}/{c.name} (skipped {since.isoformat()})" for s, c, since in due),
+    )
+    return _run_sync(
+        config,
+        [(s, c) for s, c, _since in due],
+        False,
+        False,
+        catch_up={(s.name, c.name): since for s, c, since in due},
+    )
+
+
+def _scope(
+    config: Config, source_filter: str | None, collection_filter: str | None
+) -> list[tuple[SourceConfig, CollectionConfig]]:
+    """The (source, collection) pairs a sync with these filters covers."""
+    return [
+        (source, collection)
+        for source in config.sources
+        if not source_filter or source.name == source_filter
+        for collection in source.collections
+        if not collection_filter or collection.name == collection_filter
+    ]
 
 
 def _run_sync(
     config: Config,
-    source_filter: str | None,
-    collection_filter: str | None,
+    scope: list[tuple[SourceConfig, CollectionConfig]],
     dry_run: bool,
     refresh_metadata: bool,
+    *,
+    catch_up: dict[tuple[str, str], datetime] | None = None,
 ) -> int:
+    """Sync ``scope`` in bounded parallel, starting collections in its order. With
+    ``catch_up`` — each collection's oldest skip — the collections are catch-ups: their
+    log lines say so, and each clears its rescheduled entry when it ends, whatever its
+    result (§spec:rescheduled-syncs Clearing). A killed run clears nothing."""
+    # One plugin per source block, not per name: two blocks may share a name with
+    # different collections and credentials.
+    plugins: dict[int, SourcePlugin] = {}
     work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
-    for source in config.sources:
-        if source_filter and source.name != source_filter:
-            continue
-        plugin = registry.for_source(source)
-        for collection in source.collections:
-            if collection_filter and collection.name != collection_filter:
-                continue
-            work.append((source, collection, plugin))
+    for source, collection in scope:
+        if id(source) not in plugins:
+            plugins[id(source)] = registry.for_source(source)
+        work.append((source, collection, plugins[id(source)]))
 
     if not work:
         if not dry_run:
@@ -249,7 +350,8 @@ def _run_sync(
     # migration need brief exclusive access; doing it here keeps concurrent
     # collection workers from racing on it (each then opens an already-WAL,
     # already-migrated DB). SPEC §spec:sync-workflow.
-    connect(config.state_db).close()  # type: ignore[arg-type]
+    # A dry run takes no writer lock, so it reads the database without migrating it.
+    (connect_reader if dry_run else connect)(config.state_db).close()  # type: ignore[arg-type]
 
     budgets = source_budgets(config, [(s, p) for s, _, p in work])
 
@@ -269,25 +371,33 @@ def _run_sync(
                 _sync_collection, config, source, collection, plugin,
                 dry_run=dry_run, budget=budgets[source.name],
                 opened=opened.get((source.name, collection.name)),
+                catch_up_note=_catch_up_note(catch_up, source, collection),
             ): (source, collection)
             for source, collection, plugin in work
         }
         for fut in as_completed(futures):
             source, collection = futures[fut]
+            note = _catch_up_note(catch_up, source, collection)
             try:
                 stats = fut.result()
             except Exception:
-                log.exception("sync failed for %s/%s", source.name, collection.name)
+                log.exception("sync failed for %s/%s%s", source.name, collection.name, note)
                 overall_failed += 1
                 continue
+            finally:
+                if catch_up is not None:
+                    _clear_rescheduled(config, source, collection)
             if stats.stale:
-                log.warning("%s/%s: STALE (source enumeration failed)", source.name, collection.name)
+                log.warning(
+                    "%s/%s: STALE (source enumeration failed)%s",
+                    source.name, collection.name, note,
+                )
             else:
                 log.info(
-                    "%s/%s: discovered=%d new=%d updated=%d failed=%d separated=%d bytes=%d",
+                    "%s/%s: discovered=%d new=%d updated=%d failed=%d separated=%d bytes=%d%s",
                     source.name, collection.name,
                     stats.discovered, stats.new, stats.updated, stats.failed,
-                    stats.separated, stats.bytes_downloaded,
+                    stats.separated, stats.bytes_downloaded, note,
                 )
             # A separation is reported but never fails the run: no recording was lost.
             log_separations(source.name, collection.name, stats.separated)
@@ -296,13 +406,31 @@ def _run_sync(
     return 0 if overall_failed == 0 else 1
 
 
+def _catch_up_note(
+    catch_up: dict[tuple[str, str], datetime] | None,
+    source: SourceConfig,
+    collection: CollectionConfig,
+) -> str:
+    """The suffix that marks a catch-up's log lines and names its skip time."""
+    if catch_up is None:
+        return ""
+    return f" (catch-up of the sync skipped at {catch_up[(source.name, collection.name)].isoformat()})"
+
+
+def _clear_rescheduled(config: Config, source: SourceConfig, collection: CollectionConfig) -> None:
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        RescheduledRepo(conn).clear(source.name, collection.name)
+
+
 def _open_runs(
     config: Config, work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]]
 ) -> dict[tuple[str, str], tuple[Run, OperationOutcome]]:
     """Open every collection's run record and outcome before any collection starts,
     then announce them to `serve` if it started this run (§spec:api-sync-runs): serve
     answers a trigger with the run ids, so they must exist before the first collection
-    begins. Each collection resets its start time when it actually begins."""
+    begins. Each collection resets its start time when it actually begins. Only the
+    first announce reaches serve, so a catch-up's runs, opened after the run's own,
+    are not in its answer; they show in `GET /status` like any run."""
     started = datetime.now()
     opened: dict[tuple[str, str], tuple[Run, OperationOutcome]] = {}
     with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
@@ -542,6 +670,7 @@ def _sync_collection(
     dry_run: bool,
     budget: SourceBudget,
     opened: tuple[Run, OperationOutcome] | None = None,
+    catch_up_note: str = "",
 ) -> CollectionSyncStats:
     """Sync one (source, collection) end-to-end.
 
@@ -553,7 +682,9 @@ def _sync_collection(
     successfully; a failed enumeration marks the collection stale and prunes nothing.
     """
     started = datetime.now()
-    conn = connect(config.state_db)  # type: ignore[arg-type]
+    if catch_up_note:
+        log.info("[%s/%s] starting%s", source.name, collection.name, catch_up_note)
+    conn = (connect_reader if dry_run else connect)(config.state_db)  # type: ignore[arg-type]
     items = ItemRepo(conn)
     runs = RunRepo(conn)
     outcomes = OperationOutcomeRepo(conn)
@@ -839,6 +970,9 @@ def _sync_collection_phases(
         _finish_run(runs, run, stats, finished)
     if outcome is not None:
         _finish_outcome(outcomes, outcome, stats, collection, finished, RunKind.SYNC)
+    # The collection is finished with a complete enumeration, so a skip recorded for
+    # it — before or during this run — is done (§spec:rescheduled-syncs).
+    RescheduledRepo(conn).clear(source.name, collection.name)
 
     return stats
 

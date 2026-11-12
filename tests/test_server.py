@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -11,7 +13,9 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+from shakedown.db import connect
 from shakedown.server import TOKEN_ENV, build_app
+from shakedown.state import RescheduledRepo
 from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
@@ -55,6 +59,9 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         identifier="gd-x", files=[FakeFile(name="x.flac", content=b"audio")]
     )
     assert run_sync(config) == 0
+    assert config.state_db is not None
+    with closing(connect(config.state_db)) as conn:
+        RescheduledRepo(conn).record("fake-src", "coll1", datetime(2026, 11, 10, 3, 0, 0))
 
     app = _child_app(config, items={"gd-x": {"x.flac": "audio"}})
     async with httpx.AsyncClient(
@@ -75,6 +82,8 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         # Same summary as `status --json` (§spec:library-ownership, §spec:library-cleanup).
         assert body[0]["separations"] == []
         assert body[0]["unplaced_files"] == []
+        # A rescheduled sync (§spec:rescheduled-syncs).
+        assert body[0]["rescheduled"] == {"since": "2026-11-10T03:00:00"}
 
         # metrics: open, prometheus text
         r = await client.get("/metrics")
@@ -249,14 +258,14 @@ async def test_status_and_metrics_read_sizes_from_the_db(
 
     monkeypatch.setattr(ItemRepo, "list_for_collection", no_full_rows)
     opened: list[sqlite3.Connection] = []
-    real_connect = server_module.connect
+    real_connect = server_module.connect_reader
 
     def tracking_connect(*args, **kwargs):
         conn = real_connect(*args, **kwargs)
         opened.append(conn)
         return conn
 
-    monkeypatch.setattr(server_module, "connect", tracking_connect)
+    monkeypatch.setattr(server_module, "connect_reader", tracking_connect)
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app(config)),
@@ -274,6 +283,42 @@ async def test_status_and_metrics_read_sizes_from_the_db(
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_status_and_metrics_read_an_older_schema_without_migrating_it(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """serve never migrates the database: GET /status and /metrics while the previous
+    release still writes leave it at its version, with no rescheduled entries
+    (Q-1-1, operator 2026-11-12)."""
+    import sqlite3
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    FakePlugin.items["gd-x"] = FakeItem(
+        identifier="gd-x", files=[FakeFile(name="x.flac", content=b"audio")]
+    )
+    assert run_sync(config) == 0
+    assert config.state_db is not None
+    with closing(sqlite3.connect(config.state_db)) as conn:
+        conn.execute("DROP TABLE rescheduled_syncs")
+        conn.execute("UPDATE schema_version SET version = 8")
+        conn.commit()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(config)), base_url="http://testserver"
+    ) as client:
+        r = await client.get("/status")
+        assert r.status_code == 200
+        assert r.json()[0]["counts"]["complete"] == 1
+        assert r.json()[0]["rescheduled"] is None
+        r = await client.get("/metrics")
+        assert r.status_code == 200
+        assert 'shakedown_bytes_on_disk{collection="coll1",source="fake-src"} 5.0' in r.text
+
+    with closing(sqlite3.connect(config.state_db)) as conn:
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 8
 
 
 @pytest.mark.asyncio
@@ -380,6 +425,42 @@ async def test_sync_starts_a_fresh_run_on_the_config_as_edited(
 
 
 @pytest.mark.asyncio
+async def test_triggered_sync_catches_up_rescheduled_collections_after_its_own(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """A triggered sync catches up like any sync (§spec:api-sync-runs,
+    §spec:rescheduled-syncs): the 202 lists only the requested collection's run; the
+    catch-up shows in /status as that collection's latest run, its entry gone."""
+    from shakedown.config import CollectionConfig
+
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    config.sources[0].collections.append(CollectionConfig(name="coll2", query="*"))
+    assert config.state_db is not None
+    with closing(connect(config.state_db)) as conn:
+        RescheduledRepo(conn).record("fake-src", "coll2", datetime(2026, 11, 10, 3, 0, 0))
+    app = _child_app(config, items={"gd-x": {"x.flac": "audio"}})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.post("/sync", params={"collection": "coll1"}, headers=AUTH)
+        assert r.status_code == 202
+        run_ids = r.json()["run_ids"]
+        assert len(run_ids) == 1
+        await _finish(app)
+        status = {c["collection"]: c for c in (await client.get("/status")).json()}
+        metrics = (await client.get("/metrics")).text
+    assert status["coll1"]["last_run"]["run_id"] == run_ids[0]
+    caught_up = status["coll2"]["last_run"]
+    assert caught_up["run_id"] not in run_ids
+    assert caught_up["kind"] == "sync" and caught_up["finished_at"] is not None
+    assert caught_up["items_new"] == 1
+    assert status["coll1"]["rescheduled"] is None and status["coll2"]["rescheduled"] is None
+    assert 'shakedown_sync_runs_total{result="ok"} 1.0' in metrics
+
+
+@pytest.mark.asyncio
 async def test_sync_while_a_run_holds_the_lock_is_refused_and_nothing_is_queued(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
@@ -432,16 +513,23 @@ async def test_sync_is_refused_while_a_cli_run_holds_the_lock(
         )],
     )
     app = build_app(write_config(archive.parent / "cfg.yaml", config))
+    assert config.state_db is not None
+    connect(config.state_db).close()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         with writer_lock(config):
             r = await client.post("/sync", headers=AUTH)
             assert (r.status_code, r.json()["detail"]) == (409, BUSY)
+            # A refused API sync is not rescheduled (§spec:rescheduled-syncs).
+            r = await client.post("/sync", params={"collection": "gd"}, headers=AUTH)
+            assert (r.status_code, r.json()["detail"]) == (409, BUSY)
             r = await client.post(
                 "/verify", params={"deep": True, "reconform": True}, headers=AUTH
             )
             assert (r.status_code, r.json()["detail"]) == (409, BUSY)
+    with closing(connect(config.state_db)) as conn:
+        assert RescheduledRepo(conn).get("ia", "gd") is None
 
 
 @pytest.mark.asyncio

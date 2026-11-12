@@ -51,13 +51,20 @@ def writer_lock(config: Config) -> Iterator[None]:
         os.close(fd)
 
 
-def run_exclusive(config: Config, command: Callable[[], int]) -> int:
+def run_exclusive(
+    config: Config,
+    command: Callable[[], int],
+    *,
+    on_busy: Callable[[], None] | None = None,
+) -> int:
     """Run a writing command under the writer lock; return 1 with a logged error
-    when another run holds it."""
+    when another run holds it, after calling ``on_busy`` if given."""
     try:
         with writer_lock(config):
             return command()
     except LockHeld as e:
         log.error("%s", e)
         announce_busy()
+        if on_busy is not None:
+            on_busy()
         return 1
