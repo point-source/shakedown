@@ -26,6 +26,21 @@ from shakedown.state import (
 REMOVED_UPSTREAM_LINE = "  removed upstream: {shows} (kept; dates in status --json)"
 
 
+def library_figures(items: ItemRepo, source_name: str, collection_name: str) -> dict[str, Any]:
+    """What a collection holds: show counts by status, restricted shows, and archive
+    bytes. `status` and the dashboard's library view both report these, so both
+    read them here (§spec:library-stats "Counts and bytes that match `status`")."""
+    counts = items.count_by_status(source_name, collection_name)
+    return {
+        "counts": {s.value: counts.get(s, 0) for s in ItemStatus},
+        "restricted": [
+            {"identifier": identifier, "reason": reason}
+            for identifier, reason in items.list_restricted(source_name, collection_name)
+        ],
+        "bytes_on_disk": items.archived_bytes(source_name, collection_name),
+    }
+
+
 def _collection_summary(
     config: Config,
     source_name: str,
@@ -35,7 +50,7 @@ def _collection_summary(
     drift: DriftRepo,
     outcomes: OperationOutcomeRepo,
 ) -> dict[str, Any]:
-    counts = items.count_by_status(source_name, collection_name)
+    figures = library_figures(items, source_name, collection_name)
     last = runs.latest(source_name, collection_name)
     # Only a sync (or a catch-up sync) lists the source, so only a sync can leave the
     # collection stale or clear it; a later single-show run does neither
@@ -44,12 +59,6 @@ def _collection_summary(
         source_name, collection_name, kind=(RunKind.SYNC, RunKind.CATCH_UP)
     )
     recovery = outcomes.latest_actionable(source_name, collection_name)
-    bytes_on_disk = items.archived_bytes(source_name, collection_name)
-
-    restricted = [
-        {"identifier": identifier, "reason": reason}
-        for identifier, reason in items.list_restricted(source_name, collection_name)
-    ]
     placements = PlacementRepo(items.conn)
     library_dir = config.library_root / source_name / collection_name
     rescheduled = RescheduledRepo(items.conn).get(source_name, collection_name)
@@ -57,12 +66,12 @@ def _collection_summary(
     return {
         "source": source_name,
         "collection": collection_name,
-        "counts": {s.value: counts.get(s, 0) for s in ItemStatus},
-        "bytes_on_disk": bytes_on_disk,
+        "counts": figures["counts"],
+        "bytes_on_disk": figures["bytes_on_disk"],
         "drift_files": drift.count(source_name, collection_name),
         "last_run": _summarize_run(last, _end_reason(items.conn, last)) if last else None,
         "recovery": _summarize_recovery(recovery) if recovery else None,
-        "restricted": restricted,
+        "restricted": figures["restricted"],
         # Complete shows with no copy a common player reads (§spec:quality-selection).
         "not_playable": [
             {"identifier": identifier, "reason": reason}

@@ -38,6 +38,7 @@ from shakedown.dashboard import (
 )
 from shakedown.dashboard_activity import activity_answer
 from shakedown.dashboard_health import health_answer
+from shakedown.dashboard_library import library_answer
 from shakedown.dashboard_runs import MAX_DAYS, runs_answer
 from shakedown.db import connect_reader
 from shakedown.state import DriftRepo, ItemRepo, OperationOutcomeRepo, RunRepo
@@ -175,6 +176,7 @@ def build_app(
     # The dashboard's read views (§spec:dashboard).
     register_api(app, "/api/health", VIEW_TTL_S, health_answer)
     register_api(app, "/api/activity", LIVE_TTL_S, activity_answer)
+    register_api(app, "/api/library", VIEW_TTL_S, library_answer)
 
     @app.get("/api/runs")
     def runs(days: int = Query(MAX_DAYS, ge=1, le=MAX_DAYS)) -> dict[str, Any]:
