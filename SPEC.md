@@ -2360,7 +2360,7 @@ last-good-sync age keeps growing day by day.
 
 ## Library, database, and disk §spec:library-stats
 
-*Status: not started*
+*Status: complete*
 
 The dashboard shows, per collection and in total, what the mirror holds,
 how much disk it uses and has left, how it grew over 30 days, what was
