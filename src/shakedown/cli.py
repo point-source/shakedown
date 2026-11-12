@@ -8,8 +8,9 @@ import click
 
 from shakedown import __version__
 from shakedown import config as config_module
+from shakedown.activity import note_started_by_serve
 from shakedown.filesystem import FilesystemError, ensure_hardlinkable
-from shakedown.trigger import announce_failed
+from shakedown.trigger import announce_failed, launched_by_serve
 
 DEFAULT_CONFIG_PATH = Path("/config/shakedown.yaml")
 
@@ -68,6 +69,8 @@ def _require_scope(
 def main(ctx: click.Context, config_path: Path, verbose: bool) -> None:
     """Durable mirroring of public music archives onto a local NAS."""
     _setup_logging(verbose)
+    # Before any command can announce to serve, which consumes the evidence.
+    note_started_by_serve(launched_by_serve())
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path
 
