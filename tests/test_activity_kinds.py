@@ -34,6 +34,13 @@ def _entries(config, kind: str) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def _latest_outcome_id(config, operation: str) -> int:
+    with closing(sqlite3.connect(config.state_db)) as conn:
+        return conn.execute(
+            "SELECT MAX(id) FROM operation_outcomes WHERE operation=?", (operation,)
+        ).fetchone()[0]
+
+
 def _values(row: sqlite3.Row, columns: tuple[str, ...]) -> tuple:
     return tuple(row[c] for c in columns)
 
@@ -75,6 +82,8 @@ def test_a_restage_reports_the_shows_it_stages_and_lists_nothing(mirrored) -> No
     assert _values(entry, FETCHING) == (2, 2, 0)
     assert (entry["bytes_downloaded"], entry["bytes_to_fetch"]) == (None, None)
     assert entry["speed_bytes_per_second"] is None
+    # Its outcome holds its errors for the run history (§spec:run-history).
+    assert entry["outcome_id"] == _latest_outcome_id(mirrored, "restage")
 
 
 def test_a_verify_reports_the_shows_it_checks(mirrored) -> None:
@@ -82,6 +91,7 @@ def test_a_verify_reports_the_shows_it_checks(mirrored) -> None:
     [entry] = _entries(mirrored, "verify")
     assert entry["run_id"] is None
     assert (entry["state"], entry["result"], entry["phase"]) == ("ended", "completed", "verifying")
+    assert entry["outcome_id"] is None  # a verify records no outcome
     assert _values(entry, LISTING) == (None, None, None)
     assert _values(entry, FETCHING) == (2, 2, 0)
     assert entry["bytes_downloaded"] is None
@@ -121,6 +131,7 @@ def test_a_reconcile_reports_its_listing_and_fetches_nothing(mirrored) -> None:
     assert _values(entry, LISTING) == (2, 2, 2)
     assert _values(entry, FETCHING) == (None, None, None)
     assert entry["bytes_downloaded"] is None
+    assert entry["outcome_id"] == _latest_outcome_id(mirrored, "reconcile")
 
 
 def test_a_plain_verify_on_a_pre_v10_database_records_nothing(mirrored) -> None:

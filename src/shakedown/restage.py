@@ -100,6 +100,8 @@ def _restage_collection(
         phase="plan",
         safe_next_action="fix storage/path/layout and rerun restage",
     )
+    # The run history shows this outcome's errors (§spec:run-history).
+    progress.outcome_id = outcome.id
     try:
         # A tag write a crash cut short is undone before anything is linked
         # (§spec:tag-filling).

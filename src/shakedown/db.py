@@ -248,6 +248,7 @@ _ACTIVITY_SCHEMA = [
         kind                    TEXT NOT NULL,
         started_by_serve        INTEGER NOT NULL DEFAULT 0,
         run_id                  INTEGER,
+        outcome_id              INTEGER,
         started_at              TEXT NOT NULL,
         finished_at             TEXT,
         last_heartbeat_at       TEXT NOT NULL,
@@ -467,7 +468,8 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_10(conn: sqlite3.Connection) -> None:
     """v9 → v10, the one migration of the dashboard increment (§spec:state): add the
-    activity entries (§spec:run-activity). Additive: it starts empty, and nothing else
+    activity entries (§spec:run-activity), each naming the outcome of a run with no run
+    record (§spec:run-history). Additive: it starts empty, and nothing else
     changes. Later parts of the increment (network activity, growth snapshots) add
     their tables here too — the increment moves the schema forward exactly once."""
     for stmt in _ACTIVITY_SCHEMA:

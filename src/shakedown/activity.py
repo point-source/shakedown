@@ -91,6 +91,9 @@ class Snapshot:
     speed_bytes_per_second: float | None = None
     eta_seconds: int | None = None
     run_counts: RunCounts | None = None
+    # The operation outcome of a run with no run record (restage, reconcile), whose
+    # errors the run history shows (§spec:run-history); None until it opens one.
+    outcome_id: int | None = None
 
 
 _COUNTER_COLUMNS = (
@@ -205,11 +208,13 @@ class ActivityRepo:
             UPDATE run_activity SET
                 {", ".join(f"{column}=?" for column in _PROGRESS_COLUMNS)},
                 current_items=?, last_heartbeat_at=?,
-                last_progress_at=COALESCE(?, last_progress_at)
+                last_progress_at=COALESCE(?, last_progress_at),
+                outcome_id=COALESCE(?, outcome_id)
             WHERE id=? AND state=?
             """,
             (*values, json.dumps(snap.current_items), _iso(heartbeat_at),
-             snap.last_progress_at and _iso(snap.last_progress_at), activity_id, RUNNING),
+             snap.last_progress_at and _iso(snap.last_progress_at), snap.outcome_id,
+             activity_id, RUNNING),
         )
         if run_id is not None and snap.run_counts is not None:
             counts = snap.run_counts
@@ -290,14 +295,17 @@ class ActivityRepo:
 
     def since(self, started_at: datetime, now: datetime) -> list[dict[str, Any]]:
         """Every entry started at or after ``started_at``, as the live view reads it
-        (a running entry that stopped reporting reads as ended). Empty before schema
-        v10."""
+        (a running entry that stopped reporting reads as ended), plus the
+        ``outcome_id`` it names. Empty before schema v10."""
         if not self.has_table():
             return []
         rows = self.conn.execute(
             "SELECT * FROM run_activity WHERE started_at >= ?", (_iso(started_at),)
         ).fetchall()
-        return [_as_seen(_live_entry(row), now) for row in rows]
+        return [
+            {**_as_seen(_live_entry(row), now), "outcome_id": row["outcome_id"]}
+            for row in rows
+        ]
 
     def trim(self, now: datetime) -> None:
         """Drop ended entries older than the history window."""
@@ -396,6 +404,8 @@ class Progress:
         # A run with a run record supplies its figures; they move at this entry's
         # cadence (§spec:run-activity "status agrees").
         self.run_counts: Callable[[], RunCounts] | None = None
+        # A run with no run record names the outcome that holds its errors.
+        self.outcome_id: int | None = None
         self._now = now
         self._clock = clock
         self._lock = threading.Lock()
@@ -581,6 +591,7 @@ class Progress:
                 speed_bytes_per_second=(None if final else speed) if downloading else None,
                 eta_seconds=eta,
                 run_counts=counts,
+                outcome_id=self.outcome_id,
                 **values,
             )
 

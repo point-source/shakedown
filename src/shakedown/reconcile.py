@@ -99,6 +99,8 @@ def _reconcile_collection(
         phase="walk-archive",
         safe_next_action="restore source access and rerun reconcile",
     )
+    # The run history shows this outcome's errors (§spec:run-history).
+    progress.outcome_id = outcome.id
     archive_root = config.archive_root / source.name / collection.name
     on_disk_ids: set[str] = set()
     if archive_root.is_dir():

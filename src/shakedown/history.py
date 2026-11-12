@@ -3,7 +3,8 @@
 Runs that have a run record (sync, catch_up, refetch, reconform) take every figure
 from it — the record `status` reports — so the two always match; their activity
 entry adds its id and the run's result. Restages, verifies, and reconciles have no
-record and come from their activity entries alone. A run from before activity
+record and come from their activity entries, with the errors of the outcome a
+restage or reconcile entry names. A run from before activity
 entries existed comes from its record alone, its result read from the record the
 way the run itself decided it."""
 from __future__ import annotations
@@ -21,7 +22,7 @@ from shakedown.activity import (
     stopped_reporting,
 )
 from shakedown.models import OperationStatus, Run, RunKind
-from shakedown.state import RunRepo
+from shakedown.state import OperationOutcomeRepo, RunRepo
 
 
 @dataclass(frozen=True)
@@ -99,9 +100,11 @@ def _from_record(run: Run, entry: dict[str, Any] | None, now: datetime) -> dict[
     }
 
 
-def _from_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """A run with no record. Its entry counts no new or updated shows and keeps no
-    errors or failure notice: those are null (Q-4-1, provisional)."""
+def _from_entry(entry: dict[str, Any], outcomes: OperationOutcomeRepo) -> dict[str, Any]:
+    """A run with no record. Its entry counts no new or updated shows. Its errors are
+    those of the outcome it names (restage, reconcile); a verify records none. Only
+    a sync sends a failure notice."""
+    outcome = outcomes.get(entry["outcome_id"]) if entry["outcome_id"] else None
     return {
         "run_id": None,
         "activity_id": entry["activity_id"],
@@ -119,7 +122,7 @@ def _from_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "items_updated": None,
         "items_failed": entry["items_failed"],
         "bytes_downloaded": entry["bytes_downloaded"],
-        "errors": None,
+        "errors": outcome.errors if outcome else None,
         "failure_notice_error": None,
     }
 
@@ -131,7 +134,8 @@ def run_history(conn: sqlite3.Connection, now: datetime, days: int) -> list[dict
     entries = ActivityRepo(conn).since(since, now)
     by_run = {e["run_id"]: e for e in entries if e["run_id"] is not None}
     rows = [_from_record(run, by_run.get(run.id), now) for run in RunRepo(conn).since(since)]
-    rows += [_from_entry(e) for e in entries if e["run_id"] is None]
+    outcomes = OperationOutcomeRepo(conn)
+    rows += [_from_entry(e, outcomes) for e in entries if e["run_id"] is None]
     rows.sort(key=lambda r: (r["started_at"], r["run_id"] or 0, r["activity_id"] or 0),
               reverse=True)
     return rows

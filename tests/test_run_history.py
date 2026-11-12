@@ -19,8 +19,8 @@ from shakedown.activity import (
 )
 from shakedown.db import connect
 from shakedown.history import run_history
-from shakedown.models import Run, RunKind
-from shakedown.state import RunRepo
+from shakedown.models import OperationStatus, OperationType, Run, RunKind
+from shakedown.state import OperationOutcomeRepo, RunRepo
 
 
 @pytest.fixture()
@@ -95,11 +95,35 @@ def test_runs_with_and_without_records_form_one_list_newest_first(db: Path) -> N
     }
     assert verify_row["result"] == "completed_with_item_issues"
     assert verify_row["duration_seconds"] == 240
-    # An activity entry records no new/updated counts, errors, or failure notice
-    # (Q-4-1: provisional null).
+    # An activity entry counts no new or updated shows; only a sync sends a failure
+    # notice; a verify records no outcome, so it has no errors.
     assert verify_row["items_failed"] == 1
     assert verify_row["items_new"] is None and verify_row["items_updated"] is None
     assert verify_row["errors"] is None and verify_row["failure_notice_error"] is None
+
+
+@pytest.mark.parametrize("kind, operation", [
+    (ActivityKind.RESTAGE, OperationType.RESTAGE),
+    (ActivityKind.RECONCILE, OperationType.RECONCILE),
+])
+def test_a_restage_or_reconcile_shows_the_errors_its_outcome_records(
+    db: Path, kind: ActivityKind, operation: OperationType,
+) -> None:
+    at = datetime.now() - timedelta(minutes=10)
+    with closing(connect(db)) as conn:
+        outcomes = OperationOutcomeRepo(conn)
+        outcome = outcomes.start(operation, "fake-src", "coll1", at)
+        outcomes.finish(outcome, OperationStatus.COMPLETED_WITH_ITEM_ISSUES,
+                        at + timedelta(minutes=1), errors=["gd-a: staging failed"])
+        _entry(conn, kind, at, ended=at + timedelta(minutes=1),
+               result="completed_with_item_issues",
+               snap=Snapshot(outcome_id=outcome.id))
+        unlinked = at + timedelta(minutes=5)  # recorded before entries named outcomes
+        _entry(conn, kind, unlinked, ended=unlinked + timedelta(minutes=1))
+    newer, linked = _history(db)
+    assert linked["errors"] == ["gd-a: staging failed"]
+    assert linked["failure_notice_error"] is None
+    assert newer["errors"] is None
 
 
 def test_a_reconcile_reports_its_listing_as_shows_discovered(db: Path) -> None:
