@@ -2068,7 +2068,7 @@ show a title containing `<script>`: it renders as literal text. Break
 
 ## Live run progress §spec:run-activity
 
-*Status: not started*
+*Status: complete*
 
 Every run reports its progress while it runs, and the dashboard shows
 it within seconds (§req:success-criteria #28, #33;
@@ -2878,8 +2878,8 @@ listed.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: complete; the dashboard rows (§spec:run-activity,
-§spec:dashboard) are not started*
+*Status: complete, including the run-activity rows (§spec:run-activity); the
+dashboard row (§spec:dashboard) is not started*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
