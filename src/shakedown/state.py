@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Collection, Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +51,16 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         not_playable_reason=row["not_playable_reason"],
         disappeared_at=_parse_iso(row["disappeared_at"]),
     )
+
+
+def _title(row: sqlite3.Row) -> str | None:
+    """A source's title: text as it is, a list's first entry when that is text."""
+    if row["title_type"] == "text":
+        return row["title"]
+    if row["title_type"] == "array":
+        first = json.loads(row["title"])[0] if row["title"] != "[]" else None
+        return first if isinstance(first, str) else None
+    return None
 
 
 def _row_to_operation_outcome(row: sqlite3.Row) -> OperationOutcome:
@@ -220,6 +230,49 @@ class ItemRepo:
             (source, collection),
         ).fetchone()
         return int(row["total"])
+
+    def library_bytes(self, source: str, collection: str) -> int:
+        """Total size of the files the library stages, from the same manifests as
+        ``archived_bytes``: every recorded file but archive-only ones, such as SHN
+        originals beside a playable copy (§spec:library-stats,
+        §spec:quality-selection). Library files are hardlinks: no disk of their own."""
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(json_extract(f.value, '$.size')), 0) AS total
+            FROM items, json_each(items.recorded_manifest) AS f
+            WHERE source_name=? AND collection_name=? AND archive_path IS NOT NULL
+              AND COALESCE(json_extract(f.value, '$.library'), 1) != 0
+            """,
+            (source, collection),
+        ).fetchone()
+        return int(row["total"])
+
+    def recently_downloaded(
+        self, scopes: Sequence[tuple[str, str]], limit: int
+    ) -> list[tuple[str, str, str, datetime, str | None]]:
+        """The shows of ``scopes`` downloaded most recently (new or re-fetched), newest
+        first: (source, collection, identifier, downloaded_at, title). The title is
+        the source's, or its first when it lists several; None when it lists none."""
+        if not scopes:
+            return []
+        in_scope = " OR ".join("(source_name=? AND collection_name=?)" for _ in scopes)
+        cur = self.conn.execute(
+            f"""
+            SELECT source_name, collection_name, identifier, downloaded_at,
+                   json_extract(source_metadata, '$.title') AS title,
+                   json_type(source_metadata, '$.title') AS title_type
+            FROM items
+            WHERE downloaded_at IS NOT NULL AND ({in_scope})
+            ORDER BY downloaded_at DESC, identifier
+            LIMIT ?
+            """,
+            (*(v for scope in scopes for v in scope), limit),
+        )
+        return [
+            (row["source_name"], row["collection_name"], row["identifier"],
+             datetime.fromisoformat(row["downloaded_at"]), _title(row))
+            for row in cur
+        ]
 
     def delete(self, source: str, collection: str, identifier: str) -> None:
         self.conn.execute(
