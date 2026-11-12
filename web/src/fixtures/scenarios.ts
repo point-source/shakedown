@@ -57,7 +57,7 @@ function firstInstall(): Answers {
   a["runs?days=30"].runs = []
   a.library = {
     generated_at: NOW,
-    disk: { total_bytes: 16_000_000_000_000, free_bytes: 15_870_000_000_000, full_in_days: null },
+    disk: { total_bytes: 16_000_000_000_000, free_bytes: 15_870_000_000_000 },
     totals: { counts: zero, restricted: 0, archive_bytes: 0, library_bytes: 0 },
     collections: a.library.collections.map((c) => ({ ...c, counts: zero, restricted: 0, archive_bytes: 0, library_bytes: 0, last_successful_sync_at: null })),
     growth: a.library.collections.map((c) => ({ date: NOW.slice(0, 10), source: c.source, collection: c.collection, complete: 0, archive_bytes: 0 })),
@@ -87,7 +87,7 @@ function longContent(): Answers {
     { kind: "failed_shows", source: "internetarchive", collection: long, since: null, identifiers: failed,
       detail: { recovery: { operation: "sync", status: "completed_with_item_issues", started_at: at(800), updated_at: at(700), finished_at: at(700),
         phase: "downloading", affected_item: null, affected_path: null, completed_work: null, preservation_context: null, deletion_context: null,
-        safe_next_action: "rerun sync; failed items will be retried", errors: null } } },
+        safe_next_action: "fix failed item issues and rerun sync", errors: null } } },
     { kind: "recovery", source: "internetarchive", collection: "phish", since: at(300), identifiers: ["ph1997-11-22.flac16"],
       detail: { operation: "restage", status: "failed_before_completion", started_at: at(320), updated_at: at(300), finished_at: at(300),
         phase: "staging", affected_item: "ph1997-11-22.flac16", affected_path: "/data/library/Phish/1997-11-22 - Hampton Coliseum",

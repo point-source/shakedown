@@ -118,7 +118,7 @@ export type Counts = Record<
 
 export interface LibraryAnswer {
   generated_at: Iso
-  disk: { total_bytes: number; free_bytes: number; full_in_days: number | null }
+  disk: { total_bytes: number; free_bytes: number }
   totals: { counts: Counts; restricted: number; archive_bytes: number; library_bytes: number }
   collections: {
     source: string

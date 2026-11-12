@@ -167,7 +167,7 @@ const counts = (complete: number, pending: number, failed: number, unavailable: 
 
 export const library: LibraryAnswer = {
   generated_at: at(0),
-  disk: { total_bytes: 16_000_000_000_000, free_bytes: 5_204_000_000_000, full_in_days: 84 },
+  disk: { total_bytes: 16_000_000_000_000, free_bytes: 5_204_000_000_000 },
   totals: {
     counts: { pending: 2106, downloading: 2, complete: 31204, failed: 5, unavailable: 211, disappeared: 9, pruned: 0 },
     restricted: 211, archive_bytes: 9_841_000_000_000, library_bytes: 7_102_000_000_000,
