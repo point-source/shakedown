@@ -1665,8 +1665,7 @@ appears in Navidrome with no handoff configured.
 
 ## Serve control plane §spec:serve
 
-*Status: complete; the dashboard's read endpoints are complete, its page is
-not started (§spec:dashboard)*
+*Status: complete*
 
 An optional `shakedown serve` command exposes a small HTTP API for
 users who want ad-hoc triggers and monitoring without `docker exec`
@@ -1958,8 +1957,7 @@ finishes normally.
 
 ## Read-only web dashboard §spec:dashboard
 
-*Status: complete on the server side (shared answers, `generated_at`, the
-read-only posture, the last-good config); the page is not started*
+*Status: complete*
 
 Compatibility, from deployment status "deployed, no outside consumers"
 (§req:constraints, operator-confirmed 2026-11-12): HTTP API — free; CLI
@@ -2431,7 +2429,7 @@ shows, and they lead the recently-mirrored list.
 
 ## Needs attention §spec:needs-attention
 
-*Status: complete on the server side (`GET /api/attention`); the page is not started*
+*Status: complete*
 
 The dashboard has one list of what needs the operator, naming the
 collection or show affected and the next available action, and a
@@ -2829,7 +2827,7 @@ is one route (`GET /`) with four tabs.
 
 ## Dashboard page delivery §spec:dashboard-page
 
-*Status: not started*
+*Status: complete*
 
 How the approved page (§spec:ui-kit) gets from `web/` to the operator's
 browser: built into the image, served by `serve` at its root, and
@@ -3229,8 +3227,8 @@ listed.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: complete, including the run-activity rows (§spec:run-activity); the
-dashboard row (§spec:dashboard) is not started*
+*Status: complete, including the run-activity rows (§spec:run-activity) and the
+dashboard row (§spec:dashboard)*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
