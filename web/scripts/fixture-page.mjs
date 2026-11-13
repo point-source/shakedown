@@ -27,7 +27,12 @@ export async function openScenario(page, baseURL, name, opts = {}) {
     if (s.mode.kind === "no_config") {
       return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: s.mode.detail }) })
     }
+    if (gone && s.mode.kind === "restarts_broken") {
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: s.mode.detail }) })
+    }
     if (gone) return route.abort("connectionrefused")
+    const status = s.fail?.[key]
+    if (status) return route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ detail: "Internal Server Error" }) })
     const body = s.answers[key]
     if (!body) return route.fulfill({ status: 404, body: "{}" })
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) })
@@ -46,7 +51,7 @@ export async function openScenario(page, baseURL, name, opts = {}) {
   await page.waitForTimeout(100)
   await page.clock.runFor(500)
   await page.evaluate(() => document.fonts.ready)
-  if (s.mode.kind === "goes_away") {
+  if (s.mode.kind === "goes_away" || s.mode.kind === "restarts_broken") {
     gone = true
     await page.clock.runFor(s.mode.minutes * 60_000)
   }

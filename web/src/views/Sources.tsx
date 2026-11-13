@@ -2,7 +2,7 @@ import { Bar, BarChart, Area, AreaChart, CartesianGrid, XAxis, YAxis } from "rec
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import type { ActivityAnswer, NetworkAnswer, NetworkEvent } from "@/api/types"
+import type { ActivityAnswer, NetworkAnswer, NetworkEvent, NetworkPoint } from "@/api/types"
 import { Empty, RowsSkeleton } from "@/dash/bits"
 import { clock, count, duration, plural, speed } from "@/lib/format"
 import { EVENT } from "@/lib/words"
@@ -10,6 +10,35 @@ import { EVENT } from "@/lib/words"
 const speedConfig = { mbps: { label: "Download speed", color: "var(--chart-1)" } } satisfies ChartConfig
 const problemConfig = { problems: { label: "Rate limits and errors", color: "var(--destructive)" } } satisfies ChartConfig
 const day = (t: string) => new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short" })
+
+const WINDOW_MS = 30 * 86_400_000
+
+/**
+ * The server sends only buckets with recorded activity (dashboard_network.py); the
+ * charts draw one point per bucket, so idle buckets across the 30-day window are
+ * filled with zeros to keep time to scale. The grid follows the server's buckets.
+ */
+function chartRows(series: NetworkPoint[], bucketSeconds: number, endIso: string) {
+  const row = (p: NetworkPoint) => ({
+    t: p.t,
+    mbps: p.bytes / bucketSeconds / 1e6,
+    problems: p.rate_limited + p.server_errors + p.timeouts + p.connection_errors,
+  })
+  if (series.length === 0) return []
+  const step = bucketSeconds * 1000
+  const end = Date.parse(endIso)
+  const start = end - WINDOW_MS
+  const byMs = new Map(series.map((p) => [Date.parse(p.t), p]))
+  const anchor = Date.parse(series[0].t)
+  const rows = []
+  for (let ms = anchor - Math.floor((anchor - start) / step) * step; ms <= end; ms += step) {
+    const p = byMs.get(ms)
+    byMs.delete(ms)
+    rows.push(p ? row(p) : { t: new Date(ms).toISOString(), mbps: 0, problems: 0 })
+  }
+  for (const p of byMs.values()) rows.push(row(p)) // any bucket off the grid, e.g. at the window's edge
+  return rows.sort((a, b) => Date.parse(a.t) - Date.parse(b.t))
+}
 
 function eventText(e: NetworkEvent) {
   const status = e.http_status ? ` (${e.http_status})` : ""
@@ -56,11 +85,7 @@ export function SourcesView({ network, activity, now }: { network: NetworkAnswer
     <div className="flex flex-col gap-4">
       {network.sources.map((s) => {
         const live = activity?.network.find((n) => n.source === s.source) ?? null
-        const data = s.series.map((p) => ({
-          t: p.t,
-          mbps: p.bytes / network.bucket_seconds / 1e6,
-          problems: p.rate_limited + p.server_errors + p.timeouts + p.connection_errors,
-        }))
+        const data = chartRows(s.series, network.bucket_seconds, network.generated_at)
         return (
           <Card key={s.source} className="min-w-0">
             <CardHeader>

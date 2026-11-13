@@ -20,7 +20,10 @@ export interface Scenario {
   /** How the server behaves: answer normally, answer 503 with the config error,
    *  answer first and then stop (advance the clock by `minutes`), or never answer. */
   mode: { kind: "ok" } | { kind: "no_config"; detail: string } | { kind: "goes_away"; minutes: number } | { kind: "hangs" }
+    | { kind: "restarts_broken"; detail: string; minutes: number }
   answers: Answers
+  /** Endpoints that always answer this HTTP error status instead of their answer. */
+  fail?: Partial<Record<keyof Answers, number>>
 }
 
 const NOW = base.NOW
@@ -122,6 +125,35 @@ function longContent(): Answers {
   return a
 }
 
+// A verify run: no download facts, so bytes and speed are null (activity.py).
+function verifyRunning(): Answers {
+  const a = defaultAnswers()
+  a.activity.runs.push({
+    ...clone(a.activity.runs[0]), activity_id: 920, run_id: null, collection: "phish", kind: "verify",
+    phase: "verifying", current_items: [], bytes_downloaded: null, bytes_to_fetch: null,
+    speed_bytes_per_second: null, eta_seconds: null,
+  })
+  return a
+}
+
+// A show that went before removal dates were recorded (status.py: removed_on None).
+function removedUndated(): Answers {
+  const a = defaultAnswers()
+  a.attention.health[0].removed_upstream = [{ identifier: "gd1969-02-27.undated", removed_on: null }]
+  return a
+}
+
+// Parallel collections: the later-started run finished first (history is sorted by start).
+function quietFinishOrder(): Answers {
+  const a = quiet()
+  const [r] = a["runs?days=30"].runs
+  a["runs?days=30"].runs = [
+    { ...clone(r), activity_id: 1, started_at: at(60), finished_at: at(30), duration_seconds: 1800 },
+    { ...clone(r), activity_id: 2, started_at: at(120), finished_at: at(5), duration_seconds: 6900 },
+  ]
+  return a
+}
+
 // The server lists runs newest first (§spec:run-history).
 function sorted(a: Answers): Answers {
   a["runs?days=30"].runs.sort((x, y) => Date.parse(y.started_at) - Date.parse(x.started_at))
@@ -137,6 +169,12 @@ export const SCENARIOS: Record<string, Scenario> = {
   unreachable: { now: NOW, mode: { kind: "goes_away", minutes: 4 }, answers: sorted(defaultAnswers()) },
   loading: { now: NOW, mode: { kind: "hangs" }, answers: sorted(defaultAnswers()) },
   long_content: { now: NOW, mode: { kind: "ok" }, answers: sorted(longContent()) },
+  // Behaviour scenarios (tests/behaviour.spec.ts, tests/freshness.spec.ts); no screenshots.
   // The browser's clock runs a minute ahead of the server's; the server answers normally.
   server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },
+  verify_running: { now: NOW, mode: { kind: "ok" }, answers: sorted(verifyRunning()) },
+  restarts_broken: { now: NOW, mode: { kind: "restarts_broken", detail: CONFIG_ERROR, minutes: 1 }, answers: sorted(defaultAnswers()) },
+  library_fails: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()), fail: { library: 500 } },
+  removed_undated: { now: NOW, mode: { kind: "ok" }, answers: sorted(removedUndated()) },
+  quiet_finish_order: { now: NOW, mode: { kind: "ok" }, answers: sorted(quietFinishOrder()) },
 }

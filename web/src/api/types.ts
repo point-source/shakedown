@@ -36,9 +36,10 @@ export interface ActivityRun {
   items_done: number | null
   items_failed: number | null
   current_items: string[]
-  bytes_downloaded: number
+  /** Null for runs that download nothing (verify, restage, reconcile). */
+  bytes_downloaded: number | null
   bytes_to_fetch: number | null
-  speed_bytes_per_second: number
+  speed_bytes_per_second: number | null
   eta_seconds: number | null
 }
 
@@ -181,7 +182,8 @@ export interface AttentionAnswer {
     source: string
     collection: string
     restricted: { identifier: string; reason: string }[]
-    removed_upstream: { identifier: string; removed_on: string }[]
+    /** removed_on is null for shows that went before dates were recorded. */
+    removed_upstream: { identifier: string; removed_on: string | null }[]
     drift_files: number
     not_playable: { identifier: string; reason: string }[]
     playable_copies: string[]

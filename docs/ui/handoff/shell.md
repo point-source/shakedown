@@ -61,12 +61,16 @@ labels Overview, Runs, Sources, Library. Terms: Shakedown, Release
   `runs?days=30`, `library`, `attention`, `health` every 30 s. All
   stop while `document.hidden`; on becoming visible, fetch at once.
   Relative URLs `./api/<path>`, `cache: "no-store"`. A failed request
-  keeps the previous data.
+  keeps the previous data; an answer to an older request than the last
+  one applied is dropped. A failed request counts toward "can't reach
+  Shakedown" whether or not that endpoint has answered before. A `503`
+  after data arrived (serve restarted with a broken config) shows the
+  config-broken notice over the kept data.
 - A `useNow` clock ticks every 5 s so ages and staleness update between
   answers.
 - The open tab lives in the URL hash (`#runs`, `#sources`, `#library`;
-  none = Overview); switching tabs scrolls to top. Back/forward follow
-  the hash.
+  none = Overview); switching tabs scrolls to top and adds one history
+  entry, so Back/forward move between tabs.
 - Every source-derived string renders as React text, never markup.
 
 ## Open questions

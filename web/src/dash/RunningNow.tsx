@@ -41,8 +41,10 @@ function RunRow({ run, now }: { run: ActivityRun; now: string }) {
         ) : (
           <Fact label="Shows" value={`${count(run.items_done ?? 0)} of ${run.items_to_fetch === null ? "estimating" : count(run.items_to_fetch)}`} />
         )}
-        <Fact label="Downloaded" value={run.bytes_to_fetch === null ? bytes(run.bytes_downloaded) : `${bytes(run.bytes_downloaded)} of ${bytes(run.bytes_to_fetch)}`} />
-        {!ended && <Fact label="Speed" value={speed(run.speed_bytes_per_second)} />}
+        {run.bytes_downloaded !== null && (
+          <Fact label="Downloaded" value={run.bytes_to_fetch === null ? bytes(run.bytes_downloaded) : `${bytes(run.bytes_downloaded)} of ${bytes(run.bytes_to_fetch)}`} />
+        )}
+        {!ended && run.speed_bytes_per_second !== null && <Fact label="Speed" value={speed(run.speed_bytes_per_second)} />}
         {!ended && <Fact label="Time left" value={run.eta_seconds === null ? "Estimating" : duration(run.eta_seconds)} />}
         {(run.items_failed ?? 0) > 0 && <Fact label="Failed" value={count(run.items_failed!)} tone="danger" />}
         {ended && <Fact label="Started" value={`${clock(run.started_at, now)}`} />}

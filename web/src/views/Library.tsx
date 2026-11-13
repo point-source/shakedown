@@ -120,7 +120,7 @@ function Health({ attention }: { attention: AttentionAnswer }) {
             <div className="flex flex-col gap-0.5 text-sm">
               <span>{plural(h.removed_upstream.length, "show", "shows")} disappeared from the source, kept here</span>
               <ul className="font-mono text-xs wrap-anywhere text-muted-foreground">
-                {h.removed_upstream.slice(0, 3).map((r) => <li key={r.identifier}>{r.identifier}<span className="font-sans"> · missing since {day(r.removed_on)}</span></li>)}
+                {h.removed_upstream.slice(0, 3).map((r) => <li key={r.identifier}>{r.identifier}{r.removed_on && <span className="font-sans"> · missing since {day(r.removed_on)}</span>}</li>)}
               </ul>
               {h.removed_upstream.length > 3 && <span className="text-xs text-muted-foreground">and {h.removed_upstream.length - 3} more</span>}
             </div>

@@ -2810,7 +2810,8 @@ is one route (`GET /`) with four tabs.
   (`web/tests/*.spec.ts`, config `web/playwright.config.ts`): one project
   per size × theme, `maxDiffPixels: 0`, `threshold: 0.05`, animations and
   caret off, UTC clock, `en-US` locale. Behaviour tests with no
-  screenshot (`freshness.spec.ts`) run in one project only. Baselines are committed only for
+  screenshot (`freshness.spec.ts`, `behaviour.spec.ts`) run in one
+  project only. Baselines are committed only for
   approved screens and the approved kit sheet. A font or renderer
   difference is a finding, never a reason to loosen the threshold.
   Every baseline was rendered on Linux x86-64 (Rocky Linux 9.8) with

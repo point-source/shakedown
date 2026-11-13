@@ -29,21 +29,30 @@ export function App() {
   const [tab, setTab] = useState<TabId>(tabFromHash)
   useEffect(() => {
     const on = () => setTab(tabFromHash())
+    // Back/forward: hashchange for typed hashes, popstate for entries the tabs pushed.
     window.addEventListener("hashchange", on)
-    return () => window.removeEventListener("hashchange", on)
+    window.addEventListener("popstate", on)
+    return () => {
+      window.removeEventListener("hashchange", on)
+      window.removeEventListener("popstate", on)
+    }
   }, [])
   const go = (t: string) => {
-    history.replaceState(null, "", `#${t}`)
+    // One history entry per tab change (the tab control reports a click twice).
+    if (location.hash !== `#${t}`) history.pushState(null, "", `#${t}`)
     setTab(t as TabId)
     window.scrollTo(0, 0)
   }
 
   const slots = [d.activity, d.network, d.runs, d.library, d.attention, d.health]
-  const noConfig = slots.some((s) => s.noConfig) && slots.every((s) => s.data === null)
+  // 503: serve has no valid config. With no data yet the page shows nothing; with data
+  // from before (serve restarted with a broken config) it keeps that data.
+  const configDown = slots.find((s) => s.noConfig) ?? null
+  const noConfig = configDown !== null && slots.every((s) => s.data === null)
   const neverReached = !noConfig && slots.every((s) => s.data === null && s.error !== null)
   const stale = staleSince(d, nowMs)
   const config = d.health.data?.config
-  const configError = noConfig ? slots.find((s) => s.noConfig)?.error ?? null : config && !config.valid ? config.error : null
+  const configError = configDown ? configDown.error : config && !config.valid ? config.error : null
   const updated = d.activity.data?.generated_at ?? null
 
   return (
