@@ -857,11 +857,12 @@ Technical, operational, and scope bounds on the solution space.
 - **Governance: symphony-native.** REQUIREMENTS.md and SPEC.md are the
   repo's durable governance artifacts and ship in the PR as-is; the repo
   has no ADR/RFC/design-doc tree to convert into.
-- **UI: web, track A (conventional), design state: none.** One
-  read-only web dashboard, fully usable on phone and desktop browsers,
-  with a familiar admin-dashboard look from a standard component kit.
-  No design guidelines or screens exist yet. Every other surface stays
-  as it is: CLI, `status`, the library tree, and the `serve` HTTP API.
+- **UI: web, track A (conventional), design state: kit and screens
+  locked (2026-11-12).** One read-only web dashboard, fully usable on
+  phone and desktop browsers, with a familiar admin-dashboard look from
+  a standard component kit. The kit, glossary, design authority, and
+  approved screens are in §spec:ui-kit. Every other surface stays as it
+  is: CLI, `status`, the library tree, and the `serve` HTTP API.
 - **Read-only dashboard, no config management yet (operator decision,
   2026-11-12).** This reverses the earlier "No web UI in v1" decision
   for viewing only. The dashboard starts no runs, edits no config, and

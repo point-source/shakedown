@@ -1,0 +1,13 @@
+# Keep the build context to what the image builds from. The Node stage
+# installs from web/package-lock.json, never a local node_modules, and the
+# page build comes from that stage, never a local copy.
+.git
+.venv
+**/__pycache__
+web/node_modules
+web/dist
+web/test-results
+web/playwright-report
+src/shakedown/dashboard_web
+ui-review
+.ui-review

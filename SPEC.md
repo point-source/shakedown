@@ -1665,8 +1665,7 @@ appears in Navidrome with no handoff configured.
 
 ## Serve control plane §spec:serve
 
-*Status: complete; the dashboard's read endpoints are complete, its page is
-not started (§spec:dashboard)*
+*Status: complete*
 
 An optional `shakedown serve` command exposes a small HTTP API for
 users who want ad-hoc triggers and monitoring without `docker exec`
@@ -1958,8 +1957,7 @@ finishes normally.
 
 ## Read-only web dashboard §spec:dashboard
 
-*Status: complete on the server side (shared answers, `generated_at`, the
-read-only posture, the last-good config); the page is not started*
+*Status: complete*
 
 Compatibility, from deployment status "deployed, no outside consumers"
 (§req:constraints, operator-confirmed 2026-11-12): HTTP API — free; CLI
@@ -1997,9 +1995,12 @@ Observable behavior:
   (§req:quality-attributes: live, but light).
 - **Old data is labelled, never passed off as current.** Every answer
   carries `generated_at`, the time `serve` computed it. When a refresh
-  fails or the page's newest answer is older than twice its refresh
-  interval, the page says it cannot reach shakedown and shows how old
-  the data on screen is. A run that stopped reporting is shown as ended,
+  fails or no answer has arrived for twice its refresh interval, the
+  page says it cannot reach shakedown and shows how old the data on
+  screen is. Ages count from when an answer arrived, by the browser's
+  clock: `serve` hands out an answer up to one interval old, and a
+  server clock that differs from the browser's must never read as an
+  outage (`web/tests/freshness.spec.ts`). A run that stopped reporting is shown as ended,
   never as running (§spec:run-activity).
 - **No login of its own; same posture as `GET /status`.** The page and
   its endpoints are unauthenticated, like the existing read endpoints;
@@ -2431,7 +2432,7 @@ shows, and they lead the recently-mirrored list.
 
 ## Needs attention §spec:needs-attention
 
-*Status: complete on the server side (`GET /api/attention`); the page is not started*
+*Status: complete*
 
 The dashboard has one list of what needs the operator, naming the
 collection or show affected and the next available action, and a
@@ -2573,6 +2574,327 @@ nothing and does not show (§spec:recoverable-operation-reporting).
 Introduce a typo in a config key: the page shows the error naming it,
 and the other views keep showing data. Run `shakedown validate`: the
 result and time appear per collection.
+
+## Dashboard UI kit §spec:ui-kit
+
+*Status: complete*
+
+The visual kit, terms, and design authority for the read-only web
+dashboard (§spec:dashboard). §spec:dashboard and the endpoint sections
+fix behavior and data; this section fixes how the page looks and what it
+calls things. Every screen is built only from the tokens and components
+recorded here. A value the kit lacks is a kit change, made here first.
+
+**Platform and track.** Web, track A (conventional): a familiar
+admin-dashboard look from a standard component kit (§req:constraints: UI
+line). Light and dark themes follow the device setting (operator
+decision, 2026-11-12).
+
+**Base system.** shadcn/ui (new-york style, components copied into
+`web/src/components/ui/`) on Tailwind CSS 4, React 19, TypeScript, built
+by Vite (operator decision, 2026-11-12). Charts are shadcn charts on
+Recharts. Icons are lucide-react. The page is a static build: `npm run
+build` in `web/` writes `web/dist/`, which the image's Node build stage
+produces and `serve` serves. Node never runs in the runtime image.
+Vite's `base: "./"` keeps every asset URL relative (§spec:dashboard:
+works behind a proxy). Fonts are bundled from `@fontsource-variable`
+packages; nothing loads from a third party (§spec:dashboard:
+self-contained). Every web dependency is pinned to an exact version in
+`web/package.json` and `web/package-lock.json`.
+
+**Tokens.** CSS variables in `web/src/index.css`, mapped into Tailwind
+through `@theme inline`; this file is the single source of truth.
+Components use Tailwind utilities that resolve to these variables, never
+literal colors, sizes, radii, shadows, or fonts.
+
+| Token | Light | Dark | Use |
+| --- | --- | --- | --- |
+| `--background`, `--foreground` | shadcn neutral | shadcn neutral | page |
+| `--card`, `--card-foreground` | shadcn neutral | shadcn neutral | cards |
+| `--muted`, `--muted-foreground` | shadcn neutral | shadcn neutral | labels, secondary text, tracks |
+| `--border`, `--input`, `--ring` | shadcn neutral | shadcn neutral | dividers, focus |
+| `--primary`, `--primary-foreground` | `oklch(0.546 0.245 262.881)` on `oklch(0.985 0 0)` | `oklch(0.707 0.165 254.624)` on `oklch(0.145 0 0)` | progress, chart series 1, focus ring (`--ring` = primary) |
+| `--destructive` | `oklch(0.505 0.213 27.518)` | `oklch(0.704 0.191 22.216)` | failed, stopped reporting, config error |
+| `--success` (kit addition) | `oklch(0.448 0.119 151.328)` | `oklch(0.792 0.209 151.711)` | completed, healthy |
+| `--warning` (kit addition) | `oklch(0.473 0.137 46.201)` | `oklch(0.828 0.189 84.429)` | no progress, delayed, old data |
+| `--chart-1` … `--chart-5` | `--chart-1` = primary; shadcn 2–5 | shadcn | chart series |
+| `--radius` | `0.5rem` | — | `rounded-sm/md/lg/xl` derive from it |
+| `--density` | `0.225rem` (compact) | — | Tailwind `--spacing`: every `p-*`, `gap-*`, `m-*` step |
+| `--font-sans`, `--font-mono` | Inter Variable; Geist Mono Variable (both bundled) | — | text; mono for show IDs only |
+
+`--success` and `--warning` exist because a monitoring page needs "fine"
+and "look at this" beside shadcn's "destructive". In the light theme the
+three status tones sit one step darker than Tailwind's 600 shades so
+12 px badge text on its tint passes WCAG AA (at least 4.5:1); checked
+2026-11-12.
+
+**Type scale.** Page title `text-xl` semibold. Figures (stat values)
+`text-2xl` semibold, `tabular-nums`. Card titles `text-base` semibold.
+Body `text-base`. Labels and secondary text `text-sm` muted-foreground.
+Show IDs `font-mono text-xs`. Every number that updates in place uses
+`tabular-nums` so it does not jitter.
+
+**Spacing and radius.** Tailwind's spacing scale multiplied by
+`--density`; radius steps from `--radius`. No arbitrary values
+(`p-[13px]`).
+
+**Target sizes.** 390×844 (phone), 768×1024 (tablet), 1440×900
+(desktop). Every screen state renders at all three in both themes.
+
+**Components.** From shadcn/ui: Card (with CardHeader, CardTitle,
+CardDescription, CardAction, CardContent), Badge, Progress, Table,
+Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
+
+- Badge variants `success`, `warning`, `danger`: tinted background, text
+  in the tone. Used for run results and run states.
+- Alert variant `warning`: page-wide notices (data is old, cannot reach
+  Shakedown). `destructive` carries a broken config.
+- Skeleton is the loading state of any card whose first answer has not
+  arrived.
+- CardTitle renders an `h2` (kit change), so screen readers can jump
+  between cards. A figure inside a card is plain text, never a CardTitle.
+
+**Usage rules.**
+
+- Badge tones carry outcomes and states only: `success` for Completed,
+  `warning` for No progress, delayed, or partly failed, `danger` for
+  Failed and Stopped reporting. A run's phase uses `secondary` (neutral);
+  it is not an outcome.
+- Color never carries meaning alone; every badge and dot has its words.
+- Sizes use decimal units: 1 GB = 10^9 bytes, 1 TB = 10^12 (operator
+  decision, 2026-11-12), formatted by `web/src/lib/format.ts`.
+- A chart has an `aria-label` naming what it plots and its window, and
+  the current value it summarises is also on screen as text.
+- Show IDs and other source text render as plain React text (never
+  `dangerouslySetInnerHTML`), in `font-mono text-xs`.
+- The page's content sits in one `main` landmark.
+- Below 1024 px wide, a table of more than three columns becomes
+  stacked rows (one list item per row, the key fields on two lines);
+  from 1024 px it is a Table.
+- Show IDs, paths, and server text wrap with `wrap-anywhere` (they
+  break inside a word only when they must); they are never truncated,
+  because a phone cannot hover to read the rest.
+- A list shows its first few items and "and N more"; there are no
+  expanders.
+
+**Operator decisions on the screens (2026-11-12).**
+
+- Running now lists only running runs. An ended run shows in Recent
+  runs and on the Runs tab; a killed one also in Needs attention. The
+  ended entries `/api/activity` keeps for ten minutes are not shown.
+- **No-progress rule.** The page marks a running run with no progress
+  for 5 minutes: when now minus `last_progress_at` exceeds 5 minutes, the
+  run's row in Running now gets a `warning` Badge "No progress for
+  <time>" beside its phase. The API carries no verdict on progress
+  (§spec:run-activity).
+- **A run that stopped reporting** shows, as soon as `/api/attention`
+  lists it, as a Needs attention entry "<Kind> stopped reporting at
+  <time>" with its next step, and in Recent runs and on the Runs tab with
+  a `danger` Badge "Stopped reporting".
+- The page shows no disk-full estimate (operator decision); the API no
+  longer computes one (§spec:library-stats).
+- On desktop (1024 px and up) Running now sits left of Needs attention;
+  below 1024 px Needs attention comes first.
+
+The kit sheet (`web/src/KitSheet.tsx`, `?view=kit`) shows every token
+and component state. The operator approved it on 2026-11-12 (round 2);
+its goldens are `web/tests/__screenshots__/kit-<size>-<theme>.png`.
+The representative screen the token sets were compared on was replaced
+by the designed page.
+
+**Direction.** Track A: no bespoke direction. Three token sets were
+compared on one representative screen (round 1, 2026-11-12): A neutral
+(black primary, 10 px radius, standard density, Geist), B blue (8 px,
+compact, Inter), C teal (4 px, roomy, Inter). The operator chose B
+(2026-11-12): more fits on a phone, and the blue accent marks progress
+and the speed chart clearly. A was rejected because its black accent
+barely separates progress from text; C because its roomy spacing makes
+the phone page longest.
+
+**Design authority.** No design sources existed before this kit
+(design state none), so no conflicts were settled. Entries are added
+here as `Design authority: <area> — <winner> — <reason> — <date>`.
+
+### Terms
+
+UI copy uses only these words for these things (one name per thing).
+Spec and code names in the last column never appear on screen.
+
+| Term | Meaning | Never call it | Replaces (internal) |
+| --- | --- | --- | --- |
+| Shakedown | The app this page belongs to. | the server, serve | `serve`, shakedown |
+| Show | One concert recording as the source lists it. | item, recording, entry | item |
+| Show ID | The source's identifier for a show. | item ID | `identifier` |
+| Collection | A set of shows Shakedown mirrors from one source under one name. | library, set | collection |
+| Source | A site Shakedown mirrors from, as named in the config. | plugin, provider | source block, plugin |
+| Archive | Shakedown's own copy of every downloaded file. | mirror, store, disk | archive tree, `archive_bytes`, `bytes_on_disk` |
+| Library | The folders your music tools read. Its files are links into the archive and take no extra space. | staging, archive | library tree, `library_bytes` |
+| Free space | Space left on the drive that holds the archive. | available, disk free | `disk.free_bytes` |
+| Run | One piece of work Shakedown does on one collection. | job, task, activity | activity entry, run record |
+| Sync | A run that checks the source and downloads new and changed shows. | update, refresh | `sync` |
+| Catch-up sync | A sync that waited for another run to finish, then ran. | retry, rescheduled sync | `catch_up` |
+| Refetch | A run that downloads one show again. | redownload | `refetch` |
+| Reconform | A run that puts one show's files back the way Shakedown recorded them. | repair, reset | `reconform` |
+| Restage | A run that rebuilds the library folders from the archive. | rebuild, relink | `restage` |
+| Verify | A run that checks archive files against what Shakedown recorded. | scan, audit | `verify` |
+| Reconcile | A run that rebuilds Shakedown's records from the archive. | rescan, recover | `reconcile` |
+| Validation | A check that the config, sources, and handoff targets work, run with `shakedown validate`. | test, preflight | readiness validation |
+| Release | The Shakedown version answering this page. | version, build | `release` |
+| Running | A run that is working and reporting. | active, in progress | `state: running` |
+| No progress for *time* | A running run whose counts have not moved for that long. | stuck, stalled, hung | `last_progress_at` |
+| Stopped reporting | A run that stopped sending updates: killed, crashed, or the host went down. | crashed, lost, ended unexpectedly | `end_reason: stopped_reporting`, ended unexpectedly |
+| Completed | The run finished and every show it worked on succeeded. | done, succeeded, OK | `completed` |
+| Completed, some shows failed | The run finished; some shows failed and the next sync retries them. | partial, partly failed | `completed_with_item_issues` |
+| Failed | The run ended before it finished. | error, aborted | `failed_before_completion` |
+| Listing incomplete | The source's list of shows did not load, so nothing was removed. | stale | `stale_enumeration`, stale |
+| Estimating | A total or time left that is not known yet. | unknown, calculating, — | null `items_to_fetch`, `bytes_to_fetch`, `eta_seconds` |
+| Time left | Estimated time until the run finishes. | ETA | `eta_seconds` |
+| Mirrored | A show whose files are all in the archive. | complete, downloaded, done | `complete` |
+| Pending | A show waiting to be downloaded. | queued, to do | `pending` |
+| Failed (show) | A show whose download failed; the next sync retries it. | errored, broken | `failed` |
+| Restricted | A show the source does not let Shakedown download. | unavailable, blocked, locked | `unavailable`, `restricted` |
+| Disappeared | A show the source no longer lists. Shakedown keeps its copy. | removed, deleted, gone | `disappeared`, removed upstream |
+| Needs attention | Things waiting on the operator, one entry per collection and kind. | issues, alerts, problems | attention entries |
+| Library health | Facts about the library that need no action. | warnings | health |
+| Handoff notice | The message that tells your music tools new shows arrived. | notification, webhook, ping | handoff |
+| Failure notice | The message Shakedown sends when a run fails. | alert, error email | failure notice |
+| Requests in flight | Requests to a source that are open right now. | connections, active requests | `requests_in_flight` |
+| Rate limited | The source asked Shakedown to slow down (HTTP 429). | throttled, blocked | `rate_limited` |
+| Server error | The source answered with an error (HTTP 5xx). | failure, outage | `server_error` |
+| Back-off | A wait Shakedown adds before trying again. | pause, delay, cooldown | `backoff`, `Retry-After` |
+| Retry | Another attempt at a request that failed. | redo | `retry` |
+| Drift | Archive files that changed after Shakedown recorded them. | corruption, mismatch | drift, `drift_files` |
+| Phases | Starting · Listing · Discovering · Downloading · Tagging · Updating library · Sending notices · Verifying · Finishing | — | `phase` codes; `staging` → Updating library, `notifying` → Sending notices |
+| Timed out | A request got no answer in time. | slow, hung | `timeout` |
+| Connection failed | Shakedown could not connect to the source. | offline, network error | `connection_error` |
+| Refused | The source refused the request. | denied, blocked | `refused` |
+| Passed | The last validation found no problems. | OK, valid, green | validation `completed` |
+| Passed with problems | The last validation finished but found problems. | warnings, partial | validation `completed_with_item_issues` |
+| Did not finish | The last validation stopped before it finished. | interrupted, aborted | validation `in_progress` |
+| Never validated | No validation is recorded for the collection. | unknown, untested | validation `status: null` |
+| No playable copy | A show with no audio file a player can read. | broken, unplayable | `not_playable` |
+| Original plus a playable copy | A show kept as its unplayable original beside a staged playable copy. | duplicate, converted | `playable_copies` |
+| Last completed sync | The end of a collection's latest sync that finished Completed or Completed, some shows failed. | last good sync, last success | `last_successful_sync_at` |
+| Valid (config) | shakedown.yaml loads right now. | OK, fine, good | `health.config.valid: true` |
+| Has an error (config) | shakedown.yaml does not load right now; the error names the key. | broken, invalid, failed | `health.config.valid: false` |
+| Next step | The action `status` suggests for an unfinished or failed operation, shown as the server words it. | fix, action, hint | `safe_next_action` |
+| Updated (shows) | Shows a run fetched again because they changed upstream. | changed, refreshed | `items_updated` |
+| Updated <time> | When the newest data on screen was computed. | refreshed, synced, as of | `generated_at` |
+
+"Updated" carries two meanings, kept on purpose (operator decision,
+2026-11-12): as a count of shows on Runs and Overview, and as the data
+time in the header. No other term may take a second meaning.
+
+### Screens
+
+Each approved screen lists its handoff spec, its goldens
+(`web/tests/__screenshots__/<scenario>-<tab>-<size>-<theme>.png`, from
+`web/tests/screens.spec.ts`), and the round it was approved in. The page
+is one route (`GET /`) with four tabs.
+
+| Screen | Handoff spec | Golden scenarios | Approved |
+| --- | --- | --- | --- |
+| Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13 |
+| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content | round 2, 2026-11-12 |
+| Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
+| Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
+| Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
+
+### Harness
+
+- `npm run render -- <outDir> [sets] [view]` in `web/` builds the page
+  and captures every size × theme with headless Chromium (Playwright,
+  same version as the mise-managed one) into a review folder outside
+  git.
+- `npm run test:screens` runs the Playwright screenshot tests
+  (`web/tests/*.spec.ts`, config `web/playwright.config.ts`): one project
+  per size × theme, `maxDiffPixels: 0`, `threshold: 0.05`, animations and
+  caret off, UTC clock, `en-US` locale. Behaviour tests with no
+  screenshot (`freshness.spec.ts`, `behaviour.spec.ts`) run in one
+  project only. Baselines are committed only for
+  approved screens and the approved kit sheet. A font or renderer
+  difference is a finding, never a reason to loosen the threshold.
+  Every baseline was rendered on Linux x86-64 (Rocky Linux 9.8) with
+  Playwright 1.65.0's Chromium and the bundled fonts. The screenshot
+  tests run on a developer's machine before a UI change merges, not in
+  CI (operator decision, 2026-11-12): CI checks types and the build
+  only.
+- Fixtures (`web/src/fixtures/`) hold answers in the exact shape of the
+  `/api/*` endpoints (`web/src/api/types.ts`), with a fixed clock.
+  `web/src/fixtures/scenarios.ts` names each scenario and how the server
+  behaves in it (answers, 503 with the config error, stops answering, or
+  hangs). `web/scripts/fixture-page.mjs` serves a scenario to the real
+  page by intercepting its `./api/*` requests, fixes the clock, and holds
+  the answers until the bundled fonts load, so chart labels measure the
+  same every time.
+- Handoff specs live in `docs/ui/handoff/`, one per screen, from
+  `docs/ui/handoff/_template.md`.
+
+## Dashboard page delivery §spec:dashboard-page
+
+*Status: complete*
+
+How the approved page (§spec:ui-kit) gets from `web/` to the operator's
+browser: built into the image, served by `serve` at its root, and
+checked in CI (§req:constraints: UI line, the dashboard lives in serve,
+no Node at runtime; §req:success-criteria #28–#33; §req:quality-attributes:
+phone and desktop alike).
+
+Observable behavior:
+
+- **`serve` answers the page at `/`.** `GET /` returns the built
+  `index.html`; its scripts, styles, and fonts are served under the same
+  root from the build's `assets/` folder. The page's own requests
+  (`./api/*`) and the existing routes (`/api/*`, `/healthz`, `/status`,
+  `/metrics`, the mutating endpoints) keep precedence: the page's files
+  are matched last. Every page file is a `GET` with no authentication,
+  like `GET /status` (§spec:dashboard). `index.html` is sent with
+  `Cache-Control: no-cache` so an upgrade shows the new page at once;
+  the content-hashed files under `assets/` may be cached.
+- **Works under a path prefix.** The build addresses every asset and
+  endpoint relatively (Vite `base: "./"`), so the page works at
+  `http://host:8080/` and behind a proxy at `/shakedown/` with no
+  setting (§spec:dashboard).
+- **Built into the image, never at runtime.** The Dockerfile gains a
+  Node build stage (Node 24, `npm ci` from `web/package-lock.json`, then
+  `npm run build`). Its `web/dist/` output is copied into the Python
+  package (`shakedown/dashboard_web/`) before the package is installed,
+  so it ships as package data and `serve` finds it with
+  `importlib.resources`. The runtime image contains no Node.
+- **A source checkout without a build still serves the API.** When
+  `dashboard_web/` holds no `index.html`, `GET /` answers `404` and every
+  other route works as before; tests and development runs of `serve`
+  need no Node.
+- **CI checks the page builds.** A `web` job runs `npm ci`, `npm run
+  typecheck`, and `npm run build`; the image build depends on it like
+  it depends on the Python tests. The screenshot tests are not part of
+  CI: they run on a developer's machine before a UI change merges
+  (operator decision, 2026-11-12; §spec:ui-kit Harness).
+
+**Decision and constraint.** Package data, not a separate directory in
+the image, because `serve` then finds the page the same way in the image
+and in any installed wheel, with no path setting. A static mount matched
+after the API routes, because the page is one route with hash tabs
+(`#runs`) and needs no server-side routing. `no-cache` on `index.html`
+because a stale page against a newer API would draw wrong figures after
+an upgrade.
+
+**Alternatives rejected.** *Serving from a path set in config* — one more
+setting for every operator, for a location only the image decides.
+*Building the page when `serve` starts* — puts Node in the runtime
+image, which §req:constraints rules out. *A catch-all route returning
+`index.html` for every unknown path* — the page has one route, and a
+catch-all would answer API typos with HTML.
+
+**Tradeoffs.** A `serve` started from a source checkout shows no page
+until `npm run build` has run and its output is copied in.
+
+**User-level test path.** Build the image and run `serve`: `GET /`
+returns the page, and the browser's network panel shows only requests to
+the same host. Put it behind a proxy under `/shakedown/`: the page loads
+and polls `./api/*` there. `GET /status` and `GET /api/health` answer as
+before. Upgrade the image with the page open and reload: the new page
+loads.
 
 ## Deployment §spec:deployment
 
@@ -2910,8 +3232,8 @@ listed.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: complete, including the run-activity rows (§spec:run-activity); the
-dashboard row (§spec:dashboard) is not started*
+*Status: complete, including the run-activity rows (§spec:run-activity) and the
+dashboard row (§spec:dashboard)*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.

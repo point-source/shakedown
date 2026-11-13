@@ -1,3 +1,14 @@
+# The dashboard page (§spec:dashboard-page). Built once on the build host's own
+# platform: its output is static files, the same for every image platform. The
+# runtime image gets only the files; Node never runs in it.
+FROM --platform=$BUILDPLATFORM node:24-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+
 FROM python:3.12-slim AS builder
 
 # Install from uv.lock so every build of a commit gets the same libraries.
@@ -17,6 +28,8 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-install-project --extra serve
 
 COPY src ./src
+# The page ships as package data, so it goes in before the project is installed.
+COPY --from=web /web/dist/ ./src/shakedown/dashboard_web/
 RUN uv sync --locked --no-editable --extra serve
 
 

@@ -28,10 +28,31 @@ jobs:
       - name: Test
         run: .venv/bin/pytest -v
 
+  web:
+    # The dashboard page builds (§spec:dashboard-page). The screenshot tests run
+    # on a developer's machine before a UI change merges, not here (§spec:ui-kit).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies (from package-lock.json)
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+
   docker:
     # Publish only what passed the tests. Pull requests build without pushing
     # (smoke test); pushes to main run tests only.
-    needs: test
+    needs: [test, web]
     runs-on: ubuntu-latest
     if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
     permissions:
