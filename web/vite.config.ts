@@ -8,5 +8,9 @@ import { defineConfig } from "vite"
 export default defineConfig({
   base: "./",
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
+  resolve: { alias: { "@": path.resolve(import.meta.dirname, "./src") } },
+  // One ~670 kB script (~200 kB gzip) served by serve on the operator's own
+  // network with immutable caching (§spec:dashboard-page): splitting it would
+  // not shorten any load that matters, so the default 500 kB advisory is raised.
+  build: { chunkSizeWarningLimit: 800 },
 })
