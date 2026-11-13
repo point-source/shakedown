@@ -1,6 +1,6 @@
 # Handoff: Runs tab
 
-*Approved: round 1, 2026-11-12 · Kit: §spec:ui-kit · Endpoints: `GET /api/runs?days=30`, `GET /api/library`*
+*Approved: round 1, 2026-11-12; loading state 2026-11-13 · Kit: §spec:ui-kit · Endpoints: `GET /api/runs?days=30`, `GET /api/library`*
 *Code: `web/src/views/Runs.tsx`, `web/src/dash/RunsList.tsx`*
 
 ## Purpose

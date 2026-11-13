@@ -2794,10 +2794,10 @@ is one route (`GET /`) with four tabs.
 
 | Screen | Handoff spec | Golden scenarios | Approved |
 | --- | --- | --- | --- |
-| Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading | round 2, 2026-11-12 |
+| Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13 |
 | Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content | round 2, 2026-11-12 |
-| Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content | round 1, 2026-11-12 |
-| Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content | round 1, 2026-11-12 |
+| Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
+| Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
 
 ### Harness

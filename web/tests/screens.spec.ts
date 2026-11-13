@@ -10,6 +10,9 @@ const CASES: { scenario: string; tab: string }[] = [
   ...ALL.map((tab) => ({ scenario: "first_install", tab })),
   ...["quiet", "config_broken", "no_config", "unreachable", "loading"].map((scenario) => ({ scenario, tab: "overview" })),
   { scenario: "loading", tab: "library" },
+  { scenario: "loading", tab: "runs" },
+  { scenario: "loading", tab: "sources" },
+  { scenario: "never_reached", tab: "overview" },
 ]
 
 for (const { scenario, tab } of CASES) {

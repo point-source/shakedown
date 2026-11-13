@@ -1,6 +1,6 @@
 # Handoff: Sources tab
 
-*Approved: round 1, 2026-11-12 · Kit: §spec:ui-kit · Endpoints: `GET /api/network?days=30`, `/api/activity` (`network`)*
+*Approved: round 1, 2026-11-12; loading state 2026-11-13 · Kit: §spec:ui-kit · Endpoints: `GET /api/network?days=30`, `/api/activity` (`network`)*
 *Code: `web/src/views/Sources.tsx`*
 
 ## Purpose

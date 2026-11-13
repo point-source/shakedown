@@ -20,7 +20,7 @@ export interface Scenario {
   /** How the server behaves: answer normally, answer 503 with the config error,
    *  answer first and then stop (advance the clock by `minutes`), or never answer. */
   mode: { kind: "ok" } | { kind: "no_config"; detail: string } | { kind: "goes_away"; minutes: number } | { kind: "hangs" }
-    | { kind: "restarts_broken"; detail: string; minutes: number }
+    | { kind: "restarts_broken"; detail: string; minutes: number } | { kind: "refused" }
   answers: Answers
   /** Endpoints that always answer this HTTP error status instead of their answer. */
   fail?: Partial<Record<keyof Answers, number>>
@@ -168,6 +168,7 @@ export const SCENARIOS: Record<string, Scenario> = {
   no_config: { now: NOW, mode: { kind: "no_config", detail: CONFIG_ERROR }, answers: sorted(defaultAnswers()) },
   unreachable: { now: NOW, mode: { kind: "goes_away", minutes: 4 }, answers: sorted(defaultAnswers()) },
   loading: { now: NOW, mode: { kind: "hangs" }, answers: sorted(defaultAnswers()) },
+  never_reached: { now: NOW, mode: { kind: "refused" }, answers: sorted(defaultAnswers()) },
   long_content: { now: NOW, mode: { kind: "ok" }, answers: sorted(longContent()) },
   // Behaviour scenarios (tests/behaviour.spec.ts, tests/freshness.spec.ts); no screenshots.
   // The browser's clock runs a minute ahead of the server's; the server answers normally.

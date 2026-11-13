@@ -24,6 +24,7 @@ export async function openScenario(page, baseURL, name, opts = {}) {
     const url = new URL(route.request().url())
     const key = url.pathname.replace(/^.*\/api\//, "") + url.search
     if (s.mode.kind === "hangs") return // never answers: the page stays in its loading state
+    if (s.mode.kind === "refused") return route.abort("connectionrefused") // never reached
     if (s.mode.kind === "no_config") {
       return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: s.mode.detail }) })
     }

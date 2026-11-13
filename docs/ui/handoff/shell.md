@@ -1,6 +1,6 @@
 # Handoff: Page shell and page-wide states
 
-*Approved: round 2, 2026-11-12 · Kit: §spec:ui-kit · Endpoints: all six `GET /api/*` (§spec:dashboard)*
+*Approved: round 2, 2026-11-12; never-reached state 2026-11-13 · Kit: §spec:ui-kit · Endpoints: all six `GET /api/*` (§spec:dashboard)*
 *Code: `web/src/App.tsx`, `web/src/data/useDashboard.ts` · Fixtures: `web/src/fixtures/scenarios.ts`*
 
 ## Purpose
@@ -36,7 +36,7 @@ Rendered at 390/768/1440 in light and dark (`npm run render`).
 | --- | --- | --- |
 | default | `default` | header, tabs, content |
 | can't reach Shakedown | `unreachable`: answers, then requests fail for 4 min | warning Alert "Can't reach Shakedown" / "Showing data from 4 min ago."; dot amber; Updated shows when the oldest answer arrived; content keeps the last data |
-| never reached | every request fails before any answer | warning Alert, description "Nothing to show until it answers."; tabs hidden |
+| never reached | `never_reached`: every request fails before any answer | warning Alert, description "Nothing to show until it answers."; tabs hidden |
 | config broken | `config_broken`: `health.config.valid` false | destructive Alert "shakedown.yaml has an error", the error text, "Showing data from the config loaded at 18:02."; content keeps showing data |
 | config never loaded | `no_config`: every endpoint 503 `{detail}` | destructive Alert with the error and "Nothing to show until it loads."; tabs hidden |
 | loading | `loading`: no answer yet | every card shows Skeleton rows; header shows "Shakedown" only |
