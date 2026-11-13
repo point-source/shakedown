@@ -15,10 +15,12 @@ export interface Slot<T> {
   error: string | null
   /** True when the last failure was a 503: the config has never loaded. */
   noConfig: boolean
+  /** When `data` arrived, by the browser's clock; null before the first answer. */
+  receivedAt: number | null
 }
 
 function useEndpoint<T extends { generated_at: string }>(path: string, intervalMs: number): Slot<T> {
-  const [slot, setSlot] = useState<Slot<T>>({ data: null, error: null, noConfig: false })
+  const [slot, setSlot] = useState<Slot<T>>({ data: null, error: null, noConfig: false, receivedAt: null })
   const timer = useRef<number | undefined>(undefined)
 
   useEffect(() => {
@@ -32,7 +34,7 @@ function useEndpoint<T extends { generated_at: string }>(path: string, intervalM
           if (!cancelled) setSlot((s) => ({ ...s, error: detail, noConfig: r.status === 503 }))
         } else {
           const data = (await r.json()) as T
-          if (!cancelled) setSlot({ data, error: null, noConfig: false })
+          if (!cancelled) setSlot({ data, error: null, noConfig: false, receivedAt: Date.now() })
         }
       } catch (e) {
         if (!cancelled) setSlot((s) => ({ ...s, error: String(e), noConfig: false }))
@@ -84,11 +86,13 @@ export type Dashboard = ReturnType<typeof useDashboard>
 
 /**
  * Old data is labelled, never passed off as current: the page cannot reach
- * Shakedown when a refresh failed or an answer is older than twice its interval.
- * Returns the time of the oldest answer on screen when that is the case.
+ * Shakedown when a refresh failed or an answer arrived more than twice its
+ * interval ago. Ages count from arrival, by the browser's clock, so a server
+ * clock that differs from the browser's never reads as unreachable.
+ * Returns the arrival time of the oldest answer on screen when that is the case.
  */
 export function staleSince(d: Dashboard, now: number): number | null {
-  const slots: [Slot<{ generated_at: string }>, number][] = [
+  const slots: [Slot<unknown>, number][] = [
     [d.activity, LIVE_MS], [d.network, VIEW_MS], [d.runs, VIEW_MS],
     [d.library, VIEW_MS], [d.attention, VIEW_MS], [d.health, VIEW_MS],
   ]
@@ -96,7 +100,7 @@ export function staleSince(d: Dashboard, now: number): number | null {
   let oldest: number | null = null
   for (const [slot, interval] of slots) {
     if (slot.noConfig) continue
-    const at = slot.data ? Date.parse(slot.data.generated_at) : null
+    const at = slot.receivedAt
     if (at !== null) oldest = oldest === null ? at : Math.min(oldest, at)
     if ((slot.error && slot.data) || (at !== null && now - at > 2 * interval)) stale = true
   }

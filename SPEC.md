@@ -1995,9 +1995,12 @@ Observable behavior:
   (§req:quality-attributes: live, but light).
 - **Old data is labelled, never passed off as current.** Every answer
   carries `generated_at`, the time `serve` computed it. When a refresh
-  fails or the page's newest answer is older than twice its refresh
-  interval, the page says it cannot reach shakedown and shows how old
-  the data on screen is. A run that stopped reporting is shown as ended,
+  fails or no answer has arrived for twice its refresh interval, the
+  page says it cannot reach shakedown and shows how old the data on
+  screen is. Ages count from when an answer arrived, by the browser's
+  clock: `serve` hands out an answer up to one interval old, and a
+  server clock that differs from the browser's must never read as an
+  outage (`web/tests/freshness.spec.ts`). A run that stopped reporting is shown as ended,
   never as running (§spec:run-activity).
 - **No login of its own; same posture as `GET /status`.** The page and
   its endpoints are unauthenticated, like the existing read endpoints;
@@ -2806,7 +2809,8 @@ is one route (`GET /`) with four tabs.
 - `npm run test:screens` runs the Playwright screenshot tests
   (`web/tests/*.spec.ts`, config `web/playwright.config.ts`): one project
   per size × theme, `maxDiffPixels: 0`, `threshold: 0.05`, animations and
-  caret off, UTC clock, `en-US` locale. Baselines are committed only for
+  caret off, UTC clock, `en-US` locale. Behaviour tests with no
+  screenshot (`freshness.spec.ts`) run in one project only. Baselines are committed only for
   approved screens and the approved kit sheet. A font or renderer
   difference is a finding, never a reason to loosen the threshold.
   Every baseline was rendered on Linux x86-64 (Rocky Linux 9.8) with

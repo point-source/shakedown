@@ -137,4 +137,6 @@ export const SCENARIOS: Record<string, Scenario> = {
   unreachable: { now: NOW, mode: { kind: "goes_away", minutes: 4 }, answers: sorted(defaultAnswers()) },
   loading: { now: NOW, mode: { kind: "hangs" }, answers: sorted(defaultAnswers()) },
   long_content: { now: NOW, mode: { kind: "ok" }, answers: sorted(longContent()) },
+  // The browser's clock runs a minute ahead of the server's; the server answers normally.
+  server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },
 }
