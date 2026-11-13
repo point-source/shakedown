@@ -1,5 +1,5 @@
 // How the page writes numbers, sizes, times, and durations.
-// Sizes: decimal units (1 GB = 10^9 bytes) — provisional, see plan Q-units.
+// Sizes: decimal units (1 GB = 10^9 bytes), operator decision 2026-11-12 (§spec:ui-kit).
 
 const nf = new Intl.NumberFormat("en-US")
 export const count = (n: number) => nf.format(n)
