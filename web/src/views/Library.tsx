@@ -132,6 +132,7 @@ function Health({ attention }: { attention: AttentionAnswer }) {
               <ul className="font-mono text-xs wrap-anywhere text-muted-foreground">
                 {h.not_playable.slice(0, 3).map((r) => <li key={r.identifier}>{r.identifier}: {r.reason}</li>)}
               </ul>
+              {h.not_playable.length > 3 && <span className="text-xs text-muted-foreground">and {h.not_playable.length - 3} more</span>}
             </div>
           )}
           {h.playable_copies.length > 0 && (
