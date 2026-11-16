@@ -6,13 +6,14 @@ the endpoints are explicitly NOT for public exposure.
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
 import os
 import time
-from collections.abc import Callable
-from contextlib import closing, suppress
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, closing, suppress
 from pathlib import Path
 from typing import Any
 
@@ -47,13 +48,22 @@ from shakedown.dashboard_runs import runs_answer
 from shakedown.db import connect_reader
 from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries
-from shakedown.trigger import DEFAULT_ARGV_PREFIX, Busy, ExitedEarly, Failed, launch
+from shakedown.trigger import (
+    DEFAULT_ARGV_PREFIX,
+    Busy,
+    ExitedEarly,
+    Failed,
+    launch,
+    stop_runs,
+)
 from shakedown.validate import validate_config
 
 log = logging.getLogger(__name__)
 
 TOKEN_ENV = "SHAKEDOWN_API_TOKEN"
 BUSY_MESSAGE = "a run is in progress; try again when it finishes"
+# A run stopped on request exits 128 + SIGTERM or SIGINT (§spec:graceful-stop).
+STOPPED_EXIT_CODES = (143, 130)
 
 
 def build_app(
@@ -70,7 +80,14 @@ def build_app(
     than a crash (§spec:api-sync-runs). ``clock`` times the dashboard's shared
     answers (§spec:dashboard). ``page_dir`` holds the built dashboard page
     (§spec:dashboard-page)."""
-    app = FastAPI(title="shakedown", version=__version__)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        yield
+        # Shutting down (SIGTERM, Ctrl-C): stop the runs this serve started, so they
+        # end `stopped` rather than killed with serve's container (§spec:graceful-stop).
+        await asyncio.to_thread(stop_runs, app.state.triggered)
+
+    app = FastAPI(title="shakedown", version=__version__, lifespan=lifespan)
     app.state.answers = SharedAnswers(clock)
     # Every load goes through the tracker, so the dashboard knows the last config
     # this serve loaded, including the one at start-up.
@@ -235,7 +252,11 @@ def build_app(
         require_scope(config, source, collection)
 
         def count(returncode: int) -> None:
-            c_sync.labels("ok" if returncode == 0 else "fail").inc()
+            c_sync.labels(
+                "ok" if returncode == 0
+                else "stopped" if returncode in STOPPED_EXIT_CODES
+                else "fail"
+            ).inc()
 
         return start_run(
             config, "sync", source, collection, ["sync", *scope_args(source, collection)],
