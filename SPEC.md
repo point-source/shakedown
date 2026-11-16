@@ -1163,11 +1163,9 @@ Observable behavior:
   the file better than it was found). This is the one frame shakedown
   changes that it did not write.
   A file whose existing tags the tagging library still cannot write back
-  as they are, or that cannot be read as its format, keeps its bytes,
-  with a warning in the run log; the show still completes
-  (§spec:per-item-isolation) but is not marked filled, so every later
-  sync tries that file again (operator decision, 2026-11-16: a file is
-  never skipped for good). A disk fault
+  as they are is left exactly as it is, with a warning
+  in the run log; the show still completes and is not retried for that
+  file (§spec:per-item-isolation). A disk fault
   while writing still fails the show for a retry.
 - **Never overwrite someone else's tag.** A tag already present —
   written by the uploader, the source, or the user's own tool — is never
@@ -1181,8 +1179,8 @@ Observable behavior:
   the archive, so its tagged bytes arrive atomically with it. Shows
   already mirrored are tagged once, on the first sync after the
   collection opts in. After that, a show is revisited only when its
-  computed tag values change (clash state, metadata refresh), after a
-  reconform, or while one of its files could not be filled. A crash mid-tagging never leaves a half-written file in the
+  computed tag values change (clash state, metadata refresh) or after a
+  reconform. A crash mid-tagging never leaves a half-written file in the
   archive or library: before writing into a mirrored file, the system
   keeps a complete backup of it beside the archive (same filesystem,
   outside the library) and deletes the backup once the write is done;
