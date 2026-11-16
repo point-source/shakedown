@@ -226,11 +226,12 @@ def _repair_link_frames(id3: ID3) -> None:
 
 class _Tags:
     """One file's tags behind format-neutral names, through mutagen. MP3 uses
-    EasyID3's names for ID3 frames and is saved in the ID3 version it already had, so nobody else's frames
-    are converted, except a malformed archive.org LINK frame, which is repaired
-    (_repair_link_frames); FLAC and Ogg Vorbis use Vorbis comments. mutagen writes
-    into the file itself, so every link to it carries the change. The repair is made
-    in memory and only reaches the file when there are tags to fill."""
+    EasyID3's names for ID3 frames and is saved in the ID3 version it already had, so
+    nobody else's frames are converted; FLAC and Ogg Vorbis use Vorbis comments.
+    mutagen writes into the file itself, so every link to it carries the change.
+
+    A malformed archive.org LINK frame is repaired on load (_repair_link_frames). The
+    repair is made in memory and reaches the file only when there are tags to fill."""
 
     def __init__(self, path: Path) -> None:
         suffix = path.suffix.lower()
