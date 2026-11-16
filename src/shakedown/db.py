@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
@@ -552,6 +552,25 @@ def _migrate_to_10(conn: sqlite3.Connection) -> None:
     GrowthRepo(conn).record(datetime.now(), scopes=None)
 
 
+def _migrate_to_11(conn: sqlite3.Connection) -> None:
+    """v10 → v11: v2.2.0 marked a show filled even when an MP3's tags could not be
+    saved, and recorded nothing about the skipped files (§spec:tag-filling). The
+    fingerprint of every tagged show whose recorded manifest holds an MP3 is cleared
+    once, so the first sync after the upgrade revisits it: files already filled are
+    only read, and skipped ones are filled. Nothing else changes."""
+    conn.execute(
+        """
+        DELETE FROM tag_shows WHERE EXISTS (
+            SELECT 1 FROM items, json_each(items.recorded_manifest) AS f
+            WHERE items.source_name = tag_shows.source_name
+              AND items.collection_name = tag_shows.collection_name
+              AND items.identifier = tag_shows.identifier
+              AND lower(json_extract(f.value, '$.name')) LIKE '%.mp3'
+        )
+        """
+    )
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -563,6 +582,7 @@ _MIGRATIONS = {
     8: _migrate_to_8,
     9: _migrate_to_9,
     10: _migrate_to_10,
+    11: _migrate_to_11,
 }
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from shakedown.db import connect
+from shakedown.db import SCHEMA_VERSION, connect
 from shakedown.growth import GrowthRepo
 from shakedown.lock import run_exclusive
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
@@ -55,7 +55,7 @@ def test_v9_migration_records_one_snapshot_per_collection(tmp_path: Path) -> Non
     conn.close()
 
     with closing(connect(db)) as conn:
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 10
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         items = ItemRepo(conn)
         expected = [
             ("s", c, items.count_by_status("s", c).get(ItemStatus.COMPLETE, 0),
