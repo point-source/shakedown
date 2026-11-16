@@ -660,6 +660,63 @@ def test_a_download_with_a_malformed_link_frame_is_tagged(tmp_roots) -> None:
     assert "aru93" in _tag_repo(config).fingerprints("fake-src", "coll1")
 
 
+def _reject_saves_of(monkeypatch: pytest.MonkeyPatch, file_name: str) -> None:
+    """Make mutagen reject saving one file's tags, as it does a frame it cannot
+    write back."""
+    save = tagging._Tags.save
+
+    def rejecting(self: tagging._Tags, path: Path) -> None:
+        if path.name == file_name:
+            raise ValueError("Invalid frame ID")
+        save(self, path)
+
+    monkeypatch.setattr(tagging._Tags, "save", rejecting)
+
+
+def test_a_download_whose_tag_cannot_be_saved_completes_and_is_not_retried(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file keeps its source bytes, its sibling is tagged, and the show is
+    complete and marked filled (§spec:per-item-isolation; operator decision,
+    2026-11-16: no retry on every sync)."""
+    config = make_config(*tmp_roots, fill_tags=True)
+    _link_frame_mp3_show("aru93", tmp_roots[0].parent)
+    _reject_saves_of(monkeypatch, "t01.mp3")
+
+    assert run_sync(config) == 0
+
+    stored = ItemRepo(_db(config)).get("fake-src", "coll1", "aru93")
+    assert stored is not None and stored.status == ItemStatus.COMPLETE
+    assert _archive_file(config, "aru93", "t01.mp3").read_bytes() == (
+        mp3_with_text_shaped_link_frame()
+    )
+    assert read_tags(_archive_file(config, "aru93", "t02.mp3"))["album"] == [ARU_ALBUM]
+    assert "aru93" in _tag_repo(config).fingerprints("fake-src", "coll1")
+
+
+def test_a_mirrored_file_whose_tag_cannot_be_saved_does_not_stop_the_run(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pass over mirrored shows skips the file and finishes the collection; the
+    show is marked filled, so later runs do not reopen it."""
+    root = tmp_roots[0].parent
+    _link_frame_mp3_show("aru93", root)
+    _fake_show("gd77", root)
+    assert run_sync(make_config(*tmp_roots)) == 0
+    config = make_config(*tmp_roots, fill_tags=True)
+    _reject_saves_of(monkeypatch, "t01.mp3")
+
+    assert run_sync(config) == 0
+
+    assert _album(config, "gd77") == [ALBUM]
+    assert read_tags(_archive_file(config, "aru93", "t02.mp3"))["album"] == [ARU_ALBUM]
+    assert _archive_file(config, "aru93", "t01.mp3").read_bytes() == (
+        mp3_with_text_shaped_link_frame()
+    )
+    done = _tag_repo(config).fingerprints("fake-src", "coll1")
+    assert "gd77" in done and "aru93" in done
+
+
 # --- verify --deep: shakedown's own tagging is not drift ------------------------------
 
 def _verify(config, *, reconform: bool = False) -> list[tuple[str, str]]:

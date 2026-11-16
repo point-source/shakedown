@@ -1165,7 +1165,9 @@ Observable behavior:
   A file whose existing tags the tagging library still cannot write back
   as they are is left exactly as it is, with a warning
   in the run log; the show still completes and is not retried for that
-  file (§spec:per-item-isolation). A disk fault
+  file (§spec:per-item-isolation; operator decision, 2026-11-16: the
+  one-time catch-up after the v11 upgrade, §spec:state, replaces
+  retrying on every sync). A disk fault
   while writing still fails the show for a retry.
 - **Never overwrite someone else's tag.** A tag already present —
   written by the uploader, the source, or the user's own tool — is never
