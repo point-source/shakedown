@@ -1,7 +1,6 @@
 """SQLite schema and connection helpers. Co-located with the archive (PRD §6)."""
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -559,18 +558,17 @@ def _migrate_to_11(conn: sqlite3.Connection) -> None:
     fingerprint of every tagged show whose recorded manifest holds an MP3 is cleared
     once, so the first sync after the upgrade revisits it: files already filled are
     only read, and skipped ones are filled. Nothing else changes."""
-    rows = conn.execute(
-        "SELECT t.source_name, t.collection_name, t.identifier, i.recorded_manifest"
-        " FROM tag_shows t JOIN items i USING (source_name, collection_name, identifier)"
-    ).fetchall()
-    for row in rows:
-        files = json.loads(row["recorded_manifest"] or "[]")
-        if any(f["name"].lower().endswith(".mp3") for f in files):
-            conn.execute(
-                "DELETE FROM tag_shows"
-                " WHERE source_name=? AND collection_name=? AND identifier=?",
-                (row["source_name"], row["collection_name"], row["identifier"]),
-            )
+    conn.execute(
+        """
+        DELETE FROM tag_shows WHERE EXISTS (
+            SELECT 1 FROM items, json_each(items.recorded_manifest) AS f
+            WHERE items.source_name = tag_shows.source_name
+              AND items.collection_name = tag_shows.collection_name
+              AND items.identifier = tag_shows.identifier
+              AND lower(json_extract(f.value, '$.name')) LIKE '%.mp3'
+        )
+        """
+    )
 
 
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
