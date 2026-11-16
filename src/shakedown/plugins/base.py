@@ -325,6 +325,10 @@ class SourcePlugin(ABC):
         `dest_dir` may hold files an earlier failed attempt left behind (the core
         keeps them so one late error doesn't re-download a whole show). Keep such a
         file only when `reusable_leftover` accepts it; fetch anything else.
+
+        Call `shakedown.stopping.check()` before writing each chunk: once the run is
+        asked to stop it raises `Stopped`, which the plugin lets propagate
+        (§spec:graceful-stop).
         """
 
     @abstractmethod

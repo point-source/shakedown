@@ -32,6 +32,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+from shakedown import stopping
 from shakedown.config import CollectionConfig, Config
 from shakedown.db import transaction
 from shakedown.filesystem import FilesystemError, hardlink, is_within
@@ -299,6 +300,10 @@ class LibraryPlacement:
         folders = self.repo.folders(self.source, self.collection.name)
         progress = self._progress if full else None
         for identifier in identifiers:
+            if full:
+                # A stop lets the show in hand finish linking; every placed file is
+                # recorded, so the next pass links the rest (§spec:graceful-stop).
+                stopping.check()
             item = self.items.get(self.source, self.collection.name, identifier)
             if item is None:
                 continue

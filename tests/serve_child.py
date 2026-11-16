@@ -11,7 +11,10 @@ real CLI entry point exactly as `python -m shakedown` would:
      "kill_at": "backed_up" | "saved" | "torn" | null}
 
 With a gate, every fetch waits until that path exists, so a test can hold a run
-mid-flight (to hit the writer lock or kill it) and then let it finish.
+mid-flight (to hit the writer lock or kill it) and then let it finish. A waiting
+fetch sees a stop request as a real download's chunk loop does
+(§spec:graceful-stop), unless SHAKEDOWN_FAKE_IGNORE_STOP is set: then only a second
+signal ends it.
 
 `audio_items` are shows of tiny real audio files (tests.audio_fixtures), the n-th
 file listed with title "Track n" and track "n". `kill_at` SIGKILLs the process at
@@ -31,6 +34,7 @@ from tests.audio_fixtures import make_audio
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin, install_fake
 
 SPEC_ENV = "SHAKEDOWN_FAKE_SPEC"
+IGNORE_STOP_ENV = "SHAKEDOWN_FAKE_IGNORE_STOP"
 GATE_TIMEOUT_S = 60.0
 
 
@@ -62,11 +66,19 @@ def _seed() -> None:
     if gate:
         real_fetch = FakePlugin.fetch
 
-        def gated_fetch(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        from shakedown import stopping
+
+        honor_stop = not os.environ.get(IGNORE_STOP_ENV)
+
+        def gated_fetch(self, identifier, files, dest_dir):  # type: ignore[no-untyped-def]
+            # Started: the temp folder exists, as a real download's would.
+            dest_dir.mkdir(parents=True, exist_ok=True)
             deadline = time.monotonic() + GATE_TIMEOUT_S
             while not Path(gate).exists() and time.monotonic() < deadline:
+                if honor_stop:
+                    stopping.check()
                 time.sleep(0.02)
-            return real_fetch(self, *args, **kwargs)
+            return real_fetch(self, identifier, files, dest_dir)
 
         FakePlugin.fetch = gated_fetch  # type: ignore[method-assign]
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import click
 
+from shakedown import stopping
 from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, connect_reader, transaction
@@ -158,6 +159,11 @@ def _run_verify(
                         source, collection, deep, items, tags, drift_repo, conn,
                         all_drift, missing_summary, progress,
                     )
+                except stopping.Stopped:
+                    # Only a reconform, holding the writer lock, can be stopped: it
+                    # repairs nothing this run (§spec:graceful-stop).
+                    recorder.end(progress, OperationStatus.STOPPED)
+                    return 1
                 except BaseException:
                     recorder.end(progress, OperationStatus.FAILED_BEFORE_COMPLETION)
                     raise
@@ -238,6 +244,7 @@ def _verify_collection(
     for item in items.list_for_collection(source.name, collection.name):
         if item.status != ItemStatus.COMPLETE:
             continue
+        stopping.check()
         progress.working(item.identifier)
         problem = False
         if not deep:

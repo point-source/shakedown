@@ -27,6 +27,7 @@ from mutagen.id3 import ID3, WOAS, ID3NoHeaderError
 from mutagen.mp3 import MP3
 from mutagen.oggvorbis import OggVorbis
 
+from shakedown import stopping
 from shakedown.db import transaction
 from shakedown.models import Item, Manifest
 from shakedown.placement import has_archive_copy
@@ -473,6 +474,9 @@ def fill_collection_tags(
             continue
         records = repo.file_records(source, collection, identifier)
         for name, wanted in sorted(desired.items()):
+            # A stop lets the file in hand finish, never one cut short; the show keeps
+            # no fingerprint, so the next run picks it up (§spec:graceful-stop).
+            stopping.check()
             path = item.archive_path / name
             if not path.is_file():
                 continue  # nothing to tag; a refetch brings it back, tagged

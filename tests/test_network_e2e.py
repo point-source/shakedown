@@ -84,7 +84,8 @@ async def test_a_throttled_sync_shows_its_series_hits_and_back_off(
     """serve stopped; a sync meets 429s with Retry-After on its listing and on a
     download. serve then shows the series, the hits, and the back-off at the minutes
     they happened, and the series sums to the run's bytes_downloaded."""
-    monkeypatch.setattr(sync_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda _s: None)
     config = _ia_config(tmp_roots)
     with fake_archive() as archive:
         archive.route(
@@ -132,7 +133,8 @@ def test_a_resumed_show_does_not_count_its_kept_files(
 ) -> None:
     """An interrupted show resumed on the next sync: the file it kept is not
     downloaded again and not counted in bytes_downloaded."""
-    monkeypatch.setattr(sync_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda _s: None)
     config = _ia_config(tmp_roots)
     tmp = config.archive_root / "ia" / "gd" / ".tmp-gd1"
     tmp.mkdir(parents=True)

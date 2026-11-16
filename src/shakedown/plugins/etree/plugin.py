@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 import httpx
 
+from shakedown import stopping
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
@@ -247,6 +248,9 @@ class EtreePlugin(SourcePlugin):
                     resp.raise_for_status()
                     with out.open("wb") as fh:
                         for chunk in resp.iter_bytes():
+                            # A stop abandons the file here; the next attempt
+                            # discards it (§spec:graceful-stop).
+                            stopping.check()
                             fh.write(chunk)
                             hasher.update(chunk)
             except httpx.HTTPError as exc:

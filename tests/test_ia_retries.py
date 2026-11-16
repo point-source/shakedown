@@ -30,7 +30,8 @@ COLLECTION = CollectionConfig(name="dead", query="collection:GratefulDead")
 
 @pytest.fixture()
 def archive(monkeypatch) -> Iterator[FakeArchive]:
-    monkeypatch.setattr(sync_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda _s: None)
     with fake_archive() as fake:
         yield fake
 
@@ -92,7 +93,8 @@ def test_download_5xx_after_a_search_is_one_request_and_retriable(archive, tmp_p
 def test_hours_long_retry_after_on_a_download_waits_only_the_core_cap(archive, monkeypatch, tmp_path: Path) -> None:
     """A Retry-After of six hours must not hold a request slot for six hours."""
     delays: list[float] = []
-    monkeypatch.setattr(sync_module.time, "sleep", delays.append)
+    monkeypatch.setattr("time.sleep", delays.append)
+    monkeypatch.setattr(sync_module, "_sleep", delays.append)
     plugin = _plugin()
     archive.item("gd1", FILES)
     archive.file(

@@ -14,6 +14,7 @@ from internetarchive.auth import S3Auth
 from urllib3 import Retry
 from urllib3.exceptions import MaxRetryError
 
+from shakedown import stopping
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
@@ -306,6 +307,9 @@ class IAPlugin(SourcePlugin):
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("wb") as fh:
                 for chunk in response.iter_content(chunk_size=_DOWNLOAD_CHUNK):
+                    # A stop abandons the file here; the next attempt discards it
+                    # (§spec:graceful-stop).
+                    stopping.check()
                     fh.write(chunk)
             last_modified = response.headers.get("Last-Modified")
         if last_modified:

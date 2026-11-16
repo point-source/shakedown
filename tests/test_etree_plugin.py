@@ -460,7 +460,8 @@ def test_retry_after_late_failure_fetches_only_the_missing_file(
     attempt keeps files that match the manifest and fetches only the rest."""
     import shakedown.sync as sync_module
 
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    monkeypatch.setattr("time.sleep", lambda d: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: None)
     contents = {f"t{i:02d}.flac": f"track {i}".encode() for i in range(1, 4)}
     requests: list[str] = []
 
@@ -575,3 +576,20 @@ def test_a_timed_out_download_names_its_cause(tmp_path: Path) -> None:
     item = _item_with_files([ManifestFile("show.flac", None, None)])
     result = plugin.fetch(item.identifier, item.manifest.files, tmp_path)
     assert (result.retriable, result.cause, result.http_status) == (True, "timeout", None)
+
+
+def test_a_download_stops_at_its_next_chunk(tmp_path: Path) -> None:
+    """A stop request ends a download at its next chunk (§spec:graceful-stop)."""
+    import pytest
+
+    from shakedown import stopping
+
+    plugin = _make_plugin(lambda request: httpx.Response(200, content=b"flac-bytes"))
+    item = _item_with_files([ManifestFile("show.flac", 10, None)])
+    stopping.request()
+    try:
+        with pytest.raises(stopping.Stopped):
+            plugin.fetch(item.identifier, item.manifest.files, tmp_path)
+    finally:
+        stopping.reset()
+    assert (tmp_path / "show.flac").stat().st_size < 10

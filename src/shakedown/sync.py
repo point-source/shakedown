@@ -11,7 +11,6 @@ import logging
 import os
 import queue
 import shutil
-import time
 from collections.abc import Collection, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import closing
@@ -21,6 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from shakedown import stopping
 from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress, RunCounts
 from shakedown.config import CollectionConfig, Config, ConfigError, SourceConfig
 from shakedown.config import load as load_config
@@ -181,6 +181,9 @@ class CollectionSyncStats:
     failed: int = 0
     errors: list[str] = field(default_factory=list)
     stale: bool = False  # source enumeration failed; existing items left untouched
+    # Stopped on request before it finished (§spec:graceful-stop): neither failed nor
+    # finished, so it clears no rescheduled entry and fails no exit code by itself.
+    stopped: bool = False
     # Fetches the source refused (recorded unavailable, not failed).
     unavailable: int = 0
     # Shows counted in `failed` because staging them left an issue (a foreign file at a
@@ -259,7 +262,7 @@ def run_sync(
         own = _run_sync(
             config, _scope(config, source_filter, collection_filter), False, refresh_metadata
         )
-        if refresh_metadata or config_path is None:
+        if refresh_metadata or config_path is None or stopping.requested():
             return own
         caught_up = _catch_up(config_path)
         return 0 if own == 0 and caught_up == 0 else 1
@@ -413,10 +416,20 @@ def _sync_all(
             except Exception:
                 log.exception("sync failed for %s/%s%s", source.name, collection.name, note)
                 overall_failed += 1
-                continue
-            finally:
                 if catch_up is not None:
                     _clear_rescheduled(config, source, collection)
+                continue
+            if stats.stopped:
+                # Neither done nor failed: a catch-up keeps its entry, and the next
+                # sync continues the collection (§spec:graceful-stop).
+                log.warning(
+                    "%s/%s: stopped before it finished: new=%d updated=%d bytes=%d%s",
+                    source.name, collection.name, stats.new, stats.updated,
+                    stats.bytes_downloaded, note,
+                )
+                continue
+            if catch_up is not None:
+                _clear_rescheduled(config, source, collection)
             if stats.stale:
                 log.warning(
                     "%s/%s: STALE (source enumeration failed)%s",
@@ -756,6 +769,8 @@ def _sync_collection(
             config, source, collection, plugin, items, runs, outcomes, run, outcome,
             stats, started, dry_run=dry_run, budget=budget,
         )
+    except stopping.Stopped:
+        _close_stopped(items, runs, run, outcomes, outcome, stats, source.name, collection)
     except Exception as e:
         _close_crashed(runs, run, outcomes, outcome, stats, collection, e, RunKind.SYNC)
         if recorder is not None:
@@ -794,6 +809,45 @@ def _close_crashed(
             preservation_context="completed archive work retained",
             deletion_context=_deletion_context(collection),
             safe_next_action=f"check the logged error and rerun {_RERUN[kind]}",
+            errors=stats.errors,
+        )
+
+
+def _close_stopped(
+    items: ItemRepo,
+    runs: RunRepo,
+    run: Run | None,
+    outcomes: OperationOutcomeRepo,
+    outcome: OperationOutcome | None,
+    stats: CollectionSyncStats,
+    source_name: str,
+    collection: CollectionConfig,
+) -> None:
+    """Close a run a stop cut off (§spec:graceful-stop): its record with what it did,
+    its outcome `stopped` — not a failure, so no recovery warning in `status` and no
+    failure notice. Shows it fetched are already recorded and linked; the handoff
+    notice is not sent now (a slow target would outlast the stop timeout), so they
+    join the pending list and the collection's next run sends them
+    (§spec:durable-handoff)."""
+    stats.stopped = True
+    finished = datetime.now()
+    if collection.on_complete is not None and stats.fetched:
+        PendingHandoffRepo(items.conn).mark_undelivered(
+            source_name, collection.name, stats.fetched,
+            "run stopped before it sent the handoff notice", finished,
+        )
+    if run is not None and run.finished_at is None:
+        _finish_run(runs, run, stats, finished)
+    if outcome is not None and outcome.finished_at is None:
+        outcomes.finish(
+            outcome,
+            OperationStatus.STOPPED,
+            finished,
+            phase=outcome.phase,
+            completed_work=_completed_work(stats),
+            preservation_context="completed archive work retained",
+            deletion_context=_deletion_context(collection),
+            safe_next_action=f"rerun {_RERUN[run.kind if run else RunKind.SYNC]} to continue",
             errors=stats.errors,
         )
 
@@ -886,6 +940,8 @@ def _sync_collection_phases(
         _log_plan(source.name, collection.name, plan)
         return stats
 
+    # A collection still queued when a stop arrived does no work (§spec:graceful-stop).
+    stopping.check()
     # Finish any swap or tag write a crashed run left half done, before anything
     # decides whether an item's archive copy exists.
     _recover(config, source.name, collection)
@@ -917,6 +973,9 @@ def _sync_collection_phases(
         planner,
     )
     stats.discovered = len(enumerated_identifiers)
+    # A stop cut the listing or its downloads short: the shows that landed are
+    # recorded and linked; nothing is pruned, swept, or notified (§spec:graceful-stop).
+    stopping.check()
 
     if enum_error is not None:
         # Enumeration failed (source unreachable or faulted partway). Flag the collection
@@ -935,6 +994,7 @@ def _sync_collection_phases(
         stats.progress.phase(Phase.STAGING)
         report = placement.finish()
         _apply_placement_report(stats, report, tag_issues)
+        stopping.check()
         finished = datetime.now()
         stats.progress.phase(Phase.NOTIFYING)
         _fire_notifications(
@@ -1023,6 +1083,7 @@ def _sync_collection_phases(
     stats.progress.phase(Phase.STAGING)
     report = placement.finish()
     _apply_placement_report(stats, report, tag_issues)
+    stopping.check()
 
     # Phase 5: notify. Fire before recording so an undelivered notice is captured
     # in the run's errors but never aborts the sync (§spec:durable-handoff).
@@ -1174,10 +1235,14 @@ def _pipelined_discover_and_fetch(
         while True:
             while len(fetch_futures) >= backlog:
                 process(finished.get())
+            if stopping.requested():
+                break  # no new lookups or downloads (§spec:graceful-stop)
             try:
                 # Descriptors stream in as each resolves; dispatch classifies and
                 # fetches each immediately, so downloads overlap the enumeration.
                 desc = next(descriptors, None)
+                if stopping.requested():
+                    break  # a show looked up after the stop is not started
                 if desc is None:
                     # The listing's lookups are done: shows to fetch, and their bytes,
                     # are known (§spec:run-activity "Honest totals").
@@ -1187,6 +1252,8 @@ def _pipelined_discover_and_fetch(
                     _record_lookup_failure(items, source.name, collection.name, desc, stats)
                 else:
                     dispatch(desc)
+            except stopping.Stopped:
+                break
             except Exception as e:  # any enumeration fault marks the collection stale
                 enum_error = e
                 break
@@ -1196,10 +1263,12 @@ def _pipelined_discover_and_fetch(
             while not finished.empty():
                 process(finished.get())
 
+        # Stop the lookups still running (each ends at its next request or backoff).
+        descriptor_stream.close()
         # Drain every fetch still in flight. Those downloads are valid whether or not
         # the enumeration completed, and recording them keeps the archive and DB
         # consistent (SPEC §spec:discovery-pipeline: an item may be fetched and staged
-        # before discovery completes).
+        # before discovery completes). After a stop, each ends at its next chunk.
         progress.phase(Phase.DOWNLOADING)
         for fut in as_completed(list(fetch_futures)):
             process(fut)
@@ -1496,6 +1565,10 @@ def _process_fetch_result(
     """
     try:
         outcome = fut.result()
+    except stopping.Stopped:
+        # Abandoned at a chunk by a stop: not recorded; its temp folder keeps the
+        # finished files for the next run (§spec:graceful-stop).
+        return
     except Exception as e:
         log.exception("fetch crash for %s", target.descriptor and target.descriptor.identifier)
         stats.failed += 1
@@ -1553,6 +1626,9 @@ class _FetchOutcome:
 _MAX_FETCH_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 1.0
 _MAX_BACKOFF_SECONDS = 60.0
+# A backoff wait that a stop request cuts short (§spec:graceful-stop); looked up per
+# call, so tests can skip real waits.
+_sleep = stopping.wait
 
 
 def _backoff_seconds(attempt: int) -> float:
@@ -1589,6 +1665,7 @@ def _fetch_with_retries(
     progress = progress or Progress(ActivityKind.SYNC)
     wanted = desc.manifest.files if files is None else tuple(files)
     for attempt in range(1, max_attempts + 1):
+        stopping.check()
         _prepare_tmp_dir(wanted, tmp_dir)
 
         with progress.fetch_attempt(desc.identifier, tmp_dir):
@@ -1623,7 +1700,7 @@ def _fetch_with_retries(
         )
         progress.network_event(EventKind.RETRY, identifier=desc.identifier, detail=result.error)
         progress.network_event(EventKind.BACKOFF, identifier=desc.identifier, wait_seconds=delay)
-        time.sleep(delay)
+        _sleep(delay)
     raise AssertionError("unreachable: max_attempts must be >= 1")
 
 
@@ -1723,6 +1800,7 @@ def _fetch_one_budgeted(
     upstream connection. ``progress`` lists the show as worked on while it holds the
     slot (§spec:run-activity).
     """
+    stopping.check()  # a download queued when the stop came never starts
     with budget.slot(), progress.request():
         assert target.descriptor is not None
         identifier = target.descriptor.identifier
@@ -2210,6 +2288,8 @@ def _run_single_show_collections(
 ) -> int:
     failed = 0
     for source, collection, plugin, shows in work:
+        if stopping.requested():
+            break  # a stop ends the run before the next collection
         try:
             stats = _single_show_collection(
                 config, source, collection, plugin, shows, kind, budgets[source.name],
@@ -2225,7 +2305,7 @@ def _run_single_show_collections(
             stats.failed, stats.unavailable, stats.bytes_downloaded,
         )
         log_separations(source.name, collection.name, stats.separated)
-        if stats.failed > 0:
+        if stats.failed > 0 and not stats.stopped:
             failed += 1
     return 0 if failed == 0 else 1
 
@@ -2326,6 +2406,8 @@ def _single_show_collection(
             config, source, collection, plugin, shows, kind, budget,
             items, runs, run, outcomes, outcome, stats, started,
         )
+    except stopping.Stopped:
+        _close_stopped(items, runs, run, outcomes, outcome, stats, source.name, collection)
     except Exception as e:
         _close_crashed(runs, run, outcomes, outcome, stats, collection, e, kind)
         recorder.end(stats.progress, OperationStatus.FAILED_BEFORE_COMPLETION)
@@ -2375,60 +2457,68 @@ def _single_show_phases(
     unrepaired: set[str] = set()
     with ThreadPoolExecutor(max_workers=config.max_concurrent_downloads) as fetch_pool:
         fetches: dict[Future[_FetchOutcome], PlannedItem] = {}
-        for identifier, details in look_up_rows(plugin, list(shows), budget, progress):
-            if isinstance(details, LookupFailure):
-                _note_lookup_failure(stats, source.name, collection.name, details)
-                continue
-            found = describe(identifier, details)
-            if found.is_restricted:
-                # The source refuses the show: recorded unavailable, as a sync would.
-                log.info(
-                    "[%s/%s] %s: unavailable: %s",
-                    source.name, collection.name, found.identifier, found.restriction_reason,
-                )
-                _record_unavailable(items, source.name, collection.name, found)
-                stats.unavailable += 1
-                _fail_refused(stats, found.identifier, found.restriction_reason)
-                continue
-            existing = items.get(source.name, collection.name, identifier)
-            drifted = shows[identifier]
-            if drifted is None:
-                if not found.manifest.files:
-                    _note_lookup_failure(
-                        stats, source.name, collection.name,
-                        LookupFailure(
-                            identifier, f"{NO_FILES_REASON}; archive copy left untouched"
-                        ),
+        looked_up = look_up_rows(plugin, list(shows), budget, progress)
+        try:
+            for identifier, details in looked_up:
+                if stopping.requested():
+                    break  # no new downloads (§spec:graceful-stop)
+                if isinstance(details, LookupFailure):
+                    _note_lookup_failure(stats, source.name, collection.name, details)
+                    continue
+                found = describe(identifier, details)
+                if found.is_restricted:
+                    # The source refuses the show: recorded unavailable, as a sync would.
+                    log.info(
+                        "[%s/%s] %s: unavailable: %s",
+                        source.name, collection.name, found.identifier, found.restriction_reason,
                     )
+                    _record_unavailable(items, source.name, collection.name, found)
+                    stats.unavailable += 1
+                    _fail_refused(stats, found.identifier, found.restriction_reason)
                     continue
-                # Every selected file is downloaded again; archive-only copies the
-                # rule no longer selects stay (§spec:quality-selection).
-                manifest, fetch = plan_files(found.manifest, existing, refetch=True)
-            else:
-                errors_before = len(stats.errors)
-                repair = _plan_repair(identifier, existing, details, drifted, items, stats)
-                if len(stats.errors) > errors_before:
-                    unrepaired.add(identifier)
-                if repair is None:
-                    continue
-                manifest, fetch = repair
-            action = (
-                PlanAction.CHANGED_UPSTREAM
-                if existing is not None and has_archive_copy(existing)
-                else PlanAction.NEW
-            )
-            planned = PlannedItem(replace(found, manifest=manifest), existing, action, fetch)
-            if planner is not None:
-                # A reconform restores the drifted files' source bytes, then fills their
-                # gaps again (§spec:verify-drift).
-                planned.tags = planner.plan(identifier, found.metadata, manifest)
-            archive_root.mkdir(parents=True, exist_ok=True)
-            progress.to_fetch(_fetch_size(planned))
-            fut = fetch_pool.submit(
-                _fetch_one_budgeted, budget, plugin, planned, archive_root, collection,
-                progress,
-            )
-            fetches[fut] = planned
+                existing = items.get(source.name, collection.name, identifier)
+                drifted = shows[identifier]
+                if drifted is None:
+                    if not found.manifest.files:
+                        _note_lookup_failure(
+                            stats, source.name, collection.name,
+                            LookupFailure(
+                                identifier, f"{NO_FILES_REASON}; archive copy left untouched"
+                            ),
+                        )
+                        continue
+                    # Every selected file is downloaded again; archive-only copies the
+                    # rule no longer selects stay (§spec:quality-selection).
+                    manifest, fetch = plan_files(found.manifest, existing, refetch=True)
+                else:
+                    errors_before = len(stats.errors)
+                    repair = _plan_repair(identifier, existing, details, drifted, items, stats)
+                    if len(stats.errors) > errors_before:
+                        unrepaired.add(identifier)
+                    if repair is None:
+                        continue
+                    manifest, fetch = repair
+                action = (
+                    PlanAction.CHANGED_UPSTREAM
+                    if existing is not None and has_archive_copy(existing)
+                    else PlanAction.NEW
+                )
+                planned = PlannedItem(replace(found, manifest=manifest), existing, action, fetch)
+                if planner is not None:
+                    # A reconform restores the drifted files' source bytes, then fills their
+                    # gaps again (§spec:verify-drift).
+                    planned.tags = planner.plan(identifier, found.metadata, manifest)
+                archive_root.mkdir(parents=True, exist_ok=True)
+                progress.to_fetch(_fetch_size(planned))
+                fut = fetch_pool.submit(
+                    _fetch_one_budgeted, budget, plugin, planned, archive_root, collection,
+                    progress,
+                )
+                fetches[fut] = planned
+        except stopping.Stopped:
+            pass  # a stop ended the lookups; the downloads already started drain below
+        finally:
+            looked_up.close()
         progress.enumeration_done()
         progress.phase(Phase.DOWNLOADING)
         for fut in as_completed(fetches):
@@ -2440,6 +2530,9 @@ def _single_show_phases(
             )
             if stats.failed > failed_before:
                 unrepaired.discard(_planned_identifier(fetches[fut]))
+    # A stop cut the lookups or downloads short: what landed is recorded and linked;
+    # nothing else runs (§spec:graceful-stop).
+    stopping.check()
     # A show with a drifted file left unrepaired is failed once, unless its download
     # already failed it.
     stats.failed += len(unrepaired)

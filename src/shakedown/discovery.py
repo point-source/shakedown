@@ -10,13 +10,13 @@ from __future__ import annotations
 import logging
 import re
 import threading
-import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from shakedown import stopping
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.models import Manifest, SourceFile
 from shakedown.network import EventKind
@@ -41,7 +41,9 @@ LOOKUP_TIMEOUT = 30.0  # seconds, handed to the plugin for its single request
 LOOKUP_ATTEMPTS = 3
 _LOOKUP_BACKOFF_BASE_SECONDS = 1.0
 _LOOKUP_MAX_BACKOFF_SECONDS = 30.0
-_sleep = time.sleep  # looked up per call, so tests can skip real backoff
+# A backoff wait a stop request cuts short (§spec:graceful-stop); looked up per call,
+# so tests can skip real backoff.
+_sleep = stopping.wait
 
 
 class SourceBudget:
@@ -281,6 +283,7 @@ def lookup(
     attempt's cause, the retry, and the wait (§spec:network-activity).
     """
     for attempt in range(1, LOOKUP_ATTEMPTS + 1):
+        stopping.check()  # raises out of the worker: a stop is not a failed lookup
         try:
             with budget.slot(), progress.request() if progress else nullcontext():
                 raw = plugin.lookup_item(identifier, LOOKUP_TIMEOUT)
@@ -377,7 +380,7 @@ def stream_items(
     *,
     look_up: Callable[[ListedItem], bool] | None = None,
     progress: Progress | None = None,
-) -> Iterator[ItemDescriptor | LookupFailure]:
+) -> Generator[ItemDescriptor | LookupFailure]:
     """List the collection, then look its items up in parallel across the shared
     budget, yielding each description (or lookup failure) as it resolves
     (SPEC §spec:discovery-pipeline, §spec:per-item-isolation).
@@ -395,7 +398,10 @@ def stream_items(
     listing and lookups as network activity (§spec:network-activity).
     """
     with progress.listing() if progress else nullcontext():
-        listing = list(plugin.list_items(collection))
+        listing = []
+        for row in plugin.list_items(collection):
+            stopping.check()  # a stop ends the listing at its next page
+            listing.append(row)
     enumerated.update(row.identifier for row in listing)
     rows = [row for row in listing if look_up is None or look_up(row)]
     if progress is None:
@@ -424,7 +430,7 @@ def look_up_rows(
     identifiers: Sequence[str],
     budget: SourceBudget,
     progress: Progress,
-) -> Iterator[tuple[str, ItemDetails | LookupFailure]]:
+) -> Generator[tuple[str, ItemDetails | LookupFailure]]:
     """Look up just these items — no listing — in parallel across the shared budget,
     yielding each identifier with its validated lookup (every file the source lists,
     before selection) or its failure. A single-show run acts on the shows it names
@@ -460,7 +466,7 @@ def _windowed[T, R](rows: Sequence[T], budget: SourceBudget, work: Callable[[T],
     with ThreadPoolExecutor(max_workers=workers) as pool:
 
         def top_up() -> None:
-            while len(pending) < window:
+            while len(pending) < window and not stopping.requested():
                 row = next(remaining, None)
                 if row is None:
                     return

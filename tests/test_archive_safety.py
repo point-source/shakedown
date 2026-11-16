@@ -277,7 +277,8 @@ def test_short_file_is_retried_and_never_recorded_complete(
     archive, library = tmp_roots
     config = make_config(archive, library)
     _seed("gd-a", ("a.flac", b"full length audio"))
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    monkeypatch.setattr("time.sleep", lambda d: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: None)
     attempts = {"n": 0}
 
     def short_fetch(self, identifier, files, dest_dir):
@@ -377,7 +378,8 @@ def test_abandoned_temp_dirs_are_removed_but_failed_shows_keep_theirs(
     for leftover in (".tmp-gone-upstream", ".tmp-gd-a"):
         (coll / leftover).mkdir()
         (coll / leftover / "x.flac").write_bytes(b"partial")
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    monkeypatch.setattr("time.sleep", lambda d: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: None)
 
     def fail_c(self, identifier, files, dest_dir):
         (dest_dir / "gd-c.flac").write_bytes(b"hello")  # partial, kept for resume
