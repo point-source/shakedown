@@ -1,13 +1,14 @@
 """SQLite schema and connection helpers. Co-located with the archive (PRD §6)."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
@@ -552,6 +553,26 @@ def _migrate_to_10(conn: sqlite3.Connection) -> None:
     GrowthRepo(conn).record(datetime.now(), scopes=None)
 
 
+def _migrate_to_11(conn: sqlite3.Connection) -> None:
+    """v10 → v11: v2.2.0 marked a show filled even when an MP3's tags could not be
+    saved, and recorded nothing about the skipped files (§spec:tag-filling). The
+    fingerprint of every tagged show whose recorded manifest holds an MP3 is cleared
+    once, so the first sync after the upgrade revisits it: files already filled are
+    only read, and skipped ones are filled. Nothing else changes."""
+    rows = conn.execute(
+        "SELECT t.source_name, t.collection_name, t.identifier, i.recorded_manifest"
+        " FROM tag_shows t JOIN items i USING (source_name, collection_name, identifier)"
+    ).fetchall()
+    for row in rows:
+        files = json.loads(row["recorded_manifest"] or "[]")
+        if any(f["name"].lower().endswith(".mp3") for f in files):
+            conn.execute(
+                "DELETE FROM tag_shows"
+                " WHERE source_name=? AND collection_name=? AND identifier=?",
+                (row["source_name"], row["collection_name"], row["identifier"]),
+            )
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -563,6 +584,7 @@ _MIGRATIONS = {
     8: _migrate_to_8,
     9: _migrate_to_9,
     10: _migrate_to_10,
+    11: _migrate_to_11,
 }
 
 

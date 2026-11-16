@@ -803,7 +803,7 @@ def test_v8_db_gains_empty_rescheduled_syncs(tmp_path: Path) -> None:
 
     conn = connect(db_path)
     assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION == 11
     assert "rescheduled_syncs" in _tables(conn)
     assert conn.execute("SELECT COUNT(*) AS n FROM rescheduled_syncs").fetchone()["n"] == 0
     item = ItemRepo(conn).get("s", "c", "x")
@@ -861,7 +861,7 @@ def test_v9_db_gains_empty_run_activity(tmp_path: Path) -> None:
     conn.close()
 
     conn = connect(db_path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 10
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     for table in ("run_activity", "network_minutes", "network_events"):
         assert table in _tables(conn), table
         assert conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"] == 0
@@ -869,6 +869,38 @@ def test_v9_db_gains_empty_run_activity(tmp_path: Path) -> None:
     assert ItemRepo(conn).get("s", "c", "x") is not None
     latest = RunRepo(conn).latest("s", "c")
     assert latest is not None and latest.id == run.id
+
+
+def test_v10_db_reopens_tagged_shows_with_mp3_files_once(tmp_path: Path) -> None:
+    """v2.2.0 marked a show filled even when an MP3's tags could not be saved
+    (§spec:tag-filling), and nothing recorded which files were skipped. v11 clears
+    the fingerprint of every tagged show holding an MP3, so the first sync after the
+    upgrade fills what was skipped; other shows and every file record stay."""
+    db_path = tmp_path / "v10.db"
+    conn = connect(db_path)
+    manifests = {
+        "lossy": '[{"name": "t01.MP3", "size": 1, "md5": null, "library": true}]',
+        "lossless": '[{"name": "t01.flac", "size": 1, "md5": null, "library": true}]',
+    }
+    for identifier, manifest in manifests.items():
+        conn.execute(
+            "INSERT INTO items (source_name, collection_name, identifier, status,"
+            " recorded_manifest) VALUES ('s', 'c', ?, 'complete', ?)",
+            (identifier, manifest),
+        )
+        repo = TagRepo(conn)
+        repo.set_fingerprint("s", "c", identifier, "fp")
+        repo.put_file("s", "c", identifier, "t01", TagRecord("md5", {"album": "A"}))
+    conn.execute("UPDATE schema_version SET version = 10")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+    repo = TagRepo(conn)
+    assert repo.fingerprints("s", "c") == {"lossless": "fp"}
+    assert set(repo.file_records("s", "c", "lossy")) == {"t01"}
+    assert set(repo.file_records("s", "c", "lossless")) == {"t01"}
 
 
 def test_activity_trim_keeps_30_days_and_never_touches_records(tmp_path: Path) -> None:

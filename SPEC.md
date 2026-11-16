@@ -1504,6 +1504,12 @@ Sync state lives in a single-file embedded SQLite database at
   (§spec:library-stats). These live in tables of their own; runs keep
   them to 30 days and trimming never touches item, run, or placement
   records. A database rebuilt by `reconcile` starts with no history.
+- Schema v11 clears, once, the tag-filling fingerprint of every show
+  whose recorded files include an MP3: v2.2.0 marked such a show filled
+  even when an MP3's tags could not be saved, and recorded nothing about
+  the skipped files (§spec:tag-filling). The first sync after the
+  upgrade revisits those shows; files already filled are only read.
+  Nothing else changes, and nothing is re-downloaded.
 - Only a command that holds the writer lock migrates the database.
   Commands that take no lock — `status`, `item show`, `sync --dry-run`,
   `verify` without `--reconform`, `validate`, and `serve`'s
