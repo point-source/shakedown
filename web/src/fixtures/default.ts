@@ -126,7 +126,7 @@ export const runs: RunsAnswer = {
       started_at: at(14), finished_at: at(6), duration_seconds: 480, result: "failed_before_completion",
       end_reason: "stopped_reporting", items_discovered: null, items_new: 0, items_updated: 0,
       items_failed: 0, bytes_downloaded: 210_400_000,
-      errors: ["run ended unexpectedly (stopped reporting)"], failure_notice_error: null },
+      errors: ["run ended unexpectedly (lost contact)"], failure_notice_error: null },
     { run_id: 486, activity_id: 905, kind: "sync", source: "internetarchive", collection: "phish",
       started_at: at(1170), finished_at: at(1121), duration_seconds: 2940, result: "completed",
       end_reason: null, items_discovered: 4113, items_new: 6, items_updated: 1, items_failed: 0,

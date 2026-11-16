@@ -8,7 +8,7 @@ from typing import Any
 
 import click
 
-from shakedown.activity import STOPPED_REPORTING, ActivityRepo
+from shakedown.activity import ABANDONED_ERROR, STOPPED_REPORTING, ActivityRepo
 from shakedown.config import Config
 from shakedown.db import connect_reader
 from shakedown.history import RunEnd, run_end
@@ -243,7 +243,7 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 f"failed={last['items_failed']} bytes={last['bytes_downloaded']}"
             )
             if last["end_reason"] == STOPPED_REPORTING:
-                click.echo("  run ended unexpectedly (stopped reporting)")
+                click.echo(f"  {ABANDONED_ERROR}")
             elif last["result"] == OperationStatus.STOPPED:
                 click.echo("  run stopped on request before it finished; the next run continues")
             if last["failure_notice_error"]:

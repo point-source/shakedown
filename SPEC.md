@@ -2148,7 +2148,7 @@ Observable behavior:
   killed run is reported by `status` as ended unexpectedly as soon as
   its heartbeat goes stale, and the next run that takes the writer lock
   closes it with the time of its last heartbeat and the error "run ended
-  unexpectedly (stopped reporting)", together with any outcome it left
+  unexpectedly (lost contact)", together with any outcome it left
   in progress. Before this, a killed scheduled run's record stayed open
   forever — only runs `serve` started were closed (§spec:api-sync-runs) —
   contradicting §spec:failure-behavior ("the run record is always
