@@ -2634,7 +2634,7 @@ literal colors, sizes, radii, shadows, or fonts.
 | `--muted`, `--muted-foreground` | shadcn neutral | shadcn neutral | labels, secondary text, tracks |
 | `--border`, `--input`, `--ring` | shadcn neutral | shadcn neutral | dividers, focus |
 | `--primary`, `--primary-foreground` | `oklch(0.546 0.245 262.881)` on `oklch(0.985 0 0)` | `oklch(0.707 0.165 254.624)` on `oklch(0.145 0 0)` | progress, chart series 1, focus ring (`--ring` = primary) |
-| `--destructive` | `oklch(0.505 0.213 27.518)` | `oklch(0.704 0.191 22.216)` | failed, stopped reporting, config error |
+| `--destructive` | `oklch(0.505 0.213 27.518)` | `oklch(0.704 0.191 22.216)` | failed, lost contact, config error |
 | `--success` (kit addition) | `oklch(0.448 0.119 151.328)` | `oklch(0.792 0.209 151.711)` | completed, healthy |
 | `--warning` (kit addition) | `oklch(0.473 0.137 46.201)` | `oklch(0.828 0.189 84.429)` | no progress, delayed, old data |
 | `--chart-1` … `--chart-5` | `--chart-1` = primary; shadcn 2–5 | shadcn | chart series |
@@ -2678,8 +2678,10 @@ Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
 
 - Badge tones carry outcomes and states only: `success` for Completed,
   `warning` for No progress, delayed, or partly failed, `danger` for
-  Failed and Stopped reporting. A run's phase uses `secondary` (neutral);
-  it is not an outcome.
+  Failed and Lost contact. A run's phase uses `secondary` (neutral);
+  it is not an outcome. Stopped is an outcome but uses `secondary` too:
+  a run someone stopped is not a problem (operator decision,
+  2026-11-16).
 - Color never carries meaning alone; every badge and dot has its words.
 - Sizes use decimal units: 1 GB = 10^9 bytes, 1 TB = 10^12 (operator
   decision, 2026-11-12), formatted by `web/src/lib/format.ts`.
@@ -2708,9 +2710,13 @@ Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
   <time>" beside its phase. The API carries no verdict on progress
   (§spec:run-activity).
 - **A run that stopped reporting** shows, as soon as `/api/attention`
-  lists it, as a Needs attention entry "<Kind> stopped reporting at
+  lists it, as a Needs attention entry "Lost contact with <kind> at
   <time>" with its next step, and in Recent runs and on the Runs tab with
-  a `danger` Badge "Stopped reporting".
+  a `danger` Badge "Lost contact" (renamed from "Stopped reporting",
+  operator decision, 2026-11-16, so that "Stopped" means one thing).
+- **A run stopped on request** (§spec:graceful-stop) shows in Recent
+  runs and on the Runs tab with a `secondary` Badge "Stopped". It is not
+  in Needs attention.
 - The page shows no disk-full estimate (operator decision); the API no
   longer computes one (§spec:library-stats).
 - On desktop (1024 px and up) Running now sits left of Needs attention;
@@ -2762,7 +2768,8 @@ Spec and code names in the last column never appear on screen.
 | Release | The Shakedown version answering this page. | version, build | `release` |
 | Running | A run that is working and reporting. | active, in progress | `state: running` |
 | No progress for *time* | A running run whose counts have not moved for that long. | stuck, stalled, hung | `last_progress_at` |
-| Stopped reporting | A run that stopped sending updates: killed, crashed, or the host went down. | crashed, lost, ended unexpectedly | `end_reason: stopped_reporting`, ended unexpectedly |
+| Lost contact | A run that stopped sending updates: killed, crashed, or the host went down. | stopped reporting, crashed, ended unexpectedly | `end_reason: stopped_reporting`, ended unexpectedly |
+| Stopped | A run someone stopped before it finished (`docker stop`, Ctrl-C); the next run continues where it left off. | interrupted, cancelled, aborted | `stopped`, stopped on request |
 | Completed | The run finished and every show it worked on succeeded. | done, succeeded, OK | `completed` |
 | Completed, some shows failed | The run finished; some shows failed and the next sync retries them. | partial, partly failed | `completed_with_item_issues` |
 | Failed | The run ended before it finished. | error, aborted | `failed_before_completion` |
@@ -3252,13 +3259,6 @@ a commit whose workflow tests fail: no image is published. Run
 `shakedown --help` in the published image: no release-check command is
 listed.
 
-## Failure behavior §spec:failure-behavior
-
-*Status: complete, including the run-activity rows (§spec:run-activity) and the
-dashboard row (§spec:dashboard)*
-
-The resilience contract (§req:quality-attributes): single failures
-degrade a single item or a single run, never the archive.
 ## Graceful stop §spec:graceful-stop
 
 *Status: complete*
@@ -3355,6 +3355,13 @@ during a manual sync: it exits at once with 130, and the next sync
 closes the run record. Stop `serve` while a sync it started runs: the
 sync ends stopped before `serve` exits.
 
+## Failure behavior §spec:failure-behavior
+
+*Status: complete, including the run-activity rows (§spec:run-activity) and the
+dashboard row (§spec:dashboard)*
+
+The resilience contract (§req:quality-attributes): single failures
+degrade a single item or a single run, never the archive.
 
 | Failure | Behavior |
 | --- | --- |
@@ -3386,6 +3393,8 @@ sync ends stopped before `serve` exits.
 | A sync is skipped while the previous release's run still writes (upgrade mid-run) | Nothing is recorded and the database is not migrated under the running writer; the tick exits 1 as before (§spec:rescheduled-syncs). `status`, `serve`'s reads, and the other commands that take no lock do not migrate it either (§spec:state) |
 | Config invalid when a catch-up is due | Catch-up not run; every rescheduled entry kept; error logged; the run exits non-zero (§spec:rescheduled-syncs) |
 | Run killed during a catch-up | Entries not yet cleared stay; the next finishing sync catches them up (§spec:rescheduled-syncs) |
+| `docker stop`, NAS shutdown, or Ctrl-C during a writing run | No new work starts; downloads in progress end at their next chunk and keep their temp folders; the run is recorded `stopped` — no recovery warning, no failure notice, no prune, rescheduled entries kept — and the command exits 143 (SIGTERM) or 130 (SIGINT); a second signal exits at once (§spec:graceful-stop) |
+| `serve` stopped while a run it started is going | `serve` sends that run SIGTERM and waits up to 90 s for it to stop before exiting (§spec:graceful-stop) |
 | Run killed or crashed outside `serve` (SIGKILL, OOM, host down) | Its heartbeat stops; within ~20 seconds `status` and the dashboard report it ended unexpectedly; the next run that takes the writer lock closes its record (§spec:run-activity) |
 | Recording progress or network activity fails (database busy) | That write is skipped; the next carries cumulative totals; the run is unaffected (§spec:run-activity) |
 | `serve` down while runs happen | No dashboard meanwhile; nothing lost — runs record their own progress, network activity, and growth (§spec:run-activity, §spec:network-activity, §spec:library-stats) |
@@ -3393,8 +3402,6 @@ sync ends stopped before `serve` exits.
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
 | Handoff target down, failing, or slow | Slow: waited up to five minutes, then recorded undelivered. Failed: notice recorded undelivered, shown in `status`, resent on the collection's next run; the sync still succeeds (§spec:durable-handoff) |
 | API sync requested while a run holds the lock | `409` at once; nothing queued or rescheduled (§spec:api-sync-runs) |
-| `docker stop`, NAS shutdown, or Ctrl-C during a writing run | No new work starts; downloads in progress end at their next chunk and keep their temp folders; the run is recorded `stopped` — no recovery warning, no failure notice, no prune, rescheduled entries kept — and the command exits 143 (SIGTERM) or 130 (SIGINT); a second signal exits at once (§spec:graceful-stop) |
-| `serve` stopped while a run it started is going | `serve` sends that run SIGTERM and waits up to 90 s for it to stop before exiting (§spec:graceful-stop) |
 | Best available copy is unplayable (SHN) | Kept archive-only; the best playable copy also mirrored and staged; with no playable copy, the SHN is staged and the show listed as not playable in `status` (§spec:quality-selection) |
 
 ## Real-source end-to-end check §spec:e2e-real-source

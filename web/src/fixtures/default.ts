@@ -140,6 +140,10 @@ export const runs: RunsAnswer = {
       result: "completed_with_item_issues", end_reason: null, items_discovered: 52098, items_new: 14,
       items_updated: 2, items_failed: 2, bytes_downloaded: 6_310_000_000,
       errors: ["lma-ph2003-07-15: checksum mismatch after 3 attempts"], failure_notice_error: null },
+    { run_id: 484, activity_id: 897, kind: "sync", source: "internetarchive", collection: "grateful-dead",
+      started_at: at(5200), finished_at: at(4980), duration_seconds: 13_200, result: "stopped",
+      end_reason: null, items_discovered: 17842, items_new: 412, items_updated: 0, items_failed: 0,
+      bytes_downloaded: 141_200_000_000, errors: [], failure_notice_error: null },
   ],
 }
 
