@@ -456,8 +456,11 @@ def fill_collection_tags(
     or a metadata refresh (§spec:tag-filling). A show whose fingerprint still matches
     is skipped without opening any of its files. Each file's record is stored as soon
     as it is written, and the show's fingerprint once all its files are done, so a
-    run that stops partway picks the show up again. Returns, per show, the issues of
-    tag writes that failed on the disk; such a show is retried on the next run."""
+    run that stops partway picks the show up again. A show with a file whose tags
+    could not be filled gets no fingerprint either, so the next run tries that file
+    again (operator decision, 2026-11-16: never a permanent skip). Returns, per show,
+    the issues of tag writes that failed on the disk; such a show is retried on the
+    next run."""
     repo = TagRepo(items.conn)
     shows, index = _mirrored(items, source, collection)
     done = repo.fingerprints(source, collection)
@@ -471,6 +474,7 @@ def fill_collection_tags(
         if done.get(identifier) == show_fingerprint:
             continue
         records = repo.file_records(source, collection, identifier)
+        unfilled = False
         for name, wanted in sorted(desired.items()):
             path = item.archive_path / name
             if not path.is_file():
@@ -483,10 +487,11 @@ def fill_collection_tags(
                     f"{identifier}: {tag_failure(name, e)}"
                 )
                 continue
+            unfilled |= result.status == "untaggable"
             if result.record is not None and result.record != records.get(name):
                 with transaction(items.conn):
                     repo.put_file(source, collection, identifier, name, result.record)
-        if identifier not in issues:
+        if identifier not in issues and not unfilled:
             with transaction(items.conn):
                 repo.set_fingerprint(source, collection, identifier, show_fingerprint)
     return issues

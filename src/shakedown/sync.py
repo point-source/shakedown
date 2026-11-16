@@ -1546,6 +1546,7 @@ class _FetchOutcome:
     unavailable: bool = False  # the source refuses to serve the item
     # What tagging the downloaded files recorded, per file; None when nothing was tagged.
     tag_records: dict[str, TagRecord | None] | None = None
+    tags_unfilled: bool = False  # a downloaded file's tags could not be filled
 
 
 # Bounded core-owned retries for transient fetch faults (checksum mismatch,
@@ -1837,11 +1838,14 @@ def _fetch_one(
     # tagged bytes enter the archive atomically with the show (§spec:tag-filling).
     # Kept files are links to the live archive copy and are never touched here.
     tag_records: dict[str, TagRecord | None] | None = None
+    tags_unfilled = False
     if target.tags is not None:
         tag_records = {}
         for name in sorted(fetched & target.tags.keys()):
             try:
-                tag_records[name] = fill_file(tmp_dir / name, target.tags[name], None, None).record
+                result = fill_file(tmp_dir / name, target.tags[name], None, None)
+                tag_records[name] = result.record
+                tags_unfilled |= result.status == "untaggable"
             except TagWriteError as e:
                 # The download may be torn: drop it, and the next run fetches it again.
                 (tmp_dir / name).unlink(missing_ok=True)
@@ -1874,6 +1878,7 @@ def _fetch_one(
         success=True,
         archive_path=dest,
         tag_records=tag_records,
+        tags_unfilled=tags_unfilled,
     )
 
 
@@ -2000,7 +2005,7 @@ def _record_download_tags(
 ) -> None:
     """The downloaded files hold new bytes: their old tag records go, replaced by what
     fetch-time tagging wrote. The show's fingerprint is kept only when every taggable
-    file was downloaded and tagged now; otherwise the run's pass over mirrored shows
+    file was downloaded and filled now; otherwise the run's pass over mirrored shows
     (or, with `fill_tags` off, a later opt-in) revisits it (§spec:tag-filling)."""
     assert target.descriptor is not None
     desc = target.descriptor
@@ -2010,7 +2015,12 @@ def _record_download_tags(
     for name, record in (outcome.tag_records or {}).items():
         if record is not None:
             repo.put_file(source_name, collection_name, desc.identifier, name, record)
-    if target.tags is not None and outcome.tag_records is not None and target.tags.keys() <= downloaded:
+    if (
+        target.tags is not None
+        and outcome.tag_records is not None
+        and not outcome.tags_unfilled
+        and target.tags.keys() <= downloaded
+    ):
         repo.set_fingerprint(source_name, collection_name, desc.identifier, fingerprint(target.tags))
     else:
         repo.clear_fingerprint(source_name, collection_name, desc.identifier)
