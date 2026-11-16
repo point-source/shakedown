@@ -2869,7 +2869,7 @@ Observable behavior:
   `http://host:8080/` and behind a proxy at `/shakedown/` with no
   setting (§spec:dashboard).
 - **Built into the image, never at runtime.** The Dockerfile gains a
-  Node build stage (Node 24, `npm ci` from `web/package-lock.json`, then
+  Node build stage (Node 26, `npm ci` from `web/package-lock.json`, then
   `npm run build`). Its `web/dist/` output is copied into the Python
   package (`shakedown/dashboard_web/`) before the package is installed,
   so it ships as package data and `serve` finds it with

@@ -172,7 +172,7 @@ Reference your plugin from `shakedown.yaml` with `type: <your type_name>`.
 ## Development
 
 ```bash
-uv sync --python 3.12 --extra dev --extra serve
+uv sync --python 3.15 --extra dev --extra serve
 .venv/bin/pytest -v
 ```
 
