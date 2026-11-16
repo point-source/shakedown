@@ -1317,6 +1317,9 @@ exits (§req:constraints). The command surface:
   crash, so a stale lock file never blocks the next run. A
   `sync --collection` refused this way is also recorded as rescheduled
   and caught up when the running sync finishes (§spec:rescheduled-syncs).
+- A writing command stopped by SIGTERM or SIGINT exits 143 or 130
+  after recording its runs `stopped`; a second signal exits at once
+  (§spec:graceful-stop).
 - `status --json` emits machine-readable output for dashboards
   (Homepage/Homarr) in lieu of a web UI (§req:constraints).
 
@@ -1764,8 +1767,9 @@ Observable behavior:
   so the operator can fix the file and retry. Auth (bearer token) and
   unknown-scope `404` behave as before (§spec:serve).
 - **The run counter keeps its meaning.** `serve` watches each sync it
-  started and counts it in `shakedown_sync_runs_total` as `ok` or
-  `fail` when it exits; a refused (`409`) trigger and a verify are not
+  started and counts it in `shakedown_sync_runs_total` as `ok`,
+  `stopped` (it exited 143 or 130, §spec:graceful-stop), or `fail` when
+  it exits; a refused (`409`) trigger and a verify are not
   counted (operator decision, 2026-11-10).
 
 **Decision and constraint.** A triggered sync is a fresh one-shot run,
@@ -1869,7 +1873,9 @@ Observable behavior:
   retries it. A sync that is not a catch-up and ends stale or crashed
   keeps the entry, so the next finishing sync catches it up — which can
   be that same run: its catch-up retries the collection once. A run
-  killed before it finishes a collection clears nothing. A finishing
+  killed before it finishes a collection clears nothing; neither does a
+  run stopped on request, catch-up or not, and a stopped sync runs no
+  catch-up (§spec:graceful-stop). A finishing
   run clears its collection's entry even when that skip was recorded
   while the run was going.
 - **Exit codes.** The skipped tick exits 1. A finishing sync exits
@@ -2129,7 +2135,8 @@ Observable behavior:
   few seconds. When a run finishes it records its result, using the
   outcome codes `status` already uses (`completed`,
   `completed_with_item_issues`, `failed_before_completion`,
-  `stale_enumeration`). An entry whose heartbeat is more than about 20
+  `stale_enumeration`), or `stopped` for a run stopped on request
+  (§spec:graceful-stop). An entry whose heartbeat is more than about 20
   seconds old is reported as `failed_before_completion` with end reason
   `stopped_reporting` — killed, crashed, or the host went down. The live
   view keeps each ended entry for ten minutes so its result and reason
@@ -3147,7 +3154,9 @@ Observable behavior:
   archive."
 - Interrupted runs are not reported as success merely because the
   process exited. An unfinished operation remains visible until a retry
-  completes it.
+  completes it. A run stopped on request (SIGTERM, SIGINT) shows as
+  stopped in its last run, not as a recovery warning: nothing needs
+  recovering, and the next run continues (§spec:graceful-stop).
 
 **Decision and constraint.** Recovery is surfaced through status as the
 operator's durable dashboard, not through transient logs alone. The
@@ -3250,6 +3259,102 @@ dashboard row (§spec:dashboard)*
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
+## Graceful stop §spec:graceful-stop
+
+*Status: complete*
+
+`docker stop`, a NAS shutdown, Container Station's Stop, and Ctrl-C stop
+a writing run cleanly and quickly, and the next run continues where it
+left off (§req:quality-attributes: operability, single failures degrade
+a single run, never the archive; operator decision, 2026-11-16).
+
+Observable behavior:
+
+- **Who stops.** Every writing command — `sync` (and its catch-ups),
+  `item refetch`, `verify --reconform`, `restage`, and `reconcile` —
+  handles SIGTERM and SIGINT while it holds the writer lock
+  (§spec:cli). Commands that take no lock (`status`, `validate`, a plain
+  `verify`, `sync --dry-run`) are unchanged.
+- **The first signal stops new work.** The run starts no new listing
+  page, lookup, download, tag write, or library link, and starts no
+  queued collection. A download in progress ends at its next chunk: the
+  files it finished stay in the show's temp folder, the file it was
+  writing is discarded, and the next run fetches only what is missing
+  (§spec:failure-behavior). Backoff waits end at once. The step in hand
+  always finishes when cutting it short would leave something half done:
+  a show's swap into the archive, one file's tag write (with its backup,
+  §spec:tag-filling), one show's library links (§spec:library-ownership).
+- **What a stopped run records.** Each run it cut off is closed with
+  the outcome `stopped`: its run record with what it did, its activity
+  entry ended `stopped` (§spec:run-activity). A stopped run is not a
+  failure: `status` shows no recovery warning for it (its last run says
+  it was stopped), no failure notice is sent, and it is not in Needs
+  attention. It prunes nothing and marks nothing disappeared — its
+  listing is incomplete (§spec:prune-safety) — and sweeps no temp
+  folders. Shows it fetched are recorded and linked as they landed; its
+  handoff notice is not sent during the stop (a slow target can take five
+  minutes), so those shows join the pending list and the collection's
+  next run sends them (§spec:durable-handoff). A `reconcile` stopped
+  before its rebuild writes nothing.
+- **Rescheduled syncs stay rescheduled.** A stopped collection keeps its
+  rescheduled entry, a stopped catch-up keeps its entry, and a sync that
+  was stopped runs no catch-up (§spec:rescheduled-syncs).
+- **Exit code.** A stopped command releases the writer lock and exits
+  143 after SIGTERM or 130 after SIGINT (128 + the signal number, as
+  shells and Docker report a process ended by that signal). It is
+  non-zero because the work did not finish (§spec:cli), and distinct
+  from 1, which means a run failed.
+- **A second signal exits at once**, with the same code. Nothing is
+  closed; the next run that takes the writer lock closes the run record
+  and finishes any half-done swap or tag write, exactly as after a kill
+  (§spec:run-activity, §spec:failure-behavior).
+- **`serve` stops what it started.** When `serve` shuts down (SIGTERM or
+  Ctrl-C), it sends SIGTERM to each run it started that is still going
+  and waits up to 90 seconds for it to stop before it exits
+  (§spec:api-sync-runs). Such a run counts as `stopped` in
+  `shakedown_sync_runs_total`.
+- **How long a stop takes.** A healthy download notices the stop within
+  a second; a stalled one only when its 30-second read timeout fires.
+  The recommended stop timeout is 120 seconds (`stop_grace_period: 2m`
+  in compose, `docker stop -t 120`); Docker's default of 10 seconds is
+  usually enough, and a run killed after it is still safe.
+
+**Decision and constraint.** A signal handler in shakedown, not an init
+process (tini, `docker run --init`, compose `init: true`): in a
+container shakedown is PID 1, and the kernel drops every signal a PID
+namespace's init leaves at its default action, so before this an
+uncaught SIGTERM was ignored and every `docker stop` ended in SIGKILL
+after the full grace period. An init would only make that kill faster;
+a handler is delivered to PID 1 like to any process and makes the stop
+graceful (operator decision, 2026-11-16). Python runs handlers on the
+main thread only, so the handler sets one process-wide flag that the
+pool workers read at their checkpoints. Downloads are abandoned rather
+than finished because a show's files can take minutes, longer than any
+stop timeout, while the temp folder already keeps finished files
+(§spec:failure-behavior); finishing them would turn most stops into
+kills.
+
+**Alternatives rejected.** *An init process* — kills sooner but no more
+gracefully. *Finish in-flight downloads within a time bound* — a bound
+short enough for Docker's 10 seconds finishes almost nothing, and a
+longer one is cut off by the kill. *Exit 0 on a stop* — the work did not
+finish, and the scheduler should see that. *Record a stopped run as
+failed* — a deliberate stop would raise a recovery warning, a failure
+notice, and a Needs attention entry nobody needs to act on.
+
+**Tradeoffs.** The file each download was writing is fetched again
+next run. A stopped run's handoff notice waits for the collection's next
+run. A run on an older release ignores the signal, as before.
+
+**User-level test path.** Start a long sync in a container; while it
+downloads, `docker stop -t 120` it: it exits 143 within seconds;
+`status` shows its last run stopped and no recovery warning; the
+dashboard shows the run "Stopped". Start the sync again: it fetches only
+the rest and ends where an uninterrupted sync would. Press Ctrl-C twice
+during a manual sync: it exits at once with 130, and the next sync
+closes the run record. Stop `serve` while a sync it started runs: the
+sync ends stopped before `serve` exits.
+
 
 | Failure | Behavior |
 | --- | --- |
@@ -3288,6 +3393,8 @@ degrade a single item or a single run, never the archive.
 | Scheduler misses runs (host down) | Next run converges; sync is idempotent at any cadence |
 | Handoff target down, failing, or slow | Slow: waited up to five minutes, then recorded undelivered. Failed: notice recorded undelivered, shown in `status`, resent on the collection's next run; the sync still succeeds (§spec:durable-handoff) |
 | API sync requested while a run holds the lock | `409` at once; nothing queued or rescheduled (§spec:api-sync-runs) |
+| `docker stop`, NAS shutdown, or Ctrl-C during a writing run | No new work starts; downloads in progress end at their next chunk and keep their temp folders; the run is recorded `stopped` — no recovery warning, no failure notice, no prune, rescheduled entries kept — and the command exits 143 (SIGTERM) or 130 (SIGINT); a second signal exits at once (§spec:graceful-stop) |
+| `serve` stopped while a run it started is going | `serve` sends that run SIGTERM and waits up to 90 s for it to stop before exiting (§spec:graceful-stop) |
 | Best available copy is unplayable (SHN) | Kept archive-only; the best playable copy also mirrored and staged; with no playable copy, the SHN is staged and the show listed as not playable in `status` (§spec:quality-selection) |
 
 ## Real-source end-to-end check §spec:e2e-real-source

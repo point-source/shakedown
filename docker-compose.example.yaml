@@ -110,6 +110,8 @@ services:
     container_name: shakedown-serve
     user: "${SHAKEDOWN_USER:-1000:1000}"
     restart: unless-stopped
+    # On stop, serve stops the runs it started and waits for them (up to 90 s).
+    stop_grace_period: 2m
     volumes:
       - /share/data:/data
       - /share/data/shakedown-config:/data/shakedown-config:ro
