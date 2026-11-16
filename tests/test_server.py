@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from contextlib import closing
 from datetime import datetime
@@ -1027,6 +1028,10 @@ async def test_stopping_serve_stops_the_runs_it_started(
     ) as client:
         r = await client.post("/sync", headers=AUTH)
         assert r.status_code == 202
+        # Ctrl-C in serve's terminal signals serve's process group; the run is
+        # outside it, so serve's SIGTERM is its first signal, not a second one.
+        (running,) = app.state.triggered
+        assert os.getpgid(running.process.pid) != os.getpgrp()
     (triggered,) = app.state.triggered
     assert triggered.done.is_set()
     assert triggered.process.returncode == 143

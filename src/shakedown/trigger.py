@@ -137,6 +137,9 @@ def launch(
             [*argv_prefix, "--config", str(config_path), *args],
             pass_fds=(w,),
             env=child_env,
+            # Its own process group: Ctrl-C in serve's terminal reaches serve only,
+            # and serve's SIGTERM is the run's first signal (§spec:graceful-stop).
+            process_group=0,
         )
     finally:
         os.close(w)  # only the child holds the write end, so its exit means EOF

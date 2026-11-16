@@ -3311,8 +3311,10 @@ Observable behavior:
 - **`serve` stops what it started.** When `serve` shuts down (SIGTERM or
   Ctrl-C), it sends SIGTERM to each run it started that is still going
   and waits up to 90 seconds for it to stop before it exits
-  (§spec:api-sync-runs). Such a run counts as `stopped` in
-  `shakedown_sync_runs_total`.
+  (§spec:api-sync-runs). Each run serve starts is in its own process
+  group, so Ctrl-C in serve's terminal reaches serve alone and serve's
+  SIGTERM is the run's first signal, not a second one that would end it
+  at once. Such a run counts as `stopped` in `shakedown_sync_runs_total`.
 - **How long a stop takes.** A healthy download notices the stop within
   a second; a stalled one only when its 30-second read timeout fires.
   The recommended stop timeout is 120 seconds (`stop_grace_period: 2m`
