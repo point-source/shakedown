@@ -70,7 +70,7 @@ export function KitSheet() {
         <div className="flex flex-wrap gap-2">
           <Badge variant="success">Completed</Badge>
           <Badge variant="warning">No progress for 41 min</Badge>
-          <Badge variant="danger">Stopped reporting</Badge>
+          <Badge variant="danger">Lost contact</Badge>
           <Badge variant="secondary">3</Badge>
           <Badge variant="secondary">Downloading</Badge>
         </div>

@@ -8,11 +8,11 @@ from typing import Any
 
 import click
 
-from shakedown.activity import STOPPED_REPORTING, ActivityRepo
+from shakedown.activity import ABANDONED_ERROR, STOPPED_REPORTING, ActivityRepo
 from shakedown.config import Config
 from shakedown.db import connect_reader
-from shakedown.history import run_end
-from shakedown.models import ItemStatus, OperationOutcome, RunKind
+from shakedown.history import RunEnd, run_end
+from shakedown.models import ItemStatus, OperationOutcome, OperationStatus, RunKind
 from shakedown.state import (
     DriftRepo,
     ItemRepo,
@@ -71,7 +71,7 @@ def _collection_summary(
         "counts": figures["counts"],
         "bytes_on_disk": figures["bytes_on_disk"],
         "drift_files": drift.count(source_name, collection_name),
-        "last_run": _summarize_run(last, _end_reason(items.conn, last)) if last else None,
+        "last_run": _summarize_run(last, _run_end(items.conn, last)) if last else None,
         "recovery": _summarize_recovery(recovery) if recovery else None,
         "restricted": figures["restricted"],
         # Complete shows with no copy a common player reads (§spec:quality-selection).
@@ -128,20 +128,20 @@ def _handoff_pending(
     }
 
 
-def _end_reason(conn: Any, run: Any) -> str | None:
-    """``stopped_reporting`` for a run whose heartbeat went stale — killed, crashed,
-    or the host went down — whether its record is still open or was closed since,
-    else None (§spec:run-activity). A database before schema v10 records no
+def _run_end(conn: Any, run: Any) -> RunEnd | None:
+    """How the run ended, by the run list's own rule, so `status` and `GET /api/runs`
+    always agree: its result, and ``stopped_reporting`` for a run whose heartbeat went
+    stale — killed, crashed, or the host went down — whether its record is still open
+    or was closed since (§spec:run-activity). A database before schema v10 records no
     heartbeats, so it reports none."""
     activity = ActivityRepo(conn)
     if not activity.has_table():
         return None
-    # The run list's own rule, so `status` and `GET /api/runs` always agree.
     now = datetime.now()
-    return run_end(run, activity.for_run(run.id, now), now).end_reason
+    return run_end(run, activity.for_run(run.id, now), now)
 
 
-def _summarize_run(run: Any, end_reason: str | None = None) -> dict[str, Any]:
+def _summarize_run(run: Any, end: RunEnd | None = None) -> dict[str, Any]:
     return {
         # The id a `serve` trigger answers with, so a caller can find its run here
         # (§spec:api-sync-runs).
@@ -158,9 +158,12 @@ def _summarize_run(run: Any, end_reason: str | None = None) -> dict[str, Any]:
         "errors": run.errors,
         # Why this run's failure alert was not delivered (§spec:durable-handoff).
         "failure_notice_error": run.failure_notice_error,
+        # The run's outcome code, as `GET /api/runs` gives it: null while it runs, or
+        # `stopped` when it was stopped on request (§spec:graceful-stop).
+        "result": end.result if end else None,
         # `stopped_reporting` when the run is still open but stopped reporting: it
         # ended unexpectedly (§spec:run-activity).
-        "end_reason": end_reason,
+        "end_reason": end.end_reason if end else None,
     }
 
 
@@ -240,7 +243,9 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 f"failed={last['items_failed']} bytes={last['bytes_downloaded']}"
             )
             if last["end_reason"] == STOPPED_REPORTING:
-                click.echo("  run ended unexpectedly (stopped reporting)")
+                click.echo(f"  {ABANDONED_ERROR}")
+            elif last["result"] == OperationStatus.STOPPED:
+                click.echo("  run stopped on request before it finished; the next run continues")
             if last["failure_notice_error"]:
                 click.echo(f"  failure notice not delivered: {last['failure_notice_error']}")
         else:

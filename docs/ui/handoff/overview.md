@@ -1,6 +1,6 @@
 # Handoff: Overview tab
 
-*Approved: round 2, 2026-11-12 · Kit: §spec:ui-kit · Endpoints: `GET /api/library`, `/api/attention`, `/api/activity`, `/api/runs`, `/api/health`*
+*Approved: round 2, 2026-11-12; Lost contact and Stopped 2026-11-16 · Kit: §spec:ui-kit · Endpoints: `GET /api/library`, `/api/attention`, `/api/activity`, `/api/runs`, `/api/health`*
 *Code: `web/src/views/Overview.tsx`, `web/src/dash/RunningNow.tsx`, `web/src/dash/NeedsAttention.tsx`, `web/src/dash/RunsList.tsx`*
 
 ## Purpose
@@ -93,4 +93,6 @@ Runs tab.
 
 ## Open questions
 
-None. The validation words joined the Terms (round 2).
+None. The validation words joined the Terms (round 2). "Stopped reporting"
+became "Lost contact" and a run stopped on request reads `secondary`
+"Stopped" (operator decision 2026-11-16).

@@ -1,6 +1,6 @@
 # Handoff: Runs tab
 
-*Approved: round 1, 2026-11-12; loading state 2026-11-13 · Kit: §spec:ui-kit · Endpoints: `GET /api/runs?days=30`, `GET /api/library`*
+*Approved: round 1, 2026-11-12; loading state 2026-11-13; Lost contact and Stopped 2026-11-16 · Kit: §spec:ui-kit · Endpoints: `GET /api/runs?days=30`, `GET /api/library`*
 *Code: `web/src/views/Runs.tsx`, `web/src/dash/RunsList.tsx`*
 
 ## Purpose
@@ -18,7 +18,7 @@ each collection last synced to completion.
 | Took | `duration_seconds` | `duration()` | "—" while running |
 | New / Updated / Failed | `items_new` / `items_updated` / `items_failed` | `count()`; Failed destructive when > 0 | "—" |
 | Downloaded | `bytes_downloaded` | `bytes()` | "—" |
-| Result | `result`, `end_reason` | Badge via `outcome()`: `stopped_reporting` → danger "Stopped reporting"; else `RESULT`; running → `secondary` "Running" | — |
+| Result | `result`, `end_reason` | Badge via `outcome()`: `stopped_reporting` → danger "Lost contact"; else `RESULT` (`stopped` → `secondary` "Stopped"); running → `secondary` "Running" | — |
 | Errors | `errors[]` | mono xs, first 2, "and N more" | omitted |
 | Failure notice | `failure_notice_error` | "Failure notice not sent: " + text | omitted |
 
@@ -34,7 +34,7 @@ The server's order is kept (newest first).
 
 | State | Scenario | What changes |
 | --- | --- | --- |
-| default | `default` | 6 runs incl. 2 running, stopped reporting, partly failed |
+| default | `default` | 7 runs incl. 2 running, lost contact, partly failed, stopped |
 | first install | `first_install` | "None yet" per collection; "Runs show up here once the first one starts." |
 | long content | `long_content` | 30 runs, long names, multi-error rows |
 | loading | `loading` | Skeleton rows |

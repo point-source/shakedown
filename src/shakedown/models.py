@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 # How every closer of a killed run starts the error it records: the next locked run
-# ("... (stopped reporting)") and serve, which saw its child die ("... (killed by
+# ("... (lost contact)") and serve, which saw its child die ("... (killed by
 # SIGKILL)").
 ENDED_UNEXPECTEDLY = "run ended unexpectedly"
 
@@ -61,6 +61,9 @@ class OperationStatus(StrEnum):
     COMPLETED_WITH_ITEM_ISSUES = "completed_with_item_issues"
     FAILED_BEFORE_COMPLETION = "failed_before_completion"
     STALE_ENUMERATION = "stale_enumeration"
+    # Stopped on request (SIGTERM, SIGINT) before it finished: not a failure, and
+    # nothing for the operator to recover; the next run continues (§spec:graceful-stop).
+    STOPPED = "stopped"
 
 
 @dataclass(frozen=True)

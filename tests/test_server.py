@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from contextlib import closing
 from datetime import datetime
@@ -1009,3 +1010,35 @@ def test_example_compose_runs_serve_for_the_dashboard() -> None:
     assert serve["restart"] == "unless-stopped"
     assert "SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN:-}" in serve["environment"]
     assert "/share/data:/data" in serve["volumes"]
+
+
+@pytest.mark.asyncio
+async def test_stopping_serve_stops_the_runs_it_started(
+    tmp_roots: tuple[Path, Path], monkeypatch
+) -> None:
+    """serve's shutdown asks each run it started to stop and waits for it
+    (§spec:graceful-stop): the run ends `stopped` and exits 143, instead of being
+    killed with the container when serve, its PID 1, exits."""
+    monkeypatch.setenv(TOKEN_ENV, "test-token")
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    app = _child_app(config, items={"gd-x": {"x.flac": "audio"}}, gate=archive.parent / "never")
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        r = await client.post("/sync", headers=AUTH)
+        assert r.status_code == 202
+        # Ctrl-C in serve's terminal signals serve's process group; the run is
+        # outside it, so serve's SIGTERM is its first signal, not a second one.
+        (running,) = app.state.triggered
+        assert os.getpgid(running.process.pid) != os.getpgrp()
+    (triggered,) = app.state.triggered
+    assert triggered.done.is_set()
+    assert triggered.process.returncode == 143
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        last_run = (await client.get("/status")).json()[0]["last_run"]
+        assert last_run["result"] == "stopped"
+        metrics = (await client.get("/metrics")).text
+    assert 'shakedown_sync_runs_total{result="stopped"} 1.0' in metrics

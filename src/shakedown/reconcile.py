@@ -15,6 +15,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from shakedown import stopping
 from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress
 from shakedown.config import CollectionConfig, Config, SourceConfig
 from shakedown.db import connect, transaction
@@ -60,6 +61,8 @@ def _run_reconcile(config: Config) -> int:
             plugin = registry.for_source(source)
             budget = source_budgets(config, [(source, plugin)])[source.name]
             for collection in source.collections:
+                if stopping.requested():
+                    return 1  # a stop ends the run before the next collection
                 # Reconcile lists and looks up, but fetches nothing (§spec:run-activity).
                 progress = recorder.open_entry(
                     source.name, collection.name, ActivityKind.RECONCILE
@@ -73,7 +76,7 @@ def _run_reconcile(config: Config) -> int:
                     recorder.end(progress, OperationStatus.FAILED_BEFORE_COMPLETION)
                     raise
                 recorder.end(progress, outcome.status)
-                if outcome.status != OperationStatus.COMPLETED:
+                if outcome.status not in (OperationStatus.COMPLETED, OperationStatus.STOPPED):
                     failed += 1
     return 0 if failed == 0 else 1
 
@@ -128,6 +131,21 @@ def _reconcile_collection(
                 )
             else:
                 descriptors_by_id[found.identifier] = found
+        stopping.check()  # lookups skipped after a stop leave the listing partial
+    except stopping.Stopped:
+        # Stopped before the rebuild: the records stay exactly as they were, since a
+        # partial listing must not rewrite them (§spec:graceful-stop).
+        outcomes.finish(
+            outcome,
+            OperationStatus.STOPPED,
+            datetime.now(),
+            phase="fetch-manifests",
+            preservation_context="local recordings retained",
+            deletion_context="no deletion requested",
+            safe_next_action="rerun reconcile",
+        )
+        log.warning("[%s/%s] reconcile stopped before it finished", source.name, collection.name)
+        return outcome
     except Exception as e:
         source_error = e
         log.exception(

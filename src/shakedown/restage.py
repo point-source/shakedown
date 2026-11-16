@@ -10,6 +10,7 @@ import logging
 import sqlite3
 from datetime import datetime
 
+from shakedown import stopping
 from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress
 from shakedown.config import CollectionConfig, Config
 from shakedown.db import connect
@@ -63,6 +64,8 @@ def _restage_collections(
         for collection in source.collections:
             if collection_filter and collection.name != collection_filter:
                 continue
+            if stopping.requested():
+                return 1  # a stop ends the run before the next collection
 
             # A restage lists nothing: it reports the shows it stages (§spec:run-activity).
             progress = recorder.open_entry(source.name, collection.name, ActivityKind.RESTAGE)
@@ -77,7 +80,8 @@ def _restage_collections(
                     outcome.status if outcome is not None
                     else OperationStatus.FAILED_BEFORE_COMPLETION,
                 )
-            if outcome.status != OperationStatus.COMPLETED:
+            assert outcome is not None  # set, or the finally re-raised
+            if outcome.status not in (OperationStatus.COMPLETED, OperationStatus.STOPPED):
                 failed += 1
     return 0 if failed == 0 else 1
 
@@ -112,6 +116,20 @@ def _restage_collection(
             config, collection, source_name, items, progress=progress
         ).finish()
         progress.phase(Phase.FINISHING)
+    except stopping.Stopped:
+        # Stopped between shows: every link it made is recorded; the next restage
+        # links the rest (§spec:graceful-stop).
+        outcomes.finish(
+            outcome,
+            OperationStatus.STOPPED,
+            datetime.now(),
+            phase="stage",
+            preservation_context="archive recordings retained",
+            deletion_context="removed only files shakedown placed",
+            safe_next_action="rerun restage to continue",
+        )
+        log.warning("[%s/%s] restage stopped before it finished", source_name, collection.name)
+        return outcome
     except OSError as e:
         outcomes.finish(
             outcome,

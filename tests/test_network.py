@@ -428,7 +428,8 @@ def test_a_fetch_that_fails_then_succeeds_records_its_cause_retry_and_wait(
     from shakedown.models import Manifest, ManifestFile
     from shakedown.plugins.base import FetchResult
 
-    monkeypatch.setattr(sync_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda _s: None)
     answers = [
         FetchResult(success=False, error="HTTP 503", retriable=True,
                     cause=FailureCause.SERVER_ERROR, http_status=503),
@@ -496,7 +497,8 @@ def test_a_syncs_bytes_are_what_it_fetched_and_its_series_sums_to_them(
     from tests.conftest import make_config
     from tests.fake_plugin import FakeFile, FakeItem
 
-    monkeypatch.setattr(sync_module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda _s: None)
     config = make_config(*tmp_roots)
     FakePlugin.items["resumed"] = FakeItem("resumed", files=[
         FakeFile("d1.flac", b"k" * 700, format="Flac"),

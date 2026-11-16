@@ -27,6 +27,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -136,6 +137,9 @@ def launch(
             [*argv_prefix, "--config", str(config_path), *args],
             pass_fds=(w,),
             env=child_env,
+            # Its own process group: Ctrl-C in serve's terminal reaches serve only,
+            # and serve's SIGTERM is the run's first signal (§spec:graceful-stop).
+            process_group=0,
         )
     finally:
         os.close(w)  # only the child holds the write end, so its exit means EOF
@@ -167,6 +171,26 @@ def launch(
 
     threading.Thread(target=watch, name=f"watch-{process.pid}", daemon=True).start()
     return Started(triggered)
+
+
+# How long serve's shutdown waits for the runs it started to stop: inside the 120 s
+# stop timeout the README recommends, with room for serve's own exit.
+STOP_WAIT_S = 90.0
+
+
+def stop_runs(triggered: list[TriggeredRun], timeout: float = STOP_WAIT_S) -> None:
+    """Ask every run still going to stop (SIGTERM) and wait up to ``timeout`` for each
+    to exit and be closed (§spec:graceful-stop). serve calls this as it shuts down:
+    it is PID 1 in its container, and when it exits the kernel kills every process
+    left there, so a run it started would otherwise die mid-step."""
+    live = [t for t in triggered if not t.done.is_set()]
+    for t in live:
+        with contextlib.suppress(ProcessLookupError):
+            t.process.send_signal(signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    for t in live:
+        if not t.done.wait(max(0.0, deadline - time.monotonic())):
+            log.warning("run %d did not stop within %.0f s", t.process.pid, timeout)
 
 
 def _ended_reason(returncode: int) -> str:

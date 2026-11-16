@@ -61,7 +61,7 @@ ENDED = "ended"
 # The one end reason: the run's heartbeat stopped — killed, crashed, or the host
 # went down (§spec:run-activity).
 STOPPED_REPORTING = "stopped_reporting"
-ABANDONED_ERROR = f"{ENDED_UNEXPECTEDLY} (stopped reporting)"
+ABANDONED_ERROR = f"{ENDED_UNEXPECTEDLY} (lost contact)"
 
 
 @dataclass(frozen=True)

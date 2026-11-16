@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 
-from shakedown import activity
+from shakedown import activity, stopping
 from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.growth import GrowthRepo
@@ -64,14 +64,23 @@ def run_exclusive(
     """Run a writing command under the writer lock; return 1 with a logged error
     when another run holds it, after calling ``on_busy`` if given. Taking the lock
     first closes what killed runs left open (§spec:run-activity); its end records
-    the library's growth (§spec:library-stats)."""
+    the library's growth (§spec:library-stats).
+
+    While the command holds the lock, SIGTERM and SIGINT ask it to stop; a command
+    that was asked returns the stop's exit code, 143 or 130 (§spec:graceful-stop)."""
     try:
-        with writer_lock(config):
+        with writer_lock(config), stopping.handling_signals():
             _close_abandoned(config)
             try:
-                return command()
+                code = command()
+            except stopping.Stopped:
+                code = 1  # replaced below: a stop was requested
             finally:
                 _record_growth(config)
+            if stopping.requested():
+                log.warning("stopped on request; the next run continues from here")
+                return stopping.exit_code()
+            return code
     except LockHeld as e:
         log.error("%s", e)
         announce_busy()

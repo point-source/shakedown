@@ -522,7 +522,8 @@ def test_files_finished_before_the_process_died_are_reused(archive, tmp_path: Pa
     dir; the next run's fetch keeps them and downloads only the rest."""
     import shakedown.sync as sync_module
 
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    monkeypatch.setattr("time.sleep", lambda d: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: None)
     plugin = _make_plugin()
     tmp_dir = tmp_path / ".tmp-gd-x"
     served = {"a.flac": b"first", "b.flac": b"second"}
@@ -604,3 +605,20 @@ def test_files_index_is_mirrored_without_its_unmatchable_checksum(archive) -> No
     assert by_name["gd-index_files.xml"].md5 is None
     assert by_name["gd-index_meta.xml"].md5 == "c" * 32
     assert by_name["d1t01.flac"].md5 == MD5_A
+
+
+def test_a_download_stops_at_its_next_chunk(archive, tmp_path: Path) -> None:
+    """A stop request ends a download at its next chunk (§spec:graceful-stop): the
+    fetch raises Stopped and leaves the torn file for the next attempt to discard."""
+    from shakedown import stopping
+    from shakedown.models import ManifestFile
+
+    plugin = _make_plugin()
+    archive.file("gd1", "a.flac", Reply(200, b"audio"))
+    stopping.request()
+    try:
+        with pytest.raises(stopping.Stopped):
+            plugin.fetch("gd1", (ManifestFile("a.flac", 5, None),), tmp_path)
+    finally:
+        stopping.reset()
+    assert not (tmp_path / "a.flac").is_file() or (tmp_path / "a.flac").stat().st_size < 5

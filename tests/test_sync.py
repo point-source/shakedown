@@ -792,7 +792,7 @@ def test_retriable_fetch_failure_is_retried_then_succeeds(
     _seed_item("gd-show", content=b"good bytes")
 
     delays: list[float] = []
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: delays.append(d))
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: delays.append(d))
 
     attempts = {"n": 0}
     real_fetch = FakePlugin.fetch
@@ -823,7 +823,8 @@ def test_retriable_fetch_failure_gives_up_after_bounded_attempts(
     config = make_config(archive, library)
     _seed_item("gd-show")
 
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    monkeypatch.setattr("time.sleep", lambda d: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: None)
     attempts = {"n": 0}
 
     def always_fail(self, identifier, files, dest_dir):
@@ -847,7 +848,8 @@ def test_non_retriable_fetch_failure_is_not_retried(
     config = make_config(archive, library)
     _seed_item("gd-show")
 
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: None)
+    monkeypatch.setattr("time.sleep", lambda d: None)
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: None)
     attempts = {"n": 0}
 
     def hard_fail(self, identifier, files, dest_dir):
@@ -872,7 +874,7 @@ def test_retry_after_is_honored_over_backoff(
     _seed_item("gd-show", content=b"good bytes")
 
     delays: list[float] = []
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: delays.append(d))
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: delays.append(d))
 
     attempts = {"n": 0}
     real_fetch = FakePlugin.fetch
@@ -902,7 +904,7 @@ def test_retry_after_is_clamped_to_backoff_cap(
     _seed_item("gd-show", content=b"good bytes")
 
     delays: list[float] = []
-    monkeypatch.setattr(sync_module.time, "sleep", lambda d: delays.append(d))
+    monkeypatch.setattr(sync_module, "_sleep", lambda d: delays.append(d))
 
     attempts = {"n": 0}
     real_fetch = FakePlugin.fetch

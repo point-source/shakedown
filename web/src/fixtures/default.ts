@@ -126,7 +126,7 @@ export const runs: RunsAnswer = {
       started_at: at(14), finished_at: at(6), duration_seconds: 480, result: "failed_before_completion",
       end_reason: "stopped_reporting", items_discovered: null, items_new: 0, items_updated: 0,
       items_failed: 0, bytes_downloaded: 210_400_000,
-      errors: ["run ended unexpectedly (stopped reporting)"], failure_notice_error: null },
+      errors: ["run ended unexpectedly (lost contact)"], failure_notice_error: null },
     { run_id: 486, activity_id: 905, kind: "sync", source: "internetarchive", collection: "phish",
       started_at: at(1170), finished_at: at(1121), duration_seconds: 2940, result: "completed",
       end_reason: null, items_discovered: 4113, items_new: 6, items_updated: 1, items_failed: 0,
@@ -140,6 +140,10 @@ export const runs: RunsAnswer = {
       result: "completed_with_item_issues", end_reason: null, items_discovered: 52098, items_new: 14,
       items_updated: 2, items_failed: 2, bytes_downloaded: 6_310_000_000,
       errors: ["lma-ph2003-07-15: checksum mismatch after 3 attempts"], failure_notice_error: null },
+    { run_id: 484, activity_id: 897, kind: "sync", source: "internetarchive", collection: "grateful-dead",
+      started_at: at(5200), finished_at: at(4980), duration_seconds: 13_200, result: "stopped",
+      end_reason: null, items_discovered: 17842, items_new: 412, items_updated: 0, items_failed: 0,
+      bytes_downloaded: 141_200_000_000, errors: [], failure_notice_error: null },
   ],
 }
 

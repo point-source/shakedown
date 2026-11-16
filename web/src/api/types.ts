@@ -12,6 +12,7 @@ export type Phase =
   | "notifying" | "verifying" | "finishing"
 export type Result =
   | "completed" | "completed_with_item_issues" | "failed_before_completion" | "stale_enumeration"
+  | "stopped"
 export type EndReason = "stopped_reporting"
 
 export interface ActivityRun {

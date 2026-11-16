@@ -19,16 +19,19 @@ export const PHASE: Record<Phase, string> = {
   verifying: "Verifying", finishing: "Finishing",
 }
 
-export const RESULT: Record<Result, { label: string; tone: Tone }> = {
+// Stopped is neutral: a run someone stopped is not a problem (operator decision,
+// 2026-11-16).
+export const RESULT: Record<Result, { label: string; tone: Tone | null }> = {
   completed: { label: "Completed", tone: "success" },
   completed_with_item_issues: { label: "Completed, some shows failed", tone: "warning" },
   failed_before_completion: { label: "Failed", tone: "danger" },
   stale_enumeration: { label: "Listing incomplete", tone: "warning" },
+  stopped: { label: "Stopped", tone: null },
 }
 
-/** A run's outcome, with "Stopped reporting" taking precedence over its result. */
-export function outcome(result: Result | null, endReason: string | null): { label: string; tone: Tone } | null {
-  if (endReason === "stopped_reporting") return { label: "Stopped reporting", tone: "danger" }
+/** A run's outcome, with "Lost contact" taking precedence over its result. */
+export function outcome(result: Result | null, endReason: string | null): { label: string; tone: Tone | null } | null {
+  if (endReason === "stopped_reporting") return { label: "Lost contact", tone: "danger" }
   return result ? RESULT[result] : null
 }
 
@@ -78,13 +81,13 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
       if (runs.length === 1) {
         const r = runs[0]
         return {
-          title: `${KIND[r.kind]} stopped reporting${r.finished_at ? ` at ${clock(r.finished_at, now)}` : ""}`,
+          title: `Lost contact with ${kindLower(r.kind)}${r.finished_at ? ` at ${clock(r.finished_at, now)}` : ""}`,
           next: ["restage", "verify", "reconcile"].includes(r.kind)
             ? `Run ${kindLower(r.kind)} again.`
-            : `The next ${kindLower(r.kind === "catch_up" ? "sync" : r.kind)} picks up where it stopped.`,
+            : `The next ${kindLower(r.kind === "catch_up" ? "sync" : r.kind)} picks up where it left off.`,
         }
       }
-      return { title: `${runs.length} runs stopped reporting`, next: "Each picks up where it stopped on its next run." }
+      return { title: `Lost contact with ${runs.length} runs`, next: "Each picks up where it left off on its next run." }
     }
     case "stale":
       return { title: "Listing incomplete", next: "Nothing was removed. The next sync lists the source again." }

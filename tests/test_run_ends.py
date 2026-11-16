@@ -68,7 +68,7 @@ def test_close_abandoned_closes_records_at_their_last_heartbeat(config) -> None:
         assert run is not None and run.id == run_id
         assert run.finished_at == heartbeat
         assert run.errors == [ABANDONED_ERROR]
-        assert ABANDONED_ERROR == "run ended unexpectedly (stopped reporting)"
+        assert ABANDONED_ERROR == "run ended unexpectedly (lost contact)"
         outcome = OperationOutcomeRepo(conn).get(outcome_id)
         assert outcome is not None
         assert outcome.status == OperationStatus.FAILED_BEFORE_COMPLETION
@@ -103,7 +103,7 @@ def test_status_reports_a_stale_open_run_as_ended_unexpectedly(
     assert summary["last_run"]["end_reason"] == "stopped_reporting"
 
     print_status(config, as_json=False)
-    assert "ended unexpectedly (stopped reporting)" in capsys.readouterr().out
+    assert "ended unexpectedly (lost contact)" in capsys.readouterr().out
 
 
 def test_status_shows_a_reporting_run_as_running(
