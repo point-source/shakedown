@@ -1154,13 +1154,18 @@ Observable behavior:
   - track title and track number ← the per-file values the source lists
     for that file, when it lists them; otherwise left absent.
 
-  A file whose existing tags the tagging library cannot write back as
-  they are (some archive.org MP3s carry a malformed link frame that
-  cannot be saved as ID3v2.3, which mutagen rejects as an invalid
-  value) is left exactly as it is, with a warning
+  Archive.org MP3s carry a malformed link frame (a LINK frame written
+  like a text frame, holding the item's URL) that the tagging library
+  cannot save as ID3v2.3. When the system fills tags in such a file, it
+  repairs that frame into the ID3 source-webpage frame (WOAS) holding
+  the same URL, or drops it when it holds no URL; the tag stays ID3v2.3
+  and every other frame is kept (operator decision, 2026-11-16: leave
+  the file better than it was found). This is the one frame shakedown
+  changes that it did not write.
+  A file whose existing tags the tagging library still cannot write back
+  as they are is left exactly as it is, with a warning
   in the run log; the show still completes and is not retried for that
-  file. Shakedown never rewrites or drops another party's frame to
-  make room for its own tags (§spec:per-item-isolation). A disk fault
+  file (§spec:per-item-isolation). A disk fault
   while writing still fails the show for a retry.
 - **Never overwrite someone else's tag.** A tag already present —
   written by the uploader, the source, or the user's own tool — is never

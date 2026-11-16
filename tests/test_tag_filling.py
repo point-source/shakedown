@@ -316,19 +316,56 @@ def test_a_file_the_library_cannot_parse_is_left_untouched(tmp_path: Path) -> No
 
 
 
-def test_a_tag_the_library_cannot_save_leaves_the_file_untouched(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_a_malformed_archive_org_link_frame_is_repaired_and_the_file_filled(
+    tmp_path: Path,
 ) -> None:
-    """archive.org's MP3 of aru1993-08-13.shnf holds a frame mutagen cannot write back
-    as ID3v2.3 (seen on the NAS, 2026-11-11). The file is skipped with a warning, left
-    exactly as it was, and no backup is left behind; shakedown never rewrites or
-    drops someone else's frame to get its own tags in."""
+    """archive.org's MP3s carry a LINK frame written like a text frame, which mutagen
+    cannot save as ID3v2.3 (seen on the NAS, 2026-11-11 and 2026-11-16). The frame is
+    repaired into the source-webpage frame (WOAS) with the same URL, the tags are
+    filled, and the tag stays v2.3 with its other frames (operator decision,
+    2026-11-16)."""
     path = tmp_path / "coll" / "aru93" / "t01.mp3"
     path.parent.mkdir(parents=True)
     path.write_bytes(mp3_with_text_shaped_link_frame())
-    original = path.read_bytes()
     backup = tmp_path / "coll" / ".tagging" / "aru93" / "t01.mp3"
 
+    result = fill_file(path, DESIRED, None, backup)
+
+    assert result.status == "written"
+    id3 = ID3(path)
+    assert id3.version[:2] == (2, 3)
+    assert id3.getall("LINK") == []
+    assert [f.url for f in id3.getall("WOAS")] == [
+        "http://www.archive.org/details/aru1993-08-13.shnf"
+    ]
+    assert str(id3["TPE1"]) == "Aquarium Rescue Unit"
+    assert str(id3["TALB"]) == DESIRED["album"]
+    assert not backup.exists()
+
+
+def test_a_malformed_link_frame_without_a_url_is_dropped(tmp_path: Path) -> None:
+    path = tmp_path / "coll" / "x" / "t01.mp3"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(mp3_with_text_shaped_link_frame(b"see the archive"))
+
+    assert fill_file(path, DESIRED, None, None).status == "written"
+    id3 = ID3(path)
+    assert id3.getall("LINK") == [] and id3.getall("WOAS") == []
+    assert str(id3["TALB"]) == DESIRED["album"]
+
+
+def test_a_tag_the_library_cannot_save_leaves_the_file_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Any other frame mutagen rejects on save (ValueError): the file is skipped with
+    a warning, left exactly as it was, and no backup is left behind."""
+    path, backup = _archived(tmp_path, "a.mp3")
+    original = path.read_bytes()
+
+    def rejected(self: object, target: Path) -> None:
+        raise ValueError("Invalid frame ID")
+
+    monkeypatch.setattr(tagging._Tags, "save", rejected)
     result = fill_file(path, DESIRED, None, backup)
 
     assert result == FillResult("untaggable", None)
@@ -341,8 +378,7 @@ def test_an_unexpected_error_while_saving_still_fails_loudly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only the observed rejection of someone else's frame (ValueError) marks a file
-    untaggable for good; any other error surfaces, so the show is retried rather than
-    silently skipped forever."""
+    untaggable; any other error surfaces as a bug."""
     path, backup = _archived(tmp_path, "a.mp3")
     original = path.read_bytes()
 
@@ -591,9 +627,9 @@ ARU_META = {"creator": "Aquarium Rescue Unit", "date": "1993-08-13",
 ARU_ALBUM = "1993-08-13 \N{EN DASH} Carowinds Paladium Amphitheatre"
 
 
-def _untaggable_mp3_show(identifier: str, tmp_path: Path) -> FakeItem:
+def _link_frame_mp3_show(identifier: str, tmp_path: Path) -> FakeItem:
     """Shaped like aru1993-08-13.shnf on archive.org: an SHN-only show whose staged
-    VBR MP3 holds a frame mutagen cannot save as ID3v2.3, beside one it can tag."""
+    VBR MP3 holds a malformed LINK frame, beside one with no such frame."""
     taggable = make_audio(tmp_path / "source-bytes" / identifier / "t02.mp3").read_bytes()
     item = FakeItem(identifier, [
         FakeFile("t01.shn", b"S" * 500, format="Shorten"),
@@ -606,43 +642,20 @@ def _untaggable_mp3_show(identifier: str, tmp_path: Path) -> FakeItem:
     return item
 
 
-def test_a_download_whose_tag_cannot_be_saved_still_completes(tmp_roots) -> None:
-    """Seen on the NAS (2026-11-11): the show failed every run with "fetch crash".
-    The file keeps the source's bytes, its sibling is tagged, and the show is
-    complete (§spec:per-item-isolation)."""
+def test_a_download_with_a_malformed_link_frame_is_tagged(tmp_roots) -> None:
+    """Seen on the NAS (2026-11-16): fetch-time tagging skipped these MP3s. The
+    frame is repaired, both files are tagged, and the show is complete and done."""
     config = make_config(*tmp_roots, fill_tags=True)
-    _untaggable_mp3_show("aru93", tmp_roots[0].parent)
+    _link_frame_mp3_show("aru93", tmp_roots[0].parent)
 
     assert run_sync(config) == 0
 
     stored = ItemRepo(_db(config)).get("fake-src", "coll1", "aru93")
     assert stored is not None and stored.status == ItemStatus.COMPLETE
-    assert _archive_file(config, "aru93", "t01.mp3").read_bytes() == (
-        mp3_with_text_shaped_link_frame()
-    )
-    assert read_tags(_archive_file(config, "aru93", "t02.mp3"))["album"] == [ARU_ALBUM]
+    for name in ("t01.mp3", "t02.mp3"):
+        assert read_tags(_archive_file(config, "aru93", name))["album"] == [ARU_ALBUM]
     assert _library_file(config, "t01.mp3").stat().st_ino == (
         _archive_file(config, "aru93", "t01.mp3").stat().st_ino
-    )
-
-
-def test_a_mirrored_file_whose_tag_cannot_be_saved_does_not_stop_the_run(
-    tmp_roots,
-) -> None:
-    """The pass over mirrored shows skips the file and finishes the collection; the
-    show is marked done, so later runs do not reopen it."""
-    root = tmp_roots[0].parent
-    _untaggable_mp3_show("aru93", root)
-    _fake_show("gd77", root)
-    assert run_sync(make_config(*tmp_roots)) == 0
-    config = make_config(*tmp_roots, fill_tags=True)
-
-    assert run_sync(config) == 0
-
-    assert _album(config, "gd77") == [ALBUM]
-    assert read_tags(_archive_file(config, "aru93", "t02.mp3"))["album"] == [ARU_ALBUM]
-    assert _archive_file(config, "aru93", "t01.mp3").read_bytes() == (
-        mp3_with_text_shaped_link_frame()
     )
     assert "aru93" in _tag_repo(config).fingerprints("fake-src", "coll1")
 

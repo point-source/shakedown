@@ -23,7 +23,7 @@ from typing import Any, Literal
 from mutagen import MutagenError
 from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC
-from mutagen.id3 import ID3NoHeaderError
+from mutagen.id3 import ID3, WOAS, ID3NoHeaderError
 from mutagen.mp3 import MP3
 from mutagen.oggvorbis import OggVorbis
 
@@ -208,15 +208,33 @@ def _absent(values: list[str] | None) -> bool:
     return not values or not any(v.strip() for v in values)
 
 
+def _repair_link_frames(id3: ID3) -> None:
+    """archive.org MP3s carry a LINK frame written like a text frame: an encoding byte,
+    then the item's URL. mutagen reads it as a LINK whose linked-frame ID is not a
+    frame ID and cannot save it as ID3v2.3 ("Invalid frame ID"). Such a frame is
+    repaired into what it meant, the audio source's webpage (WOAS) with the same URL;
+    one that holds no URL is dropped (operator decision, 2026-11-16). A well-formed
+    LINK frame is left alone."""
+    for frame in id3.getall("LINK"):
+        if frame.frameid.isalnum() and frame.frameid.isupper():
+            continue
+        del id3[frame.HashKey]
+        url = (frame.frameid + frame.url).lstrip("\x00")
+        if url.startswith(("http://", "https://")):
+            id3.add(WOAS(url=url))
+
+
 class _Tags:
-    """One file's tags behind format-neutral names, through mutagen. MP3 goes through
-    EasyID3 and is saved in the ID3 version it already had, so nobody else's frames
-    are converted; FLAC and Ogg Vorbis use Vorbis comments. mutagen writes into the
-    file itself, so every link to it carries the change."""
+    """One file's tags behind format-neutral names, through mutagen. MP3 uses
+    EasyID3's names for ID3 frames and is saved in the ID3 version it already had, so nobody else's frames
+    are converted, except a malformed archive.org LINK frame, which is repaired
+    (_repair_link_frames); FLAC and Ogg Vorbis use Vorbis comments. mutagen writes
+    into the file itself, so every link to it carries the change. The repair is made
+    in memory and only reaches the file when there are tags to fill."""
 
     def __init__(self, path: Path) -> None:
         suffix = path.suffix.lower()
-        self._id3: EasyID3 | None = None
+        self._id3: ID3 | None = None
         self._vorbis: FLAC | OggVorbis | None = None
         if suffix == ".mp3":
             MP3(path)  # raises unless the file really is MPEG audio
@@ -226,9 +244,10 @@ class _Tags:
             # an untagged file gets v2.4, mutagen's default.
             self._v2 = 3 if header[:3] == b"ID3" and header[3] == 3 else 4
             try:
-                self._id3 = EasyID3(path)
+                self._id3 = ID3(path)
             except ID3NoHeaderError:
-                self._id3 = EasyID3()
+                self._id3 = ID3()
+            _repair_link_frames(self._id3)
         else:
             self._vorbis = FLAC(path) if suffix == ".flac" else OggVorbis(path)
             if self._vorbis.tags is None:
@@ -236,19 +255,24 @@ class _Tags:
 
     def get(self, key: str) -> list[str] | None:
         if self._id3 is not None:
-            return list(self._id3[key]) if key in self._id3 else None
+            try:
+                return list(EasyID3.Get[key](self._id3, key))
+            except KeyError:
+                return None
         assert self._vorbis is not None
         return list(self._vorbis[key]) if key in self._vorbis else None
 
     def set(self, key: str, value: str) -> None:
         if self._id3 is not None:
-            self._id3[key] = [value]
+            EasyID3.Set[key](self._id3, key, [value])
         else:
             assert self._vorbis is not None
             self._vorbis[key.upper()] = [value]
 
     def save(self, path: Path) -> None:
         if self._id3 is not None:
+            if self._v2 == 3:
+                self._id3.update_to_v23()  # as EasyID3.save does for a v2.3 save
             self._id3.save(path, v2_version=self._v2)
         else:
             assert self._vorbis is not None
@@ -384,11 +408,8 @@ def fill_file(
         raise TagWriteError(str(e)) from e
     except ValueError as e:
         # The tags cannot be written back as they are: a frame someone else wrote that
-        # mutagen rejects (archive.org MP3s carry a LINK frame written like a text
-        # frame, which it cannot save as ID3v2.3: "Invalid frame ID"). Rewriting or
-        # dropping that frame would change someone else's tag, so the file is left as
-        # it is and the show goes on (§spec:per-item-isolation). Any other error is
-        # unexpected and propagates, so the show is retried rather than skipped.
+        # mutagen rejects. The file is left as it is and the show goes on
+        # (§spec:per-item-isolation). Any other error is unexpected and propagates.
         _undo(path, backup)
         log.warning("not filling tags in %s: its existing tags cannot be saved: %s: %s",
                     path, type(e).__name__, e)
