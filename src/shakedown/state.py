@@ -366,15 +366,21 @@ class ItemRepo:
         if not scopes:
             return []
         in_scope = " OR ".join("(source_name=? AND collection_name=?)" for _ in scopes)
+        # The newest shows are picked first and only their metadata is read: the
+        # metadata of every show fills most of the database.
         cur = self.conn.execute(
             f"""
+            WITH newest AS (
+                SELECT rowid AS id FROM items
+                WHERE downloaded_at IS NOT NULL AND ({in_scope})
+                ORDER BY downloaded_at DESC, identifier
+                LIMIT ?
+            )
             SELECT source_name, collection_name, identifier, downloaded_at,
                    json_extract(source_metadata, '$.title') AS title,
                    json_type(source_metadata, '$.title') AS title_type
-            FROM items
-            WHERE downloaded_at IS NOT NULL AND ({in_scope})
+            FROM newest JOIN items ON items.rowid = newest.id
             ORDER BY downloaded_at DESC, identifier
-            LIMIT ?
             """,
             (*(v for scope in scopes for v in scope), limit),
         )
