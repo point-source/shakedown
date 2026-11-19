@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -681,6 +682,13 @@ class _Clock:
         return self.now
 
 
+def run_now(work: Callable[[], None]) -> None:
+    """Refresh a dashboard answer inside the request that found it expired, so a test
+    reads the new answer as soon as the interval passes. `serve` refreshes on a
+    thread and serves the old answer meanwhile (tests/test_shared_answers.py)."""
+    work()
+
+
 def _probe_app(config, clock, *, append: str = ""):  # type: ignore[no-untyped-def]
     """serve with one extra dashboard view that counts how often it is computed,
     over a config file holding ``config`` followed by ``append``."""
@@ -688,7 +696,7 @@ def _probe_app(config, clock, *, append: str = ""):  # type: ignore[no-untyped-d
 
     cfg_path = write_config(config.archive_root.parent / "cfg.yaml", config)
     cfg_path.write_text(cfg_path.read_text() + append)
-    app = build_app(cfg_path, clock=clock)
+    app = build_app(cfg_path, clock=clock, spawn=run_now)
     app.state.probe_builds = 0
 
     def probe(ctx):  # type: ignore[no-untyped-def]
@@ -826,7 +834,7 @@ async def test_api_on_a_serve_that_never_loaded_a_valid_config_is_503(
 def _health_app(config, clock, *, append: str = ""):  # type: ignore[no-untyped-def]
     cfg_path = write_config(config.archive_root.parent / "cfg.yaml", config)
     cfg_path.write_text(cfg_path.read_text() + append)
-    return build_app(cfg_path, clock=clock)
+    return build_app(cfg_path, clock=clock, spawn=run_now)
 
 
 @pytest.mark.asyncio

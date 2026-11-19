@@ -26,14 +26,14 @@ from shakedown.status import print_status
 from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
-from tests.test_server import _Clock
+from tests.test_server import _Clock, run_now
 
 COLLECTION_FIELDS = {"source", "collection", "counts", "restricted", "archive_bytes",
                      "library_bytes", "last_successful_sync_at"}
 
 
 def _app(config: Config, clock: _Clock):  # type: ignore[no-untyped-def]
-    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock)
+    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock, spawn=run_now)
 
 
 async def _get(app, path: str = "/api/library") -> dict[str, Any]:  # type: ignore[no-untyped-def]

@@ -2020,13 +2020,19 @@ Observable behavior:
   background tab, a locked phone). `serve` computes each endpoint's
   answer at most once per refresh interval and hands the same answer to
   every viewer, so ten open pages cost the NAS what one does
-  (§req:quality-attributes: live, but light).
+  (§req:quality-attributes: live, but light). A viewer never waits on a
+  recompute: once an answer's interval passes, `serve` keeps handing it
+  out for one more interval while a single refresh computes the next
+  behind it. An answer older than two intervals, or one whose refresh
+  failed, is not handed out again: the next viewer waits for the
+  recompute (sharing one already running) and receives its answer or
+  its error.
 - **Old data is labelled, never passed off as current.** Every answer
   carries `generated_at`, the time `serve` computed it. When a refresh
   fails or no answer has arrived for twice its refresh interval, the
   page says it cannot reach shakedown and shows how old the data on
   screen is. Ages count from when an answer arrived, by the browser's
-  clock: `serve` hands out an answer up to one interval old, and a
+  clock: `serve` hands out an answer up to two intervals old, and a
   server clock that differs from the browser's must never read as an
   outage (`web/tests/freshness.spec.ts`). A run that stopped reporting is shown as ended,
   never as running (§spec:run-activity).
@@ -2082,7 +2088,14 @@ counters, not a run's progress, the attention list, or history
 `status` holds, and adds two more services. *Loading the kit from a
 CDN* — breaks on a LAN without internet and leaks each page view.
 
-**Tradeoffs.** Up to a few seconds of lag on the live view. The page
+Answers refresh behind the viewer because a recompute inside the
+request made every viewer wait for it: on a cold, busy NAS the page
+showed placeholders for a minute (v2.2.2). Two intervals bound the age
+of what `serve` hands out, so the page's own staleness rule stays
+true.
+
+**Tradeoffs.** Up to a few seconds of lag on the live view; any view
+may show data up to two intervals old. The page
 needs `serve` running; with `serve` down there is no dashboard, but
 nothing is lost (§spec:run-activity, §spec:network-activity record from
 the runs themselves). The unauthenticated page relies on the operator's

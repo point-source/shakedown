@@ -35,6 +35,8 @@ from shakedown.dashboard import (
     VIEW_TTL_S,
     ConfigTracker,
     SharedAnswers,
+    Spawn,
+    in_thread,
     register_api,
     shared_answer,
 )
@@ -72,13 +74,15 @@ def build_app(
     argv_prefix: tuple[str, ...] = DEFAULT_ARGV_PREFIX,
     child_env: dict[str, str] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    spawn: Spawn = in_thread,
     page_dir: Path = PAGE_DIR,
 ) -> FastAPI:
     """The control plane over the config file at ``config_path``. Every endpoint
     that needs the config reads the file as it is at the request, so an edit takes
     effect without a restart, and a broken file is a 503 naming the problem rather
     than a crash (§spec:api-sync-runs). ``clock`` times the dashboard's shared
-    answers (§spec:dashboard). ``page_dir`` holds the built dashboard page
+    answers and ``spawn`` starts their refreshes, a thread each by default
+    (§spec:dashboard). ``page_dir`` holds the built dashboard page
     (§spec:dashboard-page)."""
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -88,7 +92,7 @@ def build_app(
         await asyncio.to_thread(stop_runs, app.state.triggered)
 
     app = FastAPI(title="shakedown", version=__version__, lifespan=lifespan)
-    app.state.answers = SharedAnswers(clock)
+    app.state.answers = SharedAnswers(clock, spawn)
     # Every load goes through the tracker, so the dashboard knows the last config
     # this serve loaded, including the one at start-up.
     configs = ConfigTracker(config_path)

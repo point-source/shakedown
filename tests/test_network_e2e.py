@@ -29,7 +29,7 @@ from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.fake_archive import Reply, fake_archive, json_reply
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
-from tests.test_server import _Clock
+from tests.test_server import _Clock, run_now
 
 SEARCH = "/services/search/v1/scrape"
 SHOW_A = b"a" * 3000
@@ -54,7 +54,7 @@ def _ia_config(tmp_roots: tuple[Path, Path]) -> Config:
 
 def _app(config: Config, clock: _Clock | None = None):  # type: ignore[no-untyped-def]
     return build_app(write_config(config.archive_root.parent / "cfg.yaml", config),
-                     clock=clock or _Clock())
+                     clock=clock or _Clock(), spawn=run_now)
 
 
 async def _get(app, path: str) -> dict[str, Any]:  # type: ignore[no-untyped-def]

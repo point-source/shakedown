@@ -30,7 +30,7 @@ from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 from tests.test_durable_handoff import DOWN, GOOD, _Webhooks
-from tests.test_server import _Clock
+from tests.test_server import _Clock, run_now
 
 SRC = "fake-src"
 ENTRY_FIELDS = {"kind", "source", "collection", "since", "identifiers", "detail"}
@@ -42,7 +42,7 @@ HEALTH_FIELDS = {
 
 def _app(config: Config, clock: _Clock | None = None):  # type: ignore[no-untyped-def]
     path = write_config(config.archive_root.parent / "cfg.yaml", config)
-    return build_app(path, clock=clock or _Clock())
+    return build_app(path, clock=clock or _Clock(), spawn=run_now)
 
 
 async def _get(app, path: str = "/api/attention") -> dict[str, Any]:  # type: ignore[no-untyped-def]
