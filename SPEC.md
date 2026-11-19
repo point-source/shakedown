@@ -1513,12 +1513,21 @@ Sync state lives in a single-file embedded SQLite database at
   the skipped files (§spec:tag-filling). The first sync after the
   upgrade revisits those shows; files already filled are only read.
   Nothing else changes, and nothing is re-downloaded.
+- Schema v12 keeps each show's figures with the show: its archive
+  bytes, its library bytes, and whether it is kept twice — an
+  unplayable original beside a playable copy (§spec:library-stats
+  "Stored figures", §spec:needs-attention). The migration backfills
+  every show once from its recorded manifest; on a large database that
+  is one full read (about a minute on a NAS) inside the first locked
+  run after the upgrade. Additive: nothing else changes, and nothing is
+  re-downloaded.
 - Only a command that holds the writer lock migrates the database.
   Commands that take no lock — `status`, `item show`, `sync --dry-run`,
   `verify` without `--reconform`, `validate`, and `serve`'s
   `GET /status` and `GET /metrics` — open it at whatever schema version
   it has; on an older version they show what that version records (no
-  rescheduled entries before v9). A reader that migrated while a run of
+  rescheduled entries before v9; before v12, byte totals summed from
+  every manifest, which is slow on a large database). A reader that migrated while a run of
   the previous release still writes would make that run refuse the
   database the next time it opens it. With no database yet, they create
   one at the current version.
@@ -2404,6 +2413,15 @@ Observable behavior:
   (§spec:system-shape), so library bytes use no disk of their own; the
   figure says how much of the archive the library presents. Totals sum
   the collections.
+- **Stored figures.** Each show's archive bytes, library bytes, and
+  whether it is kept twice (§spec:needs-attention library health) are
+  computed from its recorded manifest whenever the show is written, and
+  kept with it (§spec:state, schema v12). `status`, this view, and the
+  growth snapshots sum them from an index and never read a manifest, so
+  the answer costs the same on a cold page cache while a sync writes to
+  the same pool. A show whose write carries no manifest keeps its
+  recorded one and its figures with it. A reader of a database before
+  v12 sums the manifests instead, as earlier releases did.
 - **Disk.** Total and free bytes of the filesystem holding the archive,
   read from the operating system at the request — no walk of the tree.
 - **Growth.** Per day for the last 30 days, per collection and in total:
@@ -2433,9 +2451,19 @@ deriving it backwards from download dates cannot see prunes,
 replacements, or removals. Free space from the filesystem because
 nothing else knows it.
 
+Byte figures are stored per show because summing every recorded
+manifest read the whole state database — the manifests sit behind
+each show's source metadata — and took about a minute on the
+operator's NAS with a cold cache during a sync (v2.2.2). Per show,
+because every write already passes through one place, so the figures
+cannot drift from the manifests and need no end-of-run step.
+
 **Alternatives rejected.** *Walking the archive tree for bytes* — tens
 of seconds on a NAS per refresh (§spec:state notes the same for
-`status`). *`serve` snapshotting growth on a timer* — misses days when
+`status`). *Running per-collection totals adjusted on each write* — a
+missed adjustment drifts forever. *Totals recorded at the end of each
+locked run* (like the growth snapshots) — stale while a sync runs, and
+lost when a run is killed. *`serve` snapshotting growth on a timer* — misses days when
 `serve` is down. *A "new shows only" list* — the record does not
 distinguish a first download from a re-fetch; a re-fetched show is also
 news to the morning check. *A disk-full estimate* (free bytes over

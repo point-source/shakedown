@@ -14,7 +14,6 @@ from shakedown.activity import HISTORY_DAYS, RUNNING, STOPPED_REPORTING, Activit
 from shakedown.dashboard import DashboardContext, iso
 from shakedown.history import GOOD_RESULTS, run_history
 from shakedown.models import ItemStatus, OperationStatus, OperationType, RunKind
-from shakedown.selection import keeps_unplayable_original
 from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries
 
@@ -200,13 +199,7 @@ def _entries(
 
 def _health(summary: dict[str, Any], items: ItemRepo) -> dict[str, Any]:
     """The collection's library facts: not to-dos, so apart from the entries."""
-    kept_twice = [
-        identifier
-        for identifier, manifest in items.list_archive_only_manifests(
-            summary["source"], summary["collection"]
-        )
-        if keeps_unplayable_original(manifest)
-    ]
+    kept_twice = items.list_playable_copies(summary["source"], summary["collection"])
     return {
         "source": summary["source"],
         "collection": summary["collection"],

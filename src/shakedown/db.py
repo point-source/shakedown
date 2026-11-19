@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
@@ -46,6 +46,11 @@ _SCHEMA = [
         -- when the show was first found missing from a complete listing
         -- (§spec:item-lifecycle)
         disappeared_at     TEXT,
+        -- the show's figures from its recorded manifest, kept with every write so
+        -- totals never read a manifest (§spec:library-stats "Stored figures")
+        archive_bytes      INTEGER NOT NULL DEFAULT 0,
+        library_bytes      INTEGER NOT NULL DEFAULT 0,
+        playable_copy      INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (source_name, collection_name, identifier)
     )
     """,
@@ -346,6 +351,22 @@ _NETWORK_SCHEMA = [
 _SCHEMA += _NETWORK_SCHEMA
 
 
+# Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer
+# reads its index alone, never the rows, whose manifests and source metadata fill
+# most of the database. Created with the columns, by a fresh database or by v12.
+_FIGURES_INDEXES = [
+    """
+    CREATE INDEX IF NOT EXISTS items_figures_idx
+        ON items (source_name, collection_name, archive_bytes, library_bytes, archive_path)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS items_playable_copy_idx
+        ON items (source_name, collection_name, status, identifier)
+        WHERE playable_copy = 1
+    """,
+]
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and lazily create) the state DB at db_path."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,6 +429,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     row = cur.fetchone()
     if row is None:
         conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+        for stmt in _FIGURES_INDEXES:
+            conn.execute(stmt)
         return
 
     current = row["version"]
@@ -571,6 +594,32 @@ def _migrate_to_11(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_12(conn: sqlite3.Connection) -> None:
+    """v11 → v12: store each show's archive bytes, library bytes, and whether it is
+    kept twice (an unplayable original beside a playable copy) with the show, so
+    `status` and the dashboard sum an index instead of reading every manifest
+    (§spec:library-stats "Stored figures"). Every show is backfilled once from its
+    recorded manifest, by the same computation every later write uses. Additive:
+    nothing else changes."""
+    for column in ("archive_bytes", "library_bytes", "playable_copy"):
+        if not _has_column(conn, "items", column):
+            conn.execute(f"ALTER TABLE items ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+    # Imported here: state imports this module.
+    from shakedown.state import manifest_figures
+
+    rows = conn.execute(
+        "SELECT rowid, recorded_manifest FROM items WHERE recorded_manifest IS NOT NULL"
+    )
+    updates = [(*manifest_figures(row["recorded_manifest"]), row["rowid"]) for row in rows]
+    with transaction(conn):
+        conn.executemany(
+            "UPDATE items SET archive_bytes=?, library_bytes=?, playable_copy=? WHERE rowid=?",
+            updates,
+        )
+        for stmt in _FIGURES_INDEXES:
+            conn.execute(stmt)
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -583,6 +632,7 @@ _MIGRATIONS = {
     9: _migrate_to_9,
     10: _migrate_to_10,
     11: _migrate_to_11,
+    12: _migrate_to_12,
 }
 
 

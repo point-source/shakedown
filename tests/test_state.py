@@ -803,7 +803,7 @@ def test_v8_db_gains_empty_rescheduled_syncs(tmp_path: Path) -> None:
 
     conn = connect(db_path)
     assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
     assert "rescheduled_syncs" in _tables(conn)
     assert conn.execute("SELECT COUNT(*) AS n FROM rescheduled_syncs").fetchone()["n"] == 0
     item = ItemRepo(conn).get("s", "c", "x")
