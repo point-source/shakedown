@@ -29,7 +29,12 @@ export function Overview({ d, now, onAllRuns }: { d: Dashboard; now: string; onA
         {/* Phone: Needs attention first. Desktop: Running now on the left (operator, 2026-11-12). */}
         <div className="min-w-0 lg:order-2 lg:col-span-2"><NeedsAttention entries={d.attention.data?.entries ?? null} now={now} /></div>
         <div className="min-w-0 lg:order-1 lg:col-span-3">
-          <RunningNow runs={d.activity.data?.runs ?? null} lastRun={lastRun} now={now} />
+          <RunningNow
+            runs={d.activity.data?.runs ?? null}
+            waiting={d.activity.data?.waiting ?? null}
+            lastRun={lastRun}
+            now={now}
+          />
         </div>
       </div>
       <Card className="min-w-0">

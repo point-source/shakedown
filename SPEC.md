@@ -2875,6 +2875,7 @@ Spec and code names in the last column never appear on screen.
 | Validation | A check that the config, sources, and handoff targets work, run with `shakedown validate`. | test, preflight | readiness validation |
 | Release | The Shakedown version answering this page. | version, build | `release` |
 | Running | A run that is working and reporting. | active, in progress | `state: running` |
+| Waiting | A collection whose run starts when a slot frees in the current sync. | queued, pending, scheduled | `waiting`, waiting entry |
 | No progress for *time* | A running run whose counts have not moved for that long. | stuck, stalled, hung | `last_progress_at` |
 | Lost contact | A run that stopped sending updates: killed, crashed, or the host went down. | stopped reporting, crashed, ended unexpectedly | `end_reason: stopped_reporting`, ended unexpectedly |
 | Stopped | A run someone stopped before it finished (`docker stop`, Ctrl-C); the next run continues where it left off. | interrupted, cancelled, aborted | `stopped`, stopped on request |
@@ -2930,7 +2931,7 @@ is one route (`GET /`) with four tabs.
 | Screen | Handoff spec | Golden scenarios | Approved |
 | --- | --- | --- | --- |
 | Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13 |
-| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content | round 2, 2026-11-12 |
+| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content, waiting | round 2, 2026-11-12; waiting rows 2026-11-20 |
 | Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |

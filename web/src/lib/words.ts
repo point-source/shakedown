@@ -19,6 +19,10 @@ export const PHASE: Record<Phase, string> = {
   verifying: "Verifying", finishing: "Finishing",
 }
 
+// A collection whose run starts when a slot frees in the current sync (glossary
+// "Waiting", §spec:ui-kit).
+export const WAITING = "Waiting"
+
 // Stopped is neutral: a run someone stopped is not a problem (operator decision,
 // 2026-11-16).
 export const RESULT: Record<Result, { label: string; tone: Tone | null }> = {

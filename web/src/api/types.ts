@@ -64,9 +64,21 @@ export interface NetworkNow {
   last_event: NetworkEvent | null
 }
 
+/** A collection waiting for a slot in a multi-collection sync: not a run yet. */
+export interface WaitingCollection {
+  activity_id: number
+  source: string
+  collection: string
+  kind: "sync" | "catch_up"
+  started_by_serve: boolean
+  since: Iso
+}
+
 export interface ActivityAnswer {
   generated_at: Iso
   runs: ActivityRun[]
+  /** In the order they start. */
+  waiting: WaitingCollection[]
   network: NetworkNow[]
 }
 

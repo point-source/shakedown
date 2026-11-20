@@ -41,6 +41,7 @@ export const activity: ActivityAnswer = {
       speed_bytes_per_second: 0, eta_seconds: null,
     },
   ],
+  waiting: [],
   network: [
     {
       source: "internetarchive", speed_bytes_per_second: 38_200_000, requests_in_flight: 4,

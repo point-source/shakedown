@@ -140,6 +140,28 @@ function verifyRunning(): Answers {
   return a
 }
 
+// A catch-up round with more collections than slots (§spec:sync-workflow "Waiting
+// collections"): two catch-ups run, three wait their turn in the order they start.
+// The round began when grateful-dead started; etree-lma took the slot freed since.
+// Each waiting collection keeps its rescheduled entry until its catch-up ends
+// (§spec:rescheduled-syncs Clearing), each skipped before the round began.
+function waitingRound(): Answers {
+  const a = defaultAnswers()
+  for (const r of a.activity.runs) if (r.state === "running") r.kind = "catch_up"
+  const roundStart = a.activity.runs[0].started_at
+  const collections = ["phish", "dead-and-company", "ratdog"]
+  a.activity.waiting = collections.map((collection, i) => ({
+    activity_id: 914 + i, source: "internetarchive", collection, kind: "catch_up",
+    started_by_serve: false, since: roundStart,
+  }))
+  const at_ = a.attention.entries.findIndex((e) => e.kind === "rescheduled")
+  a.attention.entries.splice(at_, 1, ...collections.map((collection, i): AttentionEntry => ({
+    kind: "rescheduled", source: "internetarchive", collection, since: at(1120 - i * 60),
+    identifiers: [], count: 0, detail: {},
+  })))
+  return a
+}
+
 // A show that went before removal dates were recorded (status.py: removed_on None).
 function removedUndated(): Answers {
   const a = defaultAnswers()
@@ -175,6 +197,7 @@ export const SCENARIOS: Record<string, Scenario> = {
   loading: { now: NOW, mode: { kind: "hangs" }, answers: sorted(defaultAnswers()) },
   never_reached: { now: NOW, mode: { kind: "refused" }, answers: sorted(defaultAnswers()) },
   long_content: { now: NOW, mode: { kind: "ok" }, answers: sorted(longContent()) },
+  waiting: { now: NOW, mode: { kind: "ok" }, answers: sorted(waitingRound()) },
   // Behaviour scenarios (tests/behaviour.spec.ts, tests/freshness.spec.ts); no screenshots.
   // The browser's clock runs a minute ahead of the server's; the server answers normally.
   server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },

@@ -1,9 +1,9 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
-import type { ActivityRun, HistoryRun } from "@/api/types"
+import type { ActivityRun, HistoryRun, WaitingCollection } from "@/api/types"
 import { Empty, Fact, RowsSkeleton, ShowIds, ToneBadge } from "@/dash/bits"
 import { ago, bytes, clock, count, duration, speed } from "@/lib/format"
-import { KIND, PHASE, outcome } from "@/lib/words"
+import { KIND, PHASE, WAITING, outcome } from "@/lib/words"
 
 // A running run whose counts have not moved for this long gets an amber
 // "No progress for <time>" badge (operator decision 2026-11-12, §spec:ui-kit).
@@ -64,14 +64,36 @@ function RunRow({ run, now }: { run: ActivityRun; now: string }) {
   )
 }
 
-// Only running runs: an ended run moves to Recent runs, and a killed one also to
-// Needs attention (operator decision 2026-11-12, §spec:ui-kit).
-export function RunningNow({ runs, lastRun, now }: {
+// A collection waiting for a slot: not a run yet, so no phase, counters, or No
+// progress badge (operator decision 2026-11-20).
+function WaitingRow({ entry, now }: { entry: WaitingCollection; now: string }) {
+  return (
+    <li className="flex flex-col gap-2 py-4 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="min-w-0 font-medium wrap-anywhere">{entry.collection}</span>
+        <span className="text-muted-foreground">· {KIND[entry.kind]}</span>
+        <span className="ml-auto flex flex-wrap gap-1">
+          <ToneBadge tone={null}>{WAITING}</ToneBadge>
+        </span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Since {clock(entry.since, now)} · {ago(entry.since, now)} ago
+      </p>
+    </li>
+  )
+}
+
+// Only running runs, then the collections waiting for a slot: an ended run moves
+// to Recent runs, and a killed one also to Needs attention (operator decisions
+// 2026-11-12 and 2026-11-20, §spec:ui-kit).
+export function RunningNow({ runs, waiting, lastRun, now }: {
   runs: ActivityRun[] | null
+  waiting: WaitingCollection[] | null
   lastRun: HistoryRun | null
   now: string
 }) {
-  const shown = runs?.filter((r) => r.state === "running") ?? null
+  const running = runs?.filter((r) => r.state === "running") ?? null
+  const shown = running === null ? null : { running, waiting: waiting ?? [] }
   return (
     <Card className="min-w-0">
       <CardHeader>
@@ -80,13 +102,16 @@ export function RunningNow({ runs, lastRun, now }: {
       <CardContent>
         {shown === null ? (
           <RowsSkeleton />
-        ) : shown.length === 0 ? (
+        ) : shown.running.length + shown.waiting.length === 0 ? (
           <Empty>
             Nothing is running.
             {lastRun?.finished_at && ` The last run ended ${ago(lastRun.finished_at, now)} ago.`}
           </Empty>
         ) : (
-          <ul className="divide-y">{shown.map((r) => <RunRow key={r.activity_id} run={r} now={now} />)}</ul>
+          <ul className="divide-y">
+            {shown.running.map((r) => <RunRow key={r.activity_id} run={r} now={now} />)}
+            {shown.waiting.map((w) => <WaitingRow key={w.activity_id} entry={w} now={now} />)}
+          </ul>
         )}
       </CardContent>
     </Card>
