@@ -290,3 +290,94 @@ def test_a_crash_mid_round_reports_only_the_collection_that_ran(
     for name in ("coll2", "coll3"):
         assert summaries[name]["recovery"] is None
         assert summaries[name]["last_run"] is None
+
+
+def test_a_busy_database_as_a_collection_starts_still_shows_its_run(
+    tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection takes its slot while another collection writes: the flip of its
+    entry to running waits for the write, as a run's final write does, so the run
+    is never left without an entry (it would read as ended unexpectedly)."""
+    config = _config(tmp_roots)
+    FakePlugin.items["gd-a"] = FakeItem("gd-a", files=[FakeFile("gd-a.flac", b"x")])
+    real_begin = activity.ActivityRecorder.begin
+    held = threading.Event()
+
+    def begin_while_busy(self, waiting, *, run_id):  # type: ignore[no-untyped-def]
+        if waiting.collection == "coll2" and not held.is_set():
+            def hold() -> None:
+                conn = sqlite3.connect(config.state_db, isolation_level=None)  # type: ignore[arg-type]
+                conn.execute("BEGIN IMMEDIATE")
+                held.set()
+                time.sleep(1.0)  # longer than a progress tick waits
+                conn.execute("COMMIT")
+                conn.close()
+
+            threading.Thread(target=hold).start()
+            assert held.wait(5)
+        return real_begin(self, waiting, run_id=run_id)
+
+    monkeypatch.setattr(activity.ActivityRecorder, "begin", begin_while_busy)
+
+    assert run_sync(config) == 0
+
+    assert [(e["collection_name"], e["state"], e["result"]) for e in _activity_rows(config)] == [
+        (name, "ended", "completed") for name in COLLECTIONS
+    ]
+
+
+def test_a_collection_whose_outcome_cannot_open_closes_its_run(
+    tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write that fails as a collection starts (a full disk) fails that collection
+    only, and its run record still closes (§spec:failure-behavior)."""
+    from shakedown.state import OperationOutcomeRepo
+
+    config = _config(tmp_roots)
+    FakePlugin.items["gd-a"] = FakeItem("gd-a", files=[FakeFile("gd-a.flac", b"x")])
+    real_start = OperationOutcomeRepo.start
+
+    def start(self, operation, source, collection, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if collection == "coll2":
+            raise sqlite3.OperationalError("database or disk is full")
+        return real_start(self, operation, source, collection, *args, **kwargs)
+
+    monkeypatch.setattr(OperationOutcomeRepo, "start", start)
+
+    assert run_sync(config) == 1
+
+    runs = {r["collection_name"]: r for r in _run_rows(config)}
+    assert runs["coll2"]["finished_at"] is not None
+    assert any("disk is full" in e for e in json.loads(runs["coll2"]["errors"]))
+    assert runs["coll1"]["finished_at"] is not None and runs["coll3"]["finished_at"] is not None
+    assert all(e["state"] != "waiting" for e in _activity_rows(config))
+
+
+def test_the_next_writer_clears_a_killed_runs_waiting_collections_at_once(
+    tmp_roots: tuple[Path, Path], tmp_path: Path,
+) -> None:
+    """A run started right after a kill — before the killed run's heartbeat is
+    stale — never shows the killed run's collections as waiting beside its own."""
+    config = _config(tmp_roots)
+    gate = tmp_path / "go"
+    proc = _spawn_cli(tmp_path, config, gate)
+    try:
+        def holding() -> bool:
+            try:
+                rows = _activity_rows(config)
+            except sqlite3.OperationalError:
+                return False
+            return sorted(r["state"] for r in rows) == ["running", "waiting", "waiting"]
+
+        _wait_for(holding, "coll1 running, coll2 and coll3 waiting", timeout=30)
+        proc.send_signal(signal.SIGKILL)
+        assert proc.wait(timeout=30) == -signal.SIGKILL
+    finally:
+        gate.touch()
+        if proc.poll() is None:
+            proc.kill()
+
+    assert run_exclusive(config, lambda: 0) == 0  # at once: heartbeats still fresh
+    assert [r["state"] for r in _activity_rows(config)] == ["running"]
+    with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
+        assert ActivityRepo(conn).waiting(datetime.now()) == []

@@ -247,6 +247,11 @@ class ActivityRepo:
             [(_iso(at), activity_id, WAITING) for activity_id in activity_ids],
         )
 
+    def drop_all_waiting(self) -> None:
+        """Every waiting entry: only a run holding the writer lock opens them, so once
+        another run holds it they all belong to runs that ended."""
+        self.conn.execute("DELETE FROM run_activity WHERE state=?", (WAITING,))
+
     def drop_waiting(self, activity_ids: list[int]) -> None:
         """Waiting entries whose run ended before they started leave no trace: they
         never ran (§spec:run-activity "Waiting collections")."""
@@ -952,13 +957,16 @@ class ActivityRecorder:
                                 now=self._now, clock=self._clock)
             try:
                 repo = ActivityRepo(self._conn)
-                with transaction(self._conn):
+                # The other collections write meanwhile: wait for them as a run's
+                # final write does, never skip like a progress tick.
+                with self._patient(), transaction(self._conn):
                     repo.begin(waiting.activity_id, run_id, self._now())
                     progress.activity_id = waiting.activity_id
                     repo.write(progress.activity_id, progress.snapshot(), self._now())
                 self._entries.append(progress)
             except Exception as e:
                 progress.activity_id = None
+                self._waiting.append(waiting)  # still waiting in the database: close() drops it
                 self._warn(e)
         return progress
 
@@ -970,7 +978,8 @@ class ActivityRecorder:
             with self._lock:
                 if waiting in self._waiting:
                     self._waiting.remove(waiting)
-                ActivityRepo(self._conn).drop_waiting([waiting.activity_id])
+                with self._patient():
+                    ActivityRepo(self._conn).drop_waiting([waiting.activity_id])
         except Exception as e:
             self._warn(e)
 
@@ -994,6 +1003,17 @@ class ActivityRecorder:
                     repo.beat(waiting, now)
         except Exception as e:
             self._warn(e)
+
+    @contextlib.contextmanager
+    def _patient(self) -> Iterator[None]:
+        """A write that must land (an entry's start, end, or removal) waits for other
+        writers as long as any connection does; progress ticks skip instead."""
+        assert self._conn is not None
+        self._conn.execute(f"PRAGMA busy_timeout={_END_BUSY_TIMEOUT_MS}")
+        try:
+            yield
+        finally:
+            self._conn.execute(f"PRAGMA busy_timeout={_TICK_BUSY_TIMEOUT_MS}")
 
     @contextlib.contextmanager
     def _writing_network(self, conn: sqlite3.Connection) -> Iterator[None]:
@@ -1022,14 +1042,8 @@ class ActivityRecorder:
                 if progress in self._entries:
                     self._entries.remove(progress)
                 snap = progress.snapshot(final=True)
-                self._conn.execute(f"PRAGMA busy_timeout={_END_BUSY_TIMEOUT_MS}")
-                try:
-                    with self._writing_network(self._conn):
-                        ActivityRepo(self._conn).end(
-                            progress.activity_id, result, self._now(), snap
-                        )
-                finally:
-                    self._conn.execute(f"PRAGMA busy_timeout={_TICK_BUSY_TIMEOUT_MS}")
+                with self._patient(), self._writing_network(self._conn):
+                    ActivityRepo(self._conn).end(progress.activity_id, result, self._now(), snap)
         except Exception as e:
             self._warn(e)
 
@@ -1098,4 +1112,5 @@ def close_abandoned(conn: sqlite3.Connection, now: datetime) -> None:
             assert outcome.id is not None
             outcomes.close_abandoned(outcome.id, ABANDONED_ERROR, outcome.updated_at)
         if has_activity:
+            activity.drop_all_waiting()
             activity.close_stale(now)

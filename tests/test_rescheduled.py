@@ -370,7 +370,7 @@ def test_status_text_shows_the_rescheduled_collection(
     out = capsys.readouterr().out
     line = (
         "  rescheduled: first skipped 2026-11-10T03:00:00; "
-        "runs when the current sync finishes"
+        "runs as a catch-up sync"
     )
     assert out.count(line) == 1
     section = out.split(f"=== {SRC}/b ===")[1].split("===")[0]

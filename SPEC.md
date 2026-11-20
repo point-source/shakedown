@@ -1913,7 +1913,10 @@ Observable behavior:
   every multi-collection sync already follows (§spec:cli).
 - **Visible in status.** `shakedown status` shows, per collection with
   an entry, that its sync was rescheduled, the time of its oldest skip,
-  and that it runs when the current sync finishes. `status --json` and
+  and that it runs as a catch-up sync (`rescheduled: first skipped
+  <time>; runs as a catch-up sync`, worded like Needs attention's entry,
+  approved 2026-11-20, so it stays true once its catch-up round has
+  begun). `status --json` and
   `GET /status` carry `rescheduled: {"since": <time>}` per collection,
   or `null`, with the time formatted like every other time in `status`.
   An entry for a collection no longer configured is not shown. A
@@ -2191,7 +2194,8 @@ Observable behavior:
   started then, with its run record. If its run ends first (stopped,
   crashed, or killed), it never started and leaves no trace: its run
   removes the entry, or the next run that takes the writer lock does
-  once its heartbeat is stale. Waiting entries are never in `runs`, the
+  as it starts (only a lock holder has waiting entries); until then a
+  reader stops listing it once its heartbeat is stale. Waiting entries are never in `runs`, the
   run history, or Needs attention; `status` shows a waiting line for the
   collection (§spec:rescheduled-syncs "Visible in status").
 - **Ends are never missed.** A running entry updates its heartbeat every

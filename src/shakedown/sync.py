@@ -745,21 +745,21 @@ def _sync_collection(
     run: Run | None = None
     outcome: OperationOutcome | None = None
     stats = CollectionSyncStats()
-    if recorder is not None and waiting is not None:
-        run = runs.start(source.name, collection.name, started, kind=kind)
-        outcome = outcomes.start(
-            OperationType.SYNC,
-            source.name,
-            collection.name,
-            started,
-            phase="discover",
-            safe_next_action="restore source access and rerun sync",
-        )
-        announce_opened(run.id, outcome.id, source.name, collection.name)
-        stats.progress = recorder.begin(waiting, run_id=run.id)
-        stats.progress.run_counts = lambda: _run_counts(stats)
-
     try:
+        if recorder is not None and waiting is not None:
+            # Inside the crash guard: a write that fails here still closes the run.
+            run = runs.start(source.name, collection.name, started, kind=kind)
+            outcome = outcomes.start(
+                OperationType.SYNC,
+                source.name,
+                collection.name,
+                started,
+                phase="discover",
+                safe_next_action="restore source access and rerun sync",
+            )
+            announce_opened(run.id, outcome.id, source.name, collection.name)
+            stats.progress = recorder.begin(waiting, run_id=run.id)
+            stats.progress.run_counts = lambda: _run_counts(stats)
         _sync_collection_phases(
             config, source, collection, plugin, items, runs, outcomes, run, outcome,
             stats, started, dry_run=dry_run, budget=budget,
@@ -769,6 +769,8 @@ def _sync_collection(
     except Exception as e:
         _close_crashed(runs, run, outcomes, outcome, stats, collection, e, RunKind.SYNC)
         if recorder is not None:
+            if waiting is not None:
+                recorder.drop(waiting)  # no-op once it began
             recorder.end(stats.progress, OperationStatus.FAILED_BEFORE_COMPLETION)
         raise
     if recorder is not None:

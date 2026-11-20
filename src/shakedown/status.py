@@ -298,7 +298,7 @@ def print_status(config: Config, *, as_json: bool) -> None:
         if s["rescheduled"]:
             click.echo(
                 f"  rescheduled: first skipped {s['rescheduled']['since']}; "
-                "runs when the current sync finishes"
+                "runs as a catch-up sync"
             )
         handoff = s["handoff_pending"]
         if handoff:
