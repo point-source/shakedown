@@ -22,6 +22,7 @@ from shakedown.models import (
     Run,
     RunKind,
 )
+from shakedown.selection import keeps_unplayable_original
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -51,6 +52,21 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         not_playable_reason=row["not_playable_reason"],
         disappeared_at=_parse_iso(row["disappeared_at"]),
     )
+
+
+def show_figures(manifest: Manifest) -> tuple[int, int, int]:
+    """A show's stored figures from its recorded manifest: its archive bytes (every
+    file's listed size), its library bytes (the same without archive-only files), and
+    1 when it is kept twice — an unplayable original beside a playable copy
+    (§spec:library-stats "Stored figures", §spec:needs-attention library health)."""
+    archive = sum(f.size or 0 for f in manifest.files)
+    library = sum(f.size or 0 for f in manifest.files if f.library)
+    return archive, library, int(keeps_unplayable_original(manifest))
+
+
+def manifest_figures(recorded_manifest: str) -> tuple[int, int, int]:
+    """`show_figures` of a recorded manifest as the record holds it (JSON)."""
+    return show_figures(Manifest.from_json(json.loads(recorded_manifest)))
 
 
 def _title(row: sqlite3.Row) -> str | None:
@@ -98,14 +114,17 @@ class ItemRepo:
         return _row_to_item(row) if row else None
 
     def upsert(self, item: Item) -> None:
+        manifest = item.recorded_manifest
+        stored = show_figures(manifest) if manifest else (0, 0, 0)
         self.conn.execute(
             """
             INSERT INTO items (
                 source_name, collection_name, identifier, status,
                 archive_path, discovered_at, downloaded_at, last_verified_at,
                 restriction_reason, source_metadata, recorded_manifest,
-                change_signal, not_playable_reason, disappeared_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                change_signal, not_playable_reason, disappeared_at,
+                archive_bytes, library_bytes, playable_copy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_name, collection_name, identifier) DO UPDATE SET
                 status=excluded.status,
                 archive_path=excluded.archive_path,
@@ -118,7 +137,14 @@ class ItemRepo:
                 change_signal=COALESCE(excluded.change_signal, items.change_signal),
                 not_playable_reason=excluded.not_playable_reason,
                 -- never kept from the old row: a show listed again loses its date
-                disappeared_at=excluded.disappeared_at
+                disappeared_at=excluded.disappeared_at,
+                -- the figures follow the manifest the row keeps
+                archive_bytes=CASE WHEN excluded.recorded_manifest IS NULL
+                    THEN items.archive_bytes ELSE excluded.archive_bytes END,
+                library_bytes=CASE WHEN excluded.recorded_manifest IS NULL
+                    THEN items.library_bytes ELSE excluded.library_bytes END,
+                playable_copy=CASE WHEN excluded.recorded_manifest IS NULL
+                    THEN items.playable_copy ELSE excluded.playable_copy END
             """,
             (
                 item.source_name,
@@ -131,10 +157,11 @@ class ItemRepo:
                 _iso(item.last_verified_at),
                 item.restriction_reason,
                 json.dumps(item.source_metadata),
-                json.dumps(item.recorded_manifest.to_json()) if item.recorded_manifest else None,
+                json.dumps(manifest.to_json()) if manifest else None,
                 item.change_signal,
                 item.not_playable_reason,
                 _iso(item.disappeared_at),
+                *stored,
             ),
         )
 
@@ -220,11 +247,12 @@ class ItemRepo:
         )
         return [row["identifier"] for row in cur]
 
-    def list_archive_only_manifests(
+    def _archive_only_manifests(
         self, source: str, collection: str
     ) -> list[tuple[str, Manifest]]:
         """(identifier, recorded manifest) of the collection's complete shows whose
-        manifest keeps at least one file out of the library, in order."""
+        manifest keeps at least one file out of the library, in order: the kept-twice
+        list of a database before v12. It reads every manifest."""
         cur = self.conn.execute(
             """
             SELECT identifier, recorded_manifest FROM items
@@ -253,13 +281,23 @@ class ItemRepo:
         )
         return {ItemStatus(row["status"]): row["n"] for row in cur}
 
+    def has_stored_figures(self) -> bool:
+        """False on a database before schema v12, which keeps no figures with its
+        shows: a reader never migrates, so it sums the manifests instead."""
+        return any(
+            row["name"] == "archive_bytes"
+            for row in self.conn.execute("PRAGMA table_info(items)")
+        )
+
     def archived_bytes(self, source: str, collection: str) -> int:
-        """Total size of the archive copies on record, from their manifests: a cheap
-        stand-in for walking the archive tree, which on a NAS takes tens of seconds."""
+        """Total size of the archive copies on record: the shows' stored figures,
+        summed from their index (§spec:library-stats "Stored figures"). A stand-in
+        for walking the archive tree, which on a NAS takes tens of seconds."""
+        if not self.has_stored_figures():
+            return self._manifest_bytes(source, collection, library_only=False)
         row = self.conn.execute(
             """
-            SELECT COALESCE(SUM(json_extract(f.value, '$.size')), 0) AS total
-            FROM items, json_each(items.recorded_manifest) AS f
+            SELECT COALESCE(SUM(archive_bytes), 0) AS total FROM items
             WHERE source_name=? AND collection_name=? AND archive_path IS NOT NULL
             """,
             (source, collection),
@@ -267,20 +305,57 @@ class ItemRepo:
         return int(row["total"])
 
     def library_bytes(self, source: str, collection: str) -> int:
-        """Total size of the files the library stages, from the same manifests as
-        ``archived_bytes``: every recorded file but archive-only ones, such as SHN
-        originals beside a playable copy (§spec:library-stats,
-        §spec:quality-selection). Library files are hardlinks: no disk of their own."""
+        """Total size of the files the library stages: every recorded file but
+        archive-only ones, such as SHN originals beside a playable copy
+        (§spec:library-stats, §spec:quality-selection). Library files are hardlinks:
+        no disk of their own."""
+        if not self.has_stored_figures():
+            return self._manifest_bytes(source, collection, library_only=True)
         row = self.conn.execute(
             """
-            SELECT COALESCE(SUM(json_extract(f.value, '$.size')), 0) AS total
-            FROM items, json_each(items.recorded_manifest) AS f
+            SELECT COALESCE(SUM(library_bytes), 0) AS total FROM items
             WHERE source_name=? AND collection_name=? AND archive_path IS NOT NULL
-              AND COALESCE(json_extract(f.value, '$.library'), 1) != 0
             """,
             (source, collection),
         ).fetchone()
         return int(row["total"])
+
+    def _manifest_bytes(self, source: str, collection: str, *, library_only: bool) -> int:
+        """The byte total summed from every manifest, for a database before v12. It
+        reads every row, so it is slow on a large database with a cold cache."""
+        staged = (
+            "AND COALESCE(json_extract(f.value, '$.library'), 1) != 0" if library_only else ""
+        )
+        row = self.conn.execute(
+            f"""
+            SELECT COALESCE(SUM(json_extract(f.value, '$.size')), 0) AS total
+            FROM items, json_each(items.recorded_manifest) AS f
+            WHERE source_name=? AND collection_name=? AND archive_path IS NOT NULL
+              {staged}
+            """,
+            (source, collection),
+        ).fetchone()
+        return int(row["total"])
+
+    def list_playable_copies(self, source: str, collection: str) -> list[str]:
+        """The collection's complete shows kept twice — an unplayable original (SHN or
+        unrecognised audio) archive-only beside a playable copy the library stages —
+        in order (§spec:needs-attention library health)."""
+        if not self.has_stored_figures():
+            return [
+                identifier
+                for identifier, manifest in self._archive_only_manifests(source, collection)
+                if keeps_unplayable_original(manifest)
+            ]
+        cur = self.conn.execute(
+            """
+            SELECT identifier FROM items
+            WHERE source_name=? AND collection_name=? AND status=? AND playable_copy = 1
+            ORDER BY identifier
+            """,
+            (source, collection, ItemStatus.COMPLETE.value),
+        )
+        return [row["identifier"] for row in cur]
 
     def recently_downloaded(
         self, scopes: Sequence[tuple[str, str]], limit: int
@@ -291,15 +366,21 @@ class ItemRepo:
         if not scopes:
             return []
         in_scope = " OR ".join("(source_name=? AND collection_name=?)" for _ in scopes)
+        # The newest shows are picked first and only their metadata is read: the
+        # metadata of every show fills most of the database.
         cur = self.conn.execute(
             f"""
+            WITH newest AS (
+                SELECT rowid AS id FROM items
+                WHERE downloaded_at IS NOT NULL AND ({in_scope})
+                ORDER BY downloaded_at DESC, identifier
+                LIMIT ?
+            )
             SELECT source_name, collection_name, identifier, downloaded_at,
                    json_extract(source_metadata, '$.title') AS title,
                    json_type(source_metadata, '$.title') AS title_type
-            FROM items
-            WHERE downloaded_at IS NOT NULL AND ({in_scope})
+            FROM newest JOIN items ON items.rowid = newest.id
             ORDER BY downloaded_at DESC, identifier
-            LIMIT ?
             """,
             (*(v for scope in scopes for v in scope), limit),
         )

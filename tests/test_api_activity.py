@@ -30,7 +30,7 @@ from shakedown.status import print_status
 from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.serve_child import SPEC_ENV
-from tests.test_server import AUTH, CHILD_PREFIX, REPO_ROOT, _Clock, _finish
+from tests.test_server import AUTH, CHILD_PREFIX, REPO_ROOT, _Clock, _finish, run_now
 
 FIELDS = {
     "activity_id", "run_id", "source", "collection", "kind", "started_by_serve",
@@ -42,7 +42,7 @@ FIELDS = {
 
 
 def _app(config, clock: _Clock):  # type: ignore[no-untyped-def]
-    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock)
+    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock, spawn=run_now)
 
 
 async def _get(app, path: str = "/api/activity") -> dict[str, Any]:  # type: ignore[no-untyped-def]

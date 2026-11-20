@@ -1513,12 +1513,24 @@ Sync state lives in a single-file embedded SQLite database at
   the skipped files (§spec:tag-filling). The first sync after the
   upgrade revisits those shows; files already filled are only read.
   Nothing else changes, and nothing is re-downloaded.
+- Schema v12 keeps each show's figures with the show: its archive
+  bytes, its library bytes, and whether it is kept twice — an
+  unplayable original beside a playable copy (§spec:library-stats
+  "Stored figures", §spec:needs-attention). The migration backfills
+  every show once from its recorded manifest; on a large database that
+  is one full read (about a minute on a NAS) inside the first locked
+  run after the upgrade. While it runs, SQLite's write-ahead log grows
+  to about the size of the database, on the volume that holds it; a
+  volume without that much free space fails the run, the migration
+  rolls back whole, and the next run tries again. Additive: nothing
+  else changes, and nothing is re-downloaded.
 - Only a command that holds the writer lock migrates the database.
   Commands that take no lock — `status`, `item show`, `sync --dry-run`,
   `verify` without `--reconform`, `validate`, and `serve`'s
   `GET /status` and `GET /metrics` — open it at whatever schema version
   it has; on an older version they show what that version records (no
-  rescheduled entries before v9). A reader that migrated while a run of
+  rescheduled entries before v9; before v12, byte totals summed from
+  every manifest, which is slow on a large database). A reader that migrated while a run of
   the previous release still writes would make that run refuse the
   database the next time it opens it. With no database yet, they create
   one at the current version.
@@ -2011,13 +2023,19 @@ Observable behavior:
   background tab, a locked phone). `serve` computes each endpoint's
   answer at most once per refresh interval and hands the same answer to
   every viewer, so ten open pages cost the NAS what one does
-  (§req:quality-attributes: live, but light).
+  (§req:quality-attributes: live, but light). A viewer never waits on a
+  recompute: once an answer's interval passes, `serve` keeps handing it
+  out for one more interval while a single refresh computes the next
+  behind it. An answer older than two intervals, or one whose refresh
+  failed, is not handed out again: the next viewer waits for the
+  recompute (sharing one already running) and receives its answer or
+  its error.
 - **Old data is labelled, never passed off as current.** Every answer
   carries `generated_at`, the time `serve` computed it. When a refresh
   fails or no answer has arrived for twice its refresh interval, the
   page says it cannot reach shakedown and shows how old the data on
   screen is. Ages count from when an answer arrived, by the browser's
-  clock: `serve` hands out an answer up to one interval old, and a
+  clock: `serve` hands out an answer up to two intervals old, and a
   server clock that differs from the browser's must never read as an
   outage (`web/tests/freshness.spec.ts`). A run that stopped reporting is shown as ended,
   never as running (§spec:run-activity).
@@ -2031,6 +2049,11 @@ Observable behavior:
 - **Works behind a proxy, at any path.** The page addresses its assets
   and endpoints by relative URL, so it works at a host's root or under a
   path prefix the proxy adds, with no setting.
+- **Compressed.** `serve` gzips any answer or asset over 1 KB for a
+  client that asks (`Accept-Encoding: gzip`). A proxy that passes
+  `Content-Encoding` through, as nginx-proxy-manager does, hands the
+  browser the compressed answer. Answers carry no secrets, so
+  compression exposes nothing an attacker could guess at.
 - **Self-contained.** Every asset the page needs ships inside the
   shakedown image and is served by `serve`. The browser fetches nothing
   from a third party (no CDN, fonts, or analytics), so the page works on
@@ -2073,7 +2096,14 @@ counters, not a run's progress, the attention list, or history
 `status` holds, and adds two more services. *Loading the kit from a
 CDN* — breaks on a LAN without internet and leaks each page view.
 
-**Tradeoffs.** Up to a few seconds of lag on the live view. The page
+Answers refresh behind the viewer because a recompute inside the
+request made every viewer wait for it: on a cold, busy NAS the page
+showed placeholders for a minute (v2.2.2). Two intervals bound the age
+of what `serve` hands out, so the page's own staleness rule stays
+true.
+
+**Tradeoffs.** Up to a few seconds of lag on the live view; any view
+may show data up to two intervals old. The page
 needs `serve` running; with `serve` down there is no dashboard, but
 nothing is lost (§spec:run-activity, §spec:network-activity record from
 the runs themselves). The unauthenticated page relies on the operator's
@@ -2404,6 +2434,15 @@ Observable behavior:
   (§spec:system-shape), so library bytes use no disk of their own; the
   figure says how much of the archive the library presents. Totals sum
   the collections.
+- **Stored figures.** Each show's archive bytes, library bytes, and
+  whether it is kept twice (§spec:needs-attention library health) are
+  computed from its recorded manifest whenever the show is written, and
+  kept with it (§spec:state, schema v12). `status`, this view, and the
+  growth snapshots sum them from an index and never read a manifest, so
+  the answer costs the same on a cold page cache while a sync writes to
+  the same pool. A show whose write carries no manifest keeps its
+  recorded one and its figures with it. A reader of a database before
+  v12 sums the manifests instead, as earlier releases did.
 - **Disk.** Total and free bytes of the filesystem holding the archive,
   read from the operating system at the request — no walk of the tree.
 - **Growth.** Per day for the last 30 days, per collection and in total:
@@ -2433,9 +2472,19 @@ deriving it backwards from download dates cannot see prunes,
 replacements, or removals. Free space from the filesystem because
 nothing else knows it.
 
+Byte figures are stored per show because summing every recorded
+manifest read the whole state database — the manifests sit behind
+each show's source metadata — and took about a minute on the
+operator's NAS with a cold cache during a sync (v2.2.2). Per show,
+because every write already passes through one place, so the figures
+cannot drift from the manifests and need no end-of-run step.
+
 **Alternatives rejected.** *Walking the archive tree for bytes* — tens
 of seconds on a NAS per refresh (§spec:state notes the same for
-`status`). *`serve` snapshotting growth on a timer* — misses days when
+`status`). *Running per-collection totals adjusted on each write* — a
+missed adjustment drifts forever. *Totals recorded at the end of each
+locked run* (like the growth snapshots) — stale while a sync runs, and
+lost when a run is killed. *`serve` snapshotting growth on a timer* — misses days when
 `serve` is down. *A "new shows only" list* — the record does not
 distinguish a first download from a re-fetch; a re-fetched show is also
 news to the morning check. *A disk-full estimate* (free bytes over
@@ -2518,13 +2567,19 @@ Observable behavior:
   the page says so plainly.
 
 API: `GET /api/attention` (unauthenticated) answers `{generated_at,
-entries: [{kind, source, collection, since, identifiers, detail}],
-health: [{source, collection, restricted: [{identifier, reason}],
-removed_upstream: [{identifier, removed_on}], drift_files,
-not_playable: [{identifier, reason}], playable_copies: [identifier]}]}`.
-`detail` holds the kind's extra facts under `status`'s own field names;
-`identifiers` is empty for collection-wide kinds. Lists are complete;
-the page decides how many to show.
+entries: [{kind, source, collection, since, identifiers, count,
+detail}], health: [{source, collection, restricted: [{identifier,
+reason}], restricted_count, removed_upstream: [{identifier,
+removed_on}], removed_upstream_count, drift_files, not_playable:
+[{identifier, reason}], not_playable_count, playable_copies:
+[identifier], playable_copies_count}]}`. `detail` holds the kind's
+extra facts under `status`'s own field names; `identifiers` is empty
+for collection-wide kinds. Counts are complete; every list carries its
+first 10 shows or files, in order: `identifiers`, `detail.separations`,
+`detail.unplaced_files`, and the health lists. An entry's `count` is
+how many shows it affects (files, for `unplaced_files`); each health
+list's `*_count` is how many shows it has. The page shows the first
+few and how many more. `status --json` keeps its lists complete.
 
 **Decision and constraint.** Group by collection and kind because a
 long list of identical entries hides the one that matters
@@ -2534,8 +2589,14 @@ computation because a disagreement is a defect
 action is a code the page words, not server text, so wording stays with
 the screens (§spec:dashboard: codes, not copy).
 
+Lists are capped because the answer carried every restricted show:
+about 1 MB every 30 seconds per open page on the operator's mirror,
+for a page that shows three (v2.2.2). Ten matches what `status`
+prints.
+
 **Alternatives rejected.** *One entry per show* — buries collection-wide
-problems under show noise. *Health facts in the attention list* — a
+problems under show noise. *A full-list endpoint beside the capped
+answer* — nothing reads it; `status --json` has the complete lists. *Health facts in the attention list* — a
 restricted show needs nothing from the operator; mixing them makes the
 list never empty.
 

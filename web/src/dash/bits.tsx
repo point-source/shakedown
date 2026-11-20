@@ -53,10 +53,10 @@ export function ToneBadge({ tone, children }: { tone: Tone | null; children: Rea
 }
 
 /** Show IDs as plain text, wrapping on any character; the rest counted. */
-export function ShowIds({ ids, max = 3 }: { ids: string[]; max?: number }) {
+export function ShowIds({ ids, total = ids.length, max = 3 }: { ids: string[]; total?: number; max?: number }) {
   if (ids.length === 0) return null
   const shown = ids.slice(0, max)
-  const more = ids.length - shown.length
+  const more = total - shown.length
   return (
     <p className="font-mono text-xs wrap-anywhere text-muted-foreground">
       {shown.join(", ")}

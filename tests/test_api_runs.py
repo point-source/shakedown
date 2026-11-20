@@ -25,7 +25,7 @@ from shakedown.sync import run_sync
 from shakedown.verify import run_verify
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
-from tests.test_server import _Clock
+from tests.test_server import _Clock, run_now
 
 FIELDS = {
     "run_id", "activity_id", "kind", "source", "collection", "started_at",
@@ -41,7 +41,7 @@ RECORD_FIGURES = (
 
 
 def _app(config: Config, clock: _Clock):  # type: ignore[no-untyped-def]
-    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock)
+    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock, spawn=run_now)
 
 
 async def _call(app, path: str) -> httpx.Response:  # type: ignore[no-untyped-def]

@@ -30,19 +30,20 @@ from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 from tests.test_durable_handoff import DOWN, GOOD, _Webhooks
-from tests.test_server import _Clock
+from tests.test_server import _Clock, run_now
 
 SRC = "fake-src"
-ENTRY_FIELDS = {"kind", "source", "collection", "since", "identifiers", "detail"}
+ENTRY_FIELDS = {"kind", "source", "collection", "since", "identifiers", "count", "detail"}
 HEALTH_FIELDS = {
-    "source", "collection", "restricted", "removed_upstream", "drift_files",
-    "not_playable", "playable_copies",
+    "source", "collection", "restricted", "restricted_count", "removed_upstream",
+    "removed_upstream_count", "drift_files", "not_playable", "not_playable_count",
+    "playable_copies", "playable_copies_count",
 }
 
 
 def _app(config: Config, clock: _Clock | None = None):  # type: ignore[no-untyped-def]
     path = write_config(config.archive_root.parent / "cfg.yaml", config)
-    return build_app(path, clock=clock or _Clock())
+    return build_app(path, clock=clock or _Clock(), spawn=run_now)
 
 
 async def _get(app, path: str = "/api/attention") -> dict[str, Any]:  # type: ignore[no-untyped-def]
@@ -127,8 +128,10 @@ def test_a_healthy_mirror_needs_nothing(tmp_roots: tuple[Path, Path]) -> None:
     assert answer["entries"] == []
     assert answer["health"] == [
         {
-            "source": SRC, "collection": name, "restricted": [], "removed_upstream": [],
-            "drift_files": 0, "not_playable": [], "playable_copies": [],
+            "source": SRC, "collection": name, "restricted": [], "restricted_count": 0,
+            "removed_upstream": [], "removed_upstream_count": 0, "drift_files": 0,
+            "not_playable": [], "not_playable_count": 0, "playable_copies": [],
+            "playable_copies_count": 0,
         }
         for name in ("coll1", "coll2")
     ]
@@ -156,9 +159,9 @@ def test_a_failed_show_is_listed_until_a_good_sync(
     recovery = entry["detail"].pop("recovery")
     assert entry == {
         "kind": "failed_shows", "source": SRC, "collection": "coll1", "since": None,
-        "identifiers": ["gd-bad"], "detail": {},
+        "identifiers": ["gd-bad"], "count": 1, "detail": {},
     }
-    assert len(entry["identifiers"]) == summary["counts"]["failed"]
+    assert entry["count"] == summary["counts"]["failed"]
     assert recovery["status"] == summary["recovery"]["status"] == "completed_with_item_issues"
     assert recovery["affected_item"] == "gd-bad"
     assert recovery["safe_next_action"] == summary["recovery"]["safe_next_action"]
@@ -179,7 +182,59 @@ def test_three_hundred_failed_shows_are_one_entry(tmp_roots: tuple[Path, Path]) 
     answer = _attention(config)
 
     assert _kinds(answer) == [("coll1", "failed_shows")]
-    assert answer["entries"][0]["identifiers"] == [f"gd-{i:03d}" for i in range(300)]
+    [entry] = answer["entries"]
+    assert entry["identifiers"] == [f"gd-{i:03d}" for i in range(10)]
+    assert entry["count"] == 300
+
+
+def _many_problems(config: Config, shows: int) -> None:
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        items, placements = ItemRepo(conn), PlacementRepo(conn)
+        conn.execute("BEGIN")
+        for i in range(shows):
+            items.upsert(Item(SRC, "coll1", f"gd-r-{i:05d}", ItemStatus.UNAVAILABLE,
+                              restriction_reason="access restricted by the uploader"))
+            items.upsert(Item(SRC, "coll1", f"gd-f-{i:05d}", ItemStatus.FAILED))
+            items.upsert(Item(SRC, "coll1", f"gd-d-{i:05d}", ItemStatus.DISAPPEARED,
+                              disappeared_at=datetime(2026, 11, 1)))
+            items.upsert(Item(SRC, "coll1", f"gd-n-{i:05d}", ItemStatus.COMPLETE,
+                              not_playable_reason="only in SHN"))
+            placements.set_folder(SRC, "coll1", f"gd-s-{i:05d}", f"F [gd-s-{i:05d}]",
+                                  separated=True)
+            placements.add_unplaced(SRC, "coll1", f"Stray/{i:05d}.txt")
+        conn.execute("COMMIT")
+
+
+def test_the_answer_size_does_not_grow_with_the_collection(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Counts are complete; each list carries the first ten of its shows or files, in
+    order (§spec:needs-attention). 7,000 restricted shows cost what 20 do."""
+    small_roots = (tmp_roots[0] / "small", tmp_roots[1] / "small")
+    for root in small_roots:
+        root.mkdir()
+    small = make_config(*small_roots)
+    big = make_config(*tmp_roots)
+    _many_problems(small, 20)
+    _many_problems(big, 2000)
+
+    small_size = len(json.dumps(_attention(small)))
+    answer = _attention(big)
+    assert len(json.dumps(answer)) < small_size * 1.05
+
+    summary = _summary(_status(big, capsys))
+    [health] = answer["health"]
+    for key in ("restricted", "removed_upstream", "not_playable"):
+        assert health[key] == summary[key][:10]
+        assert health[f"{key}_count"] == len(summary[key]) == 2000
+    for kind in ("failed_shows", "separations", "unplaced_files"):
+        entry = _entry(answer, kind)
+        assert entry["count"] == 2000
+        assert len(entry["identifiers"]) == (0 if kind == "unplaced_files" else 10)
+    assert _entry(answer, "failed_shows")["identifiers"][0] == "gd-f-00000"
+    assert _entry(answer, "separations")["detail"]["separations"] == summary["separations"][:10]
+    assert _entry(answer, "unplaced_files")["detail"]["unplaced_files"] == (
+        summary["unplaced_files"][:10])
 
 
 def test_a_recovery_carries_status_recovery_object(
@@ -222,7 +277,7 @@ def test_a_stale_collection_has_one_collection_wide_entry(tmp_roots: tuple[Path,
     stale = _entry(answer, "stale")
     assert stale == {
         "kind": "stale", "source": SRC, "collection": "coll1", "since": None,
-        "identifiers": [], "detail": {},
+        "identifiers": [], "count": 0, "detail": {},
     }
 
     assert run_sync(config) == 0
@@ -310,9 +365,11 @@ def test_separations_and_unplaced_files_match_status(
     separations = _entry(answer, "separations")
     assert separations["since"] is None
     assert separations["identifiers"] == ["gd-a.aud", "gd-a.sbd"]
+    assert separations["count"] == 2
     assert separations["detail"] == {"separations": summary["separations"]}
     unplaced = _entry(answer, "unplaced_files")
     assert unplaced["since"] is None and unplaced["identifiers"] == []
+    assert unplaced["count"] == 1
     assert unplaced["detail"] == {"unplaced_files": summary["unplaced_files"]}
     # Entries keep the spec's kind order within a collection.
     assert _kinds(answer) == [("coll1", "separations"), ("coll1", "unplaced_files")]
@@ -633,6 +690,8 @@ def test_health_carries_status_library_facts(
     assert set(health) == HEALTH_FIELDS
     for key in ("restricted", "removed_upstream", "drift_files", "not_playable"):
         assert health[key] == summary[key]
+    for key in ("restricted", "removed_upstream", "not_playable"):
+        assert health[f"{key}_count"] == len(summary[key]) == 1
     assert health["removed_upstream"] == [{"identifier": "gd-gone", "removed_on": "2026-11-01"}]
 
 
@@ -648,6 +707,7 @@ def test_a_show_kept_as_an_unplayable_original_and_a_playable_copy_is_listed(
     [health] = _attention(config)["health"]
 
     assert health["playable_copies"] == ["gd-shn-mp3"]
+    assert health["playable_copies_count"] == 1
     assert health["not_playable"] == _summary(_status(config, capsys))["not_playable"]
     assert [r["identifier"] for r in health["not_playable"]] == ["gd-shn-only"]
 

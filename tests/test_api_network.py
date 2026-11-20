@@ -20,7 +20,7 @@ from shakedown.db import connect
 from shakedown.network import EventKind, MinuteTotals, NetworkEvent, NetworkRepo
 from shakedown.server import build_app
 from tests.conftest import write_config
-from tests.test_server import _Clock
+from tests.test_server import _Clock, run_now
 
 SERIES_FIELDS = {
     "t", "bytes", "peak_requests_in_flight", "rate_limited", "server_errors",
@@ -45,7 +45,7 @@ def _config(tmp_roots: tuple[Path, Path], *names: str) -> Config:
 
 def _app(config: Config, clock: _Clock | None = None):  # type: ignore[no-untyped-def]
     return build_app(write_config(config.archive_root.parent / "cfg.yaml", config),
-                     clock=clock or _Clock())
+                     clock=clock or _Clock(), spawn=run_now)
 
 
 async def _get(app, path: str) -> httpx.Response:  # type: ignore[no-untyped-def]

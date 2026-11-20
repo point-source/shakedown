@@ -25,7 +25,7 @@ function Entry({ e, now }: { e: AttentionEntry; now: string }) {
         </span>
       )}
       {reason && <p className="font-mono text-xs wrap-anywhere whitespace-pre-wrap text-muted-foreground">{reason}</p>}
-      <ShowIds ids={e.kind === "unplaced_files" ? files : e.identifiers} />
+      <ShowIds ids={e.kind === "unplaced_files" ? files : e.identifiers} total={e.count} />
       {e.since && e.kind !== "rescheduled" && !e.kind.startsWith("ended") && (
         <span className="text-xs text-muted-foreground">Since {clock(e.since, now)}</span>
       )}

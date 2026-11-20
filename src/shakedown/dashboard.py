@@ -17,6 +17,7 @@ a key holding the validated values.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from collections.abc import Callable, Hashable
@@ -30,6 +31,8 @@ from fastapi import FastAPI, HTTPException
 
 from shakedown.config import Config, ConfigError, load
 from shakedown.db import connect_empty, connect_reader
+
+log = logging.getLogger(__name__)
 
 # Refresh intervals (§spec:dashboard): the live view every few seconds, every other
 # view about every 30 seconds. An answer is computed at most once per interval.
@@ -104,20 +107,37 @@ Builder = Callable[[DashboardContext], dict[str, Any]]
 
 @dataclass
 class _Slot:
-    lock: threading.Lock = field(default_factory=threading.Lock)
+    # Held while the key's answer is computed: one computation per key at a time.
+    computing: threading.Lock = field(default_factory=threading.Lock)
     answer: dict[str, Any] | None = None
     computed_at: float = 0.0
+    refreshing: bool = False  # a refresh runs behind the answer being served
+    failed: bool = False  # the last refresh failed: the answer is not served again
+
+
+Spawn = Callable[[Callable[[], None]], None]
+
+
+def in_thread(work: Callable[[], None]) -> None:
+    """Run ``work`` on a thread of its own: how `serve` refreshes an answer."""
+    threading.Thread(target=work, name="dashboard-refresh", daemon=True).start()
 
 
 class SharedAnswers:
-    """One cached answer per key, recomputed once its interval has passed.
+    """One cached answer per key, refreshed behind the viewers once its interval has
+    passed (§spec:dashboard "Live where it matters, light everywhere").
 
-    Routes run in a threadpool, so concurrent viewers of an expired answer wait on
-    the key's lock and all receive the one answer computed for them. A failure
-    (an `HTTPException`) is raised to the viewer and never cached."""
+    Within its interval an answer is served as it is. For one more interval it is
+    still served at once, while one refresh (started by ``spawn``, a thread by
+    default) computes the next. Older than that — or once a refresh has failed —
+    it is no longer served: the viewer computes the answer, or waits for the
+    computation already running, so the page's freshness rule (no answer for two
+    intervals means stale) stays true. A failure (an `HTTPException`) is raised to
+    the viewer that computed it and never cached."""
 
-    def __init__(self, clock: Callable[[], float]) -> None:
+    def __init__(self, clock: Callable[[], float], spawn: Spawn = in_thread) -> None:
         self._clock = clock
+        self._spawn = spawn
         self._lock = threading.Lock()
         self._slots: dict[Hashable, _Slot] = {}
 
@@ -126,13 +146,55 @@ class SharedAnswers:
     ) -> dict[str, Any]:
         with self._lock:
             slot = self._slots.setdefault(key, _Slot())
-        with slot.lock:
-            now = self._clock()
-            if slot.answer is not None and now - slot.computed_at < ttl:
-                return slot.answer
-            slot.answer = compute()
-            slot.computed_at = now
+            answer, age = slot.answer, self._clock() - slot.computed_at
+            servable = answer is not None and not slot.failed and age < 2 * ttl
+            refresh = servable and age >= ttl and not slot.refreshing
+            if refresh:
+                slot.refreshing = True
+            seen = slot.computed_at
+        if refresh:
+            self._spawn(lambda: self._refresh(slot, compute, seen))
+        if servable:
+            # The latest answer: one a synchronous spawn just refreshed is in place.
+            assert slot.answer is not None
             return slot.answer
+        return self._compute_now(slot, ttl, compute)
+
+    def _compute_now(
+        self, slot: _Slot, ttl: float, compute: Callable[[], dict[str, Any]]
+    ) -> dict[str, Any]:
+        seen = slot.computed_at
+        with slot.computing:
+            if slot.answer is not None and not slot.failed and (
+                slot.computed_at != seen or self._clock() - slot.computed_at < ttl
+            ):
+                return slot.answer  # computed while this viewer waited
+            answer = compute()
+            with self._lock:
+                # Dated when ready, as generated_at is: a computation slower than the
+                # interval still yields an answer viewers are served.
+                slot.answer, slot.computed_at, slot.failed = answer, self._clock(), False
+            return answer
+
+    def _refresh(
+        self, slot: _Slot, compute: Callable[[], dict[str, Any]], seen: float
+    ) -> None:
+        with slot.computing:
+            if slot.computed_at != seen:
+                # A viewer computed a newer answer before this refresh started.
+                with self._lock:
+                    slot.refreshing = False
+                return
+            try:
+                answer = compute()
+            except Exception:
+                log.warning("dashboard answer could not be refreshed", exc_info=True)
+                with self._lock:
+                    slot.failed, slot.refreshing = True, False
+                return
+            with self._lock:
+                slot.answer, slot.computed_at = answer, self._clock()
+                slot.failed = slot.refreshing = False
 
 
 def shared_answer(app: FastAPI, key: Hashable, ttl: float, build: Builder) -> dict[str, Any]:

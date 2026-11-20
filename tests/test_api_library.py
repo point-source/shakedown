@@ -26,14 +26,14 @@ from shakedown.status import print_status
 from shakedown.sync import run_sync
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
-from tests.test_server import _Clock
+from tests.test_server import _Clock, run_now
 
 COLLECTION_FIELDS = {"source", "collection", "counts", "restricted", "archive_bytes",
                      "library_bytes", "last_successful_sync_at"}
 
 
 def _app(config: Config, clock: _Clock):  # type: ignore[no-untyped-def]
-    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock)
+    return build_app(write_config(config.archive_root.parent / "cfg.yaml", config), clock=clock, spawn=run_now)
 
 
 async def _get(app, path: str = "/api/library") -> dict[str, Any]:  # type: ignore[no-untyped-def]
@@ -280,3 +280,58 @@ async def test_library_view_is_get_only(tmp_roots: tuple[Path, Path]) -> None:
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         assert (await client.post("/api/library")).status_code == 405
+
+
+def _manifest_sums(config: Config) -> tuple[int, int]:
+    """The archive and library bytes as the recorded manifests give them: what the
+    stored figures must keep equal to through every writing run."""
+    with closing(connect(config.state_db)) as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(json_extract(f.value, '$.size')), 0),
+                   COALESCE(SUM(CASE WHEN COALESCE(json_extract(f.value, '$.library'), 1)
+                                     != 0 THEN json_extract(f.value, '$.size') END), 0)
+            FROM items, json_each(items.recorded_manifest) AS f
+            WHERE archive_path IS NOT NULL
+            """
+        ).fetchone()
+    return int(row[0]), int(row[1])
+
+
+@pytest.mark.asyncio
+async def test_figures_match_status_and_the_manifests_through_every_writing_run(
+    tmp_roots: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§spec:library-stats "Stored figures": after a sync, a refetch, a reconcile, and a
+    disappearance, the library view, `status`, and the manifests agree."""
+    from shakedown.reconcile import run_reconcile
+    from shakedown.sync import refetch_item
+
+    config = make_config(*tmp_roots)
+    clock = _Clock()
+    app = _app(config, clock)
+
+    async def check(archive: int) -> None:
+        clock.now += 2 * VIEW_TTL_S  # past any cached answer
+        [coll] = (await _get(app))["collections"]
+        [status] = _status(config, capsys)
+        assert coll["archive_bytes"] == status["bytes_on_disk"] == archive
+        assert (coll["archive_bytes"], coll["library_bytes"]) == _manifest_sums(config)
+
+    _show("a", 100)
+    _show("b", 200)
+    assert run_sync(config) == 0
+    await check(300)
+
+    _show("b", 250)  # the source replaced the file
+    assert refetch_item(config, "b") == 0
+    await check(350)
+
+    assert run_reconcile(config) == 0
+    await check(350)
+
+    del FakePlugin.items["a"]  # gone upstream: kept on disk, still archived
+    assert run_sync(config) == 0
+    [status] = _status(config, capsys)
+    assert status["counts"]["disappeared"] == 1
+    await check(350)
