@@ -1519,8 +1519,11 @@ Sync state lives in a single-file embedded SQLite database at
   "Stored figures", §spec:needs-attention). The migration backfills
   every show once from its recorded manifest; on a large database that
   is one full read (about a minute on a NAS) inside the first locked
-  run after the upgrade. Additive: nothing else changes, and nothing is
-  re-downloaded.
+  run after the upgrade. While it runs, SQLite's write-ahead log grows
+  to about the size of the database, on the volume that holds it; a
+  volume without that much free space fails the run, the migration
+  rolls back whole, and the next run tries again. Additive: nothing
+  else changes, and nothing is re-downloaded.
 - Only a command that holds the writer lock migrates the database.
   Commands that take no lock — `status`, `item show`, `sync --dry-run`,
   `verify` without `--reconform`, `validate`, and `serve`'s
