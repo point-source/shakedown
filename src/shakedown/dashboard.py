@@ -154,9 +154,9 @@ class SharedAnswers:
         if refresh:
             self._spawn(lambda: self._refresh(slot, compute))
         if servable:
-            assert answer is not None
-            # A refresh that ran at once (a synchronous spawn) is already in place.
-            return slot.answer if slot.answer is not None else answer
+            # The latest answer: one a synchronous spawn just refreshed is in place.
+            assert slot.answer is not None
+            return slot.answer
         return self._compute_now(slot, ttl, compute)
 
     def _compute_now(
@@ -164,19 +164,19 @@ class SharedAnswers:
     ) -> dict[str, Any]:
         seen = slot.computed_at
         with slot.computing:
-            started = self._clock()
             if slot.answer is not None and not slot.failed and (
-                slot.computed_at != seen or started - slot.computed_at < ttl
+                slot.computed_at != seen or self._clock() - slot.computed_at < ttl
             ):
                 return slot.answer  # computed while this viewer waited
             answer = compute()
             with self._lock:
-                slot.answer, slot.computed_at, slot.failed = answer, started, False
+                # Dated when ready, as generated_at is: a computation slower than the
+                # interval still yields an answer viewers are served.
+                slot.answer, slot.computed_at, slot.failed = answer, self._clock(), False
             return answer
 
     def _refresh(self, slot: _Slot, compute: Callable[[], dict[str, Any]]) -> None:
         with slot.computing:
-            started = self._clock()
             try:
                 answer = compute()
             except Exception:
@@ -185,7 +185,7 @@ class SharedAnswers:
                     slot.failed, slot.refreshing = True, False
                 return
             with self._lock:
-                slot.answer, slot.computed_at = answer, started
+                slot.answer, slot.computed_at = answer, self._clock()
                 slot.failed = slot.refreshing = False
 
 

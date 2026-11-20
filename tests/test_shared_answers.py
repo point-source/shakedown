@@ -136,13 +136,21 @@ def test_a_failed_refresh_is_never_served_as_current() -> None:
     assert answers.get("k", TTL, build) == {"n": 4}
 
 
-def test_a_refresh_dated_when_it_started() -> None:
-    """The interval counts from when the answer's data was read."""
+def test_an_answer_is_dated_when_its_computation_finished() -> None:
+    """A computation slower than the interval still yields an answer viewers are
+    served: its age counts from when it was ready, as generated_at does."""
     answers, clock, threads, build = _answers()
-    answers.get("k", TTL, build)
-    clock.now = TTL
-    answers.get("k", TTL, build)
-    threads.join()
-    clock.now = 2 * TTL - 0.1
-    assert answers.get("k", TTL, build) == {"n": 2}
-    assert len(threads.started) == 1
+
+    def slow() -> dict[str, Any]:
+        clock.now += 70  # longer than two intervals
+        return build()
+
+    answers.get("k", TTL, slow)  # ready at 70
+    clock.now = 70 + TTL  # expired: served while one refresh runs
+    build.hold = threading.Event()
+    assert answers.get("k", TTL, slow) == {"n": 1}
+    build.hold.set()
+    threads.join()  # the refresh finished at 170
+    clock.now = 171
+    assert answers.get("k", TTL, slow) == {"n": 2}
+    assert build.builds == 2 and len(threads.started) == 1
