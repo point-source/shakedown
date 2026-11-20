@@ -11,6 +11,8 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from shakedown.db import SCHEMA_VERSION, connect, open_unmigrated
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
 from shakedown.state import ItemRepo
@@ -130,6 +132,32 @@ def test_the_v12_migration_backfills_every_show_once(tmp_path: Path) -> None:
         assert (repo.archived_bytes(S, C), repo.library_bytes(S, C)) == _manifest_sums(conn)
         assert repo.archived_bytes(S, C) == 3807
         assert repo.list_playable_copies(S, C) == ["kept-twice"]
+
+
+def test_a_reader_during_the_v12_migration_sees_the_old_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backfill reads every manifest (about a minute on a NAS). Meanwhile a reader
+    sees either no stored figures, and sums the manifests, or filled ones: never
+    columns still at zero."""
+    import shakedown.state as state
+
+    db = tmp_path / "s.db"
+    with closing(connect(db)) as conn:
+        _seed(ItemRepo(conn))
+    _to_v11(db)
+    real = state.show_figures
+    seen: list[int] = []
+
+    def show_figures_and_read(manifest: Manifest) -> tuple[int, int, int]:
+        with closing(open_unmigrated(db)) as reader:
+            seen.append(ItemRepo(reader).archived_bytes(S, C))
+        return real(manifest)
+
+    monkeypatch.setattr(state, "show_figures", show_figures_and_read)
+    with closing(connect(db)) as conn:
+        assert ItemRepo(conn).archived_bytes(S, C) == 3807
+    assert seen and set(seen) == {3807}
 
 
 def test_a_reader_of_a_v11_database_answers_from_the_manifests_without_migrating(

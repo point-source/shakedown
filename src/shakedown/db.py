@@ -601,9 +601,6 @@ def _migrate_to_12(conn: sqlite3.Connection) -> None:
     (§spec:library-stats "Stored figures"). Every show is backfilled once from its
     recorded manifest, by the same computation every later write uses. Additive:
     nothing else changes."""
-    for column in ("archive_bytes", "library_bytes", "playable_copy"):
-        if not _has_column(conn, "items", column):
-            conn.execute(f"ALTER TABLE items ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
     # Imported here: state imports this module.
     from shakedown.state import manifest_figures
 
@@ -611,7 +608,14 @@ def _migrate_to_12(conn: sqlite3.Connection) -> None:
         "SELECT rowid, recorded_manifest FROM items WHERE recorded_manifest IS NOT NULL"
     )
     updates = [(*manifest_figures(row["recorded_manifest"]), row["rowid"]) for row in rows]
+    # One transaction: a reader (which never migrates) sees either no figures, and
+    # sums the manifests, or filled ones — never the new columns still at zero.
     with transaction(conn):
+        for column in ("archive_bytes", "library_bytes", "playable_copy"):
+            if not _has_column(conn, "items", column):
+                conn.execute(
+                    f"ALTER TABLE items ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
         conn.executemany(
             "UPDATE items SET archive_bytes=?, library_bytes=?, playable_copy=? WHERE rowid=?",
             updates,
