@@ -92,7 +92,7 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
     case "stale":
       return { title: "Listing incomplete", next: "Nothing was removed. The next sync lists the source again." }
     case "rescheduled":
-      return { title: `Catch-up sync waiting since ${clock(e.since!, now)}`, next: "Runs when the current run ends." }
+      return { title: `Sync skipped at ${clock(e.since!, now)}`, next: "It runs as a catch-up sync." }
     case "handoff_pending":
       return {
         title: `Handoff notice not sent for ${plural(Number(d.shows), "show", "shows")}`,
