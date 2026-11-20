@@ -2559,13 +2559,19 @@ Observable behavior:
   the page says so plainly.
 
 API: `GET /api/attention` (unauthenticated) answers `{generated_at,
-entries: [{kind, source, collection, since, identifiers, detail}],
-health: [{source, collection, restricted: [{identifier, reason}],
-removed_upstream: [{identifier, removed_on}], drift_files,
-not_playable: [{identifier, reason}], playable_copies: [identifier]}]}`.
-`detail` holds the kind's extra facts under `status`'s own field names;
-`identifiers` is empty for collection-wide kinds. Lists are complete;
-the page decides how many to show.
+entries: [{kind, source, collection, since, identifiers, count,
+detail}], health: [{source, collection, restricted: [{identifier,
+reason}], restricted_count, removed_upstream: [{identifier,
+removed_on}], removed_upstream_count, drift_files, not_playable:
+[{identifier, reason}], not_playable_count, playable_copies:
+[identifier], playable_copies_count}]}`. `detail` holds the kind's
+extra facts under `status`'s own field names; `identifiers` is empty
+for collection-wide kinds. Counts are complete; every list carries its
+first 10 shows or files, in order: `identifiers`, `detail.separations`,
+`detail.unplaced_files`, and the health lists. An entry's `count` is
+how many shows it affects (files, for `unplaced_files`); each health
+list's `*_count` is how many shows it has. The page shows the first
+few and how many more. `status --json` keeps its lists complete.
 
 **Decision and constraint.** Group by collection and kind because a
 long list of identical entries hides the one that matters
@@ -2575,8 +2581,14 @@ computation because a disagreement is a defect
 action is a code the page words, not server text, so wording stays with
 the screens (§spec:dashboard: codes, not copy).
 
+Lists are capped because the answer carried every restricted show:
+about 1 MB every 30 seconds per open page on the operator's mirror,
+for a page that shows three (v2.2.2). Ten matches what `status`
+prints.
+
 **Alternatives rejected.** *One entry per show* — buries collection-wide
-problems under show noise. *Health facts in the attention list* — a
+problems under show noise. *A full-list endpoint beside the capped
+answer* — nothing reads it; `status --json` has the complete lists. *Health facts in the attention list* — a
 restricted show needs nothing from the operator; mixing them makes the
 list never empty.
 

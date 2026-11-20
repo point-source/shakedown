@@ -200,41 +200,48 @@ export const library: LibraryAnswer = {
   })),
 }
 
+// The server sends each attention list's first ten shows beside its full count
+// (dashboard_attention.py SAMPLE).
+export const first = <T,>(items: T[]): T[] => items.slice(0, 10)
+const gdRestricted = [
+  { identifier: "gd1977-05-08.sbd.betty.flac16", reason: "stream only" },
+  { identifier: "gd1969-02-27.sbd.lemieux.flac24", reason: "stream only" },
+  { identifier: "gd1973-06-10.aud.unknown.shnf", reason: "access restricted by the uploader" },
+].concat(Array.from({ length: 185 }, (_, i) => ({ identifier: `gd19${70 + (i % 25)}-01-${String(1 + (i % 28)).padStart(2, "0")}.sbd.r${i}.flac16`, reason: "stream only" })))
+const phRestricted = Array.from({ length: 16 }, (_, i) => ({ identifier: `ph199${i % 10}-12-${String(10 + i).padStart(2, "0")}.sbd.flac16`, reason: "stream only" }))
+
 export const attention: AttentionAnswer = {
   generated_at: at(0),
   entries: [
     { kind: "failed_shows", source: "internetarchive", collection: "grateful-dead", since: null,
       identifiers: ["gd1970-02-13.aud.unknown.1234.flac16", "gd1980-10-25.sbd.miller.7.flac16", "gd1991-06-14.mtx.seamons.flac16"],
-      detail: {} },
+      count: 3, detail: {} },
     { kind: "ended_unexpectedly", source: "internetarchive", collection: "phish", since: at(6),
-      identifiers: [], detail: { runs: [{ run_id: 487, activity_id: 910, kind: "refetch", finished_at: at(6) }] } },
+      identifiers: [], count: 0, detail: { runs: [{ run_id: 487, activity_id: 910, kind: "refetch", finished_at: at(6) }] } },
     { kind: "rescheduled", source: "internetarchive", collection: "phish", since: at(90),
-      identifiers: [], detail: {} },
+      identifiers: [], count: 0, detail: {} },
     { kind: "handoff_pending", source: "etree-lma", collection: "etree-lma", since: at(2533),
-      identifiers: ["lma-ph2003-07-12", "lma-ph2003-07-13"],
+      identifiers: ["lma-ph2003-07-12", "lma-ph2003-07-13"], count: 2,
       detail: { shows: 2, last_reason: "connection refused (beets:8337)" } },
   ],
   health: [
     { source: "internetarchive", collection: "grateful-dead",
-      restricted: [
-        { identifier: "gd1977-05-08.sbd.betty.flac16", reason: "stream only" },
-        { identifier: "gd1969-02-27.sbd.lemieux.flac24", reason: "stream only" },
-        { identifier: "gd1973-06-10.aud.unknown.shnf", reason: "access restricted by the uploader" },
-      ].concat(Array.from({ length: 185 }, (_, i) => ({ identifier: `gd19${70 + (i % 25)}-01-${String(1 + (i % 28)).padStart(2, "0")}.sbd.r${i}.flac16`, reason: "stream only" }))),
+      restricted: first(gdRestricted), restricted_count: gdRestricted.length,
       removed_upstream: [
         { identifier: "gd1972-05-04.sbd.unknown.flac16", removed_on: "2026-11-02" },
         { identifier: "gd1985-06-14.aud.vernon.shnf", removed_on: "2026-10-28" },
       ],
-      drift_files: 0, not_playable: [], playable_copies: [] },
+      removed_upstream_count: 2,
+      drift_files: 0, not_playable: [], not_playable_count: 0, playable_copies: [], playable_copies_count: 0 },
     { source: "internetarchive", collection: "phish",
-      restricted: Array.from({ length: 16 }, (_, i) => ({ identifier: `ph199${i % 10}-12-${String(10 + i).padStart(2, "0")}.sbd.flac16`, reason: "stream only" })),
-      removed_upstream: [], drift_files: 3, not_playable: [],
-      playable_copies: ["ph1989-05-28.shnf", "ph1990-04-05.shnf"] },
+      restricted: first(phRestricted), restricted_count: phRestricted.length,
+      removed_upstream: [], removed_upstream_count: 0, drift_files: 3, not_playable: [], not_playable_count: 0,
+      playable_copies: ["ph1989-05-28.shnf", "ph1990-04-05.shnf"], playable_copies_count: 2 },
     { source: "etree-lma", collection: "etree-lma",
       restricted: Array.from({ length: 7 }, (_, i) => ({ identifier: `lma-gd19${80 + i}-03-0${1 + i}`, reason: "access restricted by the uploader" })),
-      removed_upstream: [], drift_files: 0,
+      restricted_count: 7, removed_upstream: [], removed_upstream_count: 0, drift_files: 0,
       not_playable: [{ identifier: "lma-ph1991-11-19", reason: "only SHN audio, which no player here reads" }],
-      playable_copies: [] },
+      not_playable_count: 1, playable_copies: [], playable_copies_count: 0 },
   ],
 }
 

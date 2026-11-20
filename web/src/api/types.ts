@@ -172,7 +172,10 @@ export interface AttentionEntry {
   source: string
   collection: string
   since: Iso | null
+  /** The first ten affected shows; `count` says how many there are. */
   identifiers: string[]
+  /** How many shows the entry affects (files, for unplaced_files). */
+  count: number
   detail: Record<string, unknown>
 }
 
@@ -182,12 +185,17 @@ export interface AttentionAnswer {
   health: {
     source: string
     collection: string
+    // Each list holds its first ten shows; its *_count says how many there are.
     restricted: { identifier: string; reason: string }[]
+    restricted_count: number
     /** removed_on is null for shows that went before dates were recorded. */
     removed_upstream: { identifier: string; removed_on: string | null }[]
+    removed_upstream_count: number
     drift_files: number
     not_playable: { identifier: string; reason: string }[]
+    not_playable_count: number
     playable_copies: string[]
+    playable_copies_count: number
   }[]
 }
 

@@ -67,7 +67,10 @@ function firstInstall(): Answers {
     recently_mirrored: [],
   }
   a.attention.entries = []
-  a.attention.health = a.attention.health.map((h) => ({ ...h, restricted: [], removed_upstream: [], drift_files: 0, not_playable: [], playable_copies: [] }))
+  a.attention.health = a.attention.health.map((h) => ({
+    ...h, restricted: [], restricted_count: 0, removed_upstream: [], removed_upstream_count: 0, drift_files: 0,
+    not_playable: [], not_playable_count: 0, playable_copies: [], playable_copies_count: 0,
+  }))
   a.health.validation = a.health.validation.map((v) => ({ ...v, status: null, at: null }))
   return a
 }
@@ -87,23 +90,24 @@ function longContent(): Answers {
   a.activity.runs[0].items_failed = 1_204
   const failed = Array.from({ length: 300 }, (_, i) => `gd19${66 + (i % 30)}-0${1 + (i % 9)}-${String(1 + (i % 28)).padStart(2, "0")}.sbd.r${i}.flac16`)
   const entries: AttentionEntry[] = [
-    { kind: "failed_shows", source: "internetarchive", collection: long, since: null, identifiers: failed,
+    { kind: "failed_shows", source: "internetarchive", collection: long, since: null, identifiers: base.first(failed), count: failed.length,
       detail: { recovery: { operation: "sync", status: "completed_with_item_issues", started_at: at(800), updated_at: at(700), finished_at: at(700),
         phase: "downloading", affected_item: null, affected_path: null, completed_work: null, preservation_context: null, deletion_context: null,
         safe_next_action: "fix failed item issues and rerun sync", errors: null } } },
-    { kind: "recovery", source: "internetarchive", collection: "phish", since: at(300), identifiers: ["ph1997-11-22.flac16"],
+    { kind: "recovery", source: "internetarchive", collection: "phish", since: at(300), identifiers: ["ph1997-11-22.flac16"], count: 1,
       detail: { operation: "restage", status: "failed_before_completion", started_at: at(320), updated_at: at(300), finished_at: at(300),
         phase: "staging", affected_item: "ph1997-11-22.flac16", affected_path: "/data/library/Phish/1997-11-22 - Hampton Coliseum",
         completed_work: null, preservation_context: null, deletion_context: null, safe_next_action: "fix storage/path/layout and rerun restage", errors: null } },
-    { kind: "stale", source: "etree-lma", collection: "etree-lma", since: null, identifiers: [], detail: {} },
-    { kind: "rescheduled", source: "internetarchive", collection: "phish", since: at(90), identifiers: [], detail: {} },
-    { kind: "handoff_pending", source: "etree-lma", collection: "etree-lma", since: at(2533), identifiers: Array.from({ length: 41 }, (_, i) => `lma-ph2003-07-${String(1 + (i % 30)).padStart(2, "0")}-${i}`),
+    { kind: "stale", source: "etree-lma", collection: "etree-lma", since: null, identifiers: [], count: 0, detail: {} },
+    { kind: "rescheduled", source: "internetarchive", collection: "phish", since: at(90), identifiers: [], count: 0, detail: {} },
+    { kind: "handoff_pending", source: "etree-lma", collection: "etree-lma", since: at(2533), count: 41,
+      identifiers: base.first(Array.from({ length: 41 }, (_, i) => `lma-ph2003-07-${String(1 + (i % 30)).padStart(2, "0")}-${i}`)),
       detail: { shows: 41, last_reason: "HTTPConnectionPool(host='beets', port=8337): Max retries exceeded with url: /api/import (Caused by NewConnectionError: Failed to establish a new connection: [Errno 111] Connection refused)" } },
-    { kind: "failure_notice_undelivered", source: "internetarchive", collection: "phish", since: at(1121), identifiers: [],
+    { kind: "failure_notice_undelivered", source: "internetarchive", collection: "phish", since: at(1121), identifiers: [], count: 0,
       detail: { failure_notice_error: "apprise: no service accepted the notification (ntfy://ntfy.lan/shakedown: 403 Forbidden)", run_id: 486 } },
-    { kind: "separations", source: "internetarchive", collection: long, since: null, identifiers: ["gd1977-05-08.sbd.hicks.4982.sbeok.shnf", "gd1977-05-08.aud.vernon.flac16"],
+    { kind: "separations", source: "internetarchive", collection: long, since: null, identifiers: ["gd1977-05-08.sbd.hicks.4982.sbeok.shnf", "gd1977-05-08.aud.vernon.flac16"], count: 2,
       detail: { separations: [] } },
-    { kind: "unplaced_files", source: "internetarchive", collection: "phish", since: null, identifiers: [],
+    { kind: "unplaced_files", source: "internetarchive", collection: "phish", since: null, identifiers: [], count: 4,
       detail: { unplaced_files: ["/data/library/Phish/1997-11-22 - Hampton Coliseum/cover.jpg", "/data/library/Phish/.DS_Store", "/data/library/Phish/1995-12-31 - Madison Square Garden/notes.txt", "/data/library/Phish/1993-08-13/folder.jpg"] } },
   ]
   a.attention.entries = entries
@@ -140,6 +144,7 @@ function verifyRunning(): Answers {
 function removedUndated(): Answers {
   const a = defaultAnswers()
   a.attention.health[0].removed_upstream = [{ identifier: "gd1969-02-27.undated", removed_on: null }]
+  a.attention.health[0].removed_upstream_count = 1
   return a
 }
 

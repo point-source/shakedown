@@ -18,6 +18,9 @@ from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries
 
 _RECOVERY_TIMES = ("started_at", "updated_at", "finished_at")
+# How many shows or files each list carries; its count is always complete
+# (§spec:needs-attention). The page shows three; `status` prints ten.
+SAMPLE = 10
 # The operations that fetch shows, so the only ones whose item issues are failed shows.
 _FETCHES = {OperationType.SYNC.value, OperationType.REFETCH.value, OperationType.RECONFORM.value}
 # The operation each run kind records its outcome under.
@@ -36,14 +39,19 @@ def _entry(
     *,
     since: str | None = None,
     identifiers: list[str] | None = None,
+    count: int | None = None,
     detail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """An entry: its first ``SAMPLE`` identifiers and how many it has (``count``, when
+    what it counts is not its identifiers)."""
+    identifiers = identifiers or []
     return {
         "kind": kind,
         "source": summary["source"],
         "collection": summary["collection"],
         "since": _api_time(since),
-        "identifiers": identifiers or [],
+        "identifiers": identifiers[:SAMPLE],
+        "count": len(identifiers) if count is None else count,
         "detail": detail or {},
     }
 
@@ -185,13 +193,16 @@ def _entries(
                 "separations",
                 summary,
                 identifiers=[s["identifier"] for s in summary["separations"]],
-                detail={"separations": summary["separations"]},
+                detail={"separations": summary["separations"][:SAMPLE]},
             )
         )
     if summary["unplaced_files"]:
         entries.append(
             _entry(
-                "unplaced_files", summary, detail={"unplaced_files": summary["unplaced_files"]}
+                "unplaced_files",
+                summary,
+                count=len(summary["unplaced_files"]),
+                detail={"unplaced_files": summary["unplaced_files"][:SAMPLE]},
             )
         )
     return entries
@@ -203,18 +214,24 @@ def _health(summary: dict[str, Any], items: ItemRepo) -> dict[str, Any]:
     return {
         "source": summary["source"],
         "collection": summary["collection"],
-        "restricted": summary["restricted"],
-        "removed_upstream": summary["removed_upstream"],
+        **_sampled("restricted", summary["restricted"]),
+        **_sampled("removed_upstream", summary["removed_upstream"]),
         "drift_files": summary["drift_files"],
-        "not_playable": summary["not_playable"],
-        "playable_copies": kept_twice,
+        **_sampled("not_playable", summary["not_playable"]),
+        **_sampled("playable_copies", kept_twice),
     }
+
+
+def _sampled(key: str, shows: list[Any]) -> dict[str, Any]:
+    """A health list as the API carries it: its first ``SAMPLE`` shows and its count."""
+    return {key: shows[:SAMPLE], f"{key}_count": len(shows)}
 
 
 def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
     """Every configured collection's entries (empty when nothing needs attention) and
-    its health, in config order. Lists are complete; the page decides how many to
-    show."""
+    its health, in config order. Each list carries its first ``SAMPLE`` shows or
+    files beside its complete count, so the answer stays small however large a
+    collection grows."""
     items = ItemRepo(ctx.conn)
     now = datetime.now()
     history = run_history(ctx.conn, now, HISTORY_DAYS)

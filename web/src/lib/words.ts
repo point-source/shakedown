@@ -70,7 +70,7 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
   const d = e.detail as Record<string, unknown>
   switch (e.kind) {
     case "failed_shows":
-      return { title: `${plural(e.identifiers.length, "show", "shows")} failed`, next: "The next sync retries them." }
+      return { title: `${plural(e.count, "show", "shows")} failed`, next: "The next sync retries them." }
     case "recovery": {
       const r = d as unknown as Recovery
       const op = OPERATION[r.operation] ?? r.operation
@@ -102,13 +102,12 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
       return { title: "Failure notice not sent", next: "Check the failure notice settings in shakedown.yaml." }
     case "separations":
       return {
-        title: e.identifiers.length === 1 ? "1 show has its own folder" : `${plural(e.identifiers.length, "show", "shows")} have their own folders`,
+        title: e.count === 1 ? "1 show has its own folder" : `${plural(e.count, "show", "shows")} have their own folders`,
         next: "Their folders would clash, so each name carries its show ID.",
       }
     case "unplaced_files": {
-      const files = (d.unplaced_files ?? []) as string[]
       return {
-        title: `${plural(files.length, "file", "files")} in the library Shakedown didn't place`,
+        title: `${plural(e.count, "file", "files")} in the library Shakedown didn't place`,
         next: "Delete them if you don't need them. Shakedown leaves them alone.",
       }
     }

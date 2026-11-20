@@ -100,45 +100,45 @@ function Collections({ library }: { library: LibraryAnswer }) {
 
 function Health({ attention }: { attention: AttentionAnswer }) {
   const rows = attention.health.filter((h) =>
-    h.restricted.length || h.removed_upstream.length || h.drift_files || h.not_playable.length || h.playable_copies.length)
+    h.restricted_count || h.removed_upstream_count || h.drift_files || h.not_playable_count || h.playable_copies_count)
   if (rows.length === 0) return <Empty>Every mirrored show is complete and playable.</Empty>
   return (
     <ul className="divide-y">
       {rows.map((h) => (
         <li key={`${h.source}:${h.collection}`} className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0">
           <span className="font-medium wrap-anywhere">{h.collection}</span>
-          {h.restricted.length > 0 && (
+          {h.restricted_count > 0 && (
             <div className="flex flex-col gap-0.5 text-sm">
-              <span>{plural(h.restricted.length, "show", "shows")} restricted</span>
+              <span>{plural(h.restricted_count, "show", "shows")} restricted</span>
               <ul className="font-mono text-xs wrap-anywhere text-muted-foreground">
                 {h.restricted.slice(0, 3).map((r) => <li key={r.identifier}>{r.identifier}: {r.reason}</li>)}
               </ul>
-              {h.restricted.length > 3 && <span className="text-xs text-muted-foreground">and {h.restricted.length - 3} more</span>}
+              {h.restricted_count > 3 && <span className="text-xs text-muted-foreground">and {h.restricted_count - 3} more</span>}
             </div>
           )}
-          {h.removed_upstream.length > 0 && (
+          {h.removed_upstream_count > 0 && (
             <div className="flex flex-col gap-0.5 text-sm">
-              <span>{plural(h.removed_upstream.length, "show", "shows")} disappeared from the source, kept here</span>
+              <span>{plural(h.removed_upstream_count, "show", "shows")} disappeared from the source, kept here</span>
               <ul className="font-mono text-xs wrap-anywhere text-muted-foreground">
                 {h.removed_upstream.slice(0, 3).map((r) => <li key={r.identifier}>{r.identifier}{r.removed_on && <span className="font-sans"> · missing since {day(r.removed_on)}</span>}</li>)}
               </ul>
-              {h.removed_upstream.length > 3 && <span className="text-xs text-muted-foreground">and {h.removed_upstream.length - 3} more</span>}
+              {h.removed_upstream_count > 3 && <span className="text-xs text-muted-foreground">and {h.removed_upstream_count - 3} more</span>}
             </div>
           )}
           {h.drift_files > 0 && <span className="text-sm">Drift: {plural(h.drift_files, "file", "files")} changed since Shakedown recorded them</span>}
-          {h.not_playable.length > 0 && (
+          {h.not_playable_count > 0 && (
             <div className="flex flex-col gap-0.5 text-sm">
-              <span>{plural(h.not_playable.length, "show has", "shows have")} no playable copy</span>
+              <span>{plural(h.not_playable_count, "show has", "shows have")} no playable copy</span>
               <ul className="font-mono text-xs wrap-anywhere text-muted-foreground">
                 {h.not_playable.slice(0, 3).map((r) => <li key={r.identifier}>{r.identifier}: {r.reason}</li>)}
               </ul>
-              {h.not_playable.length > 3 && <span className="text-xs text-muted-foreground">and {h.not_playable.length - 3} more</span>}
+              {h.not_playable_count > 3 && <span className="text-xs text-muted-foreground">and {h.not_playable_count - 3} more</span>}
             </div>
           )}
-          {h.playable_copies.length > 0 && (
+          {h.playable_copies_count > 0 && (
             <div className="flex flex-col gap-0.5 text-sm">
-              <span>{plural(h.playable_copies.length, "show is", "shows are")} kept as the original plus a playable copy</span>
-              <ShowIds ids={h.playable_copies} />
+              <span>{plural(h.playable_copies_count, "show is", "shows are")} kept as the original plus a playable copy</span>
+              <ShowIds ids={h.playable_copies} total={h.playable_copies_count} />
             </div>
           )}
         </li>
