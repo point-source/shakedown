@@ -119,6 +119,8 @@ def test_collections_waiting_for_a_slot_show_as_waiting_not_running(
         summaries = _summaries(config)
 
         running = summaries["coll1"]
+        # The run in progress still reports: no recovery warning while it works.
+        assert running["recovery"] is None
         assert running["waiting"] is None
         assert running["last_run"]["finished_at"] is None
         for name in ("coll2", "coll3"):
@@ -143,11 +145,10 @@ def test_collections_waiting_for_a_slot_show_as_waiting_not_running(
 
         print_status(config, as_json=False)
         out = capsys.readouterr().out
+        assert "RECOVERY" not in out
         sections = dict(
             (block.splitlines()[0], block) for block in out.split("=== ")[1:]
         )
-        for name in ("coll2", "coll3"):
-            assert "RECOVERY" not in sections[f"fake-src/{name} ==="]
         assert "; starts when a slot frees in the current sync" in (
             sections["fake-src/coll2 ==="]
         )

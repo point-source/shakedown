@@ -8,7 +8,13 @@ from typing import Any
 
 import click
 
-from shakedown.activity import ABANDONED_ERROR, STOPPED_REPORTING, ActivityRepo
+from shakedown.activity import (
+    ABANDONED_ERROR,
+    RUNNING,
+    STOPPED_REPORTING,
+    ActivityRepo,
+    operation_of,
+)
 from shakedown.config import Config
 from shakedown.db import connect_reader
 from shakedown.history import RunEnd, run_end
@@ -64,6 +70,12 @@ def _collection_summary(
         source_name, collection_name, kind=(RunKind.SYNC, RunKind.CATCH_UP)
     )
     recovery = outcomes.latest_actionable(source_name, collection_name)
+    if (
+        recovery is not None
+        and recovery.status == OperationStatus.IN_PROGRESS
+        and (source_name, collection_name, recovery.operation.value) in live.running
+    ):
+        recovery = None  # the run is still going and reporting: nothing to recover
     waiting = live.waiting.get((source_name, collection_name))
     placements = PlacementRepo(items.conn)
     library_dir = config.library_root / source_name / collection_name
@@ -196,11 +208,17 @@ def _summarize_recovery(outcome: OperationOutcome) -> dict[str, Any]:
 
 
 class _Live:
-    """What runs report right now: each waiting collection's entry."""
+    """What runs report right now: (source, collection, operation) of each running
+    entry, and each waiting collection's entry."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         now = datetime.now()
         activity = ActivityRepo(conn)
+        self.running = {
+            (e["source"], e["collection"], operation_of(e["kind"]))
+            for e in activity.live(now)
+            if e["state"] == RUNNING
+        }
         self.waiting = {(e["source"], e["collection"]): e for e in activity.waiting(now)}
 
 

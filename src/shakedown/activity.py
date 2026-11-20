@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from shakedown.db import ACTIVITY_SINCE_VERSION, transaction
-from shakedown.models import ENDED_UNEXPECTEDLY, OperationStatus
+from shakedown.models import ENDED_UNEXPECTEDLY, OperationStatus, OperationType
 from shakedown.network import EventKind, NetworkEvent, NetworkMeter, NetworkRepo
 from shakedown.plugins.base import ListingRetry, failure_cause, http_status, listing_retries_to
 from shakedown.state import OperationOutcomeRepo, RunRepo
@@ -66,6 +66,16 @@ WAITING = "waiting"
 # went down (§spec:run-activity).
 STOPPED_REPORTING = "stopped_reporting"
 ABANDONED_ERROR = f"{ENDED_UNEXPECTEDLY} (lost contact)"
+
+
+# The operation each kind records its outcome under, where the two names differ.
+_OPERATION_OF_KIND = {ActivityKind.CATCH_UP.value: OperationType.SYNC.value,
+                      ActivityKind.VERIFY.value: OperationType.VALIDATE.value}
+
+
+def operation_of(kind: str) -> str:
+    """The operation outcome a run of ``kind`` records (a catch-up is a sync)."""
+    return _OPERATION_OF_KIND.get(kind, kind)
 
 
 @dataclass(frozen=True)

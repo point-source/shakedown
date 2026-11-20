@@ -2208,7 +2208,10 @@ Observable behavior:
 - **`status` agrees, during and after.** A sync's or single-show run's
   counts in its run record (new, updated, failed, bytes downloaded)
   move at the same cadence as the activity entry, so `status` and the
-  dashboard show the same numbers mid-run. A run record left open by a
+  dashboard show the same numbers mid-run. While a run still reports,
+  `status` shows no recovery warning for its operation in progress —
+  the run is working, and Needs attention already left it out — and
+  shows one once its heartbeat is stale. A run record left open by a
   killed run is reported by `status` as ended unexpectedly as soon as
   its heartbeat goes stale, and the next run that takes the writer lock
   closes it with the time of its last heartbeat and the error "run ended
