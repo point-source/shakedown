@@ -2046,6 +2046,11 @@ Observable behavior:
 - **Works behind a proxy, at any path.** The page addresses its assets
   and endpoints by relative URL, so it works at a host's root or under a
   path prefix the proxy adds, with no setting.
+- **Compressed.** `serve` gzips any answer or asset over 1 KB for a
+  client that asks (`Accept-Encoding: gzip`). A proxy that passes
+  `Content-Encoding` through, as nginx-proxy-manager does, hands the
+  browser the compressed answer. Answers carry no secrets, so
+  compression exposes nothing an attacker could guess at.
 - **Self-contained.** Every asset the page needs ships inside the
   shakedown image and is served by `serve`. The browser fetches nothing
   from a third party (no CDN, fonts, or analytics), so the page works on

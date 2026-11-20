@@ -1050,3 +1050,32 @@ async def test_stopping_serve_stops_the_runs_it_started(
         assert last_run["result"] == "stopped"
         metrics = (await client.get("/metrics")).text
     assert 'shakedown_sync_runs_total{result="stopped"} 1.0' in metrics
+
+
+
+@pytest.mark.asyncio
+async def test_answers_over_a_kilobyte_are_gzipped_for_a_client_that_asks(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """§spec:dashboard "Compressed": a proxy that passes Content-Encoding through (as
+    nginx-proxy-manager does) hands the browser the compressed answer; a small
+    answer, or a client that does not ask, gets it as it is."""
+    from shakedown.dashboard import VIEW_TTL_S, register_api
+
+    archive, library = tmp_roots
+    app = _probe_app(make_config(archive, library), _Clock())
+    register_api(app, "/api/big", VIEW_TTL_S, lambda ctx: {"ids": [f"gd-{i:05d}" for i in range(500)]})
+    gzip_ok = {"Accept-Encoding": "gzip"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        big = await client.get("/api/big", headers=gzip_ok)
+        small = await client.get("/api/probe", headers=gzip_ok)
+        plain = await client.get("/api/big", headers={"Accept-Encoding": "identity"})
+
+    assert big.headers["content-encoding"] == "gzip"
+    assert big.json()["ids"][499] == "gd-00499"  # decoded by the client
+    assert int(big.headers["content-length"]) < len(plain.content) / 4
+    assert "content-encoding" not in small.headers
+    assert "content-encoding" not in plain.headers

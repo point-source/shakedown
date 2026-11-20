@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -92,6 +93,9 @@ def build_app(
         await asyncio.to_thread(stop_runs, app.state.triggered)
 
     app = FastAPI(title="shakedown", version=__version__, lifespan=lifespan)
+    # Answers and page assets over a kilobyte go out gzipped to a client that asks;
+    # a proxy that passes Content-Encoding through hands them on (§spec:dashboard).
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
     app.state.answers = SharedAnswers(clock, spawn)
     # Every load goes through the tracker, so the dashboard knows the last config
     # this serve loaded, including the one at start-up.
