@@ -1,6 +1,6 @@
 # Handoff: Overview tab
 
-*Approved: round 2, 2026-11-12; Lost contact and Stopped 2026-11-16 · Kit: §spec:ui-kit · Endpoints: `GET /api/library`, `/api/attention`, `/api/activity`, `/api/runs`, `/api/health`*
+*Approved: round 2, 2026-11-12; Lost contact and Stopped 2026-11-16; Waiting rows and the rescheduled wording 2026-11-20 · Kit: §spec:ui-kit · Endpoints: `GET /api/library`, `/api/attention`, `/api/activity`, `/api/runs`, `/api/health`*
 *Code: `web/src/views/Overview.tsx`, `web/src/dash/RunningNow.tsx`, `web/src/dash/NeedsAttention.tsx`, `web/src/dash/RunsList.tsx`*
 
 ## Purpose
@@ -15,7 +15,7 @@ the operator, what ran recently, and is the config sound.
 | Mirrored / "N pending" | `library.totals.counts.complete` / `.pending` | `count()` | Skeleton |
 | Archive | `library.totals.archive_bytes` | `bytes()` decimal | Skeleton |
 | Free space / "of T" | `library.disk.free_bytes` / `total_bytes` | `bytes()` | Skeleton |
-| Running now rows | `activity.runs` where `state == "running"` | see Running now | "Nothing is running. The last run ended <age> ago." (age from newest finished run in `/api/runs`; sentence part omitted when none) |
+| Running now rows | `activity.runs` where `state == "running"`, then `activity.waiting` in its order | see Running now, Waiting row | "Nothing is running. The last run ended <age> ago." when both are empty (age from newest finished run in `/api/runs`; sentence part omitted when none) |
 | Needs attention entries | `attention.entries` | see Needs attention | "Nothing needs your attention." |
 | Recent runs | first 5 `runs.runs` with `finished_at` | `RunsList` | "Runs show up here once the first one ends." |
 | Config | `health.config.valid` | Badge success "Valid" / danger "Has an error" | Skeleton |
@@ -39,6 +39,16 @@ the operator, what ran recently, and is the config sound.
   destructive when > 0.
 - "Now:" + `current_items` (mono xs, wrap, first 4, "and N more").
 - Meta: "Started HH:MM · <age> ago".
+
+### Waiting row (one per `activity.waiting` entry, after the running rows)
+
+A collection waiting for a slot in the current sync is not a run yet
+(§spec:run-activity "Waiting collections"; operator decision 2026-11-20).
+
+- Line 1: collection (medium, `wrap-anywhere`) · kind word (`KIND`),
+  right: Badge `secondary` "Waiting" (`WAITING`). No phase, progress
+  bar, facts, "Now:", or No progress badge.
+- Meta: "Since HH:MM · <age> ago" from `since`.
 
 ### Needs attention entry (one per `entries[]`)
 
@@ -70,6 +80,7 @@ cards `min-w-0`; gaps `gap-3` (stats) and `gap-4`.
 | quiet | `quiet` | Running now and Needs attention empty states |
 | first install | `first_install` | zero stats, empty states, "Never validated" |
 | long content | `long_content` | 8 entries of every kind, 300 failed show IDs, long names and server errors wrap |
+| waiting | `waiting` | a catch-up round: 2 running catch-ups, then 3 waiting rows in the order they start |
 | loading / can't reach / config broken | see `shell.md` | |
 
 ## Copy
@@ -78,7 +89,7 @@ Stat labels Mirrored, Archive, Free space; "N pending"; "of <size>".
 Card titles Running now, Needs attention, Recent runs, Shakedown. "All
 runs". Run facts Listed, Discovered, Shows, Downloaded, Speed, Time
 left, Failed; "Estimating"; "Now:"; "Started <time> · <age> ago"; "No
-progress for <time>". Attention titles and next steps per kind in
+progress for <time>". "Waiting"; "Since <time> · <age> ago". Attention titles and next steps per kind in
 `words.ts`. "Next step:", "Since <time>". "Config", "Valid", "Has an
 error", "Last validation", "Never validated", validation words
 Passed / Passed with problems / Did not finish / Failed / Listing
@@ -95,4 +106,7 @@ Runs tab.
 
 None. The validation words joined the Terms (round 2). "Stopped reporting"
 became "Lost contact" and a run stopped on request reads `secondary`
-"Stopped" (operator decision 2026-11-16).
+"Stopped" (operator decision 2026-11-16). Collections waiting for a slot
+got their own rows and the glossary term "Waiting"; the rescheduled
+entry became "Sync skipped at <time>" / "It runs as a catch-up sync." so
+"waiting" keeps one meaning (operator decisions 2026-11-20).

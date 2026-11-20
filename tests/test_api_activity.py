@@ -109,6 +109,44 @@ async def test_live_view_lists_running_then_recently_ended_newest_first(
 
 
 @pytest.mark.asyncio
+async def test_waiting_collections_are_listed_apart_from_runs_in_line_order(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A collection waiting for a slot is not a run: it is listed under `waiting`, in
+    the order it starts, and never in `runs` (§spec:run-activity "Waiting
+    collections"). A waiting entry whose run stopped reporting is not listed at all."""
+    config = make_config(*tmp_roots)
+    now = datetime.now()
+    with closing(connect(config.state_db)) as conn:
+        repo = ActivityRepo(conn)
+        running = _seed_entry(conn, ActivityKind.CATCH_UP, started=now - timedelta(hours=2),
+                              heartbeat=now - timedelta(seconds=1))
+        first = repo.create_waiting("fake-src", "coll2", ActivityKind.CATCH_UP,
+                                    started_by_serve=True, at=now - timedelta(hours=2))
+        second = repo.create_waiting("fake-src", "coll3", ActivityKind.CATCH_UP,
+                                     started_by_serve=True, at=now - timedelta(hours=2))
+        repo.beat([first, second], now - timedelta(seconds=1))
+        gone = repo.create_waiting("other", "coll4", ActivityKind.SYNC,
+                                   started_by_serve=False, at=now - timedelta(hours=3))
+        conn.execute("UPDATE run_activity SET last_heartbeat_at=? WHERE id=?",
+                     ((now - timedelta(minutes=5)).isoformat(), gone))
+
+    body = await _get(_app(config, _Clock()))
+    assert [r["activity_id"] for r in body["runs"]] == [running]
+    assert body["waiting"] == [
+        {"activity_id": first, "source": "fake-src", "collection": "coll2",
+         "kind": "catch_up", "started_by_serve": True,
+         "since": body["waiting"][0]["since"]},
+        {"activity_id": second, "source": "fake-src", "collection": "coll3",
+         "kind": "catch_up", "started_by_serve": True,
+         "since": body["waiting"][1]["since"]},
+    ]
+    since = datetime.fromisoformat(body["waiting"][0]["since"])
+    assert since.tzinfo is not None
+    assert abs(since.replace(tzinfo=None) - (now - timedelta(hours=2))) < timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
 async def test_live_view_is_shared_until_its_interval_passes(
     tmp_roots: tuple[Path, Path],
 ) -> None:
@@ -133,7 +171,7 @@ async def test_live_view_on_a_pre_v10_database_is_empty_and_never_migrates(
         conn.execute("DROP TABLE run_activity")
         conn.execute("UPDATE schema_version SET version = 9")
     body = await _get(_app(config, _Clock()))
-    assert body["runs"] == [] and body["network"] == []
+    assert body["runs"] == [] and body["network"] == [] and body["waiting"] == []
     with closing(sqlite3.connect(config.state_db)) as conn:
         assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 9
 
@@ -192,7 +230,7 @@ async def test_a_run_serve_started_shows_live_and_then_its_result(
         live = await _poll(app, clock, lambda runs: next(
             (e for e in runs if e["current_items"] == ["gd-x"]), None), "the fetch")
         assert live["started_by_serve"] is True
-        assert live["run_id"] == r.json()["run_ids"][0]
+        assert live["run_id"] == app.state.triggered[0].runs[0]["run_id"]
         assert (live["state"], live["kind"]) == ("running", "sync")
         assert live["items_to_fetch"] == 1
     finally:

@@ -19,6 +19,10 @@ export const PHASE: Record<Phase, string> = {
   verifying: "Verifying", finishing: "Finishing",
 }
 
+// A collection whose run starts when a slot frees in the current sync (glossary
+// "Waiting", §spec:ui-kit).
+export const WAITING = "Waiting"
+
 // Stopped is neutral: a run someone stopped is not a problem (operator decision,
 // 2026-11-16).
 export const RESULT: Record<Result, { label: string; tone: Tone | null }> = {
@@ -92,7 +96,7 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
     case "stale":
       return { title: "Listing incomplete", next: "Nothing was removed. The next sync lists the source again." }
     case "rescheduled":
-      return { title: `Catch-up sync waiting since ${clock(e.since!, now)}`, next: "Runs when the current run ends." }
+      return { title: `Sync skipped at ${clock(e.since!, now)}`, next: "It runs as a catch-up sync." }
     case "handoff_pending":
       return {
         title: `Handoff notice not sent for ${plural(Number(d.shows), "show", "shows")}`,

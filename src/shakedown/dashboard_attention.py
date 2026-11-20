@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from shakedown.activity import HISTORY_DAYS, RUNNING, STOPPED_REPORTING, ActivityKind, ActivityRepo
+from shakedown.activity import HISTORY_DAYS, STOPPED_REPORTING, operation_of
 from shakedown.dashboard import DashboardContext, iso
 from shakedown.history import GOOD_RESULTS, run_history
 from shakedown.models import ItemStatus, OperationStatus, OperationType, RunKind
@@ -23,9 +23,6 @@ _RECOVERY_TIMES = ("started_at", "updated_at", "finished_at")
 SAMPLE = 10
 # The operations that fetch shows, so the only ones whose item issues are failed shows.
 _FETCHES = {OperationType.SYNC.value, OperationType.REFETCH.value, OperationType.RECONFORM.value}
-# The operation each run kind records its outcome under.
-_OPERATION_OF_KIND = {RunKind.CATCH_UP.value: OperationType.SYNC.value,
-                      ActivityKind.VERIFY.value: OperationType.VALIDATE.value}
 
 
 def _api_time(value: str | None) -> str | None:
@@ -80,27 +77,17 @@ def _unexpected_ends(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return ends
 
 
-def _operation(kind: str) -> str:
-    return _OPERATION_OF_KIND.get(kind, kind)
-
-
 def _entries(
     summary: dict[str, Any],
     items: ItemRepo,
     runs: list[dict[str, Any]],
-    running: set[tuple[str, str, str]],
 ) -> list[dict[str, Any]]:
-    """The collection's entries, in the kind order of §spec:needs-attention.
-    ``running`` holds (source, collection, operation) of the runs still reporting."""
+    """The collection's entries, in the kind order of §spec:needs-attention. A run
+    still going and reporting has no recovery in `status`'s summary: the activity
+    view shows it."""
     source, collection = summary["source"], summary["collection"]
     entries: list[dict[str, Any]] = []
     recovery = summary["recovery"]
-    if (
-        recovery
-        and recovery["status"] == OperationStatus.IN_PROGRESS.value
-        and (source, collection, recovery["operation"]) in running
-    ):
-        recovery = None  # the run is still going: the activity view shows it
     recovery_detail = (
         {**recovery, **{key: _api_time(recovery[key]) for key in _RECOVERY_TIMES}}
         if recovery
@@ -126,7 +113,7 @@ def _entries(
         recovery
         and recovery["status"] == OperationStatus.IN_PROGRESS.value
         and any(
-            _operation(run["kind"]) == recovery["operation"] for run in ended
+            operation_of(run["kind"]) == recovery["operation"] for run in ended
         )
     )
     if failed:
@@ -235,11 +222,6 @@ def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
     items = ItemRepo(ctx.conn)
     now = datetime.now()
     history = run_history(ctx.conn, now, HISTORY_DAYS)
-    running = {
-        (e["source"], e["collection"], _operation(e["kind"]))
-        for e in ActivityRepo(ctx.conn).live(now)
-        if e["state"] == RUNNING
-    }
     summaries = collection_summaries(ctx.config, ctx.conn)
 
     def runs_of(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -248,7 +230,7 @@ def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
 
     return {
         "entries": [
-            entry for s in summaries for entry in _entries(s, items, runs_of(s), running)
+            entry for s in summaries for entry in _entries(s, items, runs_of(s))
         ],
         "health": [_health(s, items) for s in summaries],
     }

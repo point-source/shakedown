@@ -215,6 +215,18 @@ Guarantees:
   without touching disk or database.
 - Concurrency is bounded by the global `max_concurrent_downloads` and
   `max_concurrent_collections` config caps.
+- **Waiting collections.** A multi-collection sync (an all-collections
+  or all-of-a-source sync, or a catch-up, §spec:rescheduled-syncs) runs
+  at most `max_concurrent_collections` collections at once; the rest
+  wait, in order, for a slot. A collection's run record and operation
+  outcome open when it takes a slot, and its run is timed from then.
+  Until then it has only a waiting entry (§spec:run-activity "Waiting
+  collections"), so `status`, crash recovery, and run history see no
+  run of it — never a stuck or crashed one. A stop that comes while it
+  waits means it never starts (§spec:graceful-stop). Before this, every
+  collection's run record opened when the sync began, so collections
+  waiting their turn read as runs stuck in progress, each with a
+  recovery warning (operator decision, 2026-11-20).
 
 **Why temp-dir + atomic rename.** The fetch phase is where crashes,
 disk-full, and network drops live. Renaming within one filesystem is
@@ -1752,13 +1764,19 @@ Observable behavior:
   shakedown run — the same one-shot run the scheduler launches — which
   reads the config file at start. A config edit therefore takes effect
   on the next trigger without restarting `serve`.
-- **Answers at once.** When the new run has taken the writer lock and
-  opened its run records, `serve` answers `202 Accepted` with the scope
-  it started and those records' ids — one per collection the sync
-  covers; a verify opens none (operator decision, 2026-11-10). Progress
-  and the result are read from `GET /status` like any run's, where each
-  collection's latest run carries its id; the run record always closes,
-  even if the run crashes or is killed (§spec:failure-behavior).
+- **Answers at once.** When the new run has taken the writer lock,
+  `serve` answers `202 Accepted` with the scope it started:
+  `{"started": "sync" | "verify", "source", "collection"}`. Each
+  collection's run record opens when that collection starts
+  (§spec:sync-workflow "Waiting collections"); progress and the result
+  are read from `GET /status` like any run's, where each collection's
+  latest run carries its id. The run tells `serve` each record as it
+  opens, so the run record always closes, even if the run crashes or is
+  killed (§spec:failure-behavior). Until 2026-11-20 the answer listed
+  one run id per collection (operator decision, 2026-11-10); that needed
+  every record open before any collection began, which made collections
+  waiting for a slot read as stuck runs, so the ids now come from
+  `GET /status` only (operator decision, 2026-11-20).
 - **Refuses immediately when busy.** If another run holds the writer
   lock, the request is refused with `409 Conflict` and the message "a
   run is in progress; try again when it finishes". Nothing is queued
@@ -1766,9 +1784,9 @@ Observable behavior:
   (§spec:rescheduled-syncs).
 - **A triggered sync catches up like any sync.** When its own work
   finishes, it runs the collections rescheduled at that moment
-  (§spec:rescheduled-syncs). Those catch-ups are not among the ids in
-  the `202` answer; they show in `GET /status` as each collection's
-  latest run.
+  (§spec:rescheduled-syncs). The catch-ups show in `GET /status` as each
+  collection's latest run, and `serve` closes their records too if the
+  run is killed.
 - `POST /verify` follows the same pattern (fresh run, `202`, `409` when
   a reconform cannot take the lock). `POST /validate`, `GET /status`,
   and `GET /metrics` read the config as it is at the request.
@@ -1895,18 +1913,24 @@ Observable behavior:
   every multi-collection sync already follows (§spec:cli).
 - **Visible in status.** `shakedown status` shows, per collection with
   an entry, that its sync was rescheduled, the time of its oldest skip,
-  and that it runs when the current sync finishes. `status --json` and
+  and that it runs as a catch-up sync (`rescheduled: first skipped
+  <time>; runs as a catch-up sync`, worded like Needs attention's entry,
+  approved 2026-11-20, so it stays true once its catch-up round has
+  begun). `status --json` and
   `GET /status` carry `rescheduled: {"since": <time>}` per collection,
   or `null`, with the time formatted like every other time in `status`.
-  An entry for a collection no longer configured is not shown.
+  An entry for a collection no longer configured is not shown. A
+  caught-up collection still waiting for its slot shows that it waits
+  (`waiting: since <time>; starts when a slot frees in the current
+  sync`, and `waiting: {"kind", "since"}` in JSON) beside its
+  rescheduled line, and no recovery warning: it has no run yet
+  (§spec:sync-workflow "Waiting collections").
 - **API-triggered runs.** A sync started by `POST /sync` catches up like
-  any sync. The `202` answer lists only the run records of the
-  collections it was asked for; catch-ups appear in `GET /status` as
-  each collection's latest run. If that run is killed during a
-  catch-up, `serve` does not know the catch-up's run record, so it
-  stays open like a killed scheduled run's; the entry is still there,
-  so the next finishing sync runs that collection again and its new run
-  replaces the open one in `status`.
+  any sync; catch-ups appear in `GET /status` as each collection's
+  latest run. If that run is killed during a catch-up, `serve` closes
+  the catch-up's run record as it does the run's own
+  (§spec:api-sync-runs); the entry is still there, so the next
+  finishing sync runs that collection again.
 - **Rebuilds.** A database rebuilt by `reconcile` after it was lost or
   reset starts with no entries; each collection's next tick runs as
   usual. `reconcile` over an existing database leaves its entries in
@@ -2161,6 +2185,19 @@ Observable behavior:
   different facts and the page shows them differently. The API carries
   no verdict on progress; the page marks a running run with no progress
   for 5 minutes (§spec:ui-kit).
+- **Waiting collections.** A collection waiting for a slot in a
+  multi-collection sync (§spec:sync-workflow "Waiting collections") is
+  not a run yet: it has a waiting entry — collection, kind, whether
+  `serve` started the run, and since when it waits — with no run
+  record, phase, or counters, kept alive by its run's heartbeat. When
+  it takes a slot the entry becomes that collection's running entry,
+  started then, with its run record. If its run ends first (stopped,
+  crashed, or killed), it never started and leaves no trace: its run
+  removes the entry, or the next run that takes the writer lock does
+  as it starts (only a lock holder has waiting entries); until then a
+  reader stops listing it once its heartbeat is stale. Waiting entries are never in `runs`, the
+  run history, or Needs attention; `status` shows a waiting line for the
+  collection (§spec:rescheduled-syncs "Visible in status").
 - **Ends are never missed.** A running entry updates its heartbeat every
   few seconds. When a run finishes it records its result, using the
   outcome codes `status` already uses (`completed`,
@@ -2174,7 +2211,10 @@ Observable behavior:
 - **`status` agrees, during and after.** A sync's or single-show run's
   counts in its run record (new, updated, failed, bytes downloaded)
   move at the same cadence as the activity entry, so `status` and the
-  dashboard show the same numbers mid-run. A run record left open by a
+  dashboard show the same numbers mid-run. While a run still reports,
+  `status` shows no recovery warning for its operation in progress —
+  the run is working, and Needs attention already left it out — and
+  shows one once its heartbeat is stale. A run record left open by a
   killed run is reported by `status` as ended unexpectedly as soon as
   its heartbeat goes stale, and the next run that takes the writer lock
   closes it with the time of its last heartbeat and the error "run ended
@@ -2193,8 +2233,8 @@ Observable behavior:
   of its progress.
 
 API: `GET /api/activity` (unauthenticated; refreshed every few seconds)
-answers `{generated_at, runs: [...], network: [...]}`. `network` is
-specified in §spec:network-activity. Each `runs` entry:
+answers `{generated_at, runs: [...], waiting: [...], network: [...]}`.
+`network` is specified in §spec:network-activity. Each `runs` entry:
 
 | Field | Meaning |
 | --- | --- |
@@ -2218,6 +2258,17 @@ specified in §spec:network-activity. Each `runs` entry:
 
 `runs` holds running entries and entries that ended in the last ten
 minutes, running first, then newest first.
+
+`waiting` holds the collections waiting for a slot in a run that still
+reports, in the order they start. Each entry:
+
+| Field | Meaning |
+| --- | --- |
+| `activity_id` | The entry's id; the same id carries its running entry once it starts |
+| `source`, `collection` | The collection that waits |
+| `kind` | `sync` or `catch_up` |
+| `started_by_serve` | true when `serve` launched the run |
+| `since` | ISO time it began waiting |
 
 **Decision and constraint.** Runs record their own progress, into the
 state database, on a timer — because runs live in short-lived
@@ -2828,6 +2879,7 @@ Spec and code names in the last column never appear on screen.
 | Validation | A check that the config, sources, and handoff targets work, run with `shakedown validate`. | test, preflight | readiness validation |
 | Release | The Shakedown version answering this page. | version, build | `release` |
 | Running | A run that is working and reporting. | active, in progress | `state: running` |
+| Waiting | A collection whose run starts when a slot frees in the current sync. | queued, pending, scheduled | `waiting`, waiting entry |
 | No progress for *time* | A running run whose counts have not moved for that long. | stuck, stalled, hung | `last_progress_at` |
 | Lost contact | A run that stopped sending updates: killed, crashed, or the host went down. | stopped reporting, crashed, ended unexpectedly | `end_reason: stopped_reporting`, ended unexpectedly |
 | Stopped | A run someone stopped before it finished (`docker stop`, Ctrl-C); the next run continues where it left off. | interrupted, cancelled, aborted | `stopped`, stopped on request |
@@ -2883,7 +2935,7 @@ is one route (`GET /`) with four tabs.
 | Screen | Handoff spec | Golden scenarios | Approved |
 | --- | --- | --- | --- |
 | Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13 |
-| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content | round 2, 2026-11-12 |
+| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content, waiting | round 2, 2026-11-12; waiting rows 2026-11-20 |
 | Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
@@ -3338,7 +3390,9 @@ Observable behavior:
   `verify`, `sync --dry-run`) are unchanged.
 - **The first signal stops new work.** The run starts no new listing
   page, lookup, download, tag write, or library link, and starts no
-  queued collection. A download in progress ends at its next chunk: the
+  waiting collection: it gets no run record, its waiting entry goes
+  (§spec:run-activity "Waiting collections"), and one log line names
+  every collection the stop kept from starting. A download in progress ends at its next chunk: the
   files it finished stay in the show's temp folder, the file it was
   writing is discarded, and the next run fetches only what is missing
   (§spec:failure-behavior). Backoff waits end at once. The step in hand
@@ -3458,7 +3512,7 @@ degrade a single item or a single run, never the archive.
 | Run killed during a catch-up | Entries not yet cleared stay; the next finishing sync catches them up (§spec:rescheduled-syncs) |
 | `docker stop`, NAS shutdown, or Ctrl-C during a writing run | No new work starts; downloads in progress end at their next chunk and keep their temp folders; the run is recorded `stopped` — no recovery warning, no failure notice, no prune, rescheduled entries kept — and the command exits 143 (SIGTERM) or 130 (SIGINT); a second signal exits at once (§spec:graceful-stop) |
 | `serve` stopped while a run it started is going | `serve` sends that run SIGTERM and waits up to 90 s for it to stop before exiting (§spec:graceful-stop) |
-| Run killed or crashed outside `serve` (SIGKILL, OOM, host down) | Its heartbeat stops; within ~20 seconds `status` and the dashboard report it ended unexpectedly; the next run that takes the writer lock closes its record (§spec:run-activity) |
+| Run killed or crashed outside `serve` (SIGKILL, OOM, host down) | Its heartbeat stops; within ~20 seconds `status` and the dashboard report it ended unexpectedly; the next run that takes the writer lock closes its record. Collections it had not started yet show nothing: they never ran (§spec:run-activity) |
 | Recording progress or network activity fails (database busy) | That write is skipped; the next carries cumulative totals; the run is unaffected (§spec:run-activity) |
 | `serve` down while runs happen | No dashboard meanwhile; nothing lost — runs record their own progress, network activity, and growth (§spec:run-activity, §spec:network-activity, §spec:library-stats) |
 | Dashboard cannot reach `serve` | The page says so and shows the age of the data on screen (§spec:dashboard) |

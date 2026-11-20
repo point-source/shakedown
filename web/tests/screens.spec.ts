@@ -8,7 +8,7 @@ const CASES: { scenario: string; tab: string }[] = [
   ...ALL.map((tab) => ({ scenario: "default", tab })),
   ...ALL.map((tab) => ({ scenario: "long_content", tab })),
   ...ALL.map((tab) => ({ scenario: "first_install", tab })),
-  ...["quiet", "config_broken", "no_config", "unreachable", "loading"].map((scenario) => ({ scenario, tab: "overview" })),
+  ...["quiet", "waiting", "config_broken", "no_config", "unreachable", "loading"].map((scenario) => ({ scenario, tab: "overview" })),
   { scenario: "loading", tab: "library" },
   { scenario: "loading", tab: "runs" },
   { scenario: "loading", tab: "sources" },

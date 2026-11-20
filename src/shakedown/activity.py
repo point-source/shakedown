@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from shakedown.db import ACTIVITY_SINCE_VERSION, transaction
-from shakedown.models import ENDED_UNEXPECTEDLY, OperationStatus
+from shakedown.models import ENDED_UNEXPECTEDLY, OperationStatus, OperationType
 from shakedown.network import EventKind, NetworkEvent, NetworkMeter, NetworkRepo
 from shakedown.plugins.base import ListingRetry, failure_cause, http_status, listing_retries_to
 from shakedown.state import OperationOutcomeRepo, RunRepo
@@ -58,10 +58,24 @@ class Phase(StrEnum):
 
 RUNNING = "running"
 ENDED = "ended"
+# A collection waiting for a slot in a multi-collection sync: no run record yet, no
+# phase, no counters. Its entry becomes `running` when it starts, or is deleted if
+# its run ends first (§spec:run-activity "Waiting collections").
+WAITING = "waiting"
 # The one end reason: the run's heartbeat stopped — killed, crashed, or the host
 # went down (§spec:run-activity).
 STOPPED_REPORTING = "stopped_reporting"
 ABANDONED_ERROR = f"{ENDED_UNEXPECTEDLY} (lost contact)"
+
+
+# The operation each kind records its outcome under, where the two names differ.
+_OPERATION_OF_KIND = {ActivityKind.CATCH_UP.value: OperationType.SYNC.value,
+                      ActivityKind.VERIFY.value: OperationType.VALIDATE.value}
+
+
+def operation_of(kind: str) -> str:
+    """The operation outcome a run of ``kind`` records (a catch-up is a sync)."""
+    return _OPERATION_OF_KIND.get(kind, kind)
 
 
 @dataclass(frozen=True)
@@ -195,11 +209,81 @@ class ActivityRepo:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
-    def restart(self, activity_id: int, at: datetime) -> None:
-        """Move an entry opened ahead of time to when its work actually began."""
-        self.conn.execute(
-            "UPDATE run_activity SET started_at=? WHERE id=?", (_iso(at), activity_id)
+    def create_waiting(
+        self, source: str, collection: str, kind: ActivityKind, *,
+        started_by_serve: bool, at: datetime,
+    ) -> int:
+        """A waiting entry: ``started_at`` holds when it began waiting until it starts."""
+        cur = self.conn.execute(
+            """
+            INSERT INTO run_activity (
+                source_name, collection_name, kind, started_by_serve, run_id,
+                started_at, last_heartbeat_at, last_progress_at, state, phase
+            ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)
+            """,
+            (source, collection, kind.value, int(started_by_serve),
+             _iso(at), _iso(at), _iso(at), WAITING),
         )
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def begin(self, activity_id: int, run_id: int | None, at: datetime) -> None:
+        """A waiting entry's run starts now: it becomes a running entry of ``run_id``,
+        timed from here."""
+        self.conn.execute(
+            """
+            UPDATE run_activity SET state=?, run_id=?, phase=?, started_at=?,
+                last_heartbeat_at=?, last_progress_at=?
+            WHERE id=? AND state=?
+            """,
+            (RUNNING, run_id, Phase.STARTING.value, _iso(at), _iso(at), _iso(at),
+             activity_id, WAITING),
+        )
+
+    def beat(self, activity_ids: list[int], at: datetime) -> None:
+        """Waiting entries are alive: their run still reports."""
+        self.conn.executemany(
+            "UPDATE run_activity SET last_heartbeat_at=? WHERE id=? AND state=?",
+            [(_iso(at), activity_id, WAITING) for activity_id in activity_ids],
+        )
+
+    def drop_all_waiting(self) -> None:
+        """Every waiting entry: only a run holding the writer lock opens them, so once
+        another run holds it they all belong to runs that ended."""
+        self.conn.execute("DELETE FROM run_activity WHERE state=?", (WAITING,))
+
+    def drop_waiting(self, activity_ids: list[int]) -> None:
+        """Waiting entries whose run ended before they started leave no trace: they
+        never ran (§spec:run-activity "Waiting collections")."""
+        self.conn.executemany(
+            "DELETE FROM run_activity WHERE id=? AND state=?",
+            [(activity_id, WAITING) for activity_id in activity_ids],
+        )
+
+    def waiting(self, now: datetime) -> list[dict[str, Any]]:
+        """Collections waiting for a slot in a run that still reports, in the order
+        they start. Empty before schema v10."""
+        if not self.has_table():
+            return []
+        cutoff = now - timedelta(seconds=STALE_AFTER_S)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM run_activity WHERE state=? AND last_heartbeat_at >= ?
+            ORDER BY id
+            """,
+            (WAITING, _iso(cutoff)),
+        ).fetchall()
+        return [
+            {
+                "activity_id": row["id"],
+                "source": row["source_name"],
+                "collection": row["collection_name"],
+                "kind": row["kind"],
+                "started_by_serve": bool(row["started_by_serve"]),
+                "since": _parse(row["started_at"]),
+            }
+            for row in rows
+        ]
 
     def write(self, activity_id: int, snap: Snapshot, heartbeat_at: datetime,
               run_id: int | None = None) -> None:
@@ -260,8 +344,13 @@ class ActivityRepo:
         return datetime.fromisoformat(row["hb"]) if row and row["hb"] else None
 
     def close_stale(self, now: datetime) -> None:
-        """End every running entry that stopped reporting, at its last heartbeat."""
+        """End every running entry that stopped reporting, at its last heartbeat, and
+        delete every waiting entry of a run that stopped reporting: it never started."""
         cutoff = now - timedelta(seconds=STALE_AFTER_S)
+        self.conn.execute(
+            "DELETE FROM run_activity WHERE state=? AND last_heartbeat_at < ?",
+            (WAITING, _iso(cutoff)),
+        )
         self.conn.execute(
             """
             UPDATE run_activity SET state=?, result=?, end_reason=?,
@@ -315,7 +404,8 @@ class ActivityRepo:
         if not self.has_table():
             return []
         rows = self.conn.execute(
-            "SELECT * FROM run_activity WHERE started_at >= ?", (_iso(started_at),)
+            "SELECT * FROM run_activity WHERE started_at >= ? AND state != ?",
+            (_iso(started_at), WAITING),
         ).fetchall()
         return [
             {**_as_seen(_live_entry(row), now), "outcome_id": row["outcome_id"]}
@@ -712,6 +802,15 @@ class Progress:
         return (end_b - start_b) / (end_t - start_t)
 
 
+@dataclass
+class Waiting:
+    """A collection waiting for a slot: its entry's id, None while recording is off."""
+    source: str
+    collection: str
+    kind: ActivityKind
+    activity_id: int | None = None
+
+
 _started_by_serve: bool | None = None
 
 
@@ -753,6 +852,10 @@ class ActivityRecorder:
         self._tick_s = TICK_S if tick_s is None else tick_s
         self._lock = threading.Lock()
         self._entries: list[Progress] = []
+        self._waiting: list[Waiting] = []
+        # Waiting rows a failed flip or removal left behind: no longer heartbeated
+        # (they are not waiting), removed at close().
+        self._stray: list[int] = []
         # One meter per configured source, shared by its collections' entries.
         self._meters: dict[str, NetworkMeter] = {}
         self._warned = False
@@ -823,13 +926,67 @@ class ActivityRecorder:
             self._warn(e)
         return progress
 
-    def restart(self, progress: Progress) -> None:
-        """The entry's work begins now (it was opened ahead of time)."""
-        if self._conn is None or progress.activity_id is None:
+    def open_waiting(self, source: str, collection: str, kind: ActivityKind) -> Waiting:
+        """Record that a collection waits for a slot; its run opens when it starts
+        (``begin``) or never (``drop``)."""
+        waiting = Waiting(source, collection, kind)
+        if self._conn is None:
+            return waiting
+        try:
+            with self._lock:
+                waiting.activity_id = ActivityRepo(self._conn).create_waiting(
+                    source, collection, kind,
+                    started_by_serve=self._started_by_serve, at=self._now(),
+                )
+                self._waiting.append(waiting)
+        except Exception as e:
+            self._warn(e)
+        return waiting
+
+    def begin(self, waiting: Waiting, *, run_id: int | None) -> Progress:
+        """The waiting collection starts now: its entry becomes the running entry of
+        ``run_id``. Returns its hooks, as ``open_entry`` does."""
+        if self._conn is None or waiting.activity_id is None:
+            return self.open_entry(waiting.source, waiting.collection, waiting.kind,
+                                   run_id=run_id)
+        with self._lock:
+            if waiting in self._waiting:
+                self._waiting.remove(waiting)
+            meter = self._meters.setdefault(
+                waiting.source, NetworkMeter(waiting.source, self._now)
+            )
+            progress = Progress(waiting.kind, source=waiting.source,
+                                collection=waiting.collection, meter=meter, run_id=run_id,
+                                now=self._now, clock=self._clock)
+            try:
+                repo = ActivityRepo(self._conn)
+                # The other collections write meanwhile: wait for them as a run's
+                # final write does, never skip like a progress tick.
+                with self._patient(), transaction(self._conn):
+                    repo.begin(waiting.activity_id, run_id, self._now())
+                    progress.activity_id = waiting.activity_id
+                    repo.write(progress.activity_id, progress.snapshot(), self._now())
+                self._entries.append(progress)
+            except Exception as e:
+                progress.activity_id = None
+                self._stray.append(waiting.activity_id)
+                self._warn(e)
+        return progress
+
+    def drop(self, waiting: Waiting) -> None:
+        """The waiting collection will not start (its run is stopping)."""
+        if self._conn is None or waiting.activity_id is None:
             return
         try:
             with self._lock:
-                ActivityRepo(self._conn).restart(progress.activity_id, self._now())
+                if waiting in self._waiting:
+                    self._waiting.remove(waiting)
+                try:
+                    with self._patient():
+                        ActivityRepo(self._conn).drop_waiting([waiting.activity_id])
+                except Exception:
+                    self._stray.append(waiting.activity_id)
+                    raise
         except Exception as e:
             self._warn(e)
 
@@ -840,7 +997,8 @@ class ActivityRecorder:
         try:
             with self._lock:
                 entries = [p for p in self._entries if p.activity_id is not None]
-                if not entries:
+                waiting = [w.activity_id for w in self._waiting if w.activity_id is not None]
+                if not entries and not waiting:
                     return
                 snaps = [(p, p.snapshot()) for p in entries]
                 now = self._now()
@@ -849,8 +1007,20 @@ class ActivityRecorder:
                     for progress, snap in snaps:
                         assert progress.activity_id is not None
                         repo.write(progress.activity_id, snap, now, progress.run_id)
+                    repo.beat(waiting, now)
         except Exception as e:
             self._warn(e)
+
+    @contextlib.contextmanager
+    def _patient(self) -> Iterator[None]:
+        """A write that must land (an entry's start, end, or removal) waits for other
+        writers as long as any connection does; progress ticks skip instead."""
+        assert self._conn is not None
+        self._conn.execute(f"PRAGMA busy_timeout={_END_BUSY_TIMEOUT_MS}")
+        try:
+            yield
+        finally:
+            self._conn.execute(f"PRAGMA busy_timeout={_TICK_BUSY_TIMEOUT_MS}")
 
     @contextlib.contextmanager
     def _writing_network(self, conn: sqlite3.Connection) -> Iterator[None]:
@@ -879,21 +1049,16 @@ class ActivityRecorder:
                 if progress in self._entries:
                     self._entries.remove(progress)
                 snap = progress.snapshot(final=True)
-                self._conn.execute(f"PRAGMA busy_timeout={_END_BUSY_TIMEOUT_MS}")
-                try:
-                    with self._writing_network(self._conn):
-                        ActivityRepo(self._conn).end(
-                            progress.activity_id, result, self._now(), snap
-                        )
-                finally:
-                    self._conn.execute(f"PRAGMA busy_timeout={_TICK_BUSY_TIMEOUT_MS}")
+                with self._patient(), self._writing_network(self._conn):
+                    ActivityRepo(self._conn).end(progress.activity_id, result, self._now(), snap)
         except Exception as e:
             self._warn(e)
 
     def close(self) -> None:
-        """Stop the timer, write any network activity still pending, and trim history
-        older than 30 days. An entry still open here was never ended; it reads as
-        stopped reporting once its heartbeat ages."""
+        """Stop the timer, write any network activity still pending, delete the
+        entries of collections still waiting (they never started), and trim history
+        older than 30 days. A running entry still open here was never ended; it reads
+        as stopped reporting once its heartbeat ages."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join()
@@ -904,7 +1069,14 @@ class ActivityRecorder:
                 self._conn.execute(f"PRAGMA busy_timeout={_END_BUSY_TIMEOUT_MS}")
                 with self._writing_network(self._conn):
                     pass
-                ActivityRepo(self._conn).trim(self._now())
+                repo = ActivityRepo(self._conn)
+                repo.drop_waiting(
+                    [w.activity_id for w in self._waiting if w.activity_id is not None]
+                    + self._stray
+                )
+                self._waiting.clear()
+                self._stray.clear()
+                repo.trim(self._now())
         except Exception as e:
             self._warn(e)
         finally:
@@ -949,4 +1121,5 @@ def close_abandoned(conn: sqlite3.Connection, now: datetime) -> None:
             assert outcome.id is not None
             outcomes.close_abandoned(outcome.id, ABANDONED_ERROR, outcome.updated_at)
         if has_activity:
+            activity.drop_all_waiting()
             activity.close_stale(now)

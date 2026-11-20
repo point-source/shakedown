@@ -1,5 +1,6 @@
-"""`GET /api/activity`: the live view of runs (§spec:run-activity) and of each
-source's network activity now (§spec:network-activity)."""
+"""`GET /api/activity`: the live view of runs and of collections waiting for a slot
+(§spec:run-activity), and of each source's network activity now
+(§spec:network-activity)."""
 from __future__ import annotations
 
 import sqlite3
@@ -16,14 +17,18 @@ _TIMES = ("started_at", "finished_at", "last_heartbeat_at", "last_progress_at")
 
 def activity_answer(ctx: DashboardContext) -> dict[str, Any]:
     """Running entries first, then entries that ended in the last ten minutes, newest
-    first; and per source with a run in progress, its network activity now."""
-    runs = ActivityRepo(ctx.conn).live(datetime.now())
+    first; the collections waiting for a slot, in the order they start; and per
+    source with a run in progress, its network activity now."""
+    now = datetime.now()
+    repo = ActivityRepo(ctx.conn)
+    runs = repo.live(now)
     network = _network_now(ctx.conn, [r for r in runs if r["state"] == RUNNING])
     for entry in runs:
         del entry["requests_in_flight"]
         for key in _TIMES:
             entry[key] = iso(entry[key])
-    return {"runs": runs, "network": network}
+    waiting = [{**entry, "since": iso(entry["since"])} for entry in repo.waiting(now)]
+    return {"runs": runs, "waiting": waiting, "network": network}
 
 
 def _network_now(conn: sqlite3.Connection, running: list[dict[str, Any]]) -> list[dict[str, Any]]:

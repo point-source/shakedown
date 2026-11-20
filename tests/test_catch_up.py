@@ -140,14 +140,20 @@ def test_catch_ups_open_their_runs_oldest_skip_first_under_the_cap(
     config: Config, config_file: Path
 ) -> None:
     """With two collection workers, both catch-ups run in one bounded pass; the older
-    skip is opened, and so started, first."""
+    skip waits first in line, and so starts first. Both start at once here, so their
+    run records open in either order: their entries keep the line's order."""
     _mark(config, SRC, "c", 1)
     _mark(config, SRC, "b", 5)
     assert run_sync(config, source_filter=SRC, collection_filter="a",
                     config_path=config_file) == 0
     b, c = _latest(config, SRC, "b"), _latest(config, SRC, "c")
     assert b is not None and c is not None
-    assert c.id < b.id
+    with closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+        entry = {
+            row["run_id"]: row["id"]
+            for row in conn.execute("SELECT id, run_id FROM run_activity")
+        }
+    assert entry[c.id] < entry[b.id]
 
 
 def test_entry_recorded_during_the_catch_up_waits_for_the_next_sync(
