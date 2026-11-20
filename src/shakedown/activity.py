@@ -853,6 +853,9 @@ class ActivityRecorder:
         self._lock = threading.Lock()
         self._entries: list[Progress] = []
         self._waiting: list[Waiting] = []
+        # Waiting rows a failed flip or removal left behind: no longer heartbeated
+        # (they are not waiting), removed at close().
+        self._stray: list[int] = []
         # One meter per configured source, shared by its collections' entries.
         self._meters: dict[str, NetworkMeter] = {}
         self._warned = False
@@ -966,7 +969,7 @@ class ActivityRecorder:
                 self._entries.append(progress)
             except Exception as e:
                 progress.activity_id = None
-                self._waiting.append(waiting)  # still waiting in the database: close() drops it
+                self._stray.append(waiting.activity_id)
                 self._warn(e)
         return progress
 
@@ -978,8 +981,12 @@ class ActivityRecorder:
             with self._lock:
                 if waiting in self._waiting:
                     self._waiting.remove(waiting)
-                with self._patient():
-                    ActivityRepo(self._conn).drop_waiting([waiting.activity_id])
+                try:
+                    with self._patient():
+                        ActivityRepo(self._conn).drop_waiting([waiting.activity_id])
+                except Exception:
+                    self._stray.append(waiting.activity_id)
+                    raise
         except Exception as e:
             self._warn(e)
 
@@ -1065,8 +1072,10 @@ class ActivityRecorder:
                 repo = ActivityRepo(self._conn)
                 repo.drop_waiting(
                     [w.activity_id for w in self._waiting if w.activity_id is not None]
+                    + self._stray
                 )
                 self._waiting.clear()
+                self._stray.clear()
                 repo.trim(self._now())
         except Exception as e:
             self._warn(e)

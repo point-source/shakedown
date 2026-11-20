@@ -346,10 +346,11 @@ def test_a_collection_whose_outcome_cannot_open_closes_its_run(
 
     assert run_sync(config) == 1
 
+    # The run record and outcome open together: the failed insert takes the run
+    # record with it, so nothing is left open, and the others ran normally.
     runs = {r["collection_name"]: r for r in _run_rows(config)}
-    assert runs["coll2"]["finished_at"] is not None
-    assert any("disk is full" in e for e in json.loads(runs["coll2"]["errors"]))
-    assert runs["coll1"]["finished_at"] is not None and runs["coll3"]["finished_at"] is not None
+    assert sorted(runs) == ["coll1", "coll3"]
+    assert all(r["finished_at"] is not None for r in runs.values())
     assert all(e["state"] != "waiting" for e in _activity_rows(config))
 
 
@@ -381,3 +382,49 @@ def test_the_next_writer_clears_a_killed_runs_waiting_collections_at_once(
     assert [r["state"] for r in _activity_rows(config)] == ["running"]
     with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
         assert ActivityRepo(conn).waiting(datetime.now()) == []
+
+
+def test_a_failed_flip_to_running_does_not_keep_the_collection_waiting(
+    tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the entry's flip to running cannot land at all, the collection runs
+    without an entry, and its row is no longer kept alive as waiting: readers stop
+    listing it once its heartbeat is stale."""
+    monkeypatch.setattr(activity, "STALE_AFTER_S", 0.3)
+    config = _config(tmp_roots)
+    FakePlugin.items["gd-a"] = FakeItem("gd-a", files=[FakeFile("gd-a.flac", b"x")])
+    real_begin = ActivityRepo.begin
+
+    def begin(self, activity_id, run_id, at):  # type: ignore[no-untyped-def]
+        row = self.conn.execute(
+            "SELECT collection_name FROM run_activity WHERE id=?", (activity_id,)
+        ).fetchone()
+        if row[0] == "coll2":
+            raise sqlite3.OperationalError("database is locked")
+        return real_begin(self, activity_id, run_id, at)
+
+    monkeypatch.setattr(ActivityRepo, "begin", begin)
+    entered, release = threading.Event(), threading.Event()
+    real_fetch = FakePlugin.fetch
+
+    def fetch(self, identifier, files, dest_dir):  # type: ignore[no-untyped-def]
+        if "coll2" in str(dest_dir) and not entered.is_set():
+            entered.set()
+            assert release.wait(20)
+        return real_fetch(self, identifier, files, dest_dir)
+
+    monkeypatch.setattr(FakePlugin, "fetch", fetch)
+    result: list[int] = []
+    runner = threading.Thread(target=lambda: result.append(run_sync(config)))
+    runner.start()
+    try:
+        assert entered.wait(10)
+        time.sleep(0.6)  # ticks pass while coll2 works; its row ages out
+        with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
+            queue = ActivityRepo(conn).waiting(datetime.now())
+        assert [e["collection"] for e in queue] == ["coll3"]
+    finally:
+        release.set()
+        runner.join(20)
+    assert result == [0]
+    assert all(e["state"] != "waiting" for e in _activity_rows(config))
