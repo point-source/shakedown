@@ -2,20 +2,23 @@
 
 A triggered sync or verify is the ordinary one-shot CLI run — the same command the
 scheduler launches — so it reads the config file at its start and a crash never
-takes `serve` down. `serve` still has to answer the HTTP request at once with the
-run's id, or refuse it when another run holds the writer lock. The child tells it
-which, over a readiness fd in the style of s6's `notification-fd`: serve passes the
-write end of a pipe and names it in SHAKEDOWN_READY_FD, and the child writes exactly
-one JSON line there, then closes it:
+takes `serve` down. `serve` still has to answer the HTTP request at once, or refuse
+it when another run holds the writer lock. The child tells it which, over a
+readiness fd in the style of s6's `notification-fd`: serve passes the write end of a
+pipe and names it in SHAKEDOWN_READY_FD, and the child writes one JSON line there:
 
 - ``{"state": "busy"}`` — another run holds the writer lock; the child exits 1.
 - ``{"state": "failed", "error": "..."}`` — the child could not load its config.
-- ``{"state": "started", "runs": [...]}`` — the child holds the lock and has opened
-  every run record it will use; each entry names its run and outcome ids and scope.
+- ``{"state": "started"}`` — the child holds the lock.
+
+After ``started`` the child keeps the fd and writes one more line per run record it
+opens, as each collection starts — ``{"state": "opened", "run_id": …,
+"outcome_id": …, "source": …, "collection": …}`` — so serve can close, by exact id,
+the records a killed run left open. The fd closes when the child exits.
 
 Without SHAKEDOWN_READY_FD (CLI and scheduler runs) every announce is a no-op.
 sd_notify was not used: it needs a datagram socket and its own message format, and
-all we carry is one line.
+all we carry is a few lines.
 """
 from __future__ import annotations
 
@@ -41,20 +44,35 @@ log = logging.getLogger(__name__)
 READY_FD_ENV = "SHAKEDOWN_READY_FD"
 
 
-def _announce(message: dict[str, Any]) -> None:
-    # Pop, so only the first announce counts and child processes of this run (a
-    # handoff command) never see the variable.
+# The readiness fd, kept after ``started`` for the ``opened`` lines; None otherwise.
+_ready_fd: int | None = None
+_fd_lock = threading.Lock()
+
+
+def _write(fd: int, message: dict[str, Any]) -> bool:
+    try:
+        os.write(fd, (json.dumps(message) + "\n").encode())
+        return True
+    except OSError as e:
+        log.warning("could not tell serve the run's state: %s", e)
+        return False
+
+
+def _announce(message: dict[str, Any], *, keep: bool = False) -> None:
+    """The run's one state line. Pop the variable, so only the first announce counts
+    and child processes of this run (a handoff command) never see it; with ``keep``,
+    hold the fd for the ``opened`` lines that follow."""
+    global _ready_fd
     raw = os.environ.pop(READY_FD_ENV, None)
     if raw is None:
         return
     fd = int(raw)  # only serve sets it, always to the pipe's fd number
-    try:
-        os.write(fd, (json.dumps(message) + "\n").encode())
-    except OSError as e:
-        log.warning("could not tell serve the run's state: %s", e)
-    finally:
-        with contextlib.suppress(OSError):
-            os.close(fd)
+    if _write(fd, message) and keep:
+        os.set_inheritable(fd, False)  # a handoff command must not hold serve's pipe open
+        _ready_fd = fd
+        return
+    with contextlib.suppress(OSError):
+        os.close(fd)
 
 
 def launched_by_serve() -> bool:
@@ -71,8 +89,23 @@ def announce_failed(error: str) -> None:
     _announce({"state": "failed", "error": error})
 
 
-def announce_started(runs: list[dict[str, Any]]) -> None:
-    _announce({"state": "started", "runs": runs})
+def announce_started() -> None:
+    _announce({"state": "started"}, keep=True)
+
+
+def announce_opened(run_id: int | None, outcome_id: int | None, source: str,
+                    collection: str) -> None:
+    """Tell serve, if it started this run, about a run record just opened."""
+    global _ready_fd
+    with _fd_lock:
+        if _ready_fd is None:
+            return
+        if not _write(_ready_fd, {"state": "opened", "run_id": run_id,
+                                  "outcome_id": outcome_id, "source": source,
+                                  "collection": collection}):
+            with contextlib.suppress(OSError):
+                os.close(_ready_fd)
+            _ready_fd = None
 
 
 # --- serve side -------------------------------------------------------------------
@@ -125,10 +158,10 @@ def launch(
 ) -> Launch:
     """Start `shakedown --config <config_path> <args>` and wait for its one line.
 
-    Returns once the child has started (it holds the writer lock and has opened its
-    run records), refused (busy), or failed before starting. A started child is
-    watched on a daemon thread: when it exits, any of its run records it left open
-    are closed, then ``on_exit`` gets its return code.
+    Returns once the child has started (it holds the writer lock), refused (busy),
+    or failed before starting. A started child is watched on a daemon thread, which
+    collects the run records it opens as it announces them; when it exits, any of
+    them it left open are closed, then ``on_exit`` gets its return code.
     """
     r, w = os.pipe()
     child_env = {**os.environ, **(env or {}), READY_FD_ENV: str(w)}
@@ -143,11 +176,12 @@ def launch(
         )
     finally:
         os.close(w)  # only the child holds the write end, so its exit means EOF
-    with os.fdopen(r, "rb") as reader:
-        line = reader.readline()
+    reader = os.fdopen(r, "rb")
+    line = reader.readline()
     message: dict[str, Any] = json.loads(line) if line else {}
     state = message.get("state")
     if state != "started":
+        reader.close()
         returncode = process.wait()
         if state == "busy":
             return Busy()
@@ -155,9 +189,15 @@ def launch(
             return Failed(str(message.get("error", "")))
         return ExitedEarly(returncode)
 
-    triggered = TriggeredRun(process=process, runs=list(message.get("runs", [])))
+    triggered = TriggeredRun(process=process, runs=[])
 
     def watch() -> None:
+        with reader:
+            for raw in reader:  # until the child exits and the pipe closes
+                with contextlib.suppress(ValueError):
+                    opened = json.loads(raw)
+                    if opened.get("state") == "opened":
+                        triggered.runs.append(opened)
         returncode = process.wait()
         try:
             close_abandoned(state_db, triggered.runs, returncode)

@@ -120,7 +120,7 @@ def _run_verify(
     # A verify opens no run record up front; serve learns only that it started (and,
     # for a reconform, that it holds the writer lock) (§spec:api-sync-runs). A
     # reconform's runs are opened once the hash pass knows what drifted.
-    announce_started([])
+    announce_started()
     # Only a reconform holds the writer lock, so only it may migrate the database: a
     # verify while a run of an older release writes leaves its schema alone.
     conn = (connect if reconform else connect_reader)(config.state_db)  # type: ignore[arg-type]

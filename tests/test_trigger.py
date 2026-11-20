@@ -2,8 +2,8 @@
 
 The child is the ordinary one-shot CLI run. When serve hands it a readiness fd, it
 writes one line there: `busy` when another run holds the writer lock, `failed` when
-it cannot load its config, or `started` (with its run records) once it holds the
-lock and has opened every run record it will use.
+it cannot load its config, or `started` once it holds the lock — then one `opened`
+line per run record, as each collection starts.
 """
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import BinaryIO
 
 from shakedown.config import CollectionConfig
 from shakedown.lock import writer_lock
@@ -24,10 +26,10 @@ from tests.serve_child import SPEC_ENV
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _spawn(
+def _spawn_reading(
     tmp_path: Path, args: list[str], *, items: dict | None = None, gate: Path | None = None
-) -> tuple[subprocess.Popen[bytes], dict | None]:
-    """Start a fake-source child with a readiness fd; return it and its one line."""
+) -> tuple[subprocess.Popen[bytes], BinaryIO]:
+    """Start a fake-source child with a readiness fd; return it and the fd's reader."""
     spec = tmp_path / "fake-spec.json"
     spec.write_text(json.dumps({"items": items or {}, "gate": str(gate) if gate else None}))
     r, w = os.pipe()
@@ -38,9 +40,21 @@ def _spawn(
         pass_fds=(w,), env=env, cwd=REPO_ROOT,
     )
     os.close(w)
-    with os.fdopen(r, "rb") as reader:
-        line = reader.readline()
-    return proc, (json.loads(line) if line else None)
+    return proc, os.fdopen(r, "rb")
+
+
+def _read(reader: BinaryIO) -> dict | None:
+    line = reader.readline()
+    return json.loads(line) if line else None
+
+
+def _spawn(
+    tmp_path: Path, args: list[str], *, items: dict | None = None, gate: Path | None = None
+) -> tuple[subprocess.Popen[bytes], dict | None]:
+    """Start a fake-source child with a readiness fd; return it and its first line."""
+    proc, reader = _spawn_reading(tmp_path, args, items=items, gate=gate)
+    with reader:
+        return proc, _read(reader)
 
 
 def _run_row(db: Path, run_id: int) -> sqlite3.Row:
@@ -63,32 +77,37 @@ def test_child_announces_busy_when_another_run_holds_the_lock(
     assert line == {"state": "busy"}
 
 
-def test_child_announces_started_once_it_holds_the_lock_and_opened_its_runs(
+def test_child_announces_started_once_it_holds_the_lock_then_each_run_it_opens(
     tmp_roots: tuple[Path, Path], tmp_path: Path
 ) -> None:
     config = make_config(*tmp_roots)
     write_config(tmp_path / "cfg.yaml", config)
     gate = tmp_path / "go"
-    proc, line = _spawn(tmp_path, ["sync"], items={"gd-x": {"x.flac": "a"}}, gate=gate)
-    try:
-        assert line is not None and line["state"] == "started"
-        [run] = line["runs"]
-        assert (run["source"], run["collection"]) == ("fake-src", "coll1")
-        assert config.state_db is not None
-        row = _run_row(config.state_db, run["run_id"])
-        assert row is not None and row["finished_at"] is None  # open while it runs
-        # The lock is held when serve is told the run started.
-        from shakedown.lock import LockHeld
-
+    proc, reader = _spawn_reading(
+        tmp_path, ["sync"], items={"gd-x": {"x.flac": "a"}}, gate=gate
+    )
+    with reader:
         try:
-            with writer_lock(config):
-                raise AssertionError("the child must hold the writer lock")
-        except LockHeld:
-            pass
-    finally:
-        gate.touch()
+            assert _read(reader) == {"state": "started"}
+            # The lock is held when serve is told the run started.
+            from shakedown.lock import LockHeld
+
+            try:
+                with writer_lock(config):
+                    raise AssertionError("the child must hold the writer lock")
+            except LockHeld:
+                pass
+            opened = _read(reader)
+            assert opened is not None and opened["state"] == "opened"
+            assert (opened["source"], opened["collection"]) == ("fake-src", "coll1")
+            assert config.state_db is not None
+            row = _run_row(config.state_db, opened["run_id"])
+            assert row is not None and row["finished_at"] is None  # open while it runs
+        finally:
+            gate.touch()
+        assert _read(reader) is None  # nothing more; the fd closes as the child exits
     assert proc.wait(timeout=30) == 0
-    assert _run_row(config.state_db, run["run_id"])["finished_at"] is not None
+    assert _run_row(config.state_db, opened["run_id"])["finished_at"] is not None
 
 
 def test_child_announces_failed_with_the_config_error(tmp_path: Path) -> None:
@@ -101,12 +120,11 @@ def test_child_announces_failed_with_the_config_error(tmp_path: Path) -> None:
     assert "max_concurrent_collections" in line["error"]
 
 
-def test_child_opens_every_collection_run_up_front_and_times_each_from_its_start(
+def test_child_opens_each_collection_run_as_it_starts(
     tmp_roots: tuple[Path, Path], tmp_path: Path
 ) -> None:
-    """With one collection at a time, three collections' runs are all announced at
-    start, and a queued collection's run is timed from when it began, not from when
-    the record was opened."""
+    """With one collection at a time, a waiting collection's run record opens — and
+    is announced — only when it starts, timed from then (§spec:sync-workflow)."""
     config = make_config(*tmp_roots)
     config.max_concurrent_collections = 1
     config.sources[0].collections += [
@@ -115,22 +133,32 @@ def test_child_opens_every_collection_run_up_front_and_times_each_from_its_start
     ]
     write_config(tmp_path / "cfg.yaml", config)
     gate = tmp_path / "go"
-    proc, line = _spawn(tmp_path, ["sync"], items={"gd-x": {"x.flac": "a"}}, gate=gate)
-    try:
-        assert line is not None and line["state"] == "started"
-        assert sorted(r["collection"] for r in line["runs"]) == ["coll1", "coll2", "coll3"]
-    finally:
-        # The first collection may begin before or after this moment, but it holds
-        # its slot at the gate, so the two queued ones can only begin after it.
-        released = datetime.now()
-        gate.touch()
-    assert proc.wait(timeout=30) == 0
-    assert config.state_db is not None
-    starts = sorted(
-        datetime.fromisoformat(_run_row(config.state_db, r["run_id"])["started_at"])
-        for r in line["runs"]
+    proc, reader = _spawn_reading(
+        tmp_path, ["sync"], items={"gd-x": {"x.flac": "a"}}, gate=gate
     )
-    assert released <= starts[1] <= starts[2]
+    with reader:
+        try:
+            assert _read(reader) == {"state": "started"}
+            first = _read(reader)
+            assert first is not None and first["collection"] == "coll1"
+            assert config.state_db is not None
+            conn = sqlite3.connect(config.state_db)
+            try:
+                # coll1 holds its slot at the gate: the others have no record yet.
+                assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+            finally:
+                conn.close()
+        finally:
+            released = datetime.now()
+            gate.touch()
+        rest = [_read(reader), _read(reader)]
+        assert _read(reader) is None
+    assert proc.wait(timeout=30) == 0
+    assert [r["collection"] for r in rest if r] == ["coll2", "coll3"]
+    for later in rest:
+        assert later is not None
+        started = datetime.fromisoformat(_run_row(config.state_db, later["run_id"])["started_at"])
+        assert started >= released
 
 
 # --- serve side: launch a run, wait for its line, watch it to the end -------------
@@ -214,6 +242,11 @@ def test_watcher_closes_the_runs_of_a_killed_child(
         on_exit=exits.append,
     )
     assert isinstance(result, trigger.Started)
+    # Wait for its collection to start: serve knows the run record from then on.
+    deadline = time.monotonic() + 30
+    while not result.run.runs:
+        assert time.monotonic() < deadline, "the run record never opened"
+        time.sleep(0.02)
     result.run.process.send_signal(signal.SIGKILL)
     assert result.run.done.wait(timeout=30)
     assert exits == [-signal.SIGKILL]
@@ -238,6 +271,10 @@ def test_watcher_closes_the_runs_of_a_killed_child(
     )
     assert isinstance(later, trigger.Started)
     try:
+        deadline = time.monotonic() + 30
+        while not later.run.runs:
+            assert time.monotonic() < deadline, "the later run record never opened"
+            time.sleep(0.02)
         trigger.close_abandoned(config.state_db, result.run.runs, -signal.SIGKILL)
         assert _run_row(config.state_db, later.run.runs[0]["run_id"])["finished_at"] is None
     finally:

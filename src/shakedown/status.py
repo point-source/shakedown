@@ -51,7 +51,10 @@ def _collection_summary(
     runs: RunRepo,
     drift: DriftRepo,
     outcomes: OperationOutcomeRepo,
+    live: _Live | None = None,
 ) -> dict[str, Any]:
+    if live is None:
+        live = _Live(items.conn)
     figures = library_figures(items, source_name, collection_name)
     last = runs.latest(source_name, collection_name)
     # Only a sync (or a catch-up sync) lists the source, so only a sync can leave the
@@ -61,6 +64,7 @@ def _collection_summary(
         source_name, collection_name, kind=(RunKind.SYNC, RunKind.CATCH_UP)
     )
     recovery = outcomes.latest_actionable(source_name, collection_name)
+    waiting = live.waiting.get((source_name, collection_name))
     placements = PlacementRepo(items.conn)
     library_dir = config.library_root / source_name / collection_name
     rescheduled = RescheduledRepo(items.conn).get(source_name, collection_name)
@@ -101,6 +105,12 @@ def _collection_summary(
         # The collection's sync was skipped because another run held the writer lock;
         # `since` is its oldest skip (§spec:rescheduled-syncs).
         "rescheduled": {"since": rescheduled.isoformat()} if rescheduled else None,
+        # The collection waits for a slot in a sync that still reports; its run starts
+        # when one frees (§spec:run-activity "Waiting collections").
+        "waiting": (
+            {"kind": waiting["kind"], "since": waiting["since"].isoformat()}
+            if waiting else None
+        ),
         # Stale = the most recent sync failed to enumerate the source; existing
         # items are retained (§spec:failure-behavior).
         "stale": bool(last_sync.stale) if last_sync else False,
@@ -185,6 +195,15 @@ def _summarize_recovery(outcome: OperationOutcome) -> dict[str, Any]:
     }
 
 
+class _Live:
+    """What runs report right now: each waiting collection's entry."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        now = datetime.now()
+        activity = ActivityRepo(conn)
+        self.waiting = {(e["source"], e["collection"]): e for e in activity.waiting(now)}
+
+
 def collection_summaries(config: Config, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Every configured collection's `status --json` summary, in config order: the one
     computation `status` and the dashboard's attention view share
@@ -193,8 +212,11 @@ def collection_summaries(config: Config, conn: sqlite3.Connection) -> list[dict[
     runs = RunRepo(conn)
     drift = DriftRepo(conn)
     outcomes = OperationOutcomeRepo(conn)
+    live = _Live(conn)
     return [
-        _collection_summary(config, source.name, collection.name, items, runs, drift, outcomes)
+        _collection_summary(
+            config, source.name, collection.name, items, runs, drift, outcomes, live
+        )
         for source in config.sources
         for collection in source.collections
     ]
@@ -250,6 +272,11 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 click.echo(f"  failure notice not delivered: {last['failure_notice_error']}")
         else:
             click.echo("  last run: never")
+        if s["waiting"]:
+            click.echo(
+                f"  waiting: since {s['waiting']['since']}; "
+                "starts when a slot frees in the current sync"
+            )
         if s["rescheduled"]:
             click.echo(
                 f"  rescheduled: first skipped {s['rescheduled']['since']}; "

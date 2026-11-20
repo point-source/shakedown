@@ -192,7 +192,7 @@ async def test_a_run_serve_started_shows_live_and_then_its_result(
         live = await _poll(app, clock, lambda runs: next(
             (e for e in runs if e["current_items"] == ["gd-x"]), None), "the fetch")
         assert live["started_by_serve"] is True
-        assert live["run_id"] == r.json()["run_ids"][0]
+        assert live["run_id"] == app.state.triggered[0].runs[0]["run_id"]
         assert (live["state"], live["kind"]) == ("running", "sync")
         assert live["items_to_fetch"] == 1
     finally:

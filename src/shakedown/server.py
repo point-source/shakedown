@@ -162,7 +162,7 @@ def build_app(
         on_exit: Callable[[int], None] | None = None,
     ) -> dict[str, Any]:
         """Start the run as a separate one-shot process and answer once it holds the
-        writer lock and has opened its run records (§spec:api-sync-runs)."""
+        writer lock (§spec:api-sync-runs)."""
         assert config.state_db is not None  # filled in by Config validation
         result = launch(
             config_path,
@@ -185,12 +185,9 @@ def build_app(
         # serve lives for months: keep only the runs still going, plus this one.
         app.state.triggered = [t for t in app.state.triggered if not t.done.is_set()]
         app.state.triggered.append(result.run)
-        return {
-            "started": verb,
-            "source": source,
-            "collection": collection,
-            "run_ids": [r["run_id"] for r in result.run.runs],
-        }
+        # Each collection's run record opens when it starts; GET /status shows its id
+        # as the collection's latest run (§spec:api-sync-runs).
+        return {"started": verb, "source": source, "collection": collection}
 
     def current_config() -> Config:
         try:

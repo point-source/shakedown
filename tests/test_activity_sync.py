@@ -174,7 +174,8 @@ def test_a_failing_recorder_leaves_the_run_identical(
     def broken(*args: object, **kwargs: object) -> None:
         raise sqlite3.OperationalError("disk I/O error")
 
-    for name in ("create", "restart", "write", "end", "trim"):
+    for name in ("create", "create_waiting", "begin", "beat", "drop_waiting", "write",
+                 "end", "trim"):
         monkeypatch.setattr(activity.ActivityRepo, name, broken)
     recorded = _mirror(tmp_path, "failing")
 

@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime
@@ -108,11 +109,11 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         ).status_code == 401
         r = await client.post("/sync", headers={"Authorization": "Bearer test-token"})
         assert r.status_code == 202
-        body = r.json()
-        assert body["started"] == "sync" and len(body["run_ids"]) == 1
+        assert r.json() == {"started": "sync", "source": None, "collection": None}
         await _finish(app)
+        [opened] = app.state.triggered[0].runs
         last_run = (await client.get("/status")).json()[0]["last_run"]
-        assert last_run["run_id"] == body["run_ids"][0]
+        assert last_run["run_id"] == opened["run_id"]
         assert last_run["items_new"] == 0  # idempotent: the separate run saw it mirrored
 
         # verify: requires a bearer token
@@ -121,9 +122,7 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
             headers={"Authorization": "Bearer test-token"},
         )
         assert r.status_code == 202
-        assert r.json() == {
-            "started": "verify", "source": None, "collection": None, "run_ids": [],
-        }
+        assert r.json() == {"started": "verify", "source": None, "collection": None}
         await _finish(app)
 
 
@@ -398,8 +397,8 @@ async def test_sync_starts_a_fresh_run_on_the_config_as_edited(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
     """Change a collection's layout with serve running, then trigger it: 202 at once
-    with the scope and run ids, the run stages under the new layout, and /status
-    shows that run (§spec:api-sync-runs user-level test path)."""
+    with the scope, the run stages under the new layout, and /status shows that run
+    (§spec:api-sync-runs user-level test path)."""
     monkeypatch.setenv(TOKEN_ENV, "test-token")
     archive, library = tmp_roots
     config = make_config(archive, library)
@@ -411,15 +410,11 @@ async def test_sync_starts_a_fresh_run_on_the_config_as_edited(
     ) as client:
         r = await client.post("/sync", params={"collection": "coll1"}, headers=AUTH)
         assert r.status_code == 202
-        body = r.json()
-        assert body == {
-            "started": "sync", "source": None, "collection": "coll1",
-            "run_ids": [body["run_ids"][0]],
-        }
+        assert r.json() == {"started": "sync", "source": None, "collection": "coll1"}
         await _finish(app)
         assert (library / "fake-src" / "coll1" / "renamed" / "gd-x" / "x.flac").is_file()
         last_run = (await client.get("/status")).json()[0]["last_run"]
-        assert last_run["run_id"] == body["run_ids"][0]
+        assert last_run["run_id"] == app.state.triggered[0].runs[0]["run_id"]
         assert last_run["finished_at"] is not None and last_run["items_new"] == 1
         assert 'shakedown_sync_runs_total{result="ok"} 1.0' in (
             await client.get("/metrics")
@@ -431,8 +426,8 @@ async def test_triggered_sync_catches_up_rescheduled_collections_after_its_own(
     tmp_roots: tuple[Path, Path], monkeypatch
 ) -> None:
     """A triggered sync catches up like any sync (§spec:api-sync-runs,
-    §spec:rescheduled-syncs): the 202 lists only the requested collection's run; the
-    catch-up shows in /status as that collection's latest run, its entry gone."""
+    §spec:rescheduled-syncs): the catch-up shows in /status as that collection's
+    latest run, its entry gone, and serve learns of both runs' records."""
     from shakedown.config import CollectionConfig
 
     monkeypatch.setenv(TOKEN_ENV, "test-token")
@@ -448,14 +443,13 @@ async def test_triggered_sync_catches_up_rescheduled_collections_after_its_own(
     ) as client:
         r = await client.post("/sync", params={"collection": "coll1"}, headers=AUTH)
         assert r.status_code == 202
-        run_ids = r.json()["run_ids"]
-        assert len(run_ids) == 1
         await _finish(app)
+        opened = {o["collection"]: o["run_id"] for o in app.state.triggered[0].runs}
         status = {c["collection"]: c for c in (await client.get("/status")).json()}
         metrics = (await client.get("/metrics")).text
-    assert status["coll1"]["last_run"]["run_id"] == run_ids[0]
+    assert status["coll1"]["last_run"]["run_id"] == opened["coll1"]
     caught_up = status["coll2"]["last_run"]
-    assert caught_up["run_id"] not in run_ids
+    assert caught_up["run_id"] == opened["coll2"]
     assert caught_up["kind"] == "catch_up" and caught_up["finished_at"] is not None
     assert caught_up["items_new"] == 1
     assert status["coll1"]["rescheduled"] is None and status["coll2"]["rescheduled"] is None
@@ -550,10 +544,16 @@ async def test_a_killed_run_is_closed_and_counted_as_failed(
     ) as client:
         r = await client.post("/sync", headers=AUTH)
         assert r.status_code == 202
-        app.state.triggered[0].process.send_signal(signal.SIGKILL)
+        triggered = app.state.triggered[0]
+        # Its collection has started: serve knows its run record.
+        deadline = time.monotonic() + 30
+        while not triggered.runs:
+            assert time.monotonic() < deadline, "the run record never opened"
+            await asyncio.sleep(0.02)
+        triggered.process.send_signal(signal.SIGKILL)
         await _finish(app)
         last_run = (await client.get("/status")).json()[0]["last_run"]
-        assert last_run["run_id"] == r.json()["run_ids"][0]
+        assert last_run["run_id"] == triggered.runs[0]["run_id"]
         assert last_run["finished_at"] is not None
         assert "run ended unexpectedly (killed by SIGKILL)" in last_run["errors"]
         metrics = (await client.get("/metrics")).text
