@@ -2191,10 +2191,9 @@ Observable behavior:
   started then, with its run record. If its run ends first (stopped,
   crashed, or killed), it never started and leaves no trace: its run
   removes the entry, or the next run that takes the writer lock does
-  once its heartbeat is stale. Waiting entries are never in the live
-  view's runs, the run history, or Needs attention; `status` shows a
-  waiting line for the collection (§spec:rescheduled-syncs "Visible in
-  status").
+  once its heartbeat is stale. Waiting entries are never in `runs`, the
+  run history, or Needs attention; `status` shows a waiting line for the
+  collection (§spec:rescheduled-syncs "Visible in status").
 - **Ends are never missed.** A running entry updates its heartbeat every
   few seconds. When a run finishes it records its result, using the
   outcome codes `status` already uses (`completed`,
@@ -2230,8 +2229,8 @@ Observable behavior:
   of its progress.
 
 API: `GET /api/activity` (unauthenticated; refreshed every few seconds)
-answers `{generated_at, runs: [...], network: [...]}`. `network` is
-specified in §spec:network-activity. Each `runs` entry:
+answers `{generated_at, runs: [...], waiting: [...], network: [...]}`.
+`network` is specified in §spec:network-activity. Each `runs` entry:
 
 | Field | Meaning |
 | --- | --- |
@@ -2255,6 +2254,17 @@ specified in §spec:network-activity. Each `runs` entry:
 
 `runs` holds running entries and entries that ended in the last ten
 minutes, running first, then newest first.
+
+`waiting` holds the collections waiting for a slot in a run that still
+reports, in the order they start. Each entry:
+
+| Field | Meaning |
+| --- | --- |
+| `activity_id` | The entry's id; the same id carries its running entry once it starts |
+| `source`, `collection` | The collection that waits |
+| `kind` | `sync` or `catch_up` |
+| `started_by_serve` | true when `serve` launched the run |
+| `since` | ISO time it began waiting |
 
 **Decision and constraint.** Runs record their own progress, into the
 state database, on a timer — because runs live in short-lived
