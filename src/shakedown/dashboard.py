@@ -151,8 +151,9 @@ class SharedAnswers:
             refresh = servable and age >= ttl and not slot.refreshing
             if refresh:
                 slot.refreshing = True
+            seen = slot.computed_at
         if refresh:
-            self._spawn(lambda: self._refresh(slot, compute))
+            self._spawn(lambda: self._refresh(slot, compute, seen))
         if servable:
             # The latest answer: one a synchronous spawn just refreshed is in place.
             assert slot.answer is not None
@@ -175,8 +176,15 @@ class SharedAnswers:
                 slot.answer, slot.computed_at, slot.failed = answer, self._clock(), False
             return answer
 
-    def _refresh(self, slot: _Slot, compute: Callable[[], dict[str, Any]]) -> None:
+    def _refresh(
+        self, slot: _Slot, compute: Callable[[], dict[str, Any]], seen: float
+    ) -> None:
         with slot.computing:
+            if slot.computed_at != seen:
+                # A viewer computed a newer answer before this refresh started.
+                with self._lock:
+                    slot.refreshing = False
+                return
             try:
                 answer = compute()
             except Exception:

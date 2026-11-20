@@ -154,3 +154,23 @@ def test_an_answer_is_dated_when_its_computation_finished() -> None:
     clock.now = 171
     assert answers.get("k", TTL, slow) == {"n": 2}
     assert build.builds == 2 and len(threads.started) == 1
+
+
+def test_a_refresh_that_starts_after_a_newer_answer_skips_its_computation() -> None:
+    """A refresh scheduled just before the second interval ends may start only after
+    a viewer has already computed a newer answer: it does not compute it again, and
+    the next expiry schedules a refresh as usual."""
+    clock, queued = _Clock(), []
+    answers = SharedAnswers(clock, spawn=queued.append)
+    build = _Builder()
+    answers.get("k", TTL, build)
+    clock.now = 2 * TTL - 0.1
+    assert answers.get("k", TTL, build) == {"n": 1}  # refresh scheduled, not started
+    clock.now = 2 * TTL
+    assert answers.get("k", TTL, build) == {"n": 2}  # the viewer computes it
+    queued.pop()()  # the late refresh starts
+    assert build.builds == 2
+
+    clock.now = 3 * TTL
+    answers.get("k", TTL, build)
+    assert len(queued) == 1  # a new refresh is scheduled
