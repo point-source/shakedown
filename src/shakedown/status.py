@@ -165,7 +165,7 @@ def _run_end(conn: Any, run: Any) -> RunEnd | None:
 
 def _summarize_run(run: Any, end: RunEnd | None = None) -> dict[str, Any]:
     return {
-        # The id a `serve` trigger answers with, so a caller can find its run here
+        # The run record's id: `serve` learns it as the collection starts
         # (§spec:api-sync-runs).
         "run_id": run.id,
         # sync, refetch, or reconform (§spec:single-show-runs).

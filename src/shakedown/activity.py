@@ -227,10 +227,10 @@ class ActivityRepo:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
-    def begin(self, activity_id: int, run_id: int | None, at: datetime) -> bool:
+    def begin(self, activity_id: int, run_id: int | None, at: datetime) -> None:
         """A waiting entry's run starts now: it becomes a running entry of ``run_id``,
-        timed from here. False when it is not waiting (deleted meanwhile)."""
-        cur = self.conn.execute(
+        timed from here."""
+        self.conn.execute(
             """
             UPDATE run_activity SET state=?, run_id=?, phase=?, started_at=?,
                 last_heartbeat_at=?, last_progress_at=?
@@ -239,7 +239,6 @@ class ActivityRepo:
             (RUNNING, run_id, Phase.STARTING.value, _iso(at), _iso(at), _iso(at),
              activity_id, WAITING),
         )
-        return cur.rowcount == 1
 
     def beat(self, activity_ids: list[int], at: datetime) -> None:
         """Waiting entries are alive: their run still reports."""
@@ -948,20 +947,19 @@ class ActivityRecorder:
             meter = self._meters.setdefault(
                 waiting.source, NetworkMeter(waiting.source, self._now)
             )
-        progress = Progress(waiting.kind, source=waiting.source,
-                            collection=waiting.collection, meter=meter, run_id=run_id,
-                            now=self._now, clock=self._clock)
-        try:
-            with self._lock:
+            progress = Progress(waiting.kind, source=waiting.source,
+                                collection=waiting.collection, meter=meter, run_id=run_id,
+                                now=self._now, clock=self._clock)
+            try:
                 repo = ActivityRepo(self._conn)
                 with transaction(self._conn):
-                    if repo.begin(waiting.activity_id, run_id, self._now()):
-                        progress.activity_id = waiting.activity_id
-                        repo.write(progress.activity_id, progress.snapshot(), self._now())
-                if progress.activity_id is not None:
-                    self._entries.append(progress)
-        except Exception as e:
-            self._warn(e)
+                    repo.begin(waiting.activity_id, run_id, self._now())
+                    progress.activity_id = waiting.activity_id
+                    repo.write(progress.activity_id, progress.snapshot(), self._now())
+                self._entries.append(progress)
+            except Exception as e:
+                progress.activity_id = None
+                self._warn(e)
         return progress
 
     def drop(self, waiting: Waiting) -> None:

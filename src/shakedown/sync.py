@@ -392,8 +392,7 @@ def _run_sync(
         # serve answers its trigger now: the run holds the lock (§spec:api-sync-runs).
         announce_started()
         return _sync_all(
-            config, work, budgets, waiting, recorder, dry_run=False, catch_up=catch_up,
-            kind=kind,
+            config, work, budgets, waiting, recorder, dry_run=False, catch_up=catch_up
         )
 
 
@@ -406,11 +405,11 @@ def _sync_all(
     *,
     dry_run: bool,
     catch_up: dict[tuple[str, str], datetime] | None,
-    kind: RunKind = RunKind.SYNC,
 ) -> int:
     """Run each collection's sync on the bounded collection pool; 1 if any failed."""
+    kind = RunKind.SYNC if catch_up is None else RunKind.CATCH_UP
     overall_failed = 0
-    not_started: list[str] = []
+    not_started: set[str] = set()
     max_workers = min(config.max_concurrent_collections, len(work))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
@@ -435,7 +434,7 @@ def _sync_all(
                     _clear_rescheduled(config, source, collection)
                 continue
             if stats.not_started:
-                not_started.append(f"{source.name}/{collection.name}")
+                not_started.add(f"{source.name}/{collection.name}")
                 continue
             if stats.stopped:
                 # Neither done nor failed: a catch-up keeps its entry, and the next
@@ -466,12 +465,10 @@ def _sync_all(
                 overall_failed += 1
     if not_started:
         # One line for every collection a stop kept from starting (§spec:graceful-stop).
-        order = [f"{s.name}/{c.name}" for s, c, _plugin in work]
-        not_started.sort(key=order.index)
-        count = len(not_started)
+        names = [n for s, c, _plugin in work if (n := f"{s.name}/{c.name}") in not_started]
         log.warning(
             "stopped before %d collection%s started: %s",
-            count, "" if count == 1 else "s", ", ".join(not_started),
+            len(names), "" if len(names) == 1 else "s", ", ".join(names),
         )
     return 0 if overall_failed == 0 else 1
 
@@ -716,7 +713,7 @@ def _sync_collection(
     waiting: Waiting | None = None,
     catch_up_note: str = "",
     recorder: ActivityRecorder | None = None,
-    kind: RunKind = RunKind.SYNC,
+    kind: RunKind,
 ) -> CollectionSyncStats:
     """Sync one (source, collection) end-to-end.
 
@@ -727,14 +724,16 @@ def _sync_collection(
     back as a post-enumeration barrier that runs only after discovery finishes
     successfully; a failed enumeration marks the collection stale and prunes nothing.
 
-    With a ``recorder`` (every run but a dry run) its run record, outcome, and activity
-    entry open here, when the collection takes its slot — never while it waits
-    (§spec:sync-workflow). A collection still waiting when a stop came never starts.
+    With a ``recorder`` and its ``waiting`` entry (every run but a dry run) its run
+    record, outcome, and activity entry open here, when the collection takes its slot
+    — never while it waits (§spec:sync-workflow). A collection still waiting when a
+    stop came never starts.
     """
-    if recorder is not None and stopping.requested():
-        if waiting is not None:
+    if recorder is not None:
+        assert waiting is not None  # _run_sync opens one per collection it records
+        if stopping.requested():
             recorder.drop(waiting)
-        return CollectionSyncStats(not_started=True)
+            return CollectionSyncStats(not_started=True)
     started = datetime.now()
     if catch_up_note:
         log.info("[%s/%s] starting%s", source.name, collection.name, catch_up_note)
@@ -746,7 +745,7 @@ def _sync_collection(
     run: Run | None = None
     outcome: OperationOutcome | None = None
     stats = CollectionSyncStats()
-    if recorder is not None:
+    if recorder is not None and waiting is not None:
         run = runs.start(source.name, collection.name, started, kind=kind)
         outcome = outcomes.start(
             OperationType.SYNC,
@@ -757,12 +756,7 @@ def _sync_collection(
             safe_next_action="restore source access and rerun sync",
         )
         announce_opened(run.id, outcome.id, source.name, collection.name)
-        stats.progress = (
-            recorder.begin(waiting, run_id=run.id) if waiting is not None
-            else recorder.open_entry(
-                source.name, collection.name, ActivityKind(kind.value), run_id=run.id
-            )
-        )
+        stats.progress = recorder.begin(waiting, run_id=run.id)
         stats.progress.run_counts = lambda: _run_counts(stats)
 
     try:

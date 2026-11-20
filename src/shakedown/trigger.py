@@ -68,7 +68,6 @@ def _announce(message: dict[str, Any], *, keep: bool = False) -> None:
         return
     fd = int(raw)  # only serve sets it, always to the pipe's fd number
     if _write(fd, message) and keep:
-        os.set_inheritable(fd, False)  # a handoff command must not hold serve's pipe open
         _ready_fd = fd
         return
     with contextlib.suppress(OSError):
