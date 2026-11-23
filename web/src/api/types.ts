@@ -156,6 +156,13 @@ export interface LibraryAnswer {
 export type AttentionKind =
   | "failed_shows" | "recovery" | "ended_unexpectedly" | "stale" | "rescheduled"
   | "handoff_pending" | "failure_notice_undelivered" | "separations" | "unplaced_files"
+  | "unidentified_files"
+
+/** An audio file whose content matches no recognised format, by its source name. */
+export interface UnidentifiedFile {
+  identifier: string
+  file: string
+}
 
 export type OperationStatus =
   | "not_started" | "in_progress" | "completed" | "completed_with_item_issues"
@@ -186,7 +193,7 @@ export interface AttentionEntry {
   since: Iso | null
   /** The first ten affected shows; `count` says how many there are. */
   identifiers: string[]
-  /** How many shows the entry affects (files, for unplaced_files). */
+  /** How many shows the entry affects (files, for unplaced_files and unidentified_files). */
   count: number
   detail: Record<string, unknown>
 }

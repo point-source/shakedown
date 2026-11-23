@@ -109,6 +109,15 @@ function longContent(): Answers {
       detail: { separations: [] } },
     { kind: "unplaced_files", source: "internetarchive", collection: "phish", since: null, identifiers: [], count: 4,
       detail: { unplaced_files: ["/data/library/Phish/1997-11-22 - Hampton Coliseum/cover.jpg", "/data/library/Phish/.DS_Store", "/data/library/Phish/1995-12-31 - Madison Square Garden/notes.txt", "/data/library/Phish/1993-08-13/folder.jpg"] } },
+    { kind: "unidentified_files", source: "internetarchive", collection: long, since: null,
+      identifiers: ["gd1982-10-10.aud.berger.98765.flac16", "gd1990-03-29.sbd.miller.27720.flac16"], count: 5,
+      detail: { unidentified_files: [
+        { identifier: "gd1982-10-10.aud.berger.98765.flac16", file: "gd82-10-10d1t01.flac" },
+        { identifier: "gd1982-10-10.aud.berger.98765.flac16", file: "gd82-10-10d1t02.flac" },
+        { identifier: "gd1982-10-10.aud.berger.98765.flac16", file: "gd82-10-10d2t07 Drums > Space.flac" },
+        { identifier: "gd1990-03-29.sbd.miller.27720.flac16", file: "gd90-03-29d1t03.flac" },
+        { identifier: "gd1990-03-29.sbd.miller.27720.flac16", file: "gd90-03-29d3t01.flac" },
+      ] } },
   ]
   a.attention.entries = entries
   const kinds = ["sync", "verify", "catch_up", "restage", "reconcile", "refetch"] as const

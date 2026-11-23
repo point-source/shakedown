@@ -1,6 +1,6 @@
 import { Badge } from "@/components/ui/badge"
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import type { AttentionEntry, Recovery } from "@/api/types"
+import type { AttentionEntry, Recovery, UnidentifiedFile } from "@/api/types"
 import { Empty, RowsSkeleton, ShowIds } from "@/dash/bits"
 import { clock } from "@/lib/format"
 import { attentionWords } from "@/lib/words"
@@ -10,7 +10,9 @@ function Entry({ e, now }: { e: AttentionEntry; now: string }) {
   const d = e.detail as Record<string, unknown>
   const recovery = (e.kind === "recovery" ? d : d.recovery) as Recovery | undefined
   const reason = (d.last_reason ?? d.failure_notice_error) as string | undefined
-  const files = (d.unplaced_files ?? []) as string[]
+  const files = e.kind === "unidentified_files"
+    ? ((d.unidentified_files ?? []) as UnidentifiedFile[]).map((f) => `${f.identifier}/${f.file}`)
+    : (d.unplaced_files ?? []) as string[]
   return (
     <li className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3">
@@ -25,7 +27,7 @@ function Entry({ e, now }: { e: AttentionEntry; now: string }) {
         </span>
       )}
       {reason && <p className="font-mono text-xs wrap-anywhere whitespace-pre-wrap text-muted-foreground">{reason}</p>}
-      <ShowIds ids={e.kind === "unplaced_files" ? files : e.identifiers} total={e.count} />
+      <ShowIds ids={e.kind === "unplaced_files" || e.kind === "unidentified_files" ? files : e.identifiers} total={e.count} />
       {e.since && e.kind !== "rescheduled" && !e.kind.startsWith("ended") && (
         <span className="text-xs text-muted-foreground">Since {clock(e.since, now)}</span>
       )}
