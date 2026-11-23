@@ -1648,33 +1648,30 @@ attention list, never only in a log (§req:success-criteria #31, #34;
 Observable behavior:
 
 - **`status`.** Per collection, `status --json` carries
-  `unidentified_files`: the complete list of `{identifier, file}` for
-  every unidentified file of the collection's mirrored shows, `file`
-  being the source's name. `status` text prints a count per collection
-  and the first 10, as it does for other lists.
-- **`GET /api/attention`.** A new entry kind, `unidentified_files`, one
-  per collection with any: `identifiers` holds the affected shows,
-  `count` the number of files, `detail.unidentified_files` the first 10
-  `{identifier, file}` pairs, and `since` is null (no time recorded),
-  following `unplaced_files` (§spec:needs-attention).
+  `unidentified_files`: the complete list of `{identifier, file}`, by
+  show, `file` being the source's name. It covers the files staged
+  under their name and never tagged: shows with an archive copy, and a
+  record that still describes the manifest's file (a record left from
+  other bytes counts for nothing). `status` text prints a count and the
+  first 10. A database from before format records lists none; `status`
+  never migrates it.
+- **`GET /api/attention`.** The entry kind `unidentified_files`, one per
+  collection with any, shaped like `unplaced_files`
+  (§spec:needs-attention): the affected shows, the number of files as
+  its count, the first 10 `{identifier, file}` pairs, and no `since`.
 - **The page words the kind.** The Needs attention row reuses the
-  existing entry row, with a title and next step from the kind's word
-  entry, written to the Terms glossary; it shows the affected files the
-  way it shows unplaced files. The next step says the files are kept as
-  they are; there is nothing shakedown will do about them.
+  existing entry row; its title and next step come from the kind's word
+  entry (the files are kept as they are and shakedown does nothing more
+  with them), and it shows the files as `<show ID>/<file>`, as unplaced
+  files show their paths.
 - **When it clears.** The entry for a file goes when the file is no
   longer unidentified: the source changes it and the new download is
   recognised, or the show is pruned. Like `separations`, it can stay
   until the source changes.
 
-**UI readiness.** The kit covers this: a new kind is one more row of an
-existing list, using the existing row component and kit tokens; no new
-screen and no Design task. No glossary term is added — the row speaks
-of shows and files. The implementing batch adds the kind to the
-`long-content` scenario (which holds every kind), renders the Needs
-attention card before and after for the operator's approval (a state
-nobody drew), and adds the state to `docs/ui/handoff/overview.md`. If
-its wording needs a term the glossary lacks, the batch asks.
+**UI readiness.** One more row of an existing list, from the existing
+row component and kit tokens; no new screen and no glossary term. The
+operator approved the row in the `long_content` render (2026-11-23).
 
 **Decision and constraint.** An attention entry per collection, shaped
 like `unplaced_files`. The constraints: the operator chose "needing
