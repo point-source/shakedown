@@ -608,6 +608,13 @@ class Progress:
         with self._lock:
             self._bump("items_failed", n)
 
+    def stored_show_checked(self) -> None:
+        """One stored show's audio was checked (§spec:real-format-catch-up). No counter
+        moves for it, yet the run is not stuck: it counts as progress (Q-5-1,
+        provisional)."""
+        with self._lock:
+            self._last_progress_at = self._now()
+
     def working(self, identifier: str) -> None:
         with self._lock:
             self._working[identifier] = self._working.get(identifier, 0) + 1

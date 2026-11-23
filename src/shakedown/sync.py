@@ -64,7 +64,13 @@ from shakedown.placement import (
 )
 from shakedown.plugins import registry
 from shakedown.plugins.base import FailureCause, FetchResult, ListedItem, SourcePlugin
-from shakedown.realformat import FormatCheck, format_label, is_checked, named_format
+from shakedown.realformat import (
+    FormatCheck,
+    format_label,
+    is_checked,
+    named_format,
+    unchecked_files,
+)
 from shakedown.reschedule import record_skipped
 from shakedown.staging import (
     METADATA_SIDECAR,
@@ -1223,8 +1229,14 @@ def _pipelined_discover_and_fetch(
                 return False
             return True
 
+        def check_stored_shows() -> None:
+            # Before any look-up decision, so the decision can read what the checks
+            # found (§spec:real-format-ranking re-ranks a stored show from them).
+            _check_stored_shows(items, source.name, collection.name, by_identifier, progress)
+
         descriptor_stream = stream_items(
-            plugin, collection, budget, enumerated, look_up=look_up, progress=progress
+            plugin, collection, budget, enumerated, look_up=look_up,
+            prepare=check_stored_shows, progress=progress,
         )
         def process(fut: Future[_FetchOutcome]) -> None:
             _process_fetch_result(
@@ -1277,6 +1289,62 @@ def _pipelined_discover_and_fetch(
             process(fut)
 
     return enumerated, deferred, enum_error
+
+
+def _check_stored_shows(
+    items: ItemRepo,
+    source_name: str,
+    collection_name: str,
+    stored: dict[str, Item],
+    progress: Progress,
+) -> dict[str, dict[str, FormatCheck]]:
+    """Check every stored show's audio files in the checked set that have no valid
+    check, from the archive copy, reading only the parts that identify each file
+    (§spec:real-format-catch-up). Covers the first sync after the upgrade and a
+    database rebuilt by `reconcile`; later syncs find nothing to check and open no
+    file. Nothing is downloaded.
+
+    Each show's checks are recorded as it finishes, so a stopped or killed run resumes
+    with the shows not yet checked. A show found holding a file whose format differs
+    from its name is then acted on as if just fetched: its tag fingerprint is cleared,
+    so the run's tag pass revisits it with the real format's writer (the computed tags
+    are keyed by file name and would not change by themselves), and the run's staging
+    pass links it under its real extension.
+
+    Returns the new checks per show: what the best-copy choice reads
+    (§spec:real-format-ranking)."""
+    formats = FormatRepo(items.conn)
+    records = formats.for_collection(source_name, collection_name)
+    found: dict[str, dict[str, FormatCheck]] = {}
+    for identifier, item in sorted(stored.items()):
+        if not has_archive_copy(item):
+            continue
+        assert item.recorded_manifest is not None and item.archive_path is not None
+        pending = unchecked_files(item.recorded_manifest, records.get(identifier, {}))
+        if not pending:
+            continue
+        stopping.check()  # the show in hand finishes; the rest wait for the next run
+        progress.working(identifier)
+        try:
+            checks = {mf.name: realformat.check_file(item.archive_path / mf.name)
+                      for mf in pending}
+        finally:
+            progress.idle(identifier)
+        by_name = {mf.name: mf for mf in pending}
+        with transaction(items.conn):
+            for name, check in checks.items():
+                mf = by_name[name]
+                formats.put(source_name, collection_name, identifier, name, mf.size, mf.md5,
+                            check)
+            if any(check.differs_from(name) for name, check in checks.items()):
+                TagRepo(items.conn).clear_fingerprint(source_name, collection_name, identifier)
+        progress.stored_show_checked()
+        _log_mislabels(source_name, collection_name, identifier, checks)
+        found[identifier] = checks
+    if found:
+        log.info("[%s/%s] checked the audio of %d stored show(s)",
+                 source_name, collection_name, len(found))
+    return found
 
 
 def _fire_notifications(

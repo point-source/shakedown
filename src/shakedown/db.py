@@ -655,8 +655,9 @@ def _migrate_to_13(conn: sqlite3.Connection) -> None:
     fingerprint of every tagged show whose recorded manifest holds a file named
     `.m4a` is cleared once: the first sync after the upgrade revisits it, filling its
     M4A files' gaps and only reading files already carrying every tag. A show whose
-    M4A files are named otherwise is revisited once its check records M4A, which
-    changes its computed tags. Nothing else changes."""
+    M4A files are named otherwise is revisited once the stored-show check finds them,
+    which clears its fingerprint (§spec:real-format-catch-up): its computed tags are
+    keyed by file name and do not change. Nothing else changes."""
     for stmt in _FORMAT_SCHEMA:
         conn.execute(stmt)
     conn.execute(
