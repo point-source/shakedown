@@ -957,6 +957,39 @@ def test_v12_db_gains_an_empty_format_record(tmp_path: Path) -> None:
     assert TagRepo(conn).fingerprints("s", "c") == {"x": "fp"}
 
 
+def test_v12_db_reopens_tagged_shows_with_m4a_files_once(tmp_path: Path) -> None:
+    """v13 also clears the fingerprint of every tagged show holding a file named
+    .m4a (any letter case), so the first sync after the upgrade fills its M4A files
+    (§spec:m4a-tags, §spec:state); other shows and every file record stay."""
+    db_path = tmp_path / "v12.db"
+    conn = connect(db_path)
+    manifests = {
+        "aac": '[{"name": "t01.m4a", "size": 1, "md5": null, "library": true}]',
+        "upper": '[{"name": "T01.M4A", "size": 1, "md5": null, "library": true}]',
+        "lossless": '[{"name": "t01.flac", "size": 1, "md5": null, "library": true}]',
+    }
+    repo = TagRepo(conn)
+    for identifier, manifest in manifests.items():
+        conn.execute(
+            "INSERT INTO items (source_name, collection_name, identifier, status,"
+            " recorded_manifest) VALUES ('s', 'c', ?, 'complete', ?)",
+            (identifier, manifest),
+        )
+        repo.set_fingerprint("s", "c", identifier, "fp")
+        repo.put_file("s", "c", identifier, "t01", TagRecord("md5", {"album": "A"}))
+    conn.execute("DROP TABLE audio_formats")
+    conn.execute("UPDATE schema_version SET version = 12")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 13
+    repo = TagRepo(conn)
+    assert repo.fingerprints("s", "c") == {"lossless": "fp"}
+    for identifier in manifests:
+        assert set(repo.file_records("s", "c", identifier)) == {"t01"}
+
+
 def test_format_repo_round_trip(tmp_path: Path) -> None:
     repo = FormatRepo(connect(tmp_path / "s.db"))
     repo.put("s", "c", "x", "a.flac", 10, "aa", AAC)

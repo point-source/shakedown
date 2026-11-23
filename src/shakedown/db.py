@@ -648,11 +648,28 @@ def _migrate_to_12(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_13(conn: sqlite3.Connection) -> None:
     """v12 → v13: add the per-file record of real audio formats (§spec:state,
-    §spec:real-format). Additive: it starts empty — downloads are checked at fetch,
-    stored shows by the catch-up (§spec:real-format-catch-up) — and nothing else
-    changes."""
+    §spec:real-format). It starts empty — downloads are checked at fetch, stored
+    shows by the catch-up (§spec:real-format-catch-up).
+
+    M4A joins the tagged formats in this version (§spec:m4a-tags), so the
+    fingerprint of every tagged show whose recorded manifest holds a file named
+    `.m4a` is cleared once: the first sync after the upgrade revisits it, filling its
+    M4A files' gaps and only reading files already carrying every tag. A show whose
+    M4A files are named otherwise is revisited once its check records M4A, which
+    changes its computed tags. Nothing else changes."""
     for stmt in _FORMAT_SCHEMA:
         conn.execute(stmt)
+    conn.execute(
+        """
+        DELETE FROM tag_shows WHERE EXISTS (
+            SELECT 1 FROM items, json_each(items.recorded_manifest) AS f
+            WHERE items.source_name = tag_shows.source_name
+              AND items.collection_name = tag_shows.collection_name
+              AND items.identifier = tag_shows.identifier
+              AND lower(json_extract(f.value, '$.name')) LIKE '%.m4a'
+        )
+        """
+    )
 
 
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
