@@ -2094,7 +2094,7 @@ def _fetch_one(
         if unsafe is not None:
             return unsafe
         if fetch and progress is not None:
-            progress.to_fetch(_bytes_of(fetch))
+            progress.more_to_fetch(_bytes_of(fetch))
 
     # The files the archive copy already holds join the download by hardlink: no
     # bytes are read or hashed, and the swap below keeps them (§spec:quality-selection).

@@ -588,6 +588,15 @@ class Progress:
             else:
                 self._bytes_to_fetch += size
 
+    def more_to_fetch(self, size: int | None) -> None:
+        """More bytes to fetch for a show already counted (None when unknown): a
+        fetch whose checks chose more files (§spec:real-format-ranking)."""
+        with self._lock:
+            if size is None:
+                self._sizes_known = False
+            else:
+                self._bytes_to_fetch += size
+
     def work_total(self, n: int) -> None:
         """The shows a non-fetching run works through, known up front (restage,
         verify)."""
