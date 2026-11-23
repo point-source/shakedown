@@ -1360,9 +1360,13 @@ def _check_stored_files(
     """Check one stored show's files. A file that cannot be checked (missing, an I/O
     error, or a reader failing on odd content) is left unchecked and tried again on the
     next run: neither the show nor the collection's discovery fails for it
-    (§spec:real-format-catch-up, §spec:per-item-isolation)."""
+    (§spec:real-format-catch-up, §spec:per-item-isolation). A missing file is passed
+    over quietly, as the tag pass does: the sync fetches it again and checks the
+    download when it arrives."""
     checks: dict[str, FormatCheck] = {}
     for mf in files:
+        if not (archive_path / mf.name).is_file():
+            continue
         try:
             checks[mf.name] = realformat.check_file(archive_path / mf.name)
         except Exception as e:  # one file's fault stays with that file

@@ -429,9 +429,9 @@ def test_a_file_that_cannot_be_checked_stays_unchecked_and_fails_nothing(
 def test_a_missing_file_is_left_to_the_syncs_own_repair(
     tmp_roots, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The check skips a stored file that is gone, and fails nothing. The sync already
-    fetches a show's missing files again (§spec:sync-workflow), and that download is
-    checked when it arrives (§spec:real-format)."""
+    """The check passes over a stored file that is gone, quietly, and fails nothing. The
+    sync already fetches a show's missing files again (§spec:sync-workflow), and that
+    download is checked when it arrives (§spec:real-format)."""
     config = make_config(*tmp_roots)
     _show("deadco2022-06-13", {"t1.flac": "m4a", "t2.flac": "m4a"})
     _mirror_before_the_check(config, monkeypatch)
@@ -441,7 +441,7 @@ def test_a_missing_file_is_left_to_the_syncs_own_repair(
     with caplog.at_level(logging.WARNING):
         assert run_sync(config) == 0
 
-    assert "could not check the format of t2.flac" in caplog.text
+    assert "could not check the format" not in caplog.text
     assert FakePlugin.fetched_files["deadco2022-06-13"][-1:] == ["t2.flac"]
     assert _formats(config, "deadco2022-06-13") == {"t1.flac": AAC, "t2.flac": AAC}
     assert _names(_library(config, "deadco2022-06-13")) == {"t1.m4a", "t2.m4a"}
