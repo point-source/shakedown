@@ -20,7 +20,7 @@ don't rebuild), with two corrections for how they behave on mislabelled files:
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -160,3 +160,27 @@ def valid_formats(
         if record is not None and record[:2] == (mf.size, mf.md5):
             valid[mf.name] = record[2]
     return valid
+
+
+def library_names(names: Sequence[str], formats: Mapping[str, FormatCheck]) -> dict[str, str]:
+    """Each library-staged file's library name, by source name (§spec:real-format).
+
+    A file whose recognised real format differs from its name keeps its stem and takes
+    the real format's lowercase extension (`1-01 St. Stephen.flac` → `.m4a`); every
+    other file keeps its exact source name. A real name that equals another staged
+    file's source name, or another file's real name, is not taken: that file keeps its
+    source name, so no show file replaces another. A function of recorded state only,
+    so the same archive state always gives the same names."""
+    wanted: dict[str, str] = {}
+    for name in names:
+        check = formats.get(name)
+        if check is not None and check.recognised and check.differs_from(name):
+            assert check.extension is not None
+            wanted[name] = name[: name.rfind(".")] + check.extension
+    taken = set(names)
+    candidates = list(wanted.values())
+    return {
+        name: real if (name in wanted and (real := wanted[name]) not in taken
+                       and candidates.count(real) == 1) else name
+        for name in names
+    }
