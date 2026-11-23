@@ -610,8 +610,8 @@ class Progress:
 
     def stored_show_checked(self) -> None:
         """One stored show's audio was checked (§spec:real-format-catch-up). No counter
-        moves for it, yet the run is not stuck: it counts as progress (Q-5-1,
-        provisional)."""
+        moves for it, yet the run is not stuck: it counts as progress
+        (§spec:run-activity "Is it stuck?")."""
         with self._lock:
             self._last_progress_at = self._now()
 

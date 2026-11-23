@@ -283,7 +283,8 @@ def test_each_checked_show_counts_as_progress(
     tmp_roots, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No counter moves while stored shows are checked, so each checked show marks the
-    run's progress: a long first sync is not shown as making none (Q-5-1, provisional)."""
+    run's progress: a long first sync is not shown as making none
+    (§spec:run-activity "Is it stuck?")."""
     monkeypatch.setattr(activity, "TICK_S", 0.05)
     config = make_config(*tmp_roots)
     for n in range(3):
