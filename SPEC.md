@@ -1156,10 +1156,10 @@ sync; the old folder is gone without any download.
 
 ## Tag filling §spec:tag-filling
 
-*Status: in progress*
+*Status: complete*
 
-Complete, including choosing the writer by the file's real format
-(§spec:real-format); M4A files (§spec:m4a-tags) not started.
+Includes choosing the writer by the file's real format
+(§spec:real-format) and M4A files (§spec:m4a-tags).
 
 A collection may opt in (`fill_tags`, default off, §spec:configuration)
 to having shakedown fill in missing basic tags from the source metadata
@@ -1288,9 +1288,9 @@ another tool; `verify --deep` reports exactly that file.
 
 *Status: in progress*
 
-The check at fetch, its record, the real-extension library name, and the
-tag writer by real format are done; tagging M4A files (§spec:m4a-tags),
-checking stored shows (§spec:real-format-catch-up), and listing
+The check at fetch, its record, the real-extension library name, the
+tag writer by real format, and tagging M4A files (§spec:m4a-tags) are
+done; checking stored shows (§spec:real-format-catch-up) and listing
 unidentified files (§spec:unidentified-audio) are not started.
 
 Compatibility: from "deployed — single operator install, no external
@@ -1495,7 +1495,7 @@ staged as `.m4a`; the MP3 is not downloaded.
 
 ## M4A tag filling §spec:m4a-tags
 
-*Status: not started*
+*Status: complete*
 
 On a `fill_tags` collection, M4A files — honestly named `.m4a` files and
 files the check found to be M4A — have their missing tags filled like
@@ -1901,11 +1901,9 @@ the run rather than being ignored).
 
 ## State persistence and recovery §spec:state
 
-*Status: in progress*
+*Status: complete*
 
-Complete through schema v12; schema v13 records each file's real format,
-and its clearing of M4A shows' tag fingerprints (§spec:m4a-tags) is not
-started.
+Complete through schema v13.
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
