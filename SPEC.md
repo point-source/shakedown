@@ -912,11 +912,11 @@ first sync downloads only the added non-audio files and playable copies.
 
 ## Library staging §spec:library-staging
 
-*Status: in progress*
+*Status: complete*
 
-Complete, including path ownership, clash separation, and
-stale-copy cleanup (§spec:library-ownership, §spec:library-cleanup); the
-real-extension exception (§spec:real-format) not started.
+Including path ownership, clash separation, stale-copy cleanup
+(§spec:library-ownership, §spec:library-cleanup), and the real-extension
+exception (§spec:real-format).
 
 Per collection, the user provides a `library_layout` template that
 renders each item's **staging directory** under the library tree, from
@@ -1158,8 +1158,8 @@ sync; the old folder is gone without any download.
 
 *Status: in progress*
 
-Complete; M4A files and choosing the writer by real format
-(§spec:m4a-tags, §spec:real-format) not started.
+Complete, including choosing the writer by the file's real format
+(§spec:real-format); M4A files (§spec:m4a-tags) not started.
 
 A collection may opt in (`fill_tags`, default off, §spec:configuration)
 to having shakedown fill in missing basic tags from the source metadata
@@ -1286,7 +1286,12 @@ another tool; `verify --deep` reports exactly that file.
 
 ## Audio known by its content §spec:real-format
 
-*Status: not started*
+*Status: in progress*
+
+The check at fetch, its record, the real-extension library name, and the
+tag writer by real format are done; tagging M4A files (§spec:m4a-tags),
+checking stored shows (§spec:real-format-catch-up), and listing
+unidentified files (§spec:unidentified-audio) are not started.
 
 Compatibility: from "deployed — single operator install, no external
 consumers" (§req:constraints): every surface this feature touches is
@@ -1694,13 +1699,13 @@ file upstream with a real FLAC and sync: the entry is gone.
 
 ## Verification and drift §spec:verify-drift
 
-*Status: in progress*
+*Status: complete*
 
-Complete, including reconform as single-show runs
-(§spec:single-show-runs), comparison against post-tag checksums, and
-refilling tags after a reconform (§spec:tag-filling); keeping a
-reconformed file's real-extension library name (§spec:real-format) not
-started.
+Including reconform as single-show runs (§spec:single-show-runs),
+comparison against post-tag checksums, refilling tags after a reconform
+with the writer for the recorded real format (§spec:tag-filling), and
+keeping a reconformed file's real-extension library name
+(§spec:real-format).
 
 `shakedown verify` is the explicit, operator-invoked integrity tool.
 It is never scheduled by default (§req:constraints).
@@ -1896,7 +1901,11 @@ the run rather than being ignored).
 
 ## State persistence and recovery §spec:state
 
-*Status: complete*
+*Status: in progress*
+
+Complete through schema v12; schema v13 records each file's real format,
+and its clearing of M4A shows' tag fingerprints (§spec:m4a-tags) is not
+started.
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -1975,7 +1984,7 @@ Sync state lives in a single-file embedded SQLite database at
   volume without that much free space fails the run, the migration
   rolls back whole, and the next run tries again. Additive: nothing
   else changes, and nothing is re-downloaded.
-- Schema v13 (not started) records, per checked audio file, the real
+- Schema v13 records, per checked audio file, the real
   format and class found by its content (§spec:real-format), beside the
   recorded manifest and outside its change-detection identity. It is
   additive: it adds no check itself — the first sync after the upgrade
