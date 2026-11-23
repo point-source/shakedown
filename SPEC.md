@@ -148,7 +148,7 @@ Behavior the user can observe:
   `disappeared`, the system records the date it was first found
   missing from a complete listing. A retained show stays on disk and in
   the library for playback, and `status` shows it informationally —
-  "removed upstream on <date>; kept" (text: a count per collection;
+  "removed upstream on \<date>; kept" (text: a count per collection;
   JSON: each show with its date) — never as a warning, a recovery item,
   or a cause of a non-zero exit. If the show is listed again, it returns
   to `complete` and the date is cleared. (Operator decision,
@@ -1003,7 +1003,7 @@ Observable behavior:
 - **Clashing folders are separated by identifier, for every clasher.**
   Within a collection, when two or more shows that have an archive copy
   render the same library folder from `library_layout`, *each* of them
-  is staged into that folder name with ` [<identifier>]` appended to its
+  is staged into that folder name with a space and `[<identifier>]` appended to its
   last segment (`1977-05-08 - Barton Hall` →
   `1977-05-08 - Barton Hall [gd77-05-08.sbd.hicks.4982.sbeok.shnf]`). No
   show keeps the bare name while another is labelled. A show whose
@@ -1181,7 +1181,7 @@ Observable behavior:
     `unknown`). When two or more
     shows that shakedown tags would end up with the same album artist,
     album, and date — which a tag-driven player merges into one album —
-    each of them gets ` [<identifier>]` appended, by the same
+    each of them gets a space and `[<identifier>]` appended, by the same
     every-clasher rule as library folders (§spec:library-ownership).
     (Operator decision, 2026-11-10.)
   - date ← the show's date; venue ← the show's venue, in the format's
@@ -2086,7 +2086,7 @@ Observable behavior:
   its pending list; changing the target sends the pending shows to the
   new target.
 - **Visible in status.** `shakedown status` (text) shows, per
-  collection, "handoff not delivered: N shows since <time>" with the
+  collection, "handoff not delivered: N shows since \<time>" with the
   last reason; `status --json` and `GET /status` carry the same, with
   the pending identifiers.
 - **Does not fail the run.** An undelivered notice does not change the
@@ -3273,11 +3273,11 @@ Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
 - **No-progress rule.** The page marks a running run with no progress
   for 5 minutes: when now minus `last_progress_at` exceeds 5 minutes, the
   run's row in Running now gets a `warning` Badge "No progress for
-  <time>" beside its phase. The API carries no verdict on progress
+  \<time>" beside its phase. The API carries no verdict on progress
   (§spec:run-activity).
 - **A run that stopped reporting** shows, as soon as `/api/attention`
-  lists it, as a Needs attention entry "Lost contact with <kind> at
-  <time>" with its next step, and in Recent runs and on the Runs tab with
+  lists it, as a Needs attention entry "Lost contact with \<kind> at
+  \<time>" with its next step, and in Recent runs and on the Runs tab with
   a `danger` Badge "Lost contact" (renamed from "Stopped reporting",
   operator decision, 2026-11-16, so that "Stopped" means one thing).
 - **A run stopped on request** (§spec:graceful-stop) shows in Recent
@@ -3373,7 +3373,7 @@ Spec and code names in the last column never appear on screen.
 | Has an error (config) | shakedown.yaml does not load right now; the error names the key. | broken, invalid, failed | `health.config.valid: false` |
 | Next step | The action `status` suggests for an unfinished or failed operation, shown as the server words it. | fix, action, hint | `safe_next_action` |
 | Updated (shows) | Shows a run fetched again because they changed upstream. | changed, refreshed | `items_updated` |
-| Updated <time> | When the newest data on screen was computed. | refreshed, synced, as of | `generated_at` |
+| Updated \<time> | When the newest data on screen was computed. | refreshed, synced, as of | `generated_at` |
 
 "Updated" carries two meanings, kept on purpose (operator decision,
 2026-11-12): as a count of shows on Runs and Overview, and as the data
