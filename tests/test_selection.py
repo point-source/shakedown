@@ -13,12 +13,14 @@ from shakedown.discovery import validate_lookup
 from shakedown.models import Manifest, ManifestFile, SourceFile
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import ItemLookup
+from shakedown.realformat import UNIDENTIFIED, AudioClass, FormatCheck, RealFormat
 from shakedown.selection import (
     DOWNLOAD_REFUSED_REASON,
     LOSSLESS_REFUSED_REASON,
     NOT_PLAYABLE_SHN_REASON,
     NOT_PLAYABLE_UNRECOGNISED_REASON,
     keeps_unplayable_original,
+    may_change_rank,
     select,
 )
 
@@ -547,3 +549,134 @@ def test_shows_without_an_unplayable_original_beside_a_playable_copy() -> None:
     )
     # A resource fork named like a track is not audio.
     assert not keeps_unplayable_original(_manifest(("t01.mp3", True), ("._t01.shn", False)))
+
+
+# --- ranking by a file's recorded real format (§spec:real-format-ranking) ------------
+
+AAC = FormatCheck(RealFormat.M4A, AudioClass.LOSSY)
+ALAC = FormatCheck(RealFormat.M4A, AudioClass.LOSSLESS)
+FLAC_CHECK = FormatCheck(RealFormat.FLAC, AudioClass.LOSSLESS)
+MP3_CHECK = FormatCheck(RealFormat.MP3, AudioClass.LOSSY)
+
+
+def _checked(files: tuple[SourceFile, ...], check: FormatCheck) -> dict:
+    """Records, as FormatRepo returns them, describing these listed files."""
+    return {f.name: (f.size, f.md5, check) for f in files}
+
+
+def _aac_flac_set(size: int = 60 * MB) -> tuple[SourceFile, ...]:
+    """A "Flac"-listed set that is really AAC in M4A (deadco2022-06-14)."""
+    return tuple(_f(f"t0{n}.flac", "Flac", size=size) for n in (1, 2))
+
+
+def test_a_flac_listed_set_recorded_as_aac_loses_to_a_real_flac_set() -> None:
+    aac = _aac_flac_set()
+    real = tuple(_f(f"t0{n}_24.flac", "24bit Flac", size=50 * MB) for n in (1, 2))
+    # By the listing, the larger "Flac" set wins among equal-order lossless copies.
+    assert _names(select((*aac, *real), None)) == ["t01.flac", "t02.flac"]
+    chosen = select((*aac, *real), None, _checked(aac, AAC))
+    assert _names(chosen) == ["t01_24.flac", "t02_24.flac"]
+
+
+def test_a_flac_listed_set_recorded_as_aac_loses_to_wav() -> None:
+    aac = _aac_flac_set()
+    wav = tuple(_f(f"t0{n}.wav", "WAVE", size=40 * MB) for n in (1, 2))
+    assert _names(select((*aac, *wav), None)) == ["t01.flac", "t02.flac"]
+    # WAV is lossless and playable: the one copy kept.
+    assert _names(select((*aac, *wav), None, _checked(aac, AAC))) == ["t01.wav", "t02.wav"]
+
+
+def test_a_flac_listed_set_recorded_as_aac_beside_shn_keeps_shn_as_best_available() -> None:
+    aac = _aac_flac_set()
+    shn = tuple(_f(f"t0{n}.shn", "Shorten", size=30 * MB) for n in (1, 2))
+    chosen = select((*aac, *shn), None, _checked(aac, AAC))
+    assert _names(chosen) == ["t01.flac", "t01.shn", "t02.flac", "t02.shn"]
+    # The AAC is the best playable copy: staged; the SHN stays archive-only.
+    assert {f.name for f in chosen.manifest.files if f.library} == {"t01.flac", "t02.flac"}
+    assert chosen.not_playable_reason is None
+
+
+def test_a_record_for_other_bytes_counts_for_nothing() -> None:
+    aac = _aac_flac_set()
+    real = tuple(_f(f"t0{n}_24.flac", "24bit Flac", size=50 * MB) for n in (1, 2))
+    stale = {f.name: (f.size + 1, f.md5, AAC) for f in aac}
+    assert _names(select((*aac, *real), None, stale)) == ["t01.flac", "t02.flac"]
+
+
+def test_an_unidentified_record_counts_as_listed() -> None:
+    aac = _aac_flac_set()
+    real = tuple(_f(f"t0{n}_24.flac", "24bit Flac", size=50 * MB) for n in (1, 2))
+    chosen = select((*aac, *real), None, _checked(aac, UNIDENTIFIED))
+    assert _names(chosen) == ["t01.flac", "t02.flac"]
+
+
+def test_apple_lossless_named_flac_orders_after_a_real_flac() -> None:
+    alac = _aac_flac_set()
+    real = tuple(_f(f"t0{n}_24.flac", "24bit Flac", size=50 * MB) for n in (1, 2))
+    chosen = select((*alac, *real), None, _checked(alac, ALAC))
+    assert _names(chosen) == ["t01_24.flac", "t02_24.flac"]
+
+
+def test_a_copy_with_one_lossy_checked_file_ranks_lossy() -> None:
+    mixed = _aac_flac_set()
+    real = tuple(_f(f"t0{n}_24.flac", "24bit Flac", size=50 * MB) for n in (1, 2))
+    records = {mixed[0].name: (mixed[0].size, mixed[0].md5, FLAC_CHECK),
+               mixed[1].name: (mixed[1].size, mixed[1].md5, AAC)}
+    assert _names(select((*mixed, *real), None, records)) == ["t01_24.flac", "t02_24.flac"]
+
+
+def test_a_lossless_file_named_mp3_counts_lossless_once_checked() -> None:
+    hidden = tuple(_f(f"t0{n}.mp3", "VBR MP3", size=40 * MB) for n in (1, 2))
+    lossy = tuple(_f(f"t0{n}.ogg", "Ogg Vorbis", size=50 * MB) for n in (1, 2))
+    assert _names(select((*hidden, *lossy), None)) == ["t01.ogg", "t02.ogg"]
+    chosen = select((*hidden, *lossy), None, _checked(hidden, FLAC_CHECK))
+    assert _names(chosen) == ["t01.mp3", "t02.mp3"]
+
+
+def _deadco_show(check: FormatCheck) -> tuple[tuple[SourceFile, ...], dict]:
+    """Shaped like the three Dead & Company shows: originals named `.flac` with no
+    listed bitrate, about twice the size per track of archive.org's VBR MP3
+    derivative, which lists its bitrate."""
+    originals = tuple(_f(f"1-0{n} Song.flac", "Flac", size=18 * MB) for n in (1, 2, 3))
+    derivatives = tuple(
+        _f(f"1-0{n} Song.mp3", "VBR MP3", size=9 * MB, original=f"1-0{n} Song.flac",
+           bitrate=180)
+        for n in (1, 2, 3)
+    )
+    return (*originals, *derivatives), _checked(originals, check)
+
+
+def test_the_dead_and_company_shows_keep_their_originals_as_aac() -> None:
+    files, records = _deadco_show(AAC)
+    chosen = select(files, None, records)
+    assert _names(chosen) == ["1-01 Song.flac", "1-02 Song.flac", "1-03 Song.flac"]
+    assert all(f.library for f in chosen.manifest.files)
+    assert chosen.restriction_reason is None
+
+
+def test_the_dead_and_company_mp3_named_flac_show_keeps_its_originals() -> None:
+    files, records = _deadco_show(MP3_CHECK)
+    chosen = select(files, None, records)
+    assert _names(chosen) == ["1-01 Song.flac", "1-02 Song.flac", "1-03 Song.flac"]
+
+
+def test_refused_lossless_keeps_its_reason_with_real_formats_known() -> None:
+    refused = tuple(_f(f"t0{n}.flac", "Flac", size=40 * MB, refused=True) for n in (1, 2))
+    mp3 = tuple(_f(f"t0{n}.mp3", "VBR MP3", size=9 * MB) for n in (1, 2))
+    chosen = select((*refused, *mp3), None, _checked(mp3, MP3_CHECK))
+    assert chosen.restriction_reason == LOSSLESS_REFUSED_REASON
+
+
+def test_a_served_flac_listed_copy_that_proves_lossy_is_not_refused_lossless() -> None:
+    files, records = _deadco_show(AAC)
+    assert select(files, None, records).restriction_reason is None
+
+
+def test_which_checks_may_change_a_shows_rank() -> None:
+    assert may_change_rank("t01.flac", AAC)
+    assert may_change_rank("t01.flac", ALAC)
+    assert may_change_rank("t01.mp3", FLAC_CHECK)
+    assert may_change_rank("t01.m4a", AAC)  # its listed class came from the format word
+    assert not may_change_rank("t01.flac", FLAC_CHECK)
+    assert not may_change_rank("t01.ogg", MP3_CHECK)  # lossy either way
+    assert not may_change_rank("t01.flac", UNIDENTIFIED)  # ranked by its listing
