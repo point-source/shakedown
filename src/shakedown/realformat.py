@@ -31,7 +31,7 @@ from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
 from mutagen.oggvorbis import OggVorbis
 
-from shakedown.models import Manifest
+from shakedown.models import Manifest, ManifestFile
 
 
 class RealFormat(StrEnum):
@@ -160,6 +160,16 @@ def valid_formats(
         if record is not None and record[:2] == (mf.size, mf.md5):
             valid[mf.name] = record[2]
     return valid
+
+
+def unchecked_files(
+    manifest: Manifest, records: Mapping[str, FormatRecord]
+) -> list[ManifestFile]:
+    """The manifest's files in the checked set, staged or archive-only, with no check
+    that still describes them: what the catch-up checks in a stored show
+    (§spec:real-format-catch-up)."""
+    valid = valid_formats(manifest, records)
+    return [mf for mf in manifest.files if is_checked(mf.name) and mf.name not in valid]
 
 
 def library_names(names: Sequence[str], formats: Mapping[str, FormatCheck]) -> dict[str, str]:

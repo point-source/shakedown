@@ -13,6 +13,7 @@ from shakedown.realformat import (
     check_file,
     is_checked,
     named_format,
+    unchecked_files,
     valid_formats,
 )
 from tests.audio_fixtures import id3_prefixed_flac_bytes, make_audio
@@ -148,3 +149,19 @@ def test_a_record_counts_only_for_the_file_the_manifest_records() -> None:
         "gone.flac": (10, "dd", AAC),
     }
     assert valid_formats(manifest, records) == {"a.flac": AAC}
+
+
+def test_unchecked_files_are_the_checked_set_without_a_valid_record() -> None:
+    """A stored show's files the catch-up still has to check (§spec:real-format-catch-up):
+    every file in the checked set, staged or archive-only, whose record is missing or
+    was made for other bytes."""
+    checked = ManifestFile("a.flac", 10, "aa")
+    changed = ManifestFile("b.flac", 10, "bb")
+    never = ManifestFile("c.MP3", 10, "cc")
+    archive_only = ManifestFile("d.ogg", 10, "dd", library=False)
+    manifest = Manifest(files=(
+        checked, changed, never, archive_only,
+        ManifestFile("e.shn", 10, "ee"), ManifestFile("info.txt", 1, "ff"),
+    ))
+    records = {"a.flac": (10, "aa", AAC), "b.flac": (10, "old", AAC)}
+    assert unchecked_files(manifest, records) == [changed, never, archive_only]

@@ -6,6 +6,7 @@ import httpx
 import pytest
 import requests
 
+from shakedown.activity import Phase
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.discovery import (
     LOOKUP_ATTEMPTS,
@@ -15,6 +16,7 @@ from shakedown.discovery import (
     SourceBudget,
     describe,
     lookup,
+    stream_items,
 )
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import ItemLookup
@@ -337,3 +339,70 @@ def test_budget_slot_is_free_while_backing_off() -> None:
         mp.setattr("shakedown.discovery._sleep", sleep)
         lookup(_plugin(), "a", budget)
     assert free_during_sleep == [True]
+
+
+class _Progress:
+    """Records what a stream tells its progress, in order."""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+        self.current: str | None = None
+
+    def listing(self):
+        import contextlib
+        return contextlib.nullcontext()
+
+    def listed(self, n: int) -> None:
+        self.log.append(f"listed {n}")
+
+    def to_look_up(self, n: int) -> None:
+        self.log.append(f"to look up {n}")
+
+    def phase(self, phase: Phase) -> None:
+        self.current = phase.value
+        self.log.append(f"phase {phase.value}")
+
+    def working(self, identifier: str) -> None: ...
+    def idle(self, identifier: str) -> None: ...
+    def looked_up(self) -> None: ...
+    def request(self):
+        import contextlib
+        return contextlib.nullcontext()
+    def network_event(self, *args, **kwargs) -> None: ...
+
+
+def test_prepare_runs_in_the_discovering_phase_before_any_skip_decision() -> None:
+    """The stored-show check runs once the listing is done, in the Discovering phase,
+    before the look-up decision and any lookup, so that decision can use its result
+    (§spec:real-format-catch-up, §spec:real-format-ranking)."""
+    FakePlugin.items["a"] = FakeItem("a", [FakeFile("t.flac", b"x")])
+    FakePlugin.items["b"] = FakeItem("b", [FakeFile("t.flac", b"x")])
+    log: list[str] = []
+    progress = _Progress(log)
+
+    def prepare() -> None:
+        log.append(f"prepare in {progress.current}")
+
+    def look_up(row) -> bool:
+        log.append(f"decide {row.identifier}")
+        return row.identifier == "a"
+
+    found = list(stream_items(
+        _plugin(), CollectionConfig(name="c", query="*"), SourceBudget(2), set(),
+        look_up=look_up, prepare=prepare, progress=progress,  # type: ignore[arg-type]
+    ))
+
+    assert [d.identifier for d in found] == ["a"]
+    assert log == ["listed 2", "phase discovering", "prepare in discovering",
+                   "decide a", "decide b", "to look up 1"]
+
+
+def test_prepare_does_not_run_when_the_listing_fails() -> None:
+    FakePlugin.unreachable_sources.add("fake-src")
+    prepared: list[bool] = []
+    with pytest.raises(RuntimeError):
+        list(stream_items(
+            _plugin(), CollectionConfig(name="c", query="*"), SourceBudget(2), set(),
+            prepare=lambda: prepared.append(True),
+        ))
+    assert prepared == []

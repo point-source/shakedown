@@ -379,6 +379,7 @@ def stream_items(
     enumerated: set[str],
     *,
     look_up: Callable[[ListedItem], bool] | None = None,
+    prepare: Callable[[], object] | None = None,
     progress: Progress | None = None,
 ) -> Generator[ItemDescriptor | LookupFailure]:
     """List the collection, then look its items up in parallel across the shared
@@ -393,6 +394,11 @@ def stream_items(
     ``look_up`` decides per listed item whether to look it up (default: all) — the
     incremental fast path skips unchanged items.
 
+    ``prepare`` runs once the listing is complete, in the Discovering phase, before any
+    look-up decision or lookup: the check of stored shows' audio
+    (§spec:real-format-catch-up), whose results the decision may read. It does not run
+    when the listing fails.
+
     ``progress`` hears how many items were listed and are to look up, each lookup
     while it runs, and each one looked up (§spec:run-activity); and measures the
     listing and lookups as network activity (§spec:network-activity).
@@ -403,15 +409,18 @@ def stream_items(
             stopping.check()  # a stop ends the listing at its next page
             listing.append(row)
     enumerated.update(row.identifier for row in listing)
+    if progress is not None:
+        from shakedown.activity import Phase
+
+        progress.listed(len(listing))
+        progress.phase(Phase.DISCOVERING)
+    if prepare is not None:
+        prepare()
     rows = [row for row in listing if look_up is None or look_up(row)]
     if progress is None:
         yield from _windowed(rows, budget, lambda row: look_up_one(plugin, row, budget))
         return
-    from shakedown.activity import Phase
-
-    progress.listed(len(listing))
     progress.to_look_up(len(rows))
-    progress.phase(Phase.DISCOVERING)
 
     def work(row: ListedItem) -> ItemDescriptor | LookupFailure:
         progress.working(row.identifier)
