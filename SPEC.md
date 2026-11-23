@@ -1514,7 +1514,9 @@ Observable behavior:
   title, and track number go in the iTunes-style atoms players read
   (`©ART`, `aART`, `©alb`, `©day`, `©nam`, `trkn`); venue goes in the
   iTunes freeform field named `VENUE`, the same name the Vorbis comment
-  and the ID3 user text field use.
+  and the ID3 user text field use. `trkn` holds only numbers, so the
+  source's `01` is written as track 1 (`3/12` as 3 of 12), and a listed
+  value with no number leaves the track number absent.
 - **The writer follows the recorded format.** A file the check found to
   be M4A is tagged as M4A whatever its name; a file named `.m4a` whose
   content is FLAC is tagged as FLAC.
