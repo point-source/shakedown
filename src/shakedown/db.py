@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
@@ -350,6 +350,28 @@ _NETWORK_SCHEMA = [
 ]
 _SCHEMA += _NETWORK_SCHEMA
 
+# Per checked audio file, the real format and class its content showed
+# (§spec:real-format). It belongs to the file as the manifest records it (name, size,
+# source checksum), so a file the source changes has no valid check until it is
+# checked again. Kept beside — never inside — the recorded manifest, the
+# change-detection key (§spec:sync-identity).
+_FORMAT_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS audio_formats (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        file_name        TEXT NOT NULL,
+        size             INTEGER,
+        md5              TEXT,
+        format           TEXT NOT NULL,
+        audio_class      TEXT,
+        PRIMARY KEY (source_name, collection_name, identifier, file_name)
+    )
+    """,
+]
+_SCHEMA += _FORMAT_SCHEMA
+
 
 # Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer
 # reads its index alone, never the rows, whose manifests and source metadata fill
@@ -624,6 +646,33 @@ def _migrate_to_12(conn: sqlite3.Connection) -> None:
             conn.execute(stmt)
 
 
+def _migrate_to_13(conn: sqlite3.Connection) -> None:
+    """v12 → v13: add the per-file record of real audio formats (§spec:state,
+    §spec:real-format). It starts empty — downloads are checked at fetch, stored
+    shows by the catch-up (§spec:real-format-catch-up).
+
+    M4A joins the tagged formats in this version (§spec:m4a-tags), so the
+    fingerprint of every tagged show whose recorded manifest holds a file named
+    `.m4a` is cleared once: the first sync after the upgrade revisits it, filling its
+    M4A files' gaps and only reading files already carrying every tag. A show whose
+    M4A files are named otherwise is revisited once the stored-show check finds them,
+    which clears its fingerprint (§spec:real-format-catch-up): its computed tags are
+    keyed by file name and do not change. Nothing else changes."""
+    for stmt in _FORMAT_SCHEMA:
+        conn.execute(stmt)
+    conn.execute(
+        """
+        DELETE FROM tag_shows WHERE EXISTS (
+            SELECT 1 FROM items, json_each(items.recorded_manifest) AS f
+            WHERE items.source_name = tag_shows.source_name
+              AND items.collection_name = tag_shows.collection_name
+              AND items.identifier = tag_shows.identifier
+              AND lower(json_extract(f.value, '$.name')) LIKE '%.m4a'
+        )
+        """
+    )
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -637,6 +686,7 @@ _MIGRATIONS = {
     10: _migrate_to_10,
     11: _migrate_to_11,
     12: _migrate_to_12,
+    13: _migrate_to_13,
 }
 
 

@@ -1,7 +1,7 @@
 # The dashboard page (§spec:dashboard-page). Built once on the build host's own
 # platform: its output is static files, the same for every image platform. The
 # runtime image gets only the files; Node never runs in it.
-FROM --platform=$BUILDPLATFORM node:26-slim AS web
+FROM --platform=$BUILDPLATFORM node:26-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -9,10 +9,10 @@ COPY web/ ./
 RUN npm run build
 
 
-FROM python:3.15-slim AS builder
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
 
 # Install from uv.lock so every build of a commit gets the same libraries.
-COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
@@ -33,7 +33,7 @@ COPY --from=web /web/dist/ ./src/shakedown/dashboard_web/
 RUN uv sync --locked --no-editable --extra serve
 
 
-FROM python:3.15-slim
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 LABEL org.opencontainers.image.title="shakedown"
 LABEL org.opencontainers.image.description="Durable mirroring of public music archives onto a local NAS."

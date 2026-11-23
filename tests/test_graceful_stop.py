@@ -39,6 +39,7 @@ from shakedown.state import (
 from shakedown.status import collection_summaries
 from shakedown.sync import run_sync
 from shakedown.trigger import READY_FD_ENV
+from tests.audio_fixtures import flac_bytes
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 from tests.serve_child import SPEC_ENV
@@ -59,8 +60,10 @@ def _add_shows(*identifiers: str) -> None:
         FakePlugin.items[identifier] = FakeItem(
             identifier=identifier,
             files=[
-                FakeFile(name="t1.flac", content=f"{identifier}-one".encode()),
-                FakeFile(name="t2.flac", content=f"{identifier}-two".encode()),
+                # Real FLAC (with a per-file tail): a file shakedown tags must be
+                # audio its check recognises (§spec:real-format).
+                FakeFile(name="t1.flac", content=flac_bytes() + f"{identifier}-one".encode()),
+                FakeFile(name="t2.flac", content=flac_bytes() + f"{identifier}-two".encode()),
             ],
             metadata={"title": identifier},
         )

@@ -10,6 +10,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from mutagen.flac import FLAC
@@ -20,6 +21,7 @@ from shakedown import tagging
 from shakedown.config import CollectionConfig, Config
 from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
+from shakedown.realformat import AudioClass, FormatCheck, RealFormat
 from shakedown.reconcile import run_reconcile
 from shakedown.restage import run_restage
 from shakedown.state import DriftRepo, ItemRepo, RunRepo, TagRecord, TagRepo
@@ -123,12 +125,13 @@ def test_missing_values_are_left_out() -> None:
     assert tags == {"album": "T"}
 
 
-def test_only_flac_mp3_and_ogg_files_are_tagged() -> None:
+def test_only_flac_mp3_ogg_and_m4a_files_are_tagged() -> None:
     desired = desired_tags(
-        "x", SHOW_META, _manifest("a.flac", "b.MP3", "c.ogg", "d.shn", "e.txt", "f.ffp"),
+        "x", SHOW_META,
+        _manifest("a.flac", "b.MP3", "c.ogg", "d.m4a", "e.shn", "f.txt", "g.ffp"),
         labelled=False,
     )
-    assert set(desired) == {"a.flac", "b.MP3", "c.ogg"}
+    assert set(desired) == {"a.flac", "b.MP3", "c.ogg", "d.m4a"}
 
 
 def test_track_title_and_number_come_from_the_source_listing() -> None:
@@ -186,6 +189,92 @@ def test_fingerprint_changes_only_with_the_computed_values() -> None:
                                                       labelled=True))
 
 
+# --- judged by the file's real format (§spec:real-format) ----------------------------
+
+M4A_AAC = FormatCheck(RealFormat.M4A, AudioClass.LOSSY)
+MP3_CHECK = FormatCheck(RealFormat.MP3, AudioClass.LOSSY)
+FLAC_CHECK = FormatCheck(RealFormat.FLAC, AudioClass.LOSSLESS)
+UNIDENTIFIED = FormatCheck(RealFormat.UNIDENTIFIED, None)
+
+
+def test_the_recorded_real_format_decides_which_files_are_tagged() -> None:
+    """A file is tagged when its real format has a writer: an MP3 or an M4A named
+    .flac is (§spec:m4a-tags); an unidentified file is never tagged; a FLAC named .m4a
+    is tagged as FLAC."""
+    manifest = _manifest("mp3.flac", "aac.flac", "wav.flac", "flac.m4a", "honest.flac")
+    formats = {"mp3.flac": MP3_CHECK, "aac.flac": M4A_AAC, "wav.flac": UNIDENTIFIED,
+               "flac.m4a": FLAC_CHECK, "honest.flac": FLAC_CHECK}
+    desired = desired_tags("x", SHOW_META, manifest, labelled=False, formats=formats)
+    assert set(desired) == {"mp3.flac", "aac.flac", "flac.m4a", "honest.flac"}
+
+
+def test_an_honestly_named_show_keeps_its_fingerprint_once_checked() -> None:
+    """Recording checks must not make every tagged show look changed: that would
+    re-read the whole collection."""
+    manifest = _manifest("a.flac", "b.mp3", "c.ogg", "d.shn")
+    formats = {"a.flac": FLAC_CHECK, "b.mp3": MP3_CHECK,
+               "c.ogg": FormatCheck(RealFormat.OGG, AudioClass.LOSSY)}
+    before = desired_tags("x", SHOW_META, manifest, labelled=False)
+    after = desired_tags("x", SHOW_META, manifest, labelled=False, formats=formats)
+    assert fingerprint(after) == fingerprint(before)
+
+
+def test_a_show_whose_files_have_no_writer_never_clashes() -> None:
+    index = TagIndex()
+    index.add("gd77.flac", SHOW_META, _manifest("a.flac"))
+    index.add("gd77.wav", SHOW_META, _manifest("a.flac"), formats={"a.flac": UNIDENTIFIED})
+    assert not index.labelled("gd77.flac")
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "fmt"),
+    [("a.ogg", "mp3", RealFormat.MP3), ("a.mp3", "flac", RealFormat.FLAC),
+     ("a.flac", "ogg", RealFormat.OGG), ("a.m4a", "flac", RealFormat.FLAC)],
+)
+def test_the_writer_follows_the_real_format_not_the_name(
+    tmp_path: Path, name: str, content: str, fmt: RealFormat
+) -> None:
+    path = make_audio(tmp_path / name, content=content)
+    result = fill_file(path, DESIRED, None, None, fmt)
+    assert result.status == "written"
+    assert read_tags(path, content) == {k: [v] for k, v in DESIRED.items()}
+
+
+def test_the_collection_pass_tags_by_recorded_format_without_warnings(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An MP3 named .flac is filled through ID3 and an M4A named .flac through iTunes
+    atoms (§spec:m4a-tags); a WAV named .flac is left exactly as it is; no "cannot be
+    read as FLAC" warning (§spec:real-format)."""
+    from shakedown.state import FormatRepo
+
+    conn = connect(tmp_path / "s.db")
+    folder = tmp_path / "coll" / "gd77"
+    contents = {"mp3.flac": "mp3", "aac.flac": "m4a", "wav.flac": "wav"}
+    checks = {"mp3.flac": MP3_CHECK, "aac.flac": M4A_AAC, "wav.flac": UNIDENTIFIED}
+    files = []
+    for name, content in contents.items():
+        path = make_audio(folder / name, content=content)
+        files.append(ManifestFile(name, path.stat().st_size, _md5(path)))
+    ItemRepo(conn).upsert(Item(
+        source_name="s", collection_name="c", identifier="gd77", status=ItemStatus.COMPLETE,
+        archive_path=folder, downloaded_at=datetime.now(), source_metadata=SHOW_META,
+        recorded_manifest=Manifest(files=tuple(files)),
+    ))
+    for mf in files:
+        FormatRepo(conn).put("s", "c", "gd77", mf.name, mf.size, mf.md5, checks[mf.name])
+    before = {name: (folder / name).read_bytes() for name in ("wav.flac",)}
+
+    issues = tagging.fill_collection_tags(tmp_path / "coll", ItemRepo(conn), "s", "c")
+
+    assert issues == {}
+    assert read_tags(folder / "mp3.flac", "mp3")["venue"] == ["Barton Hall"]
+    assert read_tags(folder / "aac.flac", "m4a")["venue"] == ["Barton Hall"]
+    assert {name: (folder / name).read_bytes() for name in before} == before
+    assert "cannot be read" not in caplog.text
+    assert set(TagRepo(conn).file_records("s", "c", "gd77")) == {"mp3.flac", "aac.flac"}
+
+
 # --- writing one file (fill_file) ---------------------------------------------------
 
 DESIRED = {"artist": "Grateful Dead", "albumartist": "Grateful Dead",
@@ -198,7 +287,7 @@ def _md5(path: Path) -> str:
 
 
 def _archived(tmp_path: Path, name: str, tags: dict[str, str] | None = None,
-              **kwargs: int) -> tuple[Path, Path]:
+              **kwargs: Any) -> tuple[Path, Path]:
     """An archive file of show `gd77` in collection folder `tmp_path/coll`, and the
     backup path shakedown journals it under while tagging."""
     path = make_audio(tmp_path / "coll" / "gd77" / name, tags, **kwargs)
@@ -392,6 +481,140 @@ def test_an_unexpected_error_while_saving_still_fails_loudly(
 
 # --- crashes mid-tagging (Q-8-1: the next run restores before anything else) ---------
 
+# --- M4A (§spec:m4a-tags) ---------------------------------------------------------
+
+# What an M4A file holds once DESIRED is filled: its track number atom (trkn) holds
+# integers, so "01" is track 1.
+M4A_WRITTEN = {**DESIRED, "tracknumber": "1"}
+
+# The Shoreline uploads' iTunes tags (deadco2022-06-13).
+UPLOADER = {"artist": "Dead and Company", "album": "Shoreline 6/13/22",
+            "date": "2022-06-13", "title": "St. Stephen", "tracknumber": "1/21",
+            "discnumber": "1/2"}
+
+
+@pytest.mark.parametrize("content", ["m4a", "alac"])
+def test_absent_m4a_tags_are_filled_in_itunes_atoms_and_recorded(
+    tmp_path: Path, content: str
+) -> None:
+    from mutagen.mp4 import MP4
+
+    path, backup = _archived(tmp_path, "a.m4a", content=content)
+    result = fill_file(path, DESIRED, None, backup, RealFormat.M4A)
+    assert result.status == "written"
+    assert read_tags(path, "m4a") == {k: [v] for k, v in M4A_WRITTEN.items()}
+    mp4 = MP4(path)
+    assert mp4.tags is not None
+    assert set(mp4.tags) == {"\xa9ART", "aART", "\xa9alb", "\xa9day", "\xa9nam", "trkn",
+                             "----:com.apple.iTunes:VENUE"}
+    assert mp4.tags["trkn"] == [(1, 0)]
+    assert mp4.info.codec == ("alac" if content == "alac" else "mp4a.40.2")
+    assert result.record == TagRecord(_md5(path), M4A_WRITTEN)
+    assert not backup.exists()
+
+
+def test_an_uploaders_itunes_tags_stay_and_only_the_gaps_are_filled(tmp_path: Path) -> None:
+    """The Shoreline shows gain album artist and venue; the uploader's spelling of the
+    artist stays (§spec:m4a-tags "Uploader tags stay")."""
+    path, backup = _archived(tmp_path, "1-01 St. Stephen.m4a", UPLOADER)
+    desired = {**DESIRED, "artist": "Dead & Company", "albumartist": "Dead & Company"}
+    result = fill_file(path, desired, None, backup, RealFormat.M4A)
+    assert read_tags(path, "m4a") == {
+        **{k: [v] for k, v in UPLOADER.items()},
+        "albumartist": ["Dead & Company"], "venue": ["Barton Hall"],
+    }
+    assert result.record is not None
+    assert result.record.written == {"albumartist": "Dead & Company", "venue": "Barton Hall"}
+
+
+def test_an_empty_m4a_tag_counts_as_absent_and_is_filled(tmp_path: Path) -> None:
+    path, backup = _archived(tmp_path, "a.m4a", {"artist": "  "})
+    fill_file(path, DESIRED, None, backup, RealFormat.M4A)
+    assert read_tags(path, "m4a")["artist"] == ["Grateful Dead"]
+
+
+def test_an_m4a_visited_again_is_not_rewritten(tmp_path: Path) -> None:
+    """The track number shakedown recorded is the one the file holds, so a second
+    visit finds nothing to change and keeps it as shakedown's."""
+    path, backup = _archived(tmp_path, "a.m4a")
+    first = fill_file(path, DESIRED, None, backup, RealFormat.M4A)
+    before = path.stat().st_mtime_ns
+    second = fill_file(path, DESIRED, first.record, backup, RealFormat.M4A)
+    assert second == FillResult("unchanged", first.record)
+    assert path.stat().st_mtime_ns == before
+
+
+def test_a_value_shakedown_wrote_in_an_m4a_is_rewritten_when_it_changes(
+    tmp_path: Path,
+) -> None:
+    path, backup = _archived(tmp_path, "a.m4a")
+    first = fill_file(path, DESIRED, None, backup, RealFormat.M4A)
+    labelled = {**DESIRED, "album": DESIRED["album"] + " [gd77.sbd]"}
+    second = fill_file(path, labelled, first.record, backup, RealFormat.M4A)
+    assert second.status == "written"
+    assert read_tags(path, "m4a")["album"] == [labelled["album"]]
+    assert second.record == TagRecord(_md5(path), {**M4A_WRITTEN, "album": labelled["album"]})
+
+
+@pytest.mark.parametrize(
+    ("track", "written"), [("3/12", "3/12"), (" 07 ", "7"), ("1/0", "1"), ("A1", None), ("", None)]
+)
+def test_an_m4a_track_number_is_written_as_a_number(
+    tmp_path: Path, track: str, written: str | None
+) -> None:
+    """trkn holds integers: a listed number is written in that form; a value with no
+    number leaves the track number absent and fills the rest."""
+    path, backup = _archived(tmp_path, "a.m4a")
+    result = fill_file(path, {**DESIRED, "tracknumber": track}, None, backup, RealFormat.M4A)
+    tags = read_tags(path, "m4a")
+    assert tags.get("tracknumber") == ([written] if written else None)
+    assert tags["venue"] == ["Barton Hall"]
+    assert result.record is not None
+    assert result.record.written.get("tracknumber") == written
+
+
+def test_an_m4a_named_flac_is_filled_by_its_recorded_format(tmp_path: Path) -> None:
+    path, backup = _archived(tmp_path, "a.flac", content="m4a")
+    result = fill_file(path, DESIRED, None, backup, RealFormat.M4A)
+    assert result.status == "written"
+    assert read_tags(path, "m4a")["venue"] == ["Barton Hall"]
+
+
+def test_a_file_named_m4a_that_is_not_one_is_left_untouched(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A .m4a not checked yet is taken by its name; content that is not MP4 is left
+    as it is, with the usual warning."""
+    path, backup = _archived(tmp_path, "a.m4a", content="wav")
+    original = path.read_bytes()
+    result = fill_file(path, DESIRED, None, backup)
+    assert result == FillResult("untaggable", None)
+    assert path.read_bytes() == original
+    assert "cannot be read as M4A" in caplog.text
+
+
+def test_an_m4a_whose_existing_tags_cannot_be_saved_is_left_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """mutagen rejects an atom it cannot render with MP4MetadataValueError, which is
+    a MutagenError too: it is the file's tags, not the disk, so the file is skipped
+    with a warning rather than failed for a retry on every run."""
+    from mutagen.mp4 import MP4MetadataValueError
+
+    path, backup = _archived(tmp_path, "a.m4a")
+    original = path.read_bytes()
+
+    def rejected(self: object, target: Path) -> None:
+        raise MP4MetadataValueError("can't render atom")
+
+    monkeypatch.setattr(tagging._Tags, "save", rejected)
+    result = fill_file(path, DESIRED, None, backup, RealFormat.M4A)
+    assert result == FillResult("untaggable", None)
+    assert path.read_bytes() == original
+    assert not backup.exists()
+    assert "can't render atom" in caplog.text
+
+
 def _crash_at(monkeypatch: pytest.MonkeyPatch, at: str) -> None:
     def crash(stage: str) -> None:
         if stage == at:
@@ -400,11 +623,12 @@ def _crash_at(monkeypatch: pytest.MonkeyPatch, at: str) -> None:
     monkeypatch.setattr(tagging, "_fault_point", crash)
 
 
+@pytest.mark.parametrize("name", ["a.flac", "a.m4a"])
 @pytest.mark.parametrize("stage", ["backed_up", "saved"])
 def test_a_crash_while_tagging_is_undone_by_the_next_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, name: str
 ) -> None:
-    path, backup = _archived(tmp_path, "a.flac")
+    path, backup = _archived(tmp_path, name)
     library = tmp_path / "library" / "a.flac"
     library.parent.mkdir()
     os.link(path, library)
@@ -861,9 +1085,9 @@ def test_a_second_sync_reads_no_file_of_a_tagged_show(
     opened: list[Path] = []
     real_init = tagging._Tags.__init__
 
-    def counting_init(self: tagging._Tags, path: Path) -> None:
+    def counting_init(self: tagging._Tags, path: Path, *args: object) -> None:
         opened.append(path)
-        real_init(self, path)
+        real_init(self, path, *args)  # type: ignore[arg-type]
 
     monkeypatch.setattr(tagging._Tags, "__init__", counting_init)
     assert run_sync(config) == 0

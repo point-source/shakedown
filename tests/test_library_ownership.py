@@ -10,6 +10,7 @@ from shakedown.db import connect
 from shakedown.restage import run_restage
 from shakedown.state import PlacementRepo, RunRepo
 from shakedown.sync import run_sync
+from tests.audio_fixtures import flac_bytes
 from tests.conftest import make_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 
@@ -33,9 +34,11 @@ def _names(library: Path) -> list[str]:
 
 
 def _seed(identifier: str, *, files: dict[str, bytes] | None = None, **metadata) -> None:
+    """A show; by default one real FLAC file, so it lists no unidentified audio."""
     FakePlugin.items[identifier] = FakeItem(
         identifier=identifier,
-        files=[FakeFile(name=n, content=c) for n, c in (files or {"t1.flac": b"x"}).items()],
+        files=[FakeFile(name=n, content=c)
+               for n, c in (files or {"t1.flac": flac_bytes()}).items()],
         metadata=metadata,
     )
 

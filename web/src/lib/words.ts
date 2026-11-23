@@ -115,5 +115,10 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
         next: "Delete them if you don't need them. Shakedown leaves them alone.",
       }
     }
+    case "unidentified_files":
+      return {
+        title: `${plural(e.count, "file", "files")} Shakedown can't identify`,
+        next: "Shakedown keeps them as they are and does nothing more with them.",
+      }
   }
 }

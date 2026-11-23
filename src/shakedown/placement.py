@@ -37,6 +37,7 @@ from shakedown.config import CollectionConfig, Config
 from shakedown.db import transaction
 from shakedown.filesystem import FilesystemError, hardlink, is_within
 from shakedown.models import Item
+from shakedown.realformat import FormatRecord, library_names, valid_formats
 from shakedown.staging import (
     METADATA_SIDECAR,
     UnsafeLibraryPathError,
@@ -44,7 +45,7 @@ from shakedown.staging import (
     manifest_reserves_sidecar_name,
     staging_dir_for,
 )
-from shakedown.state import ItemRepo, PlacementRepo
+from shakedown.state import FormatRepo, ItemRepo, PlacementRepo
 from shakedown.utils.sanitize import path_safe
 from shakedown.utils.templates import TemplateError
 
@@ -125,6 +126,8 @@ class LibraryPlacement:
         self._bare: dict[str, str] = {}
         self._groups: dict[str, set[str]] = {}
         self._refused: dict[str, str] = {}
+        # identifier -> file name -> recorded real-format check (§spec:real-format).
+        self._formats: dict[str, dict[str, FormatRecord]] = {}
         self._render_error: tuple[str, str] | None = None
         self._report = PlacementReport()
 
@@ -144,6 +147,9 @@ class LibraryPlacement:
             return
         old = self._bare.get(identifier)
         self._unindex(identifier)
+        self._formats[identifier] = FormatRepo(self.items.conn).for_show(
+            self.source, self.collection.name, identifier
+        )
         item = self.items.get(self.source, self.collection.name, identifier)
         if item is None or not has_archive_copy(item):
             return
@@ -191,6 +197,9 @@ class LibraryPlacement:
         self._groups.clear()
         self._refused.clear()
         self._render_error = None
+        self._formats = FormatRepo(self.items.conn).for_collection(
+            self.source, self.collection.name
+        )
         for item in self.items.list_for_collection(self.source, self.collection.name):
             if not has_archive_copy(item):
                 continue
@@ -238,14 +247,18 @@ class LibraryPlacement:
 
     # --- desired placement ---------------------------------------------------------
 
-    def _desired_names(self, item: Item) -> list[str]:
-        """The file names the show places in its folder: every recorded file the
-        library stages (whether or not its archive copy is on disk — a missing archive
-        file must not take the library copy with it), plus the metadata sidecar when
-        preserved. An archive-only copy, such as SHN beside a playable copy, is not
-        placed (§spec:quality-selection)."""
+    def _desired_names(self, item: Item) -> dict[str, str]:
+        """Library name -> archive name of every file the show places in its folder:
+        every recorded file the library stages (whether or not its archive copy is on
+        disk — a missing archive file must not take the library copy with it), plus the
+        metadata sidecar when preserved. An archive-only copy, such as SHN beside a
+        playable copy, is not placed (§spec:quality-selection). A file whose recorded
+        real format differs from its name is named with its real extension
+        (§spec:real-format); the record decides, no file is opened."""
         assert item.recorded_manifest is not None
-        names = [mf.name for mf in item.recorded_manifest.files if mf.library]
+        staged = [mf.name for mf in item.recorded_manifest.files if mf.library]
+        formats = valid_formats(item.recorded_manifest, self._formats.get(item.identifier, {}))
+        names = {real: name for name, real in library_names(staged, formats).items()}
         probe = self.base / "probe"
         for name in names:
             if not is_within(probe, probe / name):
@@ -255,13 +268,16 @@ class LibraryPlacement:
         if self.collection.preserve_source_metadata and not manifest_reserves_sidecar_name(
             item.recorded_manifest
         ):
-            names.append(METADATA_SIDECAR)
+            names[METADATA_SIDECAR] = METADATA_SIDECAR
         return names
 
     def _desired(self, item: Item) -> dict[str, str]:
         """Relative library path -> file name in the archive copy."""
         folder = PurePosixPath(self._folder(item.identifier))
-        return {(folder / name).as_posix(): name for name in self._desired_names(item)}
+        return {
+            (folder / library_name).as_posix(): name
+            for library_name, name in self._desired_names(item).items()
+        }
 
     # --- the pass ------------------------------------------------------------------
 
@@ -272,7 +288,6 @@ class LibraryPlacement:
         touched: set[Path] = set()
         # Issues from removing, moving, or linking alike make a show failed.
         issues_before = {i: len(self._report.issues.get(i, ())) for i in identifiers}
-        folders = self.repo.folders(self.source, self.collection.name)
         for identifier in identifiers:
             item = self.items.get(self.source, self.collection.name, identifier)
             if item is None:
@@ -281,7 +296,7 @@ class LibraryPlacement:
             placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
             stale = sorted(rel for rel in placed if rel not in desired)
             if stale:
-                moves = self._last_copy_moves(item, desired, stale, folders.get(identifier))
+                moves = self._last_copy_moves(item, desired, stale)
                 with transaction(self.items.conn):
                     for rel in stale:
                         if rel in moves:
@@ -320,28 +335,37 @@ class LibraryPlacement:
             else:
                 progress.done()
 
-    def _last_copy_moves(
-        self, item: Item, desired: dict[str, str], stale: list[str], old_folder: str | None
-    ) -> dict[str, str]:
-        """Old library path -> new path for files whose archive copy is gone: when the
-        show's folder changes, the library link is the last copy of those bytes, so it
-        moves with the show instead of being removed."""
+    def _last_copy_moves(self, item: Item, desired: dict[str, str], stale: list[str]
+                         ) -> dict[str, str]:
+        """Old library path -> new path for files whose archive copy is gone: the
+        library link is the last copy of those bytes, so it moves with the show (a
+        folder change, a real-extension name) instead of being removed.
+
+        A stale link is known by the longest of the show's file names its path ends
+        with, library or archive name (a link staged before its check still carries
+        the source name). Matching the path's tail, not the recorded folder, finds a
+        link whose earlier move was blocked after the show's new folder was recorded."""
         assert item.archive_path is not None
-        missing = {
-            name: rel
-            for rel, name in desired.items()
-            if name != METADATA_SIDECAR and not (item.archive_path / name).is_file()
-        }
-        if not missing or old_folder is None:
+        folder = PurePosixPath(self._folder(item.identifier))
+        # Show-relative name -> the new path when its archive copy is gone, else None.
+        names: dict[str, str | None] = {}
+        for rel, name in desired.items():
+            gone = name != METADATA_SIDECAR and not (item.archive_path / name).is_file()
+            for key in (PurePosixPath(rel).relative_to(folder).as_posix(), name):
+                if gone:
+                    names[key] = rel
+                else:
+                    names.setdefault(key, None)
+        if not any(names.values()):
             return {}
         moves: dict[str, str] = {}
         for rel in stale:
-            try:
-                name = PurePosixPath(rel).relative_to(old_folder).as_posix()
-            except ValueError:
-                continue  # not in the show's recorded folder
-            if name in missing:
-                moves[rel] = missing.pop(name)
+            matches = [key for key in names if rel == key or rel.endswith("/" + key)]
+            if not matches:
+                continue
+            target = names[max(matches, key=len)]
+            if target is not None and target not in moves.values():
+                moves[rel] = target
         return moves
 
     def _move(self, identifier: str, rel: str, new_rel: str, inode: int,

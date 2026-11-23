@@ -30,6 +30,7 @@ from shakedown.plugins.base import (
     http_status,
     retry_after_seconds,
 )
+from shakedown.realformat import FormatRecord
 from shakedown.selection import select
 
 if TYPE_CHECKING:
@@ -341,13 +342,28 @@ class ItemDescriptor:
     # a token that moves whenever the item's contents change. None when the source exposes
     # no cheap signal.
     change_signal: str | None = None
+    # Every file the source lists, kept until the fetch: a check made there that changes
+    # the ranking re-runs the choice over it (§spec:real-format-ranking). Empty once
+    # nothing will fetch the show.
+    listing: tuple[SourceFile, ...] = ()
+    # The show's recorded checks the choice was made with, by file name.
+    formats: Mapping[str, FormatRecord] = field(default_factory=dict)
+
+
+# A show's recorded checks, by identifier: what the best-copy choice reads.
+FormatsFor = Callable[[str], Mapping[str, FormatRecord]]
 
 
 def describe(
-    identifier: str, details: ItemDetails, change_signal: str | None = None
+    identifier: str,
+    details: ItemDetails,
+    change_signal: str | None = None,
+    formats: Mapping[str, FormatRecord] | None = None,
 ) -> ItemDescriptor:
-    """Turn a validated lookup into a descriptor: choose the files to mirror."""
-    chosen = select(details.files, details.restriction_reason)
+    """Turn a validated lookup into a descriptor: choose the files to mirror. A file
+    with a recorded check in ``formats`` counts by its real format
+    (§spec:real-format-ranking)."""
+    chosen = select(details.files, details.restriction_reason, formats)
     return ItemDescriptor(
         identifier=identifier,
         manifest=chosen.manifest,
@@ -356,6 +372,8 @@ def describe(
         restriction_reason=chosen.restriction_reason,
         not_playable_reason=chosen.not_playable_reason,
         change_signal=change_signal,
+        listing=details.files,
+        formats=dict(formats or {}),
     )
 
 
@@ -364,12 +382,14 @@ def look_up_one(
     listed: ListedItem,
     budget: SourceBudget,
     progress: Progress | None = None,
+    formats_for: FormatsFor | None = None,
 ) -> ItemDescriptor | LookupFailure:
     """Look up one listed item and describe it, or report why it could not be."""
     result = lookup(plugin, listed.identifier, budget, progress)
     if isinstance(result, LookupFailure):
         return result
-    return describe(listed.identifier, result, listed.change_signal)
+    formats = formats_for(listed.identifier) if formats_for is not None else None
+    return describe(listed.identifier, result, listed.change_signal, formats)
 
 
 def stream_items(
@@ -379,6 +399,8 @@ def stream_items(
     enumerated: set[str],
     *,
     look_up: Callable[[ListedItem], bool] | None = None,
+    prepare: Callable[[], object] | None = None,
+    formats_for: FormatsFor | None = None,
     progress: Progress | None = None,
 ) -> Generator[ItemDescriptor | LookupFailure]:
     """List the collection, then look its items up in parallel across the shared
@@ -393,6 +415,15 @@ def stream_items(
     ``look_up`` decides per listed item whether to look it up (default: all) — the
     incremental fast path skips unchanged items.
 
+    ``prepare`` runs once the listing is complete, in the Discovering phase, before any
+    look-up decision or lookup: the check of stored shows' audio
+    (§spec:real-format-catch-up), whose results the decision may read. It does not run
+    when the listing fails.
+
+    ``formats_for`` gives each show's recorded checks for its file choice
+    (§spec:real-format-ranking). It is read from the lookup workers, so it must not
+    touch the database: the caller fills it in ``prepare``.
+
     ``progress`` hears how many items were listed and are to look up, each lookup
     while it runs, and each one looked up (§spec:run-activity); and measures the
     listing and lookups as network activity (§spec:network-activity).
@@ -403,20 +434,25 @@ def stream_items(
             stopping.check()  # a stop ends the listing at its next page
             listing.append(row)
     enumerated.update(row.identifier for row in listing)
+    if progress is not None:
+        from shakedown.activity import Phase
+
+        progress.listed(len(listing))
+        progress.phase(Phase.DISCOVERING)
+    if prepare is not None:
+        prepare()
     rows = [row for row in listing if look_up is None or look_up(row)]
     if progress is None:
-        yield from _windowed(rows, budget, lambda row: look_up_one(plugin, row, budget))
+        yield from _windowed(
+            rows, budget, lambda row: look_up_one(plugin, row, budget, formats_for=formats_for)
+        )
         return
-    from shakedown.activity import Phase
-
-    progress.listed(len(listing))
     progress.to_look_up(len(rows))
-    progress.phase(Phase.DISCOVERING)
 
     def work(row: ListedItem) -> ItemDescriptor | LookupFailure:
         progress.working(row.identifier)
         try:
-            return look_up_one(plugin, row, budget, progress)
+            return look_up_one(plugin, row, budget, progress, formats_for)
         finally:
             progress.idle(row.identifier)
 

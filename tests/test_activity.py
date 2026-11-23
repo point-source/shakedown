@@ -131,6 +131,22 @@ def test_heartbeat_moves_every_tick_progress_only_when_something_moves(db: Path)
     rec.close()
 
 
+def test_a_checked_stored_show_counts_as_progress(db: Path) -> None:
+    """No counter moves while stored shows are checked; each checked show still moves
+    `last_progress_at` (§spec:run-activity "Is it stuck?", §spec:real-format-catch-up)."""
+    t = _Time()
+    rec = _recorder(db, t)
+    p = rec.open_entry("src", "coll", ActivityKind.SYNC)
+    t.advance(3)
+    rec.tick()
+    p.stored_show_checked()
+    checked = t.now()
+    t.advance(3)
+    rec.tick()
+    assert _row(db, p.activity_id)["last_progress_at"] == checked.isoformat()
+    rec.close()
+
+
 def test_in_flight_bytes_measured_from_the_temp_folder_without_kept_files(
     db: Path, tmp_path: Path
 ) -> None:

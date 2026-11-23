@@ -15,7 +15,8 @@ from shakedown.placement import (
     foreign_file_issue,
     removal_issue,
 )
-from shakedown.state import ItemRepo, PlacementRepo
+from shakedown.realformat import AudioClass, FormatCheck, RealFormat
+from shakedown.state import FormatRepo, ItemRepo, PlacementRepo
 from tests.conftest import make_config
 
 SRC, COLL = "fake-src", "coll1"
@@ -538,3 +539,185 @@ def test_rebuilt_database_adopts_again(tmp_path: Path) -> None:
 
     assert set(lib.repo.placed_inodes(SRC, COLL, "gd-a")) == {"X/a.flac"}
     assert lib.repo.list_unplaced(SRC, COLL) == []
+
+
+# --- the library carries the real extension (§spec:real-format) ---------------------
+
+AAC = FormatCheck(RealFormat.M4A, AudioClass.LOSSY)
+FLAC = FormatCheck(RealFormat.FLAC, AudioClass.LOSSLESS)
+UNIDENTIFIED = FormatCheck(RealFormat.UNIDENTIFIED, None)
+
+
+def _checked(lib: Lib, identifier: str, checks: dict[str, FormatCheck], md5: str = "x") -> None:
+    """Record checks as a fetch would, for the files the show's manifest records."""
+    item = lib.items.get(SRC, COLL, identifier)
+    assert item is not None and item.recorded_manifest is not None
+    sizes = {mf.name: mf.size for mf in item.recorded_manifest.files}
+    for name, check in checks.items():
+        FormatRepo(lib.items.conn).put(SRC, COLL, identifier, name, sizes[name], md5, check)
+
+
+def test_a_mislabelled_file_is_linked_under_its_real_extension(tmp_path: Path) -> None:
+    lib = Lib(tmp_path)
+    item = lib.show("deadco", {"1-01 St. Stephen.flac": b"aac", "info.txt": b"i"}, title="S")
+    _checked(lib, "deadco", {"1-01 St. Stephen.flac": AAC})
+
+    lib.finish()
+
+    assert lib.tree() == ["S/1-01 St. Stephen.m4a", "S/info.txt"]
+    assert item.archive_path is not None
+    assert (lib.base / "S/1-01 St. Stephen.m4a").stat().st_ino == (
+        item.archive_path / "1-01 St. Stephen.flac"
+    ).stat().st_ino
+    assert set(lib.repo.placed_inodes(SRC, COLL, "deadco")) == {
+        "S/1-01 St. Stephen.m4a", "S/info.txt",
+    }
+
+
+def test_the_old_link_goes_when_the_real_name_replaces_it(tmp_path: Path) -> None:
+    """A show staged before its check carries the source name; once checked, the
+    real-extension link replaces it and nothing shakedown placed is left behind
+    (§spec:library-cleanup)."""
+    lib = Lib(tmp_path)
+    lib.show("deadco", {"t1.flac": b"aac"}, title="S")
+    lib.finish()
+    assert lib.tree() == ["S/t1.flac"]
+
+    _checked(lib, "deadco", {"t1.flac": AAC})
+    lib.finish()
+
+    assert lib.tree() == ["S/t1.m4a"]
+    assert set(lib.repo.placed_inodes(SRC, COLL, "deadco")) == {"S/t1.m4a"}
+
+
+@pytest.mark.parametrize(
+    ("name", "check"),
+    [("Track.FLAC", FLAC), ("wav.flac", UNIDENTIFIED), ("unchecked.flac", None)],
+)
+def test_a_file_whose_name_fits_or_is_not_known_keeps_its_exact_name(
+    tmp_path: Path, name: str, check: FormatCheck | None
+) -> None:
+    lib = Lib(tmp_path)
+    lib.show("s", {name: b"a"}, title="S")
+    if check is not None:
+        _checked(lib, "s", {name: check})
+    lib.finish()
+    assert lib.tree() == [f"S/{name}"]
+
+
+def test_a_check_for_other_bytes_does_not_rename(tmp_path: Path) -> None:
+    """The record belongs to the manifest's file (name, size, checksum)."""
+    lib = Lib(tmp_path)
+    lib.show("s", {"t1.flac": b"a"}, title="S")
+    _checked(lib, "s", {"t1.flac": AAC}, md5="other bytes")
+    lib.finish()
+    assert lib.tree() == ["S/t1.flac"]
+
+
+def test_a_real_name_another_show_file_holds_keeps_the_source_name(tmp_path: Path) -> None:
+    lib = Lib(tmp_path)
+    lib.show("s", {"a.flac": b"aac", "a.m4a": b"aac2"}, title="S")
+    _checked(lib, "s", {"a.flac": AAC, "a.m4a": AAC})
+    lib.finish()
+    assert lib.tree() == ["S/a.flac", "S/a.m4a"]
+
+
+def test_two_files_wanting_the_same_real_name_both_keep_their_names(tmp_path: Path) -> None:
+    lib = Lib(tmp_path)
+    lib.show("s", {"a.flac": b"1", "a.mp3": b"2", "b.flac": b"3"}, title="S")
+    _checked(lib, "s", {"a.flac": AAC, "a.mp3": AAC, "b.flac": AAC})
+    lib.finish()
+    assert lib.tree() == ["S/a.flac", "S/a.mp3", "S/b.m4a"]
+
+
+def test_a_file_in_a_subfolder_keeps_its_folder(tmp_path: Path) -> None:
+    lib = Lib(tmp_path)
+    lib.show("s", {"cd1/t1.flac": b"a"}, title="S")
+    _checked(lib, "s", {"cd1/t1.flac": AAC})
+    lib.finish()
+    assert lib.tree() == ["S/cd1/t1.m4a"]
+
+
+def test_a_renamed_last_copy_moves_with_its_show(tmp_path: Path) -> None:
+    """When the archive copy is gone, the library link is the last copy of those bytes:
+    a folder change moves it under its real name instead of removing it."""
+    lib = Lib(tmp_path)
+    item = lib.show("s", {"t1.flac": b"aac"}, title="Old")
+    _checked(lib, "s", {"t1.flac": AAC})
+    lib.finish()
+    assert item.archive_path is not None
+    (item.archive_path / "t1.flac").unlink()
+
+    item.source_metadata["title"] = "New"
+    lib.items.upsert(item)
+    lib.finish()
+
+    assert lib.tree() == ["New/t1.m4a"]
+
+
+def test_a_last_copy_checked_after_staging_is_renamed_never_removed(tmp_path: Path) -> None:
+    """A show staged under the source name, then checked, whose archive copy is gone
+    by the next pass: the old link is the last copy of those bytes, so it takes the
+    real name instead of being removed (§spec:library-cleanup)."""
+    lib = Lib(tmp_path)
+    item = lib.show("s", {"t1.flac": b"aac"}, title="S")
+    lib.finish()
+    assert lib.tree() == ["S/t1.flac"]
+    inode = (lib.base / "S/t1.flac").stat().st_ino
+    _checked(lib, "s", {"t1.flac": AAC})
+    assert item.archive_path is not None
+    (item.archive_path / "t1.flac").unlink()
+
+    lib.finish()
+
+    assert lib.tree() == ["S/t1.m4a"]
+    assert (lib.base / "S/t1.m4a").stat().st_ino == inode
+    assert (lib.base / "S/t1.m4a").read_bytes() == b"aac"
+
+
+def test_a_last_copy_whose_move_was_blocked_moves_once_the_way_is_clear(
+    tmp_path: Path,
+) -> None:
+    """The show's folder changes while another file holds the new path: the last copy
+    stays where it is, and a later pass moves it once the path is free, even though
+    the show's new folder was recorded meanwhile (§spec:library-cleanup)."""
+    lib = Lib(tmp_path)
+    item = lib.show("s", {"t1.flac": b"aac"}, title="Old")
+    lib.finish()
+    inode = (lib.base / "Old/t1.flac").stat().st_ino
+    _checked(lib, "s", {"t1.flac": AAC})
+    assert item.archive_path is not None
+    (item.archive_path / "t1.flac").unlink()
+    item.source_metadata["title"] = "New"
+    lib.items.upsert(item)
+    (lib.base / "New").mkdir(parents=True)
+    (lib.base / "New/t1.m4a").write_bytes(b"someone else's")
+
+    lib.finish()
+    assert (lib.base / "Old/t1.flac").stat().st_ino == inode
+
+    (lib.base / "New/t1.m4a").unlink()
+    lib.finish()
+    assert (lib.base / "New/t1.m4a").stat().st_ino == inode
+    assert not (lib.base / "Old").exists()
+
+
+def test_a_last_copy_is_told_apart_from_a_same_named_file_in_a_subfolder(
+    tmp_path: Path,
+) -> None:
+    lib = Lib(tmp_path)
+    item = lib.show("s", {"t1.flac": b"top", "cd2/t1.flac": b"sub"}, title="Old")
+    lib.finish()
+    inode = (lib.base / "Old/t1.flac").stat().st_ino
+    assert item.archive_path is not None
+    (item.archive_path / "t1.flac").unlink()
+    item.source_metadata["title"] = "New"
+    lib.items.upsert(item)
+
+    lib.finish()
+
+    assert (lib.base / "New/t1.flac").stat().st_ino == inode
+    assert (lib.base / "New/cd2/t1.flac").stat().st_ino == (
+        item.archive_path / "cd2/t1.flac"
+    ).stat().st_ino
+    assert lib.tree() == ["New/cd2/t1.flac", "New/t1.flac"]

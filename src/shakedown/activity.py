@@ -588,6 +588,15 @@ class Progress:
             else:
                 self._bytes_to_fetch += size
 
+    def more_to_fetch(self, size: int | None) -> None:
+        """More bytes to fetch for a show already counted (None when unknown): a
+        fetch whose checks chose more files (§spec:real-format-ranking)."""
+        with self._lock:
+            if size is None:
+                self._sizes_known = False
+            else:
+                self._bytes_to_fetch += size
+
     def work_total(self, n: int) -> None:
         """The shows a non-fetching run works through, known up front (restage,
         verify)."""
@@ -607,6 +616,13 @@ class Progress:
     def failed(self, n: int = 1) -> None:
         with self._lock:
             self._bump("items_failed", n)
+
+    def stored_show_checked(self) -> None:
+        """One stored show's audio was checked (§spec:real-format-catch-up). No counter
+        moves for it, yet the run is not stuck: it counts as progress
+        (§spec:run-activity "Is it stuck?")."""
+        with self._lock:
+            self._last_progress_at = self._now()
 
     def working(self, identifier: str) -> None:
         with self._lock:

@@ -401,7 +401,9 @@ logs.
     action available next, covering at least: failed shows, interrupted
     or unrecovered runs, rescheduled collections and the time of their
     oldest skip, undelivered handoff notices, library collisions and
-    separated recordings, and library files shakedown did not place.
+    separated recordings, library files shakedown did not place, and
+    audio files whose content shakedown could not identify
+    (criterion 34).
     It also shows library health: restricted shows with their reason,
     disappeared shows, drift found by the last `verify --deep`, and
     shows kept as an unplayable original plus a playable copy. When
@@ -419,6 +421,32 @@ logs.
     NAS noticeably slower. When it cannot get fresh data, it says so
     and shows how old the data on screen is, instead of presenting old
     numbers as current.
+34. **Files are known by what they are, not what they are called.**
+    When an uploader names a file in one audio format but it holds
+    another — FLAC, MP3, Ogg Vorbis, or M4A in any combination, from
+    any source (e.g. AAC audio in an M4A container named `.flac`) —
+    shakedown recognises the real format. The archive copy keeps the
+    source's exact file name. The library copy carries the real
+    extension, and on tag-enabled collections its missing tags are
+    filled like any other file. Honestly named `.m4a` files are tagged
+    too. The best-copy choice (criterion 26) uses the real format: a
+    copy listed as lossless that turns out lossy (or the reverse) is
+    re-ranked, and a better copy is fetched if the source offers one.
+    A file whose content matches no audio format shakedown knows is
+    listed in `status` and the dashboard as needing attention, never
+    only in a log. Sync logs no per-track tag warning for a file it
+    recognised. Shows already in the archive are corrected without
+    downloading their audio again. Later syncs and `verify --deep`
+    report no re-download and no drift for them, and
+    `verify --deep --reconform` leaves the library copy correctly
+    named and re-tagged. Verifiable by syncing a fixture whose M4A
+    files are named `.flac` and seeing `.m4a` files with filled tags
+    in the library and the original names in the archive; and, on
+    the operator's install, by seeing the Dead & Company shows of
+    2022-06-13 and 2022-06-14 (Shoreline Amphitheatre) as `.m4a` and
+    of 2022-06-18 (Folsom Field, an MP3 upload) as `.mp3`, with album
+    artist and venue filled, playing in Navidrome with the right
+    format, with no re-download.
 
 ## User stories §req:user-stories
 
@@ -617,6 +645,25 @@ criterion and implies a testable path through the product's surface.
   changes anything, never slows the sync, and never shows stale numbers
   as if they were live — so that I can trust what it tells me.
   *(→ criteria 32, 33)*
+- **A mislabelled show still plays right.** As a homelab operator
+  whose Dead & Company shows arrived as AAC and MP3 files named
+  `.flac`, I want them in my library as `.m4a` and `.mp3` with their
+  tags filled, the archive
+  still holding archive.org's exact names, and the shows already
+  stored fixed without downloading them again, so that Navidrome plays
+  and labels them correctly and I never have to notice the uploader's
+  mistake. *(→ criterion 34)*
+- **My real .m4a shows browse too.** As a homelab operator, I want
+  honestly named `.m4a` shows tagged like my FLAC shows, so that they
+  group properly in Navidrome. *(→ criteria 25, 34)*
+- **The best copy, judged by what it really is.** As a collector, I
+  want a "lossless" copy that turns out lossy to be ranked as lossy,
+  and a better copy fetched when the source has one, so that I keep
+  the best version that truly exists. *(→ criteria 26, 34)*
+- **Tell me what you cannot identify.** As a homelab operator, I want
+  any file whose content shakedown cannot recognise listed in `status`
+  and on the dashboard, so that a corrupt or exotic file never hides in
+  a log line. *(→ criteria 31, 34)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -668,6 +715,9 @@ constraints that drive architecture.
   tool's own work.
 - **Restage speed.** Rebuilding the full library tree for a ~14k-item
   collection completes in under five minutes and never re-downloads.
+  Recognising a file's real format (criterion 34) never makes a
+  restage read every file in full; its cost is bounded, or the check
+  happens once per file rather than on every restage.
 - **Sync speed.** A recurring sync's wall-clock scales with what
   actually changed upstream, not with the size of the collection: a
   no-op weekly run does not re-check every item one at a time. The
@@ -836,7 +886,12 @@ Technical, operational, and scope bounds on the solution space.
   (artist, date, venue, title) from source metadata shakedown already
   holds — it only adds missing tags and never overwrites existing ones;
   (2) mirroring a source-provided playable alternative for media in an
-  unplayable format. Shakedown never converts audio itself.
+  unplayable format. Shakedown never converts audio itself. Tag
+  filling covers M4A files as well as FLAC, MP3 and Ogg Vorbis. Giving
+  a library copy its real extension when the source misnamed it
+  (criterion 34) is part of shakedown's own layout, not a rename in
+  the library tool's sense: the archive keeps the source's exact file
+  name, and existing tags are never overwritten.
 - **Tagged bytes are recorded state.** When tag filling changes a file,
   the post-tag checksum becomes part of shakedown's recorded state.
   Sync's change detection still compares only source listing against
@@ -857,6 +912,21 @@ Technical, operational, and scope bounds on the solution space.
 - **Governance: symphony-native.** REQUIREMENTS.md and SPEC.md are the
   repo's durable governance artifacts and ship in the PR as-is; the repo
   has no ADR/RFC/design-doc tree to convert into.
+- **Governance setup: lint script, CI workflow, markdown lint, agent
+  guidance section (operator decision, 2026-11-23).** Done:
+  `tools/governance-lint.sh` checks the slugs, references and SPEC.md
+  status lines and runs markdownlint; the governance-lint CI workflow
+  runs it on pull requests; AGENTS.md has a governance section; every
+  SPEC.md section carries a `*Status:*` line.
+- **Mislabelled audio: scope (operator decisions, 2026-11-23).** Out of
+  scope: converting audio; renaming files in the archive; correcting
+  archive.org's metadata or contacting uploaders; formats other than
+  FLAC, MP3, Ogg Vorbis and M4A (e.g. a mislabelled SHN, APE or WAV);
+  overwriting the uploader's existing tags; changing Navidrome's
+  configuration. How the shows already stored get corrected —
+  automatically on the first run after upgrading or through a command
+  the operator runs — is a design decision, bounded by "no audio
+  download" and the restage-speed bar.
 - **UI: web, track A (conventional), design state: kit and screens
   locked (2026-11-12).** One read-only web dashboard, fully usable on
   phone and desktop browsers, with a familiar admin-dashboard look from
@@ -892,7 +962,8 @@ in to prove the plugin seam. The discovery-performance increment (items
 16–18), and the setup, recovery, and validation-confidence increment
 (items 19–21), and the ownership, handoff, and discovery increment
 (items 22–30) have shipped; the current increment is the read-only web
-dashboard (items 32–36).
+dashboard (items 32–36), followed by mislabelled-audio handling
+(item 37).
 
 **Must have (v1 core):**
 
@@ -1037,6 +1108,22 @@ it all?" — weighed against how much already exists to show:
     30). Medium impact, high confidence: mostly counts shakedown already
     holds, plus free disk space and a growth history.
 36. Version and health (→ criterion 32). Small and contained.
+
+**Next — mislabelled audio (escalated from production triage,
+2026-11-23).** The 2026-11-21 Dead & Company catch-up stored three
+shows (59 tracks) named `.flac` that hold other audio — two AAC in
+M4A, one MP3: untagged, ranked as lossless, with one warning per
+track.
+
+37. Recognise a file's real format and act on it (→ criterion 34).
+    Low severity (no data corruption, 59 tracks seen) but the operator
+    wants a real fix, not a report, and the same gap leaves every
+    genuine `.m4a` upload untagged. High confidence: triage read the
+    files' bytes. Order inside the item: stage under the real
+    extension with the right tag writer; correct the stored shows
+    without re-download; re-rank on the real format; flag
+    unidentifiable files in `status` and the dashboard (gated on the
+    §spec:ui-kit glossary and screen state for it).
 
 **Nice to have / out of scope (candidates for later):**
 

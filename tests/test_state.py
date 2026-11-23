@@ -15,8 +15,10 @@ from shakedown.models import (
     Run,
     RunKind,
 )
+from shakedown.realformat import AudioClass, FormatCheck, RealFormat
 from shakedown.state import (
     DriftRepo,
+    FormatRepo,
     ItemRepo,
     OperationOutcomeRepo,
     PendingHandoffRepo,
@@ -554,7 +556,7 @@ def test_fresh_db_matches_migrated_schema(tmp_path: Path) -> None:
     for table in ("items", "runs", "library_placements", "library_folders",
                   "library_unplaced", "library_adoption", "handoff_pending",
                   "tag_files", "tag_shows", "run_activity", "growth_snapshots",
-                  "network_minutes", "network_events"):
+                  "network_minutes", "network_events", "audio_formats"):
         assert _columns(fresh, table) == _columns(migrated, table), table
 
 
@@ -803,7 +805,7 @@ def test_v8_db_gains_empty_rescheduled_syncs(tmp_path: Path) -> None:
 
     conn = connect(db_path)
     assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 12
+    assert SCHEMA_VERSION == 13
     assert "rescheduled_syncs" in _tables(conn)
     assert conn.execute("SELECT COUNT(*) AS n FROM rescheduled_syncs").fetchone()["n"] == 0
     item = ItemRepo(conn).get("s", "c", "x")
@@ -928,3 +930,113 @@ def test_activity_trim_keeps_30_days_and_never_touches_records(tmp_path: Path) -
     assert ids == {recent, running}
     assert ItemRepo(conn).get("s", "c", "x") is not None
     assert RunRepo(conn).latest("s", "c") is not None
+
+
+AAC = FormatCheck(RealFormat.M4A, AudioClass.LOSSY)
+FLAC_CHECK = FormatCheck(RealFormat.FLAC, AudioClass.LOSSLESS)
+UNIDENTIFIED = FormatCheck(RealFormat.UNIDENTIFIED, None)
+
+
+def test_v12_db_gains_an_empty_format_record(tmp_path: Path) -> None:
+    """v13 adds the per-file record of real formats as an additive migration
+    (§spec:state, §spec:real-format): it adds no check itself, and every item, figure
+    and tag record stays as it was."""
+    db_path = tmp_path / "v12.db"
+    conn = connect(db_path)
+    ItemRepo(conn).upsert(_make_item())
+    TagRepo(conn).set_fingerprint("s", "c", "x", "fp")
+    conn.execute("DROP TABLE audio_formats")
+    conn.execute("UPDATE schema_version SET version = 12")
+    conn.close()
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 13
+    assert "audio_formats" in _tables(conn)
+    assert conn.execute("SELECT COUNT(*) AS n FROM audio_formats").fetchone()["n"] == 0
+    assert ItemRepo(conn).get("s", "c", "x") is not None
+    assert TagRepo(conn).fingerprints("s", "c") == {"x": "fp"}
+
+
+def test_v12_db_reopens_tagged_shows_with_m4a_files_once(tmp_path: Path) -> None:
+    """v13 also clears the fingerprint of every tagged show holding a file named
+    .m4a (any letter case), so the first sync after the upgrade fills its M4A files
+    (§spec:m4a-tags, §spec:state); other shows and every file record stay."""
+    db_path = tmp_path / "v12.db"
+    conn = connect(db_path)
+    manifests = {
+        "aac": '[{"name": "t01.m4a", "size": 1, "md5": null, "library": true}]',
+        "upper": '[{"name": "T01.M4A", "size": 1, "md5": null, "library": true}]',
+        "lossless": '[{"name": "t01.flac", "size": 1, "md5": null, "library": true}]',
+    }
+    repo = TagRepo(conn)
+    for identifier, manifest in manifests.items():
+        conn.execute(
+            "INSERT INTO items (source_name, collection_name, identifier, status,"
+            " recorded_manifest) VALUES ('s', 'c', ?, 'complete', ?)",
+            (identifier, manifest),
+        )
+        repo.set_fingerprint("s", "c", identifier, "fp")
+        repo.put_file("s", "c", identifier, "t01", TagRecord("md5", {"album": "A"}))
+    conn.execute("DROP TABLE audio_formats")
+    conn.execute("UPDATE schema_version SET version = 12")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 13
+    repo = TagRepo(conn)
+    assert repo.fingerprints("s", "c") == {"lossless": "fp"}
+    for identifier in manifests:
+        assert set(repo.file_records("s", "c", identifier)) == {"t01"}
+
+
+def test_format_repo_round_trip(tmp_path: Path) -> None:
+    repo = FormatRepo(connect(tmp_path / "s.db"))
+    repo.put("s", "c", "x", "a.flac", 10, "aa", AAC)
+    repo.put("s", "c", "x", "b.flac", None, None, UNIDENTIFIED)
+    repo.put("s", "c", "x", "a.flac", 11, "ab", FLAC_CHECK)  # checked again: replaced
+    repo.put("s", "c", "y", "c.mp3", 5, "cc", AAC)
+    repo.put("s", "other", "x", "a.flac", 1, "zz", AAC)
+
+    assert repo.for_show("s", "c", "x") == {
+        "a.flac": (11, "ab", FLAC_CHECK),
+        "b.flac": (None, None, UNIDENTIFIED),
+    }
+    assert repo.for_collection("s", "c") == {
+        "x": {"a.flac": (11, "ab", FLAC_CHECK), "b.flac": (None, None, UNIDENTIFIED)},
+        "y": {"c.mp3": (5, "cc", AAC)},
+    }
+    repo.keep_only("s", "c", "x", ["b.flac"])
+    assert set(repo.for_show("s", "c", "x")) == {"b.flac"}
+    repo.delete_show("s", "c", "x")
+    assert repo.for_show("s", "c", "x") == {}
+    assert repo.for_show("s", "other", "x") != {}
+
+
+def test_forgetting_a_show_drops_its_format_record(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "s.db")
+    ItemRepo(conn).upsert(_make_item())
+    FormatRepo(conn).put("s", "c", "x", "a.flac", 1, None, AAC)
+    ItemRepo(conn).delete("s", "c", "x")
+    assert FormatRepo(conn).for_show("s", "c", "x") == {}
+
+
+def test_pruning_a_show_drops_its_format_record(tmp_path: Path) -> None:
+    """A pruned show's archive copy is gone, and with it the files the checks
+    describe."""
+    from shakedown.config import CollectionConfig
+    from shakedown.sync import _record_disappeared
+
+    conn = connect(tmp_path / "s.db")
+    folder = tmp_path / "archive" / "x"
+    folder.mkdir(parents=True)
+    item = _make_item()
+    item.archive_path = folder
+    ItemRepo(conn).upsert(item)
+    FormatRepo(conn).put("s", "c", "x", "a.flac", 1, None, AAC)
+
+    _record_disappeared(
+        ItemRepo(conn), "s", CollectionConfig(name="c", query="q", prune_disappeared=True), item
+    )
+
+    assert FormatRepo(conn).for_show("s", "c", "x") == {}

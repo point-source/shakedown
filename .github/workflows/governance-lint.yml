@@ -1,0 +1,31 @@
+name: Governance lint
+
+# Status lines, slugs and references in the governance docs, plus markdown lint
+# (tools/governance-lint.sh). Checks only: no releases, no publishing.
+
+on:
+  pull_request:
+    paths:
+      - "**/REQUIREMENTS.md"
+      - "**/SPEC.md"
+      - "**/ROADMAP.md"
+      - "**/README.md"
+      - ".markdownlint.json"
+      - "tools/governance-lint.sh"
+      - ".github/workflows/governance-lint.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  governance-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+      - name: Install markdownlint-cli2
+        run: npm install --global markdownlint-cli2@0.24.0
+      - name: Governance lint
+        run: tools/governance-lint.sh

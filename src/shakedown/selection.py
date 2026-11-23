@@ -10,11 +10,12 @@ system or editor leftovers. Shakedown never converts audio.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 
 from shakedown.models import Manifest, ManifestFile, SourceFile
+from shakedown.realformat import AudioClass, FormatCheck, FormatRecord
 
 # Recorded as the item's restriction_reason when archive.org refuses a download.
 DOWNLOAD_REFUSED_REASON = "download refused by archive.org (stream-only or restricted)"
@@ -97,11 +98,46 @@ def _playable_ext(ext: str) -> bool:
     return ext not in _UNPLAYABLE and ext not in _OTHER_AUDIO
 
 
-def _audio_class(f: SourceFile) -> _Class | None:
-    """The file's audio class, or None for a non-audio file (see `_audio_ext`)."""
+# A listed file's recorded real format, by name: only recognised checks that still
+# describe the listed file (§spec:real-format-ranking). Every other file counts as listed.
+Known = Mapping[str, FormatCheck]
+_NOTHING_KNOWN: Known = {}
+
+
+def _known(files: Sequence[SourceFile], formats: Mapping[str, FormatRecord] | None) -> Known:
+    """The recorded checks that still describe the listed files: same name, size, and
+    source checksum. An unidentified check counts for nothing: the file is ranked by
+    its listing (§spec:real-format)."""
+    if not formats:
+        return _NOTHING_KNOWN
+    known: dict[str, FormatCheck] = {}
+    for f in files:
+        record = formats.get(f.name)
+        if record is not None and record[:2] == (f.size, f.md5) and record[2].recognised:
+            known[f.name] = record[2]
+    return known
+
+
+def _check_class(check: FormatCheck) -> _Class:
+    return _Class.LOSSLESS if check.audio_class == AudioClass.LOSSLESS else _Class.LOSSY
+
+
+def _rank_ext(f: SourceFile, known: Known) -> str:
+    """The extension the lossless order reads: the real format's once checked
+    (`m4a` for Apple Lossless named `.flac`), else the listed name's."""
+    check = known.get(f.name)
+    return check.format.value if check is not None else _ext(f.name)
+
+
+def _audio_class(f: SourceFile, known: Known = _NOTHING_KNOWN) -> _Class | None:
+    """The file's audio class, or None for a non-audio file (see `_audio_ext`). A file
+    with a recorded check counts by its real class."""
     ext = _audio_ext(f.name)
     if ext is None:
         return None
+    check = known.get(f.name)
+    if check is not None:
+        return _check_class(check)
     if ext in _LOSSLESS:
         return _Class.LOSSLESS
     if ext in _LOSSY:
@@ -117,6 +153,9 @@ class _Format:
     key: str
     cls: _Class
     files: tuple[SourceFile, ...]
+    # Among lossless copies: FLAC, Apple Lossless, WAV, AIFF, then SHN, by each file's
+    # real format once checked; a copy ranks by its worst file.
+    order: int = 0
 
     @property
     def playable(self) -> bool:
@@ -159,7 +198,11 @@ def _track(name: str) -> str:
     return f"{folder}/{base.rsplit('.', 1)[0]}" if "." in base else name
 
 
-def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
+def _lossless_order(files: Sequence[SourceFile], known: Known) -> int:
+    return max(_LOSSLESS_ORDER.get(_rank_ext(f, known), len(_LOSSLESS_ORDER)) for f in files)
+
+
+def _formats(audio: Sequence[SourceFile], known: Known = _NOTHING_KNOWN) -> list[_Format]:
     """The show's audio formats: the files sharing the source's format name, plus one
     copy per audio class and file type whose tracks the source splits across names.
 
@@ -170,14 +213,17 @@ def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
     the show's track count and no track twice. Names that each cover the show stay
     separate copies (a 24-bit and a 16-bit set). Derivatives never merge: the source
     labels its own consistently, and its MP3s of different bitrates are separate
-    copies of the same tracks."""
+    copies of the same tracks.
+
+    A file with a recorded check counts by its real class, so a copy whose checked
+    files are not all lossless ranks lossy (§spec:real-format-ranking)."""
     groups: dict[str, list[SourceFile]] = {}
     for f in audio:
         groups.setdefault(f.format or _ext(f.name), []).append(f)
     out: list[_Format] = []
     for key, members in groups.items():
-        classes = {c for c in (_audio_class(f) for f in members) if c is not None}
-        out.append(_Format(key, min(classes), tuple(members)))
+        classes = {c for c in (_audio_class(f, known) for f in members) if c is not None}
+        out.append(_Format(key, min(classes), tuple(members), _lossless_order(members, known)))
 
     tracks = max(len(fmt.files) for fmt in out)
     families: dict[tuple[_Class, str], list[_Format]] = {}
@@ -190,7 +236,8 @@ def _formats(audio: Sequence[SourceFile]) -> list[_Format]:
             continue
         files = tuple(f for fmt in split for f in fmt.files)
         if len(files) == tracks == len({_track(f.name) for f in files}):
-            out.append(_Format(" + ".join(sorted(fmt.key for fmt in split)), cls, files))
+            out.append(_Format(" + ".join(sorted(fmt.key for fmt in split)), cls, files,
+                               _lossless_order(files, known)))
     return out
 
 
@@ -214,7 +261,7 @@ def _ranked(candidates: list[_Format]) -> list[_Format]:
     def key(c: _Format) -> tuple[int, int, int, float, str]:
         order, measure = 0, 0.0
         if c.cls is _Class.LOSSLESS:
-            order = _LOSSLESS_ORDER.get(_ext(c.files[0].name), len(_LOSSLESS_ORDER))
+            order = c.order
             measure = _size_per_track(c)
         elif c.cls is _Class.LOSSY:
             measure = (
@@ -243,18 +290,27 @@ def _entry(f: SourceFile, library: bool) -> ManifestFile:
     )
 
 
-def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selection:
-    """Choose the files to mirror from a source's full listing for one item."""
+def select(
+    files: Sequence[SourceFile],
+    restriction_reason: str | None,
+    formats: Mapping[str, FormatRecord] | None = None,
+) -> Selection:
+    """Choose the files to mirror from a source's full listing for one item.
+
+    ``formats`` holds the show's recorded checks by file name: a listed file whose
+    check still describes it (same size and checksum) counts by its real format and
+    class, not its listing (§spec:real-format-ranking). Unchecked files count as
+    listed."""
     audio = [f for f in files if _audio_class(f) is not None]
     if not audio:
         # Nothing to play: an empty selection, which the planner records as listing no
         # files and keeps the archive copy (a darked or glitched listing).
         return Selection(Manifest(()), bool(restriction_reason), restriction_reason)
 
-    formats = _formats(audio)
+    copies = _formats(audio, _known(audio, formats))
     # A format counts only when it covers every track and the source serves it all.
-    tracks = max(len(fmt.files) for fmt in formats)
-    candidates = [fmt for fmt in formats if len(fmt.files) == tracks and fmt.served]
+    tracks = max(len(fmt.files) for fmt in copies)
+    candidates = [fmt for fmt in copies if len(fmt.files) == tracks and fmt.served]
     if not candidates:
         return Selection(Manifest(()), True, restriction_reason or DOWNLOAD_REFUSED_REASON)
 
@@ -276,7 +332,7 @@ def select(files: Sequence[SourceFile], restriction_reason: str | None) -> Selec
     if restriction_reason:
         return Selection(manifest, True, restriction_reason)
     reason = None
-    lossless_refused = any(fmt.cls is _Class.LOSSLESS and not fmt.served for fmt in formats)
+    lossless_refused = any(fmt.cls is _Class.LOSSLESS and not fmt.served for fmt in copies)
     if best.cls is not _Class.LOSSLESS and lossless_refused:
         reason = LOSSLESS_REFUSED_REASON
     not_playable = None
@@ -305,3 +361,25 @@ def keeps_unplayable_original(manifest: Manifest) -> bool:
         elif not f.library and not _playable_ext(ext):
             original = True
     return original and playable
+
+
+def may_change_rank(name: str, check: FormatCheck) -> bool:
+    """Whether a recorded check could rank a file differently from its listed name:
+    its real class or lossless order differs from what the name gives. A `.m4a` name
+    always may: its listed class came from the source's format word, which the archive
+    does not keep. An unidentified file is ranked by its listing, so never
+    (§spec:real-format-ranking)."""
+    if not check.recognised:
+        return False
+    ext = _ext(name)
+    if ext in _EITHER:
+        return True
+    if ext in _LOSSLESS:
+        named = (_Class.LOSSLESS, _LOSSLESS_ORDER.get(ext))
+    elif ext in _LOSSY:
+        named = (_Class.LOSSY, None)
+    else:
+        named = (_Class.UNRECOGNISED, None)
+    real_class = _check_class(check)
+    real_order = _LOSSLESS_ORDER.get(check.format.value) if real_class is _Class.LOSSLESS else None
+    return named != (real_class, real_order)

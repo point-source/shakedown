@@ -19,8 +19,11 @@ from shakedown.config import Config
 from shakedown.db import connect_reader
 from shakedown.history import RunEnd, run_end
 from shakedown.models import ItemStatus, OperationOutcome, OperationStatus, RunKind
+from shakedown.placement import has_archive_copy
+from shakedown.realformat import valid_formats
 from shakedown.state import (
     DriftRepo,
+    FormatRepo,
     ItemRepo,
     OperationOutcomeRepo,
     PendingHandoffRepo,
@@ -47,6 +50,25 @@ def library_figures(items: ItemRepo, source_name: str, collection_name: str) -> 
         ],
         "bytes_on_disk": items.archived_bytes(source_name, collection_name),
     }
+
+
+def unidentified_files(items: ItemRepo, source_name: str, collection_name: str) -> list[dict[str, str]]:
+    """Every unidentified file of the collection's mirrored shows, by its source name
+    (§spec:unidentified-audio): the files staged under their name and never tagged. A
+    record counts only while it still describes the show's recorded file
+    (realformat.valid_formats). Only shows holding such a record are read, so the
+    dashboard's 30-second answer never parses every manifest."""
+    found: list[dict[str, str]] = []
+    for identifier, records in FormatRepo(items.conn).unidentified(
+        source_name, collection_name
+    ).items():
+        item = items.get(source_name, collection_name, identifier)
+        if item is None or not has_archive_copy(item):
+            continue
+        assert item.recorded_manifest is not None
+        valid = valid_formats(item.recorded_manifest, records)
+        found += [{"identifier": identifier, "file": name} for name in sorted(valid)]
+    return found
 
 
 def _collection_summary(
@@ -112,6 +134,9 @@ def _collection_summary(
             str(library_dir / path)
             for path in placements.list_unplaced(source_name, collection_name)
         ],
+        # Audio files whose content matches no recognised format, kept and staged under
+        # their source name (§spec:unidentified-audio).
+        "unidentified_files": unidentified_files(items, source_name, collection_name),
         # Shows whose handoff notice was not delivered yet (§spec:durable-handoff).
         "handoff_pending": _handoff_pending(config, source_name, collection_name, items),
         # The collection's sync was skipped because another run held the writer lock;
@@ -320,6 +345,12 @@ def print_status(config: Config, *, as_json: bool) -> None:
                 f"  library files not placed by shakedown: {len(s['unplaced_files'])} "
                 "(left in place; paths in status --json)"
             )
+        unidentified = s["unidentified_files"]
+        if unidentified:
+            files = "1 file" if len(unidentified) == 1 else f"{len(unidentified)} files"
+            click.echo(f"  audio shakedown cannot identify: {files} (kept unchanged):")
+            # `!r`: file names come from the source and may carry control characters.
+            _echo_capped([f"{u['identifier']}: {u['file']!r}" for u in unidentified])
         removed = len(s["removed_upstream"])
         if removed:
             shows = "1 show" if removed == 1 else f"{removed} shows"
