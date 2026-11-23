@@ -1289,9 +1289,9 @@ another tool; `verify --deep` reports exactly that file.
 *Status: in progress*
 
 The check at fetch, its record, the real-extension library name, the
-tag writer by real format, and tagging M4A files (§spec:m4a-tags) are
-done; checking stored shows (§spec:real-format-catch-up) is not started.
-Listing unidentified files (§spec:unidentified-audio) is in progress.
+tag writer by real format, tagging M4A files (§spec:m4a-tags), and
+listing unidentified files (§spec:unidentified-audio) are done; checking
+stored shows (§spec:real-format-catch-up) is not started.
 
 Compatibility: from "deployed — single operator install, no external
 consumers" (§req:constraints): every surface this feature touches is
@@ -1638,10 +1638,7 @@ again: it resumes. Run `reconcile`, then sync: the names stay `.m4a`.
 
 ## Unidentified audio in status and the dashboard §spec:unidentified-audio
 
-*Status: in progress*
-
-`status`, the attention entry, and the page row are built; the row waits
-for the operator's approval of its render.
+*Status: complete*
 
 A file whose content matches none of the recognised formats
 (§spec:real-format) is listed in `status` and on the dashboard's Needs
@@ -3013,11 +3010,7 @@ shows, and they lead the recently-mirrored list.
 
 ## Needs attention §spec:needs-attention
 
-*Status: in progress*
-
-Complete; the `unidentified_files` kind
-(§spec:unidentified-audio) is built and its row waits for the operator's
-approval of its render.
+*Status: complete*
 
 The dashboard has one list of what needs the operator, naming the
 collection or show affected and the next available action, and a
@@ -3402,7 +3395,7 @@ is one route (`GET /`) with four tabs.
 | Screen | Handoff spec | Golden scenarios | Approved |
 | --- | --- | --- | --- |
 | Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13 |
-| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content, waiting | round 2, 2026-11-12; waiting rows 2026-11-20 |
+| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content, waiting | round 2, 2026-11-12; waiting rows 2026-11-20; unidentified files row 2026-11-23 |
 | Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
