@@ -10,7 +10,7 @@
 
 ## System shape §spec:system-shape
 
-*Status: implemented*
+*Status: complete*
 
 The system is three logical layers, two on-disk trees, and one process:
 
@@ -62,7 +62,7 @@ same seam the *arr ecosystem uses for its download→library handoff.
 
 ## Sync identity §spec:sync-identity
 
-*Status: implemented*
+*Status: complete*
 
 This is the load-bearing design decision of the project
 (§req:priorities #1). The system's answer to "do I already have this
@@ -165,7 +165,7 @@ collection so a config typo can't silently discard recordings.
 
 ## Sync workflow §spec:sync-workflow
 
-*Status: implemented*
+*Status: complete*
 
 A sync run for a (source, collection) pair proceeds in six phases:
 
@@ -242,11 +242,13 @@ never runs against a partial discovery.
 
 ## Discovery performance §spec:discovery-performance
 
-*Status: implemented — the shared per-source concurrency budget
+*Status: complete*
+
+The shared per-source concurrency budget
 (§spec:source-budget), parallel per-item discovery and discover→download
 pipelining (§spec:discovery-pipeline, both levers), the bounded slow-metadata
 envelope (§spec:slow-metadata), and opt-in incremental discovery
-(§spec:incremental-discovery) are all in place.*
+(§spec:incremental-discovery) are all in place.
 
 On a large collection (~14k items, e.g. IA GratefulDead), discovery is
 the wall-clock bottleneck in two regimes. A **first full sync**
@@ -349,7 +351,7 @@ mechanism.
 
 ### Incremental discovery §spec:incremental-discovery
 
-*Status: implemented*
+*Status: complete*
 
 Opt-in per collection (`incremental_discovery`, default off,
 §spec:configuration). When enabled, discovery requests a cheap per-item
@@ -473,8 +475,10 @@ discovery-performance increment bought (§spec:discovery-pipeline).
 
 ## Layout collision safety §spec:layout-collision-safety
 
-*Status: complete — the config-time guard, and runtime separation
-(§spec:library-ownership).*
+*Status: complete*
+
+Includes the config-time guard, and runtime separation
+(§spec:library-ownership).
 
 A `library_layout` that cannot distinguish two items in the same
 collection renders them to the same library folder. A live-music
@@ -570,9 +574,11 @@ what is preserved.
 
 ## Source plugins §spec:source-plugins
 
-*Status: complete, including the core-owned listing/lookup contract
+*Status: complete*
+
+Includes the core-owned listing/lookup contract
 (§spec:per-item-isolation) and network measurement for the dashboard
-(§spec:network-activity).*
+(§spec:network-activity).
 
 Sources are pluggable so that new archives can be added without core
 changes (§req:constraints). A plugin lists a collection, looks up one
@@ -637,8 +643,10 @@ documented interface" — not "installable third-party ecosystem."
 
 ## Per-item isolation on every source §spec:per-item-isolation
 
-*Status: implemented, including the core's file-selection rule
-(§spec:quality-selection).*
+*Status: complete*
+
+Includes the core's file-selection rule
+(§spec:quality-selection).
 
 A server error, timeout, or malformed file listing for one item marks
 only that item failed for the run; every other item still syncs and the
@@ -725,8 +733,10 @@ mirrored.
 
 ## Best available and best playable copy §spec:quality-selection
 
-*Status: complete; ranking by a file's real format
-(§spec:real-format-ranking) not started*
+*Status: in progress*
+
+Complete; ranking by a file's real format
+(§spec:real-format-ranking) not started.
 
 For every show, the system keeps the highest-quality version the source
 offers and the highest-quality version a common player can play: one
@@ -902,9 +912,11 @@ first sync downloads only the added non-audio files and playable copies.
 
 ## Library staging §spec:library-staging
 
-*Status: complete, including path ownership, clash separation, and
+*Status: in progress*
+
+Complete, including path ownership, clash separation, and
 stale-copy cleanup (§spec:library-ownership, §spec:library-cleanup); the
-real-extension exception (§spec:real-format) not started.*
+real-extension exception (§spec:real-format) not started.
 
 Per collection, the user provides a `library_layout` template that
 renders each item's **staging directory** under the library tree, from
@@ -1144,8 +1156,10 @@ sync; the old folder is gone without any download.
 
 ## Tag filling §spec:tag-filling
 
-*Status: complete; M4A files and choosing the writer by real format
-(§spec:m4a-tags, §spec:real-format) not started*
+*Status: in progress*
+
+Complete; M4A files and choosing the writer by real format
+(§spec:m4a-tags, §spec:real-format) not started.
 
 A collection may opt in (`fill_tags`, default off, §spec:configuration)
 to having shakedown fill in missing basic tags from the source metadata
@@ -1680,11 +1694,13 @@ file upstream with a real FLAC and sync: the entry is gone.
 
 ## Verification and drift §spec:verify-drift
 
-*Status: implemented, including reconform as single-show runs
+*Status: in progress*
+
+Complete, including reconform as single-show runs
 (§spec:single-show-runs), comparison against post-tag checksums, and
 refilling tags after a reconform (§spec:tag-filling); keeping a
 reconformed file's real-extension library name (§spec:real-format) not
-started.*
+started.
 
 `shakedown verify` is the explicit, operator-invoked integrity tool.
 It is never scheduled by default (§req:constraints).
@@ -1766,8 +1782,10 @@ already works. Scheduling is deliberately someone else's job
 
 ## Single-show operations as runs §spec:single-show-runs
 
-*Status: implemented, including filling tags after a fetch on a `fill_tags`
-collection (§spec:tag-filling).*
+*Status: complete*
+
+Includes filling tags after a fetch on a `fill_tags`
+collection (§spec:tag-filling).
 
 Refetching one show, or reconforming drifted shows, behaves like a sync
 of exactly those shows (§req:success-criteria #23).
@@ -2983,8 +3001,10 @@ shows, and they lead the recently-mirrored list.
 
 ## Needs attention §spec:needs-attention
 
-*Status: complete; the `unidentified_files` kind
-(§spec:unidentified-audio) not started*
+*Status: in progress*
+
+Complete; the `unidentified_files` kind
+(§spec:unidentified-audio) not started.
 
 The dashboard has one list of what needs the operator, naming the
 collection or show affected and the next available action, and a
@@ -3748,8 +3768,10 @@ completed, and once it completes the stale warning is gone.
 
 ## Release validation gate §spec:release-validation-gate
 
-*Status: complete — `tests/test_release_workflows.py`, run by CI's
-`test` job, which the image-publishing `docker` job needs.*
+*Status: complete*
+
+Covered by `tests/test_release_workflows.py`, run by CI's
+`test` job, which the image-publishing `docker` job needs.
 
 A bounded validation of the workflows users rely on runs in CI and must
 pass before any release image is published; the shipped product carries
@@ -3908,8 +3930,10 @@ sync ends stopped before `serve` exits.
 
 ## Failure behavior §spec:failure-behavior
 
-*Status: complete, including the run-activity rows (§spec:run-activity) and the
-dashboard row (§spec:dashboard)*
+*Status: complete*
+
+Includes the run-activity rows (§spec:run-activity) and the
+dashboard row (§spec:dashboard).
 
 The resilience contract (§req:quality-attributes): single failures
 degrade a single item or a single run, never the archive.
@@ -3957,8 +3981,10 @@ degrade a single item or a single run, never the archive.
 
 ## Real-source end-to-end check §spec:e2e-real-source
 
-*Status: implemented — `tests/test_e2e_real_source.py` (opt-in `network`
-marker), run instructions and pinned-item replacement procedure in README.*
+*Status: complete*
+
+Delivered as `tests/test_e2e_real_source.py` (opt-in `network`
+marker), with run instructions and the pinned-item replacement procedure in README.
 
 The entire test suite runs offline against fakes and mocked HTTP.
 That leaves two failure classes invisible: archive.org's real API
