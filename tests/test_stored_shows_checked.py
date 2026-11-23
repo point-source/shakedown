@@ -450,3 +450,70 @@ def test_a_missing_file_is_left_to_the_syncs_own_repair(
     assert FakePlugin.fetched_files["deadco2022-06-13"][-1:] == ["t2.flac"]
     assert _formats(config, "deadco2022-06-13") == {"t1.flac": AAC, "t2.flac": AAC}
     assert _names(_library(config, "deadco2022-06-13")) == {"t1.m4a", "t2.m4a"}
+
+
+# --- reconcile, verify, reconform ---------------------------------------------------------
+
+
+def test_after_reconcile_the_names_stay_real(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database rebuilt by `reconcile` holds no checks; the next sync makes them again
+    from the files, so the library keeps its real names (§spec:state)."""
+    from shakedown.reconcile import run_reconcile
+
+    config = make_config(*tmp_roots, fill_tags=True)
+    _show("deadco2022-06-13", DEADCO)
+    _show("deadco2022-06-18", {"t1.flac": "mp3"})
+    _mirror_before_the_check(config, monkeypatch)
+    assert run_sync(config) == 0
+    library = _tree(config.library_root)
+    assert config.state_db is not None
+    config.state_db.unlink()
+    assert run_reconcile(config) == 0
+    assert _formats(config, "deadco2022-06-13") == {}
+    asked = _refuse_downloads(monkeypatch)
+
+    assert run_sync(config) == 0
+
+    assert asked == []
+    assert _formats(config, "deadco2022-06-13") == dict.fromkeys(DEADCO, AAC)
+    assert _formats(config, "deadco2022-06-18") == {"t1.flac": MP3}
+    assert _tree(config.library_root) == library
+
+
+def test_verify_finds_no_drift_and_reconform_keeps_the_real_name(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the stored shows are fixed: a later sync downloads nothing, `verify --deep`
+    finds no drift, and `verify --deep --reconform` restores the source bytes, keeps
+    the real names, and fills the tags again."""
+    from tests.test_real_format import _verify
+
+    config = make_config(*tmp_roots, fill_tags=True)
+    _show("deadco2022-06-13", DEADCO)
+    _show("deadco2022-06-18", {"t1.flac": "mp3"}).metadata["date"] = "2022-06-18"
+    _mirror_before_the_check(config, monkeypatch)
+    assert run_sync(config) == 0
+    downloads = dict(FakePlugin.fetch_count)
+
+    assert run_sync(config) == 0
+    assert FakePlugin.fetch_count == downloads
+    assert _verify(config) == []
+
+    aac = _archive(config, "deadco2022-06-13") / "1-01 St. Stephen.flac"
+    mp3 = _archive(config, "deadco2022-06-18") / "t1.flac"
+    for path in (aac, mp3):
+        with path.open("r+b") as f:  # another tool changes the bytes in place
+            f.seek(-1, 2)
+            f.write(b"\x01")
+    drifted = [("deadco2022-06-13", "1-01 St. Stephen.flac"), ("deadco2022-06-18", "t1.flac")]
+    assert _verify(config, reconform=True) == drifted  # what it found, then repaired
+    assert _verify(config) == []
+
+    assert _names(_library(config, "deadco2022-06-13")) == {
+        name.replace(".flac", ".m4a") for name in DEADCO
+    }
+    assert _names(_library(config, "deadco2022-06-18")) == {"t1.mp3"}
+    assert read_tags(aac, "m4a") == _filled("Track 1", "1")
+    assert read_tags(mp3, "mp3")["venue"] == [META["venue"]]
