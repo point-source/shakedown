@@ -2,6 +2,7 @@
 (§spec:library-ownership, §spec:library-cleanup; §req:success-criteria #19, #20)."""
 from __future__ import annotations
 
+import itertools
 import os
 import sqlite3
 from pathlib import Path
@@ -301,9 +302,14 @@ def test_status_caps_the_separation_list(tmp_roots: tuple[Path, Path], capsys) -
 
     print_status(config, as_json=False)
     out = capsys.readouterr().out
-    assert "  shared folder names (12 shows, each labelled by identifier):\n" in out
-    assert sum(line.startswith("    - gd-") for line in out.splitlines()) == 10
-    assert "    ... and 2 more\n" in out
+    header = "  shared folder names (12 shows, each labelled by identifier):\n"
+    assert header in out
+    # The separation list alone: the fixture's stand-in audio is also listed as
+    # unidentified files (§spec:unidentified-audio), each line under its own header.
+    after = out.split(header, 1)[1].splitlines()
+    block = list(itertools.takewhile(lambda line: line.startswith("    "), after))
+    assert sum(line.startswith("    - gd-") for line in block) == 10
+    assert block[-1] == "    ... and 2 more"
 
 
 def test_status_is_quiet_without_separations_or_strays(

@@ -1241,6 +1241,26 @@ class FormatRepo:
             shows.setdefault(row["identifier"], {})[row["file_name"]] = _format_record(row)
         return shows
 
+    def unidentified(self, source: str, collection: str) -> dict[str, dict[str, FormatRecord]]:
+        """The records of unidentified files, by show then file name, in identifier
+        order (§spec:unidentified-audio). Empty on a database from before format records:
+        readers never migrate."""
+        exists = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audio_formats'"
+        ).fetchone()
+        if exists is None:
+            return {}
+        cur = self.conn.execute(
+            "SELECT identifier, file_name, size, md5, format, audio_class FROM audio_formats"
+            " WHERE source_name=? AND collection_name=? AND format=?"
+            " ORDER BY identifier, file_name",
+            (source, collection, RealFormat.UNIDENTIFIED.value),
+        )
+        shows: dict[str, dict[str, FormatRecord]] = {}
+        for row in cur:
+            shows.setdefault(row["identifier"], {})[row["file_name"]] = _format_record(row)
+        return shows
+
     def keep_only(
         self, source: str, collection: str, identifier: str, file_names: Iterable[str]
     ) -> None:
