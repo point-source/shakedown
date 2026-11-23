@@ -44,6 +44,17 @@ def test_an_m4a_whose_track_description_comes_first_is_known_too(tmp_path: Path)
     assert check_file(path) == AAC
 
 
+def test_an_m4a_carrying_the_uploaders_itunes_tags_is_still_m4a(tmp_path: Path) -> None:
+    """The observed Shoreline uploads carry iTunes tags (§spec:m4a-tags)."""
+    from tests.audio_fixtures import read_tags
+
+    tags = {"artist": "Dead and Company", "album": "Shoreline", "date": "2022-06-13",
+            "title": "St. Stephen", "tracknumber": "1/21", "discnumber": "1/2"}
+    path = make_audio(tmp_path / "1-01 St. Stephen.flac", tags, content="m4a")
+    assert check_file(path) == AAC
+    assert read_tags(path, "m4a") == {k: [v] for k, v in tags.items()}
+
+
 def test_a_flac_behind_an_id3_tag_is_flac_not_mp3(tmp_path: Path) -> None:
     """mutagen's MP3 sniff scores any ID3 header; the FLAC reader skips the tag."""
     path = tmp_path / "t.mp3"

@@ -7,9 +7,13 @@ import struct
 from pathlib import Path
 
 from mutagen.easyid3 import EasyID3
+from mutagen.easymp4 import EasyMP4, EasyMP4Tags
 from mutagen.flac import FLAC
 from mutagen.ogg import OggPage
 from mutagen.oggvorbis import OggVorbis
+
+# Venue as shakedown writes it in M4A: the iTunes freeform field VENUE (§spec:m4a-tags).
+EasyMP4Tags.RegisterFreeformKey("venue", "VENUE")
 
 
 def flac_bytes() -> bytes:
@@ -144,6 +148,13 @@ def make_audio(
             for key, value in tags.items():
                 id3[key] = [value]
             id3.save(path, v2_version=id3_version)
+        elif kind in ("m4a", "alac"):
+            mp4 = EasyMP4(path)
+            if mp4.tags is None:
+                mp4.add_tags()
+            for key, value in tags.items():
+                mp4[key] = [value]
+            mp4.save()
         else:
             f = FLAC(path) if kind == "flac" else OggVorbis(path)
             if f.tags is None:
@@ -160,6 +171,8 @@ def read_tags(path: Path, content: str | None = None) -> dict[str, list[str]]:
     kind = content or path.suffix.lower().lstrip(".")
     if kind == "mp3":
         return {k: list(v) for k, v in EasyID3(path).items()}
+    if kind in ("m4a", "alac"):
+        return {k: list(v) for k, v in EasyMP4(path).items()}
     f = FLAC(path) if kind == "flac" else OggVorbis(path)
     return {k.lower(): list(v) for k, v in f.items()}
 
