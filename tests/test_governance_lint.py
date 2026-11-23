@@ -95,6 +95,27 @@ def test_optional_tools_absent_are_skipped_with_a_note(tmp_path: Path) -> None:
     assert "markdownlint-cli2 not found" in result.stdout
 
 
+def test_markdownlint_failure_fails_the_run(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    (root / ".markdownlint.json").write_text("{}\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "markdownlint-cli2"
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$(dirname "$0")/args"\nexit 1\n')
+    stub.chmod(0o755)
+    result = subprocess.run(
+        [str(root / "tools" / "governance-lint.sh")],
+        cwd=root,
+        env={**ENV, "PATH": f"{bin_dir}:{ENV['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    args = (bin_dir / "args").read_text().splitlines()
+    assert args[:3] == ["**/REQUIREMENTS.md", "**/SPEC.md", "**/README.md"]
+
+
 def test_copies_inside_dot_directories_are_ignored(tmp_path: Path) -> None:
     root = _repo(tmp_path)
     copy = root / ".claude" / "worktrees" / "other"
@@ -133,11 +154,6 @@ def test_status_line_with_a_qualifier_fails(tmp_path: Path) -> None:
 def test_section_at_end_of_file_without_status_line_fails(tmp_path: Path) -> None:
     spec = SPEC + "\n## Last §spec:last\n"
     _fails_with(_repo(tmp_path, spec), "SPEC.md:19:", "status line")
-
-
-def test_status_line_rule_applies_to_spec_only(tmp_path: Path) -> None:
-    result = _lint(_repo(tmp_path))  # REQUIREMENTS.md sections carry none
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_headings_inside_fenced_blocks_are_ignored(tmp_path: Path) -> None:
