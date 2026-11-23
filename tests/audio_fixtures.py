@@ -1,5 +1,5 @@
-"""Tiny valid FLAC, MP3 and Ogg Vorbis files built by hand, so tag-filling tests need
-no encoder. mutagen parses and tags them like real recordings; the audio itself is
+"""Tiny valid FLAC, MP3, Ogg Vorbis and M4A files (and a WAV) built by hand, so tests
+need no encoder. mutagen parses and tags them like real recordings; the audio itself is
 silence-shaped filler no player needs to decode."""
 from __future__ import annotations
 
@@ -40,20 +40,112 @@ def ogg_bytes() -> bytes:
     return b"".join(pages)
 
 
-def make_audio(path: Path, tags: dict[str, str] | None = None, *, id3_version: int = 4) -> Path:
-    """Write a fixture chosen by the path's suffix, with these tags already present
-    (format-neutral names: artist, album, date, ...)."""
+def _box(name: bytes, *children: bytes) -> bytes:
+    body = b"".join(children)
+    return (8 + len(body)).to_bytes(4, "big") + name + body
+
+
+def _full_box(name: bytes, body: bytes, version: int = 0) -> bytes:
+    return _box(name, bytes([version, 0, 0, 0]) + body)
+
+
+def _descriptor(tag: int, body: bytes) -> bytes:
+    return bytes([tag, len(body)]) + body
+
+
+def m4a_bytes(codec: str = "aac", *, moov_last: bool = True) -> bytes:
+    """An MP4 audio file, as iTunes writes one: `ftyp`, `mdat` (filler), and a `moov`
+    whose one sound track's `stsd` describes AAC-LC (`mp4a` + `esds`, 44.1 kHz stereo)
+    or Apple Lossless (`alac`). `moov_last` puts the track description after the
+    audio, as in the observed uploads."""
+    entry_head = bytes(6) + (1).to_bytes(2, "big") + bytes(8)
+    entry_head += (2).to_bytes(2, "big") + (16).to_bytes(2, "big") + bytes(4)
+    entry_head += (44100 << 16).to_bytes(4, "big")
+    if codec == "aac":
+        specific = _descriptor(0x05, b"\x12\x10")  # AAC LC, 44.1 kHz, stereo
+        config = _descriptor(
+            0x04, b"\x40\x15" + bytes(3) + (256000).to_bytes(4, "big") * 2 + specific
+        )
+        es = _descriptor(0x03, (1).to_bytes(2, "big") + b"\x00" + config
+                         + _descriptor(0x06, b"\x02"))
+        entry = _box(b"mp4a", entry_head, _full_box(b"esds", es))
+    elif codec == "alac":
+        cookie = (4096).to_bytes(4, "big") + bytes([0, 16, 40, 10, 14, 2])
+        cookie += (255).to_bytes(2, "big") + bytes(4) + (1411200).to_bytes(4, "big")
+        cookie += (44100).to_bytes(4, "big")
+        entry = _box(b"alac", entry_head, _full_box(b"alac", cookie))
+    else:
+        raise ValueError(codec)
+    stsd = _full_box(b"stsd", (1).to_bytes(4, "big") + entry)
+    empty = (0).to_bytes(4, "big")
+    stbl = _box(b"stbl", stsd, _full_box(b"stts", empty), _full_box(b"stsc", empty),
+                _full_box(b"stsz", empty * 2), _full_box(b"stco", empty))
+    minf = _box(b"minf", _full_box(b"smhd", bytes(4)),
+                # One data reference, flagged "media in this file".
+                _box(b"dinf", _full_box(b"dref", (1).to_bytes(4, "big")
+                                        + _box(b"url ", b"\x00\x00\x00\x01"))),
+                stbl)
+    mdhd = _full_box(b"mdhd", bytes(8) + (44100).to_bytes(4, "big")
+                     + (44100).to_bytes(4, "big") + bytes(4))
+    hdlr = _full_box(b"hdlr", bytes(4) + b"soun" + bytes(12) + b"SoundHandler\x00")
+    tkhd = _full_box(b"tkhd", bytes(80), version=0)
+    mvhd = _full_box(b"mvhd", bytes(8) + (44100).to_bytes(4, "big")
+                     + (44100).to_bytes(4, "big") + bytes(80))
+    moov = _box(b"moov", mvhd, _box(b"trak", tkhd, _box(b"mdia", mdhd, hdlr, minf)))
+    ftyp = _box(b"ftyp", b"M4A " + bytes(4) + b"M4A mp42isom")
+    mdat = _box(b"mdat", bytes(2000))
+    return ftyp + (mdat + moov if moov_last else moov + mdat)
+
+
+def wav_bytes() -> bytes:
+    """A RIFF/WAVE file: 44.1 kHz 16-bit stereo PCM, a little silence."""
+    data = bytes(4000)
+    fmt = struct.pack("<HHIIHH", 1, 2, 44100, 44100 * 4, 4, 16)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    body += b"data" + struct.pack("<I", len(data)) + data
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def id3_prefixed_flac_bytes() -> bytes:
+    """A FLAC file with an ID3v2.4 tag in front of `fLaC`, as some taggers write it."""
+    frame = b"TPE1" + (9).to_bytes(4, "big") + b"\x00\x00" + b"\x03Artist\x00\x00"
+    size = bytes((len(frame) >> shift) & 0x7F for shift in (21, 14, 7, 0))
+    return b"ID3\x04\x00\x00" + size + frame + flac_bytes()
+
+
+CONTENT = {
+    "flac": flac_bytes,
+    "mp3": mp3_bytes,
+    "ogg": ogg_bytes,
+    "m4a": m4a_bytes,
+    "alac": lambda: m4a_bytes("alac"),
+    "wav": wav_bytes,
+}
+
+
+def make_audio(
+    path: Path,
+    tags: dict[str, str] | None = None,
+    *,
+    id3_version: int = 4,
+    content: str | None = None,
+) -> Path:
+    """Write a fixture, with these tags already present (format-neutral names: artist,
+    album, date, ...). `content` picks the audio (a CONTENT key) independently of the
+    file name, for a file named in another format; by default the path's suffix
+    decides."""
     suffix = path.suffix.lower()
+    kind = content or suffix.lstrip(".")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes({".flac": flac_bytes, ".mp3": mp3_bytes, ".ogg": ogg_bytes}[suffix]())
+    path.write_bytes(CONTENT[kind]())
     if tags:
-        if suffix == ".mp3":
+        if kind == "mp3":
             id3 = EasyID3()
             for key, value in tags.items():
                 id3[key] = [value]
             id3.save(path, v2_version=id3_version)
         else:
-            f = FLAC(path) if suffix == ".flac" else OggVorbis(path)
+            f = FLAC(path) if kind == "flac" else OggVorbis(path)
             if f.tags is None:
                 f.add_tags()
             for key, value in tags.items():
@@ -62,11 +154,13 @@ def make_audio(path: Path, tags: dict[str, str] | None = None, *, id3_version: i
     return path
 
 
-def read_tags(path: Path) -> dict[str, list[str]]:
-    """The file's tags under format-neutral lower-case names."""
-    if path.suffix.lower() == ".mp3":
+def read_tags(path: Path, content: str | None = None) -> dict[str, list[str]]:
+    """The file's tags under format-neutral lower-case names. `content` names the
+    audio when it differs from the file name (a CONTENT key)."""
+    kind = content or path.suffix.lower().lstrip(".")
+    if kind == "mp3":
         return {k: list(v) for k, v in EasyID3(path).items()}
-    f = FLAC(path) if path.suffix.lower() == ".flac" else OggVorbis(path)
+    f = FLAC(path) if kind == "flac" else OggVorbis(path)
     return {k.lower(): list(v) for k, v in f.items()}
 
 
