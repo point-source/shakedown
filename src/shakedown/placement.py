@@ -344,12 +344,14 @@ class LibraryPlacement:
         moves with the show instead of being removed."""
         assert item.archive_path is not None
         folder = PurePosixPath(self._folder(item.identifier))
-        # Keyed by library name, which may carry the real extension.
-        missing = {
-            PurePosixPath(rel).relative_to(folder).as_posix(): rel
-            for rel, name in desired.items()
-            if name != METADATA_SIDECAR and not (item.archive_path / name).is_file()
-        }
+        # Keyed by library name, which may carry the real extension, and by archive
+        # name: a link staged before its check still carries the source name.
+        missing: dict[str, str] = {}
+        for rel, name in desired.items():
+            if name == METADATA_SIDECAR or (item.archive_path / name).is_file():
+                continue
+            missing[PurePosixPath(rel).relative_to(folder).as_posix()] = rel
+            missing.setdefault(name, rel)
         if not missing or old_folder is None:
             return {}
         moves: dict[str, str] = {}
@@ -358,8 +360,8 @@ class LibraryPlacement:
                 name = PurePosixPath(rel).relative_to(old_folder).as_posix()
             except ValueError:
                 continue  # not in the show's recorded folder
-            if name in missing:
-                moves[rel] = missing.pop(name)
+            if name in missing and missing[name] not in moves.values():
+                moves[rel] = missing[name]
         return moves
 
     def _move(self, identifier: str, rel: str, new_rel: str, inode: int,

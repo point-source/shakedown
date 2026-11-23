@@ -653,3 +653,23 @@ def test_a_renamed_last_copy_moves_with_its_show(tmp_path: Path) -> None:
     lib.finish()
 
     assert lib.tree() == ["New/t1.m4a"]
+
+
+def test_a_last_copy_checked_after_staging_is_renamed_never_removed(tmp_path: Path) -> None:
+    """A show staged under the source name, then checked, whose archive copy is gone
+    by the next pass: the old link is the last copy of those bytes, so it takes the
+    real name instead of being removed (§spec:library-cleanup)."""
+    lib = Lib(tmp_path)
+    item = lib.show("s", {"t1.flac": b"aac"}, title="S")
+    lib.finish()
+    assert lib.tree() == ["S/t1.flac"]
+    inode = (lib.base / "S/t1.flac").stat().st_ino
+    _checked(lib, "s", {"t1.flac": AAC})
+    assert item.archive_path is not None
+    (item.archive_path / "t1.flac").unlink()
+
+    lib.finish()
+
+    assert lib.tree() == ["S/t1.m4a"]
+    assert (lib.base / "S/t1.m4a").stat().st_ino == inode
+    assert (lib.base / "S/t1.m4a").read_bytes() == b"aac"
