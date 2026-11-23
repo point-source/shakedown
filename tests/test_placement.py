@@ -673,3 +673,51 @@ def test_a_last_copy_checked_after_staging_is_renamed_never_removed(tmp_path: Pa
     assert lib.tree() == ["S/t1.m4a"]
     assert (lib.base / "S/t1.m4a").stat().st_ino == inode
     assert (lib.base / "S/t1.m4a").read_bytes() == b"aac"
+
+
+def test_a_last_copy_whose_move_was_blocked_moves_once_the_way_is_clear(
+    tmp_path: Path,
+) -> None:
+    """The show's folder changes while another file holds the new path: the last copy
+    stays where it is, and a later pass moves it once the path is free, even though
+    the show's new folder was recorded meanwhile (§spec:library-cleanup)."""
+    lib = Lib(tmp_path)
+    item = lib.show("s", {"t1.flac": b"aac"}, title="Old")
+    lib.finish()
+    inode = (lib.base / "Old/t1.flac").stat().st_ino
+    _checked(lib, "s", {"t1.flac": AAC})
+    assert item.archive_path is not None
+    (item.archive_path / "t1.flac").unlink()
+    item.source_metadata["title"] = "New"
+    lib.items.upsert(item)
+    (lib.base / "New").mkdir(parents=True)
+    (lib.base / "New/t1.m4a").write_bytes(b"someone else's")
+
+    lib.finish()
+    assert (lib.base / "Old/t1.flac").stat().st_ino == inode
+
+    (lib.base / "New/t1.m4a").unlink()
+    lib.finish()
+    assert (lib.base / "New/t1.m4a").stat().st_ino == inode
+    assert not (lib.base / "Old").exists()
+
+
+def test_a_last_copy_is_told_apart_from_a_same_named_file_in_a_subfolder(
+    tmp_path: Path,
+) -> None:
+    lib = Lib(tmp_path)
+    item = lib.show("s", {"t1.flac": b"top", "cd2/t1.flac": b"sub"}, title="Old")
+    lib.finish()
+    inode = (lib.base / "Old/t1.flac").stat().st_ino
+    assert item.archive_path is not None
+    (item.archive_path / "t1.flac").unlink()
+    item.source_metadata["title"] = "New"
+    lib.items.upsert(item)
+
+    lib.finish()
+
+    assert (lib.base / "New/t1.flac").stat().st_ino == inode
+    assert (lib.base / "New/cd2/t1.flac").stat().st_ino == (
+        item.archive_path / "cd2/t1.flac"
+    ).stat().st_ino
+    assert lib.tree() == ["New/cd2/t1.flac", "New/t1.flac"]

@@ -288,7 +288,6 @@ class LibraryPlacement:
         touched: set[Path] = set()
         # Issues from removing, moving, or linking alike make a show failed.
         issues_before = {i: len(self._report.issues.get(i, ())) for i in identifiers}
-        folders = self.repo.folders(self.source, self.collection.name)
         for identifier in identifiers:
             item = self.items.get(self.source, self.collection.name, identifier)
             if item is None:
@@ -297,7 +296,7 @@ class LibraryPlacement:
             placed = self.repo.placed_inodes(self.source, self.collection.name, identifier)
             stale = sorted(rel for rel in placed if rel not in desired)
             if stale:
-                moves = self._last_copy_moves(item, desired, stale, folders.get(identifier))
+                moves = self._last_copy_moves(item, desired, stale)
                 with transaction(self.items.conn):
                     for rel in stale:
                         if rel in moves:
@@ -336,32 +335,37 @@ class LibraryPlacement:
             else:
                 progress.done()
 
-    def _last_copy_moves(
-        self, item: Item, desired: dict[str, str], stale: list[str], old_folder: str | None
-    ) -> dict[str, str]:
-        """Old library path -> new path for files whose archive copy is gone: when the
-        show's folder changes, the library link is the last copy of those bytes, so it
-        moves with the show instead of being removed."""
+    def _last_copy_moves(self, item: Item, desired: dict[str, str], stale: list[str]
+                         ) -> dict[str, str]:
+        """Old library path -> new path for files whose archive copy is gone: the
+        library link is the last copy of those bytes, so it moves with the show (a
+        folder change, a real-extension name) instead of being removed.
+
+        A stale link is known by the longest of the show's file names its path ends
+        with, library or archive name (a link staged before its check still carries
+        the source name). Matching the path's tail, not the recorded folder, finds a
+        link whose earlier move was blocked after the show's new folder was recorded."""
         assert item.archive_path is not None
         folder = PurePosixPath(self._folder(item.identifier))
-        # Keyed by library name, which may carry the real extension, and by archive
-        # name: a link staged before its check still carries the source name.
-        missing: dict[str, str] = {}
+        # Show-relative name -> the new path when its archive copy is gone, else None.
+        names: dict[str, str | None] = {}
         for rel, name in desired.items():
-            if name == METADATA_SIDECAR or (item.archive_path / name).is_file():
-                continue
-            missing[PurePosixPath(rel).relative_to(folder).as_posix()] = rel
-            missing.setdefault(name, rel)
-        if not missing or old_folder is None:
+            gone = name != METADATA_SIDECAR and not (item.archive_path / name).is_file()
+            for key in (PurePosixPath(rel).relative_to(folder).as_posix(), name):
+                if gone:
+                    names[key] = rel
+                else:
+                    names.setdefault(key, None)
+        if not any(names.values()):
             return {}
         moves: dict[str, str] = {}
         for rel in stale:
-            try:
-                name = PurePosixPath(rel).relative_to(old_folder).as_posix()
-            except ValueError:
-                continue  # not in the show's recorded folder
-            if name in missing and missing[name] not in moves.values():
-                moves[rel] = missing[name]
+            matches = [key for key in names if rel == key or rel.endswith("/" + key)]
+            if not matches:
+                continue
+            target = names[max(matches, key=len)]
+            if target is not None and target not in moves.values():
+                moves[rel] = target
         return moves
 
     def _move(self, identifier: str, rel: str, new_rel: str, inode: int,
