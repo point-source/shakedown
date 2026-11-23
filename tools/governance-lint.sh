@@ -154,7 +154,7 @@ if [ -s "$tmp/docs" ]; then
   grep '^R	' "$tmp/scan" | cut -f2- >"$tmp/refs"
   { grep '^4	' "$tmp/scan" | cut -f2-
     awk -F '	' '
-      NR == FNR { n[$1]++; next }
+      FILENAME == ARGV[1] { n[$1]++; next }  # the definitions, even when empty
       !($1 in n) { printf "%s: dangling reference %s: no heading defines it\n", $2, $1; next }
       n[$1] > 1 { printf "%s: ambiguous reference %s: %d headings define it\n", $2, $1, n[$1] }
     ' "$tmp/defs" "$tmp/refs"

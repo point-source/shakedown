@@ -244,3 +244,9 @@ def test_every_violation_is_reported_in_one_run(tmp_path: Path) -> None:
         "§spec:ordering,", "§spec:sorting,"
     )
     _fails_with(_repo(tmp_path, spec), "SPEC.md:3:", "SPEC.md:17:")
+
+
+def test_a_reference_fails_when_no_heading_defines_any_slug(tmp_path: Path) -> None:
+    root = _repo(tmp_path, spec="# Spec\n\nSee §req:problem-statement.\n",
+                 requirements="# Requirements\n\nNothing yet.\n")
+    _fails_with(root, "SPEC.md:3: dangling reference §req:problem-statement")
