@@ -249,6 +249,7 @@ def test_reconform_keeps_the_real_name_and_refills_with_the_real_writer(tmp_root
     mp3 = _archive(config, "deadco2022-06-18") / "t1.flac"
     assert read_tags(mp3, "mp3")["venue"] == ["Shoreline Amphitheatre"]
     aac = _archive(config, "deadco2022-06-13") / "1-01 St. Stephen.flac"
+    assert read_tags(aac, "m4a")["venue"] == ["Shoreline Amphitheatre"]
     for path in (mp3, aac):
         with path.open("r+b") as f:  # another tool changes the bytes in place
             f.seek(-1, 2)
@@ -264,6 +265,7 @@ def test_reconform_keeps_the_real_name_and_refills_with_the_real_writer(tmp_root
     }
     assert _names(_library(config, "deadco2022-06-18")) == {"t1.mp3"}
     assert read_tags(mp3, "mp3")["venue"] == ["Shoreline Amphitheatre"]
+    assert read_tags(aac, "m4a")["venue"] == ["Shoreline Amphitheatre"]
     assert (_library(config, "deadco2022-06-18") / "t1.mp3").stat().st_ino == mp3.stat().st_ino
 
 
