@@ -284,30 +284,24 @@ def test_each_checked_show_counts_as_progress(
 ) -> None:
     """No counter moves while stored shows are checked, so each checked show marks the
     run's progress: a long first sync is not shown as making none
-    (§spec:run-activity "Is it stuck?")."""
-    monkeypatch.setattr(activity, "TICK_S", 0.05)
+    (§spec:run-activity "Is it stuck?"). Shows with nothing to check do not count."""
     config = make_config(*tmp_roots)
     for n in range(3):
         _show(f"show{n}", {"t1.flac": "m4a"})
     _mirror_before_the_check(config, monkeypatch)
-    real = realformat.check_file
-    progress_at: list[str] = []
+    real = activity.Progress.stored_show_checked
+    counted: list[int] = []
 
-    def check(path: Path) -> FormatCheck:
-        import time
+    def count(self: activity.Progress) -> None:
+        counted.append(1)
+        real(self)
 
-        if path.parent.name == "show2":
-            deadline = time.monotonic() + 5
-            while _activity(config)["last_progress_at"] == progress_at[0]:
-                assert time.monotonic() < deadline, "checked shows did not count"
-                time.sleep(0.02)
-        progress_at.append(_activity(config)["last_progress_at"])
-        return real(path)
-
-    monkeypatch.setattr(realformat, "check_file", check)
+    monkeypatch.setattr(activity.Progress, "stored_show_checked", count)
     assert run_sync(config) == 0
+    assert len(counted) == 3
 
-    assert progress_at[2] > progress_at[0]
+    assert run_sync(config) == 0
+    assert len(counted) == 3
 
 
 # --- interruptible, and a file that cannot be read --------------------------------------
