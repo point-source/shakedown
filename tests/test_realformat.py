@@ -68,6 +68,19 @@ def test_content_that_is_none_of_the_four_formats_is_unidentified(
     assert check_file(path) == UNIDENTIFIED
 
 
+def test_a_corrupt_ogg_is_unidentified_not_a_crash(tmp_path: Path) -> None:
+    """mutagen's Ogg Vorbis reader raises IndexError (not a MutagenError) on a page
+    with no segments; a broken upload must come out unidentified, or every run would
+    download and crash on it again."""
+    from tests.audio_fixtures import ogg_bytes
+
+    data = bytearray(ogg_bytes())
+    data[84] = 0  # the second page's segment count
+    path = tmp_path / "x.flac"
+    path.write_bytes(bytes(data))
+    assert check_file(path) == UNIDENTIFIED
+
+
 def test_a_wav_named_flac_is_unidentified(tmp_path: Path) -> None:
     assert check_file(make_audio(tmp_path / "t.flac", content="wav")) == UNIDENTIFIED
 

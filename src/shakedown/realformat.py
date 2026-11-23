@@ -123,7 +123,7 @@ def check_file(path: Path) -> FormatCheck:
     try:
         OggVorbis(path)
         return FormatCheck(RealFormat.OGG, AudioClass.LOSSY)
-    except MutagenError:
+    except (MutagenError, IndexError):  # IndexError: a page with no segments (observed)
         pass
     try:
         codec = MP4(path).info.codec or ""
