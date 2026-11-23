@@ -354,3 +354,68 @@ def test_a_run_killed_after_the_check_still_looks_the_show_up_next_time(
     assert _sync(config) == 0
     assert FakePlugin.fetched_files[SHOW] == sorted(FLAC_NAMES)
     assert _names(_library(config)) == FLAC_NAMES
+
+
+# --- found in review ---------------------------------------------------------------------
+
+
+def test_a_re_chosen_run_counts_the_show_once_and_all_its_bytes(tmp_roots) -> None:
+    """The extra round adds its bytes to the run's totals, not another show."""
+    config = _config(tmp_roots)
+    files = _show(_aac_set(), _flac_set(), _mp3_set()).files
+    assert _sync(config) == 0
+    with _db(config) as conn:
+        row = conn.execute(
+            "SELECT items_to_fetch, items_done, bytes_to_fetch FROM run_activity"
+            " ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    both = sum(f.size for f in files if f.name in AAC_NAMES | FLAC_NAMES)
+    assert (row["items_to_fetch"], row["items_done"], row["bytes_to_fetch"]) == (1, 1, both)
+
+
+def test_a_replaced_mislabelled_copy_is_recorded_with_its_new_bytes_when_demoted(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The uploader replaces a stored "Flac" set that is really AAC: the new files are
+    downloaded, found lossy, and demoted. The record describes the new bytes, so the
+    next sync downloads nothing."""
+    config = _config(tmp_roots)
+    item = _show(_aac_set(), _flac_set())
+    _mirror_at_v12(config, monkeypatch)
+    replaced = _aac_set(filler=7000)
+    item.files = [*replaced, *_flac_set()]
+    FakePlugin.fetched_files.clear()
+
+    assert _sync(config) == 0
+    assert FakePlugin.fetched_files[SHOW] == sorted(AAC_NAMES) + sorted(FLAC_NAMES)
+    stored = ItemRepo(_db(config)).get("fake-src", "coll1", SHOW)
+    assert stored is not None and stored.recorded_manifest is not None
+    recorded = {f.name: (f.md5, f.library) for f in stored.recorded_manifest.files}
+    for f in replaced:
+        assert recorded[f.name] == (f.md5, False)
+
+    fetches = FakePlugin.fetch_count[SHOW]
+    assert _sync(config) == 0
+    assert FakePlugin.fetch_count[SHOW] == fetches
+
+
+def test_a_reconform_restores_only_the_drifted_file(tmp_roots) -> None:
+    """§spec:verify-drift: a reconform restores the drifted files and nothing else,
+    even when the source now lists a better copy."""
+    from shakedown.verify import run_verify
+
+    config = _config(tmp_roots)
+    item = _show(_aac_set(filler=16000), _mp3_set())
+    assert _sync(config) == 0
+    item.files.extend(_flac_set())
+    drifted = _archive(config) / f"{TRACKS[0]}.flac"
+    with drifted.open("r+b") as f:  # another tool changes the bytes in place
+        f.seek(-1, 2)
+        f.write(b"\x01")
+    FakePlugin.fetched_files.clear()
+
+    with patch("shakedown.notify.httpx.post", side_effect=_Webhooks()):
+        assert run_verify(config, source_filter=None, collection_filter=None, deep=True,
+                          reconform=True, list_drift=True, assume_yes=True) == 0
+    assert FakePlugin.fetched_files[SHOW] == [drifted.name]
+    assert _names(_archive(config)) == AAC_NAMES
