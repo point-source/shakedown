@@ -143,3 +143,54 @@ def test_a_database_from_before_format_records_answers_without_migrating(
     assert config.state_db is not None
     with closing(sqlite3.connect(config.state_db)) as conn:
         assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+
+
+# --- GET /api/attention ------------------------------------------------------------
+
+
+def _attention(config: Config) -> dict[str, Any]:
+    pytest.importorskip("fastapi")
+    from tests.test_api_attention import _attention as answer
+
+    return answer(config)
+
+
+def _unidentified_entries(config: Config) -> list[dict[str, Any]]:
+    return [e for e in _attention(config)["entries"] if e["kind"] == "unidentified_files"]
+
+
+def test_the_attention_list_has_one_entry_naming_the_show_and_file(
+    tmp_roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§spec:unidentified-audio's user-level path: a WAV named `.flac` is one entry,
+    gone once the source replaces it with real FLAC."""
+    config = make_config(*tmp_roots, fill_tags=True)
+    item = _show("wav-show", {"t1.flac": "wav", "t2.flac": "flac"})
+    _show("ok", {"t1.flac": "flac"})
+    assert run_sync(config) == 0
+
+    assert _unidentified_entries(config) == [{
+        "kind": "unidentified_files", "source": SRC, "collection": COLL, "since": None,
+        "identifiers": ["wav-show"], "count": 1,
+        "detail": {"unidentified_files": _status(config, capsys)["unidentified_files"]},
+    }]
+
+    item.files[0] = FakeFile("t1.flac", CONTENT["flac"](), format="Flac")
+    assert run_sync(config) == 0
+    assert _unidentified_entries(config) == []
+
+
+def test_the_entry_counts_files_and_carries_the_first_ten(
+    tmp_roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = make_config(*tmp_roots)
+    for s in range(12):
+        _show(f"show-{s:02}", {"t1.flac": "wav", "t2.flac": "wav"})
+    assert run_sync(config) == 0
+
+    [entry] = _unidentified_entries(config)
+    files = _status(config, capsys)["unidentified_files"]
+    assert len(files) == 24
+    assert entry["count"] == 24
+    assert entry["identifiers"] == [f"show-{s:02}" for s in range(10)]
+    assert entry["detail"] == {"unidentified_files": files[:10]}

@@ -27,6 +27,7 @@ from shakedown.server import build_app
 from shakedown.state import ItemRepo, OperationOutcomeRepo, PlacementRepo, RunRepo
 from shakedown.status import print_status
 from shakedown.sync import run_sync
+from tests.audio_fixtures import flac_bytes
 from tests.conftest import make_config, write_config
 from tests.fake_plugin import FakeFile, FakeItem, FakePlugin
 from tests.test_durable_handoff import DOWN, GOOD, _Webhooks
@@ -88,10 +89,13 @@ def _same_instant(api_time: str | None, status_time: str | None) -> bool:
 
 
 def _show(identifier: str, *files: tuple[str, bytes, str | None]) -> None:
+    """A show; by default one real FLAC file, so a healthy show lists no unidentified
+    audio (§spec:unidentified-audio)."""
     FakePlugin.items[identifier] = FakeItem(
         identifier=identifier,
         files=[FakeFile(name=n, content=c, format=f) for n, c, f in files]
-        or [FakeFile(name=f"{identifier}.flac", content=identifier.encode(), format="Flac")],
+        or [FakeFile(name=f"{identifier}.flac", content=flac_bytes() + identifier.encode(),
+                     format="Flac")],
     )
 
 
@@ -621,7 +625,7 @@ def test_four_problems_are_listed_by_collection_and_each_leaves_once_resolved(
     assert sync(blocked, "coll1") == 1
     stray = library / SRC / "coll1" / "gd-a" / "my-notes.txt"
     stray.write_text("mine")
-    _show("gd-a", ("gd-a-remaster.flac", b"new", "Flac"))
+    _show("gd-a", ("gd-a-remaster.flac", flac_bytes() + b"new", "Flac"))
     assert sync(blocked, "coll1") == 1
     # coll2's tick is skipped behind another run. Last: a finishing coll1 sync would
     # catch it up.

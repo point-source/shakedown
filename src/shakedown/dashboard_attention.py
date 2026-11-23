@@ -192,6 +192,20 @@ def _entries(
                 detail={"unplaced_files": summary["unplaced_files"][:SAMPLE]},
             )
         )
+    unidentified = summary["unidentified_files"]
+    if unidentified:
+        # One entry for the collection: the affected shows, and the files as its count
+        # (§spec:unidentified-audio).
+        shows = list(dict.fromkeys(f["identifier"] for f in unidentified))
+        entries.append(
+            _entry(
+                "unidentified_files",
+                summary,
+                identifiers=shows,
+                count=len(unidentified),
+                detail={"unidentified_files": unidentified[:SAMPLE]},
+            )
+        )
     return entries
 
 

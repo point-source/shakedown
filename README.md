@@ -145,6 +145,7 @@ The dashboard's data comes from `GET /api/*` endpoints:
     - `failure_notice_undelivered`: `detail: {failure_notice_error, run_id}` from the latest run.
     - `separations`: `detail.separations: [{identifier, folder}]`.
     - `unplaced_files`: `detail.unplaced_files: [path]`.
+    - `unidentified_files`: audio files whose content matches no format shakedown recognises, kept and staged under the source's name and never tagged, as `detail.unidentified_files: [{identifier, file}]`. It clears when the source replaces the file with audio shakedown recognises, or the show is pruned.
   - `health` has one row per collection: `{source, collection, restricted: [{identifier, reason}], removed_upstream: [{identifier, removed_on}], drift_files, not_playable: [{identifier, reason}], playable_copies: [identifier]}`. `drift_files` comes from the last `verify --deep`. `playable_copies` lists complete shows kept twice: an unplayable original (SHN or an unrecognised format), kept in the archive only, plus the playable copy the library stages.
   - Lists are complete.
 
