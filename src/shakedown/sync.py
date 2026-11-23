@@ -2209,11 +2209,14 @@ def _reselect(
         records[name] = (mf.size, mf.md5, check)
     chosen = select(desc.listing, None, records)
     manifest, fetch = plan_files(chosen.manifest, target.existing)
-    kept = {mf.name for mf in manifest.files}
-    demoted = tuple(replace(mf, library=False) for name, mf in downloaded.items()
-                    if name not in kept)
+    # A downloaded file the new choice drops is recorded as downloaded, replacing the
+    # archive copy's old entry of the same name: the temp folder holds the new bytes.
+    picked = {mf.name for mf in chosen.manifest.files}
+    demoted = {name: replace(mf, library=False) for name, mf in downloaded.items()
+               if name not in picked}
     if demoted:
-        manifest = Manifest(files=tuple(sorted(manifest.files + demoted, key=lambda f: f.name)))
+        files = (*(mf for mf in manifest.files if mf.name not in demoted), *demoted.values())
+        manifest = Manifest(files=tuple(sorted(files, key=lambda f: f.name)))
     if manifest == desc.manifest:
         return None
     reselected = replace(
