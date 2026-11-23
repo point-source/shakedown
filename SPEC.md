@@ -733,10 +733,7 @@ mirrored.
 
 ## Best available and best playable copy §spec:quality-selection
 
-*Status: in progress*
-
-Complete; ranking by a file's real format
-(§spec:real-format-ranking) not started.
+*Status: complete*
 
 For every show, the system keeps the highest-quality version the source
 offers and the highest-quality version a common player can play: one
@@ -1286,12 +1283,7 @@ another tool; `verify --deep` reports exactly that file.
 
 ## Audio known by its content §spec:real-format
 
-*Status: in progress*
-
-The check at fetch, its record, the real-extension library name, the
-tag writer by real format, tagging M4A files (§spec:m4a-tags), and
-listing unidentified files (§spec:unidentified-audio) are done; checking
-stored shows (§spec:real-format-catch-up) is in progress.
+*Status: complete*
 
 Compatibility: from "deployed — single operator install, no external
 consumers" (§req:constraints): every surface this feature touches is
@@ -1418,7 +1410,7 @@ links. Sync again: no download, no change.
 
 ## Best copy by real format §spec:real-format-ranking
 
-*Status: not started*
+*Status: complete*
 
 The best-copy choice (§spec:quality-selection) uses a file's real
 format and class once it is known, so a copy listed as lossless that
@@ -1562,10 +1554,7 @@ fixture: its `.m4a` library files carry the filled tags.
 
 ## Stored shows checked once §spec:real-format-catch-up
 
-*Status: in progress*
-
-The check of stored shows, the library rename, and the tag re-run are
-done; re-ranking a stored show (§spec:real-format-ranking) is not started.
+*Status: complete*
 
 Shows already in the archive get their audio checked once, without any
 download, so mislabelled files already stored are renamed in the
