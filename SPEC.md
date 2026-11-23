@@ -1290,8 +1290,8 @@ another tool; `verify --deep` reports exactly that file.
 
 The check at fetch, its record, the real-extension library name, the
 tag writer by real format, and tagging M4A files (§spec:m4a-tags) are
-done; checking stored shows (§spec:real-format-catch-up) and listing
-unidentified files (§spec:unidentified-audio) are not started.
+done; checking stored shows (§spec:real-format-catch-up) is not started.
+Listing unidentified files (§spec:unidentified-audio) is in progress.
 
 Compatibility: from "deployed — single operator install, no external
 consumers" (§req:constraints): every surface this feature touches is
@@ -1638,7 +1638,10 @@ again: it resumes. Run `reconcile`, then sync: the names stay `.m4a`.
 
 ## Unidentified audio in status and the dashboard §spec:unidentified-audio
 
-*Status: not started*
+*Status: in progress*
+
+`status`, the attention entry, and the page row are built; the row waits
+for the operator's approval of its render.
 
 A file whose content matches none of the recognised formats
 (§spec:real-format) is listed in `status` and on the dashboard's Needs
@@ -3013,7 +3016,8 @@ shows, and they lead the recently-mirrored list.
 *Status: in progress*
 
 Complete; the `unidentified_files` kind
-(§spec:unidentified-audio) not started.
+(§spec:unidentified-audio) is built and its row waits for the operator's
+approval of its render.
 
 The dashboard has one list of what needs the operator, naming the
 collection or show affected and the next available action, and a
