@@ -166,6 +166,16 @@ class ItemRepo:
             ),
         )
 
+    def forget_change_signal(self, source: str, collection: str, identifier: str) -> None:
+        """Clear one show's stored change signal, so the next sync looks it up even on
+        an incremental collection (§spec:incremental-discovery). The lookup records the
+        signal again."""
+        self.conn.execute(
+            "UPDATE items SET change_signal = NULL"
+            " WHERE source_name=? AND collection_name=? AND identifier=?",
+            (source, collection, identifier),
+        )
+
     def list_for_collection(self, source: str, collection: str) -> Iterator[Item]:
         cur = self.conn.execute(
             "SELECT * FROM items WHERE source_name=? AND collection_name=? ORDER BY identifier",

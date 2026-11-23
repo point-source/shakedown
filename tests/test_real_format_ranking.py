@@ -255,3 +255,102 @@ def test_a_refused_lossless_show_still_reports_the_reason(tmp_roots) -> None:
     assert _sync(config) == 0
     item = ItemRepo(_db(config)).get("fake-src", "coll1", SHOW)
     assert item is not None and item.restriction_reason == LOSSLESS_REFUSED_REASON
+
+
+# --- stored shows re-rank on the same rule -----------------------------------------------
+
+
+def _mirror_at_v12(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sync as shakedown did before it checked content, then put the database back at
+    v12, with no check recorded (tests.test_stored_shows_checked)."""
+    from contextlib import closing
+
+    with monkeypatch.context() as m:
+        m.setattr("shakedown.sync.is_checked", lambda name: False)
+        assert _sync(config) == 0
+    with closing(_db(config)) as conn:
+        conn.execute("DROP TABLE audio_formats")
+        conn.execute("UPDATE schema_version SET version = 12")
+
+
+def test_a_stored_aac_set_is_replaced_by_the_real_flac_set_on_an_unchanged_signal(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§spec:real-format-ranking: the catch-up's checks change the ranking, so the show
+    is looked up even though its change signal says unchanged."""
+    config = _config(tmp_roots, incremental_discovery=True)
+    item = _show(_aac_set(), _flac_set(), _mp3_set())
+    item.change_signal = "2022-06-20T00:00:00"
+    _mirror_at_v12(config, monkeypatch)
+    assert _names(_library(config)) == AAC_NAMES
+    FakePlugin.fetched_files.clear()
+    lookups = FakePlugin.lookups(SHOW)
+
+    hooks = _Webhooks()
+    assert _sync(config, hooks) == 0
+    assert FakePlugin.lookups(SHOW) == lookups + 1
+    assert FakePlugin.fetched_files[SHOW] == sorted(FLAC_NAMES)  # only the FLAC set
+    assert _names(_archive(config)) == AAC_NAMES | FLAC_NAMES
+    assert _names(_library(config)) == FLAC_NAMES
+    assert [e["identifier"] for b in hooks.bodies for e in b["staged"]] == [SHOW]
+
+    # Later syncs skip the lookup again: the signal is recorded with the new copy.
+    assert _sync(config) == 0
+    assert FakePlugin.lookups(SHOW) == lookups + 1
+
+
+def test_a_stored_dead_and_company_show_is_looked_up_once_and_downloads_nothing(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_roots, incremental_discovery=True)
+    item = _show(_aac_set(filler=16000), _mp3_set())
+    item.change_signal = "2022-06-20T00:00:00"
+    _mirror_at_v12(config, monkeypatch)
+    fetches = FakePlugin.fetch_count[SHOW]
+    lookups = FakePlugin.lookups(SHOW)
+
+    assert _sync(config) == 0
+    assert FakePlugin.fetch_count[SHOW] == fetches
+    assert FakePlugin.lookups(SHOW) == lookups + 1
+    assert _names(_library(config)) == {f"{t}.m4a" for t in TRACKS}
+
+    assert _sync(config) == 0
+    assert FakePlugin.lookups(SHOW) == lookups + 1
+    assert FakePlugin.fetch_count[SHOW] == fetches
+
+
+def test_a_stored_honest_flac_show_is_not_looked_up(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_roots, incremental_discovery=True)
+    item = _show(_flac_set(), _mp3_set())
+    item.change_signal = "2022-06-20T00:00:00"
+    _mirror_at_v12(config, monkeypatch)
+    lookups = FakePlugin.lookups(SHOW)
+    assert _sync(config) == 0
+    assert FakePlugin.lookups(SHOW) == lookups
+
+
+def test_a_run_killed_after_the_check_still_looks_the_show_up_next_time(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shakedown.sync as sync_module
+
+    config = _config(tmp_roots, incremental_discovery=True)
+    item = _show(_aac_set(), _flac_set())
+    item.change_signal = "2022-06-20T00:00:00"
+    _mirror_at_v12(config, monkeypatch)
+    FakePlugin.fetched_files.clear()
+
+    def die(*_a, **_k):
+        raise KeyboardInterrupt  # the process dies after the checks, before lookups
+
+    with monkeypatch.context() as m:
+        m.setattr(sync_module, "_rank_records", die)
+        with pytest.raises(KeyboardInterrupt):
+            _sync(config)
+    assert FakePlugin.fetched_files == {}
+
+    assert _sync(config) == 0
+    assert FakePlugin.fetched_files[SHOW] == sorted(FLAC_NAMES)
+    assert _names(_library(config)) == FLAC_NAMES

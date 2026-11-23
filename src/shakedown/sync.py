@@ -1329,7 +1329,11 @@ def _check_stored_shows(
     from its name is then acted on as if just fetched: its tag fingerprint is cleared,
     so the run's tag pass revisits it with the real format's writer (the computed tags
     are keyed by file name and would not change by themselves), and the run's staging
-    pass links it under its real extension.
+    pass links it under its real extension. A show found holding a file the check
+    could rank differently (selection.may_change_rank) has its change signal cleared,
+    in the database and in ``stored``, so this sync looks it up and makes its choice
+    again, even on an incremental collection; a run that dies first leaves the signal
+    cleared for the next (§spec:real-format-ranking).
 
     Returns the new checks per show: what the best-copy choice reads
     (§spec:real-format-ranking)."""
@@ -1361,6 +1365,9 @@ def _check_stored_shows(
                             check)
             if any(check.differs_from(name) for name, check in checks.items()):
                 TagRepo(items.conn).clear_fingerprint(source_name, collection_name, identifier)
+            if any(may_change_rank(name, check) for name, check in checks.items()):
+                items.forget_change_signal(source_name, collection_name, identifier)
+                item.change_signal = None
         progress.stored_show_checked()
         _log_mislabels(source_name, collection_name, identifier, checks)
         found[identifier] = checks
