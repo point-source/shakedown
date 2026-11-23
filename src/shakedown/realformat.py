@@ -4,7 +4,7 @@ Uploaders sometimes name a file in one format while it holds another (AAC in an 
 container named `.flac`). Every file whose name ends in one of CHECKED_SUFFIXES is
 checked once, when it arrives, and the result is recorded beside the manifest
 (`FormatRepo`). Everything that acts on a format afterwards (library names, the tag
-writer, later the best-copy choice) reads the record, never the file.
+writer, the best-copy choice) reads the record, never the file.
 
 Identification goes through mutagen's own format readers (principles: boring edges,
 don't rebuild), with two corrections for how they behave on mislabelled files:
