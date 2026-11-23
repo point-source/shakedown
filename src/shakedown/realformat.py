@@ -72,6 +72,14 @@ class FormatCheck:
         """The real format's lowercase extension, `.m4a`; None when unidentified."""
         return f".{self.format.value}" if self.recognised else None
 
+    @property
+    def label(self) -> str:
+        """How the run log names what the check found: `M4A (AAC)`."""
+        if self.format == RealFormat.M4A:
+            codec = "Apple Lossless" if self.audio_class == AudioClass.LOSSLESS else "AAC"
+            return f"M4A ({codec})"
+        return format_label(self.format)
+
     def differs_from(self, name: str) -> bool:
         """The content is not what the name says (an unidentified file differs from
         any checked name)."""
@@ -79,6 +87,10 @@ class FormatCheck:
 
 
 UNIDENTIFIED = FormatCheck(RealFormat.UNIDENTIFIED, None)
+
+
+def format_label(fmt: RealFormat) -> str:
+    return "Ogg Vorbis" if fmt == RealFormat.OGG else fmt.value.upper()
 
 
 def is_checked(name: str) -> bool:

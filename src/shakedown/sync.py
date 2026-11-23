@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from shakedown import stopping
+from shakedown import realformat, stopping
 from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress, RunCounts, Waiting
 from shakedown.config import CollectionConfig, Config, ConfigError, SourceConfig
 from shakedown.config import load as load_config
@@ -64,6 +64,7 @@ from shakedown.placement import (
 )
 from shakedown.plugins import registry
 from shakedown.plugins.base import FailureCause, FetchResult, ListedItem, SourcePlugin
+from shakedown.realformat import FormatCheck, format_label, is_checked, named_format
 from shakedown.reschedule import record_skipped
 from shakedown.staging import (
     METADATA_SIDECAR,
@@ -87,6 +88,7 @@ from shakedown.tagging import (
     fill_collection_tags,
     fill_file,
     fingerprint,
+    is_taggable,
     recover_interrupted_tagging,
     tag_failure,
 )
@@ -1604,7 +1606,9 @@ def _process_fetch_result(
 
     with transaction(items.conn):
         _record_complete(items, source.name, collection, desc, outcome.archive_path)
+        _record_formats(items, source.name, collection.name, desc, outcome.formats)
         _record_download_tags(items, source.name, collection.name, target, outcome)
+    _log_mislabels(source.name, collection.name, desc.identifier, outcome.formats)
     stats.fetched[desc.identifier] = outcome.archive_path
     # Linked now, not at the end of the run, so a run that dies later keeps it staged.
     # Issues are reported by the run's full staging pass, which meets them again.
@@ -1619,6 +1623,8 @@ class _FetchOutcome:
     unavailable: bool = False  # the source refuses to serve the item
     # What tagging the downloaded files recorded, per file; None when nothing was tagged.
     tag_records: dict[str, TagRecord | None] | None = None
+    # The real format of each downloaded file in the checked set (§spec:real-format).
+    formats: dict[str, FormatCheck] = field(default_factory=dict)
 
 
 # Bounded core-owned retries for transient fetch faults (checksum mismatch,
@@ -1911,15 +1917,39 @@ def _fetch_one(
             error=f"missing after fetch: {verified.missing_files[:5]}",
         )
 
+    # Know each downloaded file by its content, after its checksum has passed and
+    # before tagging, so the show enters the archive with its real formats known
+    # (§spec:real-format). A file that cannot be read is an I/O fault, not a verdict:
+    # the fetch fails and the next run fetches it again.
+    formats: dict[str, FormatCheck] = {}
+    for name in sorted(n for n in fetched if is_checked(n)):
+        try:
+            formats[name] = realformat.check_file(tmp_dir / name)
+        except OSError as e:
+            return _FetchOutcome(
+                success=False,
+                archive_path=dest,
+                error=f"could not read {name} to check its format ({e}); "
+                      "will retry on the next run",
+            )
+
     # Fill the downloads' missing tags while they are still in the temp dir, so the
     # tagged bytes enter the archive atomically with the show (§spec:tag-filling).
-    # Kept files are links to the live archive copy and are never touched here.
+    # Kept files are links to the live archive copy and are never touched here. The
+    # planned tags were taken by name; only files whose real format has a writer are
+    # tagged, through that writer.
     tag_records: dict[str, TagRecord | None] | None = None
     if target.tags is not None:
         tag_records = {}
         for name in sorted(fetched & target.tags.keys()):
+            if not is_taggable(name, formats):
+                continue
+            check = formats.get(name)
+            fmt = check.format if check is not None else named_format(name)
             try:
-                tag_records[name] = fill_file(tmp_dir / name, target.tags[name], None, None).record
+                tag_records[name] = fill_file(
+                    tmp_dir / name, target.tags[name], None, None, fmt
+                ).record
             except TagWriteError as e:
                 # The download may be torn: drop it, and the next run fetches it again.
                 (tmp_dir / name).unlink(missing_ok=True)
@@ -1952,6 +1982,7 @@ def _fetch_one(
         success=True,
         archive_path=dest,
         tag_records=tag_records,
+        formats=formats,
     )
 
 
@@ -2069,6 +2100,45 @@ def _record_complete(
     return item
 
 
+def _record_formats(
+    items: ItemRepo,
+    source_name: str,
+    collection_name: str,
+    desc: ItemDescriptor,
+    formats: dict[str, FormatCheck],
+) -> None:
+    """Record each downloaded file's check against the manifest file it was made for
+    (§spec:real-format), and drop the records of files the fetched manifest no longer
+    lists. A kept file's record stays: its name, size, and checksum are unchanged.
+    Readers keep only checks that match the current manifest (valid_formats), so a
+    record left by a manifest change without a fetch counts for nothing."""
+    repo = FormatRepo(items.conn)
+    by_name = {mf.name: mf for mf in desc.manifest.files}
+    for name, check in formats.items():
+        mf = by_name[name]
+        repo.put(source_name, collection_name, desc.identifier, name, mf.size, mf.md5, check)
+    repo.keep_only(source_name, collection_name, desc.identifier, by_name)
+
+
+def _log_mislabels(
+    source_name: str, collection_name: str, identifier: str, formats: dict[str, FormatCheck]
+) -> None:
+    """One run-log line per file whose content is not what its name says. Nothing
+    else reports a mislabel shakedown handled: the library name is the visible
+    result (§spec:real-format)."""
+    for name, check in sorted(formats.items()):
+        if not check.differs_from(name):
+            continue
+        if check.recognised:
+            named = named_format(name)
+            assert named is not None
+            log.info("[%s/%s] %s: %s holds %s audio, not %s", source_name, collection_name,
+                     identifier, name, check.label, format_label(named))
+        else:
+            log.info("[%s/%s] %s: %s is not audio shakedown recognises; it keeps its name",
+                     source_name, collection_name, identifier, name)
+
+
 def _record_download_tags(
     items: ItemRepo,
     source_name: str,
@@ -2088,7 +2158,13 @@ def _record_download_tags(
     for name, record in (outcome.tag_records or {}).items():
         if record is not None:
             repo.put_file(source_name, collection_name, desc.identifier, name, record)
-    if target.tags is not None and outcome.tag_records is not None and target.tags.keys() <= downloaded:
+    # Planned by name, tagged by real format: when the two disagree for a download, the
+    # run's pass over mirrored shows settles the show from the recorded checks.
+    by_name_only = any(
+        is_taggable(name) != is_taggable(name, outcome.formats) for name in outcome.formats
+    )
+    if (target.tags is not None and outcome.tag_records is not None
+            and target.tags.keys() <= downloaded and not by_name_only):
         repo.set_fingerprint(source_name, collection_name, desc.identifier, fingerprint(target.tags))
     else:
         repo.clear_fingerprint(source_name, collection_name, desc.identifier)
