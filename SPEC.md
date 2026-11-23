@@ -1463,8 +1463,8 @@ Observable behavior:
 
 **Decision and constraint.** Recorded checks override the listing, and a
 changed ranking re-selects inside the same fetch. The constraints: the
-product's goal is the best version that truly exists (§req:problem-
-statement), so the listing's word cannot win over the bytes; the
+product's goal is the best version that truly exists
+(§req:problem-statement), so the listing's word cannot win over the bytes; the
 recorded check must feed every later lookup, or the next sync would rank
 the listing again and stage the demoted copy back; and a show entering
 the archive once keeps one handoff and one library update per show.
