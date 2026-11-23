@@ -648,8 +648,9 @@ def _migrate_to_12(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_13(conn: sqlite3.Connection) -> None:
     """v12 → v13: add the per-file record of real audio formats (§spec:state,
-    §spec:real-format). Additive: it starts empty — the first sync after the upgrade
-    checks stored files — and nothing else changes."""
+    §spec:real-format). Additive: it starts empty — downloads are checked at fetch,
+    stored shows by the catch-up (§spec:real-format-catch-up) — and nothing else
+    changes."""
     for stmt in _FORMAT_SCHEMA:
         conn.execute(stmt)
 

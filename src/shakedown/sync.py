@@ -85,6 +85,7 @@ from shakedown.tagging import (
     Desired,
     TagPlanner,
     TagWriteError,
+    effective_format,
     fill_collection_tags,
     fill_file,
     fingerprint,
@@ -1944,8 +1945,7 @@ def _fetch_one(
         for name in sorted(fetched & target.tags.keys()):
             if not is_taggable(name, formats):
                 continue
-            check = formats.get(name)
-            fmt = check.format if check is not None else named_format(name)
+            fmt = effective_format(name, formats)
             try:
                 tag_records[name] = fill_file(
                     tmp_dir / name, target.tags[name], None, None, fmt
@@ -2158,13 +2158,10 @@ def _record_download_tags(
     for name, record in (outcome.tag_records or {}).items():
         if record is not None:
             repo.put_file(source_name, collection_name, desc.identifier, name, record)
-    # Planned by name, tagged by real format: when the two disagree for a download, the
-    # run's pass over mirrored shows settles the show from the recorded checks.
-    by_name_only = any(
-        is_taggable(name) != is_taggable(name, outcome.formats) for name in outcome.formats
-    )
-    if (target.tags is not None and outcome.tag_records is not None
-            and target.tags.keys() <= downloaded and not by_name_only):
+    # The plan was taken by name; when a real format changes which files are taggable,
+    # this fingerprint no longer matches the one computed from the recorded checks, so
+    # the run's pass over mirrored shows revisits the show.
+    if target.tags is not None and outcome.tag_records is not None and target.tags.keys() <= downloaded:
         repo.set_fingerprint(source_name, collection_name, desc.identifier, fingerprint(target.tags))
     else:
         repo.clear_fingerprint(source_name, collection_name, desc.identifier)
