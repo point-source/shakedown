@@ -44,7 +44,7 @@ fi
 
 # --- 2-4. status lines and slugs ---------------------------------------------
 
-find . \( -name .git -o -name node_modules -o -name .venv \) -prune -o \
+find . \( -name '.?*' -o -name node_modules \) -prune -o \
   -type f \( -name REQUIREMENTS.md -o -name SPEC.md -o -name ROADMAP.md \) \
   -print | sed 's|^\./||' | sort >"$tmp/docs"
 

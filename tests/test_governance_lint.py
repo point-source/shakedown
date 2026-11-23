@@ -95,6 +95,16 @@ def test_optional_tools_absent_are_skipped_with_a_note(tmp_path: Path) -> None:
     assert "markdownlint-cli2 not found" in result.stdout
 
 
+def test_copies_inside_dot_directories_are_ignored(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    copy = root / ".claude" / "worktrees" / "other"
+    copy.mkdir(parents=True)
+    (copy / "SPEC.md").write_text(SPEC)
+    (copy / "REQUIREMENTS.md").write_text(REQUIREMENTS)
+    result = _lint(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_the_repository_itself_passes() -> None:
     result = subprocess.run(
         [str(SCRIPT)], cwd=REPO, env=ENV, capture_output=True, text=True, check=False
