@@ -1579,9 +1579,10 @@ Observable behavior:
 - **Automatic, on the first locked run.** The first sync after the
   upgrade checks every audio file in the checked set
   (§spec:real-format) that has no recorded check, reading only the
-  identifying parts of each file. It checks a show as the sync
-  discovers it, before the show's copy is chosen, so the run shows the
-  work in the Discovering phase. The
+  identifying parts of each file. It checks every stored show once the
+  listing is done, before any show is looked up or its copy chosen, so
+  the run shows the work in the Discovering phase; a stored show the
+  source no longer lists is checked too. The
   operator runs nothing. The same catch-up checks a database rebuilt by
   `reconcile`, which starts with no checks: unlike tag records, a check
   is recoverable from the files themselves (§spec:state).
