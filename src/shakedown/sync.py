@@ -2822,7 +2822,12 @@ def _single_show_phases(
                     if existing is not None and has_archive_copy(existing)
                     else PlanAction.NEW
                 )
-                planned = PlannedItem(replace(found, manifest=manifest), existing, action, fetch)
+                # A reconform restores the drifted files and nothing else
+                # (§spec:verify-drift): without the listing, its fetch never chooses again.
+                listing = found.listing if drifted is None else ()
+                planned = PlannedItem(
+                    replace(found, manifest=manifest, listing=listing), existing, action, fetch
+                )
                 if planner is not None:
                     # A reconform restores the drifted files' source bytes, then fills their
                     # gaps again (§spec:verify-drift).
