@@ -442,10 +442,11 @@ logs.
     named and re-tagged. Verifiable by syncing a fixture whose M4A
     files are named `.flac` and seeing `.m4a` files with filled tags
     in the library and the original names in the archive; and, on
-    the operator's install, by seeing the three Dead & Company shows
-    of 2022-06-13, 2022-06-14 (Shoreline Amphitheatre) and 2022-06-18
-    (Folsom Field) as `.m4a` with album artist and venue filled,
-    playing in Navidrome with the right format, with no re-download.
+    the operator's install, by seeing the Dead & Company shows of
+    2022-06-13 and 2022-06-14 (Shoreline Amphitheatre) as `.m4a` and
+    of 2022-06-18 (Folsom Field, an MP3 upload) as `.mp3`, with album
+    artist and venue filled, playing in Navidrome with the right
+    format, with no re-download.
 
 ## User stories §req:user-stories
 
@@ -645,8 +646,9 @@ criterion and implies a testable path through the product's surface.
   as if they were live — so that I can trust what it tells me.
   *(→ criteria 32, 33)*
 - **A mislabelled show still plays right.** As a homelab operator
-  whose Dead & Company shows arrived as AAC files named `.flac`, I want
-  them in my library as `.m4a` with their tags filled, the archive
+  whose Dead & Company shows arrived as AAC and MP3 files named
+  `.flac`, I want them in my library as `.m4a` and `.mp3` with their
+  tags filled, the archive
   still holding archive.org's exact names, and the shows already
   stored fixed without downloading them again, so that Navidrome plays
   and labels them correctly and I never have to notice the uploader's
@@ -1109,8 +1111,9 @@ it all?" — weighed against how much already exists to show:
 
 **Next — mislabelled audio (escalated from production triage,
 2026-11-23).** The 2026-11-21 Dead & Company catch-up stored three
-shows (59 tracks) of AAC audio named `.flac`: untagged, ranked as
-lossless, with one warning per track.
+shows (59 tracks) named `.flac` that hold other audio — two AAC in
+M4A, one MP3: untagged, ranked as lossless, with one warning per
+track.
 
 37. Recognise a file's real format and act on it (→ criterion 34).
     Low severity (no data corruption, 59 tracks seen) but the operator
