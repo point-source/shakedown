@@ -1317,7 +1317,7 @@ def _check_stored_shows(
     collection_name: str,
     stored: dict[str, Item],
     progress: Progress,
-) -> dict[str, dict[str, FormatCheck]]:
+) -> None:
     """Check every stored show's audio files in the checked set that have no valid
     check, from the archive copy, reading only the parts that identify each file
     (§spec:real-format-catch-up). Covers the first sync after the upgrade and a
@@ -1333,13 +1333,10 @@ def _check_stored_shows(
     could rank differently (selection.may_change_rank) has its change signal cleared,
     in the database and in ``stored``, so this sync looks it up and makes its choice
     again, even on an incremental collection; a run that dies first leaves the signal
-    cleared for the next (§spec:real-format-ranking).
-
-    Returns the new checks per show: what the best-copy choice reads
-    (§spec:real-format-ranking)."""
+    cleared for the next (§spec:real-format-ranking)."""
     formats = FormatRepo(items.conn)
     records = formats.for_collection(source_name, collection_name)
-    found: dict[str, dict[str, FormatCheck]] = {}
+    checked = 0
     for identifier, item in sorted(stored.items()):
         if not has_archive_copy(item):
             continue
@@ -1370,11 +1367,10 @@ def _check_stored_shows(
                 item.change_signal = None
         progress.stored_show_checked()
         _log_mislabels(source_name, collection_name, identifier, checks)
-        found[identifier] = checks
-    if found:
+        checked += 1
+    if checked:
         log.info("[%s/%s] checked the audio of %d stored show(s)",
-                 source_name, collection_name, len(found))
-    return found
+                 source_name, collection_name, checked)
 
 
 def _check_stored_files(
