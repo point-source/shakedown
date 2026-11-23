@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
@@ -350,6 +350,28 @@ _NETWORK_SCHEMA = [
 ]
 _SCHEMA += _NETWORK_SCHEMA
 
+# Per checked audio file, the real format and class its content showed
+# (§spec:real-format). It belongs to the file as the manifest records it (name, size,
+# source checksum), so a file the source changes has no valid check until it is
+# checked again. Kept beside — never inside — the recorded manifest, the
+# change-detection key (§spec:sync-identity).
+_FORMAT_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS audio_formats (
+        source_name      TEXT NOT NULL,
+        collection_name  TEXT NOT NULL,
+        identifier       TEXT NOT NULL,
+        file_name        TEXT NOT NULL,
+        size             INTEGER,
+        md5              TEXT,
+        format           TEXT NOT NULL,
+        audio_class      TEXT,
+        PRIMARY KEY (source_name, collection_name, identifier, file_name)
+    )
+    """,
+]
+_SCHEMA += _FORMAT_SCHEMA
+
 
 # Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer
 # reads its index alone, never the rows, whose manifests and source metadata fill
@@ -624,6 +646,14 @@ def _migrate_to_12(conn: sqlite3.Connection) -> None:
             conn.execute(stmt)
 
 
+def _migrate_to_13(conn: sqlite3.Connection) -> None:
+    """v12 → v13: add the per-file record of real audio formats (§spec:state,
+    §spec:real-format). Additive: it starts empty — the first sync after the upgrade
+    checks stored files — and nothing else changes."""
+    for stmt in _FORMAT_SCHEMA:
+        conn.execute(stmt)
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -637,6 +667,7 @@ _MIGRATIONS = {
     10: _migrate_to_10,
     11: _migrate_to_11,
     12: _migrate_to_12,
+    13: _migrate_to_13,
 }
 
 

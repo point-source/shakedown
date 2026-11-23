@@ -22,6 +22,7 @@ from shakedown.models import (
     Run,
     RunKind,
 )
+from shakedown.realformat import AudioClass, FormatCheck, FormatRecord, RealFormat
 from shakedown.selection import keeps_unplayable_original
 
 
@@ -395,8 +396,9 @@ class ItemRepo:
             "DELETE FROM items WHERE source_name=? AND collection_name=? AND identifier=?",
             (source, collection, identifier),
         )
-        # The show's tag records describe bytes shakedown no longer tracks.
+        # The show's tag and format records describe bytes shakedown no longer tracks.
         TagRepo(self.conn).delete_show(source, collection, identifier)
+        FormatRepo(self.conn).delete_show(source, collection, identifier)
 
 
 class RunRepo:
@@ -1192,3 +1194,72 @@ class TagRepo:
             "DELETE FROM tag_files WHERE source_name=? AND collection_name=? AND identifier=?",
             (source, collection, identifier),
         )
+
+
+class FormatRepo:
+    """The real-format record (§spec:real-format, §spec:state): per checked audio file,
+    what its content showed, with the manifest file's (size, md5) it was made for. A
+    caller keeps only checks that still match the manifest (realformat.valid_formats)."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def put(
+        self, source: str, collection: str, identifier: str, file_name: str,
+        size: int | None, md5: str | None, check: FormatCheck,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO audio_formats (source_name, collection_name, identifier, file_name,
+                                       size, md5, format, audio_class)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source_name, collection_name, identifier, file_name)
+            DO UPDATE SET size=excluded.size, md5=excluded.md5, format=excluded.format,
+                          audio_class=excluded.audio_class
+            """,
+            (source, collection, identifier, file_name, size, md5, check.format.value,
+             check.audio_class.value if check.audio_class is not None else None),
+        )
+
+    def for_show(self, source: str, collection: str, identifier: str) -> dict[str, FormatRecord]:
+        cur = self.conn.execute(
+            "SELECT file_name, size, md5, format, audio_class FROM audio_formats"
+            " WHERE source_name=? AND collection_name=? AND identifier=?",
+            (source, collection, identifier),
+        )
+        return {row["file_name"]: _format_record(row) for row in cur}
+
+    def for_collection(self, source: str, collection: str) -> dict[str, dict[str, FormatRecord]]:
+        """Every show's records in one query (staging a whole collection)."""
+        cur = self.conn.execute(
+            "SELECT identifier, file_name, size, md5, format, audio_class FROM audio_formats"
+            " WHERE source_name=? AND collection_name=?",
+            (source, collection),
+        )
+        shows: dict[str, dict[str, FormatRecord]] = {}
+        for row in cur:
+            shows.setdefault(row["identifier"], {})[row["file_name"]] = _format_record(row)
+        return shows
+
+    def keep_only(
+        self, source: str, collection: str, identifier: str, file_names: Iterable[str]
+    ) -> None:
+        """Drop the records of files no longer in the show's manifest."""
+        keep = set(file_names)
+        gone = [name for name in self.for_show(source, collection, identifier) if name not in keep]
+        self.conn.executemany(
+            "DELETE FROM audio_formats WHERE source_name=? AND collection_name=?"
+            " AND identifier=? AND file_name=?",
+            [(source, collection, identifier, name) for name in gone],
+        )
+
+    def delete_show(self, source: str, collection: str, identifier: str) -> None:
+        self.conn.execute(
+            "DELETE FROM audio_formats WHERE source_name=? AND collection_name=? AND identifier=?",
+            (source, collection, identifier),
+        )
+
+
+def _format_record(row: sqlite3.Row) -> FormatRecord:
+    audio_class = AudioClass(row["audio_class"]) if row["audio_class"] is not None else None
+    return row["size"], row["md5"], FormatCheck(RealFormat(row["format"]), audio_class)

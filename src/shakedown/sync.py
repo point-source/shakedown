@@ -71,6 +71,7 @@ from shakedown.staging import (
     write_sidecar,
 )
 from shakedown.state import (
+    FormatRepo,
     ItemRepo,
     OperationOutcomeRepo,
     PendingHandoffRepo,
@@ -2217,8 +2218,10 @@ def _record_disappeared(
         existing.status = ItemStatus.PRUNED
         existing.archive_path = None
         items.upsert(existing)
-        # The tagged bytes are gone with the archive copy (§spec:tag-filling).
+        # The tagged and checked bytes are gone with the archive copy (§spec:tag-filling,
+        # §spec:real-format).
         TagRepo(items.conn).delete_show(source_name, collection.name, existing.identifier)
+        FormatRepo(items.conn).delete_show(source_name, collection.name, existing.identifier)
         return
     existing.status = ItemStatus.DISAPPEARED
     items.upsert(existing)
