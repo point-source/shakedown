@@ -913,11 +913,11 @@ Technical, operational, and scope bounds on the solution space.
   repo's durable governance artifacts and ship in the PR as-is; the repo
   has no ADR/RFC/design-doc tree to convert into.
 - **Governance setup: lint script, CI workflow, markdown lint, agent
-  guidance section (operator decision, 2026-11-23).** The repo has
-  `.markdownlint.json` and the UI screenshot harness; it lacks a
-  governance lint script, a CI job running it and markdown lint, and a
-  governance section in AGENTS.md. Drift to fix: SPEC.md sections carry
-  no `*Status:*` lines.
+  guidance section (operator decision, 2026-11-23).** Done:
+  `tools/governance-lint.sh` checks the slugs, references and SPEC.md
+  status lines and runs markdownlint; the governance-lint CI workflow
+  runs it on pull requests; AGENTS.md has a governance section; every
+  SPEC.md section carries a `*Status:*` line.
 - **Mislabelled audio: scope (operator decisions, 2026-11-23).** Out of
   scope: converting audio; renaming files in the archive; correcting
   archive.org's metadata or contacting uploaders; formats other than
