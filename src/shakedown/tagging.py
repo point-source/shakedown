@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from mutagen import MutagenError
 from mutagen.easyid3 import EasyID3
+from mutagen.easymp4 import EasyMP4, EasyMP4Tags
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3, WOAS, ID3NoHeaderError
 from mutagen.mp3 import MP3
@@ -36,16 +37,19 @@ from shakedown.state import FormatRepo, ItemRepo, TagRecord, TagRepo
 
 log = logging.getLogger(__name__)
 
-# The venue goes in the format's custom field: Vorbis comment VENUE, ID3 TXXX:VENUE.
+# The venue goes in the format's custom field of one name: Vorbis comment VENUE, ID3
+# TXXX:VENUE, and in M4A the iTunes freeform field ----:com.apple.iTunes:VENUE
+# (§spec:m4a-tags).
 EasyID3.RegisterTXXXKey("venue", "VENUE")
+EasyMP4Tags.RegisterFreeformKey("venue", "VENUE")
 
 # Tags go by format-neutral names (artist, albumartist, album, date, venue, title,
 # tracknumber); _Tags maps each to the format's own field.
 
-# The formats shakedown can tag (§spec:tag-filling): FLAC, MP3, Ogg Vorbis, judged by
-# the file's real format (§spec:real-format). Every other file — SHN, an unidentified
-# file, and for now M4A (§spec:m4a-tags) — is left untouched.
-WRITABLE = frozenset({RealFormat.FLAC, RealFormat.MP3, RealFormat.OGG})
+# The formats shakedown can tag (§spec:tag-filling): FLAC, MP3, Ogg Vorbis, and M4A
+# (§spec:m4a-tags), judged by the file's real format (§spec:real-format). Every other
+# file — SHN, an unidentified file — is left untouched.
+WRITABLE = frozenset({RealFormat.FLAC, RealFormat.MP3, RealFormat.OGG, RealFormat.M4A})
 
 # The album separator, exactly as SPEC writes it: an en dash between spaces.
 ALBUM_SEPARATOR = " \N{EN DASH} "
@@ -254,11 +258,16 @@ def _repair_link_frames(id3: ID3) -> None:
             id3.add(WOAS(url=url))
 
 
+# An M4A track number as its integer atom (trkn) can hold it: `n` or `n/total`.
+_TRACK_NUMBER = re.compile(r"^\s*(\d+)\s*(?:/\s*(\d+))?\s*$")
+
+
 class _Tags:
     """One file's tags behind format-neutral names, through mutagen, opened with the
     writer for the file's real format (never its name's). MP3 uses
     EasyID3's names for ID3 frames and is saved in the ID3 version it already had, so
-    nobody else's frames are converted; FLAC and Ogg Vorbis use Vorbis comments.
+    nobody else's frames are converted; FLAC and Ogg Vorbis use Vorbis comments; M4A
+    uses EasyMP4's names for the iTunes atoms players read (§spec:m4a-tags).
     mutagen writes into the file itself, so every link to it carries the change.
 
     A malformed archive.org LINK frame is repaired on load (_repair_link_frames). The
@@ -268,7 +277,12 @@ class _Tags:
         assert fmt in WRITABLE, fmt
         self._id3: ID3 | None = None
         self._vorbis: FLAC | OggVorbis | None = None
-        if fmt == RealFormat.MP3:
+        self._mp4: EasyMP4 | None = None
+        if fmt == RealFormat.M4A:
+            self._mp4 = EasyMP4(path)
+            if self._mp4.tags is None:
+                self._mp4.add_tags()
+        elif fmt == RealFormat.MP3:
             MP3(path)  # raises unless the file really is MPEG audio
             with path.open("rb") as f:
                 header = f.read(4)
@@ -285,7 +299,25 @@ class _Tags:
             if self._vorbis.tags is None:
                 self._vorbis.add_tags()
 
+    def canonical(self, key: str, value: str) -> str | None:
+        """The value as this file would hold it once written, so it compares with what
+        the file holds; None when the format cannot hold it. Only an M4A track number
+        differs: trkn holds integers ("01" is held as "1"), and a value with no number
+        stays absent."""
+        if self._mp4 is None or key != "tracknumber":
+            return value
+        match = _TRACK_NUMBER.match(value)
+        if match is None:
+            return None
+        number, total = match.groups()
+        return f"{int(number)}/{int(total)}" if total else str(int(number))
+
     def get(self, key: str) -> list[str] | None:
+        if self._mp4 is not None:
+            try:
+                return list(self._mp4[key])
+            except KeyError:
+                return None
         if self._id3 is not None:
             try:
                 return list(EasyID3.Get[key](self._id3, key))
@@ -295,14 +327,18 @@ class _Tags:
         return list(self._vorbis[key]) if key in self._vorbis else None
 
     def set(self, key: str, value: str) -> None:
-        if self._id3 is not None:
+        if self._mp4 is not None:
+            self._mp4[key] = [value]
+        elif self._id3 is not None:
             EasyID3.Set[key](self._id3, key, [value])
         else:
             assert self._vorbis is not None
             self._vorbis[key.upper()] = [value]
 
     def save(self, path: Path) -> None:
-        if self._id3 is not None:
+        if self._mp4 is not None:
+            self._mp4.save(path)
+        elif self._id3 is not None:
             if self._v2 == 3:
                 self._id3.update_to_v23()  # as EasyID3.save does for a v2.3 save
             self._id3.save(path, v2_version=self._v2)
@@ -410,7 +446,9 @@ def fill_file(
 
     ours = dict(record.written) if record is not None else {}
     changes: dict[str, str] = {}
-    for key, value in desired.items():
+    wanted = {key: held for key, value in desired.items()
+              if (held := tags.canonical(key, value)) is not None}
+    for key, value in wanted.items():
         current = tags.get(key)
         if _absent(current):
             changes[key] = value
@@ -421,7 +459,7 @@ def fill_file(
             elif ours[key] != value:
                 changes[key] = value
     for key in list(ours):
-        if key not in desired and tags.get(key) != [ours[key]]:
+        if key not in wanted and tags.get(key) != [ours[key]]:
             del ours[key]
 
     if not changes:
@@ -440,17 +478,20 @@ def fill_file(
     try:
         tags.save(path)
         _fsync(path)
-    except (OSError, MutagenError) as e:
-        _undo(path, backup)
-        raise TagWriteError(str(e)) from e
     except ValueError as e:
-        # The tags cannot be written back as they are: a frame someone else wrote that
-        # mutagen rejects. The file is left as it is and the show goes on
-        # (§spec:per-item-isolation). Any other error is unexpected and propagates.
+        # The tags cannot be written back as they are: a frame or atom someone else
+        # wrote that mutagen rejects (for M4A, MP4MetadataValueError, which is also a
+        # MutagenError, so this comes first; mutagen reports disk faults as plain
+        # MutagenError, never ValueError). The file is left as it is and the show goes
+        # on (§spec:per-item-isolation).
         _undo(path, backup)
         log.warning("not filling tags in %s: its existing tags cannot be saved: %s: %s",
                     path, type(e).__name__, e)
         return FillResult("untaggable", record)
+    except (OSError, MutagenError) as e:
+        # A disk fault. Any other error is unexpected and propagates.
+        _undo(path, backup)
+        raise TagWriteError(str(e)) from e
     post_tag_md5 = _md5(path)
     _fault_point("saved")
     if backup is not None:
