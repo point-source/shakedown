@@ -31,7 +31,8 @@ from shakedown import stopping
 from shakedown.db import transaction
 from shakedown.models import Item, Manifest
 from shakedown.placement import has_archive_copy
-from shakedown.state import ItemRepo, TagRecord, TagRepo
+from shakedown.realformat import FormatCheck, RealFormat, named_format, valid_formats
+from shakedown.state import FormatRepo, ItemRepo, TagRecord, TagRepo
 
 log = logging.getLogger(__name__)
 
@@ -41,18 +42,30 @@ EasyID3.RegisterTXXXKey("venue", "VENUE")
 # Tags go by format-neutral names (artist, albumartist, album, date, venue, title,
 # tracknumber); _Tags maps each to the format's own field.
 
-# The formats shakedown can tag (§spec:tag-filling): FLAC, MP3, Ogg Vorbis. Every other
-# file, SHN included, is left untouched.
-TAGGABLE_SUFFIXES = (".flac", ".mp3", ".ogg")
+# The formats shakedown can tag (§spec:tag-filling): FLAC, MP3, Ogg Vorbis, judged by
+# the file's real format (§spec:real-format). Every other file — SHN, an unidentified
+# file, and for now M4A (§spec:m4a-tags) — is left untouched.
+WRITABLE = frozenset({RealFormat.FLAC, RealFormat.MP3, RealFormat.OGG})
 
 # The album separator, exactly as SPEC writes it: an en dash between spaces.
 ALBUM_SEPARATOR = " \N{EN DASH} "
 
 Desired = dict[str, dict[str, str]]  # file name -> tag name -> value
 
+# A show's checks that still describe its files (realformat.valid_formats).
+Formats = Mapping[str, FormatCheck]
 
-def is_taggable(name: str) -> bool:
-    return name.lower().endswith(TAGGABLE_SUFFIXES)
+
+def effective_format(name: str, formats: Formats | None) -> RealFormat | None:
+    """What shakedown takes a file to be: its recorded check, else what its name says
+    (a file not checked yet — until the catch-up, a show stored before the check
+    existed — or outside the checked set)."""
+    check = formats.get(name) if formats is not None else None
+    return check.format if check is not None else named_format(name)
+
+
+def is_taggable(name: str, formats: Formats | None = None) -> bool:
+    return effective_format(name, formats) in WRITABLE
 
 
 def _text(value: Any) -> str | None:
@@ -82,16 +95,18 @@ def _show_values(identifier: str, metadata: Mapping[str, Any]) -> dict[str, str]
 
 
 def desired_tags(
-    identifier: str, metadata: Mapping[str, Any], manifest: Manifest, *, labelled: bool
+    identifier: str, metadata: Mapping[str, Any], manifest: Manifest, *, labelled: bool,
+    formats: Formats | None = None,
 ) -> Desired:
     """Every taggable file's computed tags. `labelled` appends ` [<identifier>]` to the
-    album: the show clashes with another (TagIndex)."""
+    album: the show clashes with another (TagIndex). `formats` holds the show's valid
+    checks; a file is taggable by its real format (effective_format)."""
     show = _show_values(identifier, metadata)
     if labelled:
         show["album"] = f"{show['album']} [{identifier}]"
     desired: Desired = {}
     for mf in manifest.files:
-        if not is_taggable(mf.name):
+        if not is_taggable(mf.name, formats):
             continue
         tags = dict(show)
         if mf.title is not None:
@@ -121,11 +136,14 @@ class TagIndex:
         self._key: dict[str, tuple[str, str, str]] = {}
         self._members: dict[tuple[str, str, str], set[str]] = {}
 
-    def add(self, identifier: str, metadata: Mapping[str, Any], manifest: Manifest) -> None:
+    def add(
+        self, identifier: str, metadata: Mapping[str, Any], manifest: Manifest,
+        formats: Formats | None = None,
+    ) -> None:
         """Index (or re-index) a show that has an archive copy. A show with no
         taggable file is not tagged, so it clashes with nothing."""
         self.remove(identifier)
-        if not any(is_taggable(mf.name) for mf in manifest.files):
+        if not any(is_taggable(mf.name, formats) for mf in manifest.files):
             return
         show = _show_values(identifier, metadata)
         key = (show.get("albumartist", ""), show["album"], show.get("date", ""))
@@ -142,15 +160,24 @@ class TagIndex:
         return key is not None and len(self._members[key]) > 1
 
 
-def _mirrored(items: ItemRepo, source: str, collection: str) -> tuple[list[Item], TagIndex]:
-    """The collection's shows with an archive copy, and their clash index."""
+def _mirrored(
+    items: ItemRepo, source: str, collection: str
+) -> tuple[list[Item], TagIndex, dict[str, dict[str, FormatCheck]]]:
+    """The collection's shows with an archive copy, their clash index, and each show's
+    valid format checks."""
     shows = [item for item in items.list_for_collection(source, collection)
              if has_archive_copy(item)]
+    records = FormatRepo(items.conn).for_collection(source, collection)
     index = TagIndex()
+    formats: dict[str, dict[str, FormatCheck]] = {}
     for item in shows:
         assert item.recorded_manifest is not None
-        index.add(item.identifier, item.source_metadata, item.recorded_manifest)
-    return shows, index
+        formats[item.identifier] = valid_formats(
+            item.recorded_manifest, records.get(item.identifier, {})
+        )
+        index.add(item.identifier, item.source_metadata, item.recorded_manifest,
+                  formats[item.identifier])
+    return shows, index, formats
 
 
 class TagPlanner:
@@ -160,9 +187,11 @@ class TagPlanner:
     is corrected by the run's pass over mirrored shows."""
 
     def __init__(self, items: ItemRepo, source: str, collection: str) -> None:
-        _, self.index = _mirrored(items, source, collection)
+        _, self.index, _ = _mirrored(items, source, collection)
 
     def plan(self, identifier: str, metadata: Mapping[str, Any], manifest: Manifest) -> Desired:
+        """Planned before the download, so taken by name: the fetch narrows it to the
+        files whose real format, checked in the temp folder, has a writer."""
         self.index.add(identifier, metadata, manifest)
         return desired_tags(
             identifier, metadata, manifest, labelled=self.index.labelled(identifier)
@@ -226,7 +255,8 @@ def _repair_link_frames(id3: ID3) -> None:
 
 
 class _Tags:
-    """One file's tags behind format-neutral names, through mutagen. MP3 uses
+    """One file's tags behind format-neutral names, through mutagen, opened with the
+    writer for the file's real format (never its name's). MP3 uses
     EasyID3's names for ID3 frames and is saved in the ID3 version it already had, so
     nobody else's frames are converted; FLAC and Ogg Vorbis use Vorbis comments.
     mutagen writes into the file itself, so every link to it carries the change.
@@ -234,11 +264,11 @@ class _Tags:
     A malformed archive.org LINK frame is repaired on load (_repair_link_frames). The
     repair is made in memory and reaches the file only when there are tags to fill."""
 
-    def __init__(self, path: Path) -> None:
-        suffix = path.suffix.lower()
+    def __init__(self, path: Path, fmt: RealFormat) -> None:
+        assert fmt in WRITABLE, fmt
         self._id3: ID3 | None = None
         self._vorbis: FLAC | OggVorbis | None = None
-        if suffix == ".mp3":
+        if fmt == RealFormat.MP3:
             MP3(path)  # raises unless the file really is MPEG audio
             with path.open("rb") as f:
                 header = f.read(4)
@@ -251,7 +281,7 @@ class _Tags:
                 self._id3 = ID3()
             _repair_link_frames(self._id3)
         else:
-            self._vorbis = FLAC(path) if suffix == ".flac" else OggVorbis(path)
+            self._vorbis = FLAC(path) if fmt == RealFormat.FLAC else OggVorbis(path)
             if self._vorbis.tags is None:
                 self._vorbis.add_tags()
 
@@ -351,9 +381,12 @@ def _undo(path: Path, backup: Path | None) -> None:
 
 
 def fill_file(
-    path: Path, desired: Mapping[str, str], record: TagRecord | None, backup: Path | None
+    path: Path, desired: Mapping[str, str], record: TagRecord | None, backup: Path | None,
+    fmt: RealFormat | None = None,
 ) -> FillResult:
-    """Fill the file's absent tags with the desired values (§spec:tag-filling).
+    """Fill the file's absent tags with the desired values (§spec:tag-filling), through
+    the writer for `fmt`, the file's real format (§spec:real-format); by default, the
+    format its name says.
 
     A tag already present is never changed — except a value shakedown wrote itself
     (in `record`) whose computed value changed, and only while the file still holds
@@ -366,11 +399,13 @@ def fill_file(
     in between is undone by recover_interrupted_tagging at the start of the next run.
     A file in a fetch's temp folder is linked nowhere yet and takes no backup.
     """
+    fmt = fmt or named_format(path.name)
+    assert fmt is not None, path
     try:
-        tags = _Tags(path)
+        tags = _Tags(path, fmt)
     except MutagenError as e:
         log.warning("not filling tags in %s: the file cannot be read as %s: %s",
-                    path, path.suffix.lstrip(".").upper(), e)
+                    path, fmt.value.upper(), e)
         return FillResult("untaggable", record)
 
     ours = dict(record.written) if record is not None else {}
@@ -461,14 +496,15 @@ def fill_collection_tags(
     run that stops partway picks the show up again. Returns, per show, the issues of
     tag writes that failed on the disk; such a show is retried on the next run."""
     repo = TagRepo(items.conn)
-    shows, index = _mirrored(items, source, collection)
+    shows, index, formats = _mirrored(items, source, collection)
     done = repo.fingerprints(source, collection)
     issues: dict[str, list[str]] = {}
     for item in shows:
         assert item.recorded_manifest is not None and item.archive_path is not None
         identifier = item.identifier
         desired = desired_tags(identifier, item.source_metadata, item.recorded_manifest,
-                               labelled=index.labelled(identifier))
+                               labelled=index.labelled(identifier),
+                               formats=formats[identifier])
         show_fingerprint = fingerprint(desired)
         if done.get(identifier) == show_fingerprint:
             continue
@@ -482,7 +518,8 @@ def fill_collection_tags(
                 continue  # nothing to tag; a refetch brings it back, tagged
             try:
                 result = fill_file(path, wanted, records.get(name),
-                                   backup_path(collection_root, identifier, name))
+                                   backup_path(collection_root, identifier, name),
+                                   effective_format(name, formats[identifier]))
             except TagWriteError as e:
                 issues.setdefault(identifier, []).append(
                     f"{identifier}: {tag_failure(name, e)}"

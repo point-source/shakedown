@@ -20,6 +20,7 @@ from shakedown import tagging
 from shakedown.config import CollectionConfig, Config
 from shakedown.db import connect
 from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
+from shakedown.realformat import AudioClass, FormatCheck, RealFormat
 from shakedown.reconcile import run_reconcile
 from shakedown.restage import run_restage
 from shakedown.state import DriftRepo, ItemRepo, RunRepo, TagRecord, TagRepo
@@ -184,6 +185,91 @@ def test_fingerprint_changes_only_with_the_computed_values() -> None:
                                                       labelled=False))
     assert fingerprint(a) != fingerprint(desired_tags("x", SHOW_META, _manifest("a.flac"),
                                                       labelled=True))
+
+
+# --- judged by the file's real format (§spec:real-format) ----------------------------
+
+M4A_AAC = FormatCheck(RealFormat.M4A, AudioClass.LOSSY)
+MP3_CHECK = FormatCheck(RealFormat.MP3, AudioClass.LOSSY)
+FLAC_CHECK = FormatCheck(RealFormat.FLAC, AudioClass.LOSSLESS)
+UNIDENTIFIED = FormatCheck(RealFormat.UNIDENTIFIED, None)
+
+
+def test_the_recorded_real_format_decides_which_files_are_tagged() -> None:
+    """A file is tagged when its real format has a writer: an MP3 named .flac is; an
+    M4A named .flac waits for the M4A writer (§spec:m4a-tags) and an unidentified file
+    is never tagged; a FLAC named .m4a is tagged as FLAC."""
+    manifest = _manifest("mp3.flac", "aac.flac", "wav.flac", "flac.m4a", "honest.flac")
+    formats = {"mp3.flac": MP3_CHECK, "aac.flac": M4A_AAC, "wav.flac": UNIDENTIFIED,
+               "flac.m4a": FLAC_CHECK, "honest.flac": FLAC_CHECK}
+    desired = desired_tags("x", SHOW_META, manifest, labelled=False, formats=formats)
+    assert set(desired) == {"mp3.flac", "flac.m4a", "honest.flac"}
+
+
+def test_an_honestly_named_show_keeps_its_fingerprint_once_checked() -> None:
+    """Recording checks must not make every tagged show look changed: that would
+    re-read the whole collection."""
+    manifest = _manifest("a.flac", "b.mp3", "c.ogg", "d.shn")
+    formats = {"a.flac": FLAC_CHECK, "b.mp3": MP3_CHECK,
+               "c.ogg": FormatCheck(RealFormat.OGG, AudioClass.LOSSY)}
+    before = desired_tags("x", SHOW_META, manifest, labelled=False)
+    after = desired_tags("x", SHOW_META, manifest, labelled=False, formats=formats)
+    assert fingerprint(after) == fingerprint(before)
+
+
+def test_a_show_whose_files_have_no_writer_never_clashes() -> None:
+    index = TagIndex()
+    index.add("gd77.flac", SHOW_META, _manifest("a.flac"))
+    index.add("gd77.aac", SHOW_META, _manifest("a.flac"), formats={"a.flac": M4A_AAC})
+    assert not index.labelled("gd77.flac")
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "fmt"),
+    [("a.ogg", "mp3", RealFormat.MP3), ("a.mp3", "flac", RealFormat.FLAC),
+     ("a.flac", "ogg", RealFormat.OGG)],
+)
+def test_the_writer_follows_the_real_format_not_the_name(
+    tmp_path: Path, name: str, content: str, fmt: RealFormat
+) -> None:
+    path = make_audio(tmp_path / name, content=content)
+    result = fill_file(path, DESIRED, None, None, fmt)
+    assert result.status == "written"
+    assert read_tags(path, content) == {k: [v] for k, v in DESIRED.items()}
+
+
+def test_the_collection_pass_tags_by_recorded_format_without_warnings(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An MP3 named .flac is filled through ID3; an M4A named .flac and a WAV named
+    .flac are left exactly as they are, with no "cannot be read as FLAC" warning
+    (§spec:real-format)."""
+    from shakedown.state import FormatRepo
+
+    conn = connect(tmp_path / "s.db")
+    folder = tmp_path / "coll" / "gd77"
+    contents = {"mp3.flac": "mp3", "aac.flac": "m4a", "wav.flac": "wav"}
+    checks = {"mp3.flac": MP3_CHECK, "aac.flac": M4A_AAC, "wav.flac": UNIDENTIFIED}
+    files = []
+    for name, content in contents.items():
+        path = make_audio(folder / name, content=content)
+        files.append(ManifestFile(name, path.stat().st_size, _md5(path)))
+    ItemRepo(conn).upsert(Item(
+        source_name="s", collection_name="c", identifier="gd77", status=ItemStatus.COMPLETE,
+        archive_path=folder, downloaded_at=datetime.now(), source_metadata=SHOW_META,
+        recorded_manifest=Manifest(files=tuple(files)),
+    ))
+    for mf in files:
+        FormatRepo(conn).put("s", "c", "gd77", mf.name, mf.size, mf.md5, checks[mf.name])
+    before = {name: (folder / name).read_bytes() for name in ("aac.flac", "wav.flac")}
+
+    issues = tagging.fill_collection_tags(tmp_path / "coll", ItemRepo(conn), "s", "c")
+
+    assert issues == {}
+    assert read_tags(folder / "mp3.flac", "mp3")["venue"] == ["Barton Hall"]
+    assert {name: (folder / name).read_bytes() for name in before} == before
+    assert "cannot be read" not in caplog.text
+    assert set(TagRepo(conn).file_records("s", "c", "gd77")) == {"mp3.flac"}
 
 
 # --- writing one file (fill_file) ---------------------------------------------------
@@ -861,9 +947,9 @@ def test_a_second_sync_reads_no_file_of_a_tagged_show(
     opened: list[Path] = []
     real_init = tagging._Tags.__init__
 
-    def counting_init(self: tagging._Tags, path: Path) -> None:
+    def counting_init(self: tagging._Tags, path: Path, *args: object) -> None:
         opened.append(path)
-        real_init(self, path)
+        real_init(self, path, *args)  # type: ignore[arg-type]
 
     monkeypatch.setattr(tagging._Tags, "__init__", counting_init)
     assert run_sync(config) == 0
