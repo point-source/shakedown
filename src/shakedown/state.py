@@ -1242,8 +1242,8 @@ class FormatRepo:
         return shows
 
     def unidentified(self, source: str, collection: str) -> dict[str, dict[str, FormatRecord]]:
-        """The records of unidentified files, by show then file name, in identifier
-        order (§spec:unidentified-audio). Empty on a database from before format records:
+        """The records of unidentified files, by show, in identifier order
+        (§spec:unidentified-audio). Empty on a database from before format records:
         readers never migrate."""
         exists = self.conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audio_formats'"
@@ -1253,7 +1253,7 @@ class FormatRepo:
         cur = self.conn.execute(
             "SELECT identifier, file_name, size, md5, format, audio_class FROM audio_formats"
             " WHERE source_name=? AND collection_name=? AND format=?"
-            " ORDER BY identifier, file_name",
+            " ORDER BY identifier",
             (source, collection, RealFormat.UNIDENTIFIED.value),
         )
         shows: dict[str, dict[str, FormatRecord]] = {}
