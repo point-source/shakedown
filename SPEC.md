@@ -725,7 +725,8 @@ mirrored.
 
 ## Best available and best playable copy §spec:quality-selection
 
-*Status: complete*
+*Status: complete; ranking by a file's real format
+(§spec:real-format-ranking) not started*
 
 For every show, the system keeps the highest-quality version the source
 offers and the highest-quality version a common player can play: one
@@ -750,7 +751,9 @@ Observable behavior:
   are not available). A copy is the files sharing the source's format
   name; when no single name covers the show, the uploader's files of
   one audio class and file type count as one copy as long as together
-  they hold exactly the show's track count and no track twice. The
+  they hold exactly the show's track count and no track twice. A file
+  whose real format the system has checked counts by that format, not
+  its listing (§spec:real-format-ranking). The
   source's derivatives never merge: archive.org labels its own copies
   consistently, and its MP3s of different bitrates are separate copies
   of the same tracks. archive.org names a FLAC's format by its bit depth, so a show
@@ -900,7 +903,8 @@ first sync downloads only the added non-audio files and playable copies.
 ## Library staging §spec:library-staging
 
 *Status: complete, including path ownership, clash separation, and
-stale-copy cleanup (§spec:library-ownership, §spec:library-cleanup).*
+stale-copy cleanup (§spec:library-ownership, §spec:library-cleanup); the
+real-extension exception (§spec:real-format) not started.*
 
 Per collection, the user provides a `library_layout` template that
 renders each item's **staging directory** under the library tree, from
@@ -910,7 +914,10 @@ filenames are then hardlinked into that directory unchanged.
 
 - **Templates produce directories, never renamed files.** Filenames in
   the deepest directory always match the archive, so tools (and users)
-  can correlate the two trees by name. Renaming and retagging are the
+  can correlate the two trees by name. The one exception: a file whose
+  content is in a different audio format than its name says keeps its
+  stem but carries its real extension in the library
+  (§spec:real-format). Renaming and retagging are the
   library tool's job, out of scope by charter (§req:constraints) — the
   one bounded exception is opt-in gap-filling of basic tags
   (§spec:tag-filling).
@@ -1137,7 +1144,8 @@ sync; the old folder is gone without any download.
 
 ## Tag filling §spec:tag-filling
 
-*Status: complete*
+*Status: complete; M4A files and choosing the writer by real format
+(§spec:m4a-tags, §spec:real-format) not started*
 
 A collection may opt in (`fill_tags`, default off, §spec:configuration)
 to having shakedown fill in missing basic tags from the source metadata
@@ -1148,8 +1156,9 @@ the bounded gap-filling exception; tagged bytes are recorded state).
 Observable behavior:
 
 - **What is filled.** For each audio file in a format the system can
-  tag (FLAC, MP3, Ogg Vorbis; other files, including SHN, are left
-  untouched), the system fills only tags that are absent — a tag whose
+  tag (FLAC, MP3, Ogg Vorbis, and M4A per §spec:m4a-tags — judged by the
+  file's real format, §spec:real-format; other files, including SHN,
+  are left untouched), the system fills only tags that are absent — a tag whose
   values are all empty or whitespace counts as absent (operator
   decision, 2026-11-10):
   - artist and album artist ← the show's creator;
@@ -1261,11 +1270,408 @@ by identifier, and files that had tags keep them unchanged. Run sync and
 `verify --deep` again: no download, no drift. Retag one file with
 another tool; `verify --deep` reports exactly that file.
 
+## Audio known by its content §spec:real-format
+
+*Status: not started*
+
+Compatibility: from "deployed — single operator install, no external
+consumers" (§req:constraints): every surface this feature touches is
+free to break — library file names, state database (moves forward by
+one additive migration), `status` text and JSON, `GET /api/attention`,
+and the dashboard. The archive is frozen in one respect: no file in it
+is renamed, and the stored shows are corrected without downloading
+their audio (§req:constraints: never force re-downloading the bulk of
+the archive). (Operator decisions, 2026-11-23.)
+
+The system decides what format an audio file is from its content, not
+its name, and acts on the real format everywhere a format matters: the
+library file name, the tag writer, and the best-copy choice
+(§req:success-criteria #34; §req:user-stories: a mislabelled show still
+plays right; §req:constraints: the bounded exception for a library copy's
+real extension).
+
+Observable behavior:
+
+- **Which files are checked.** Every audio file whose name ends in
+  `.flac`, `.mp3`, `.ogg`, or `.m4a` (any letter case), from any
+  source, whether it is staged or kept archive-only. Other audio (SHN,
+  WAV, APE, …) is taken by its name as today; mislabels among those are
+  out of scope (§req:constraints: mislabelled audio scope).
+- **What a check finds.** One of four recognised formats, each with its
+  audio class: FLAC (lossless), MP3 (lossy), Ogg Vorbis (lossy), or M4A
+  — an MP4 audio container — holding AAC (lossy) or Apple Lossless
+  (lossless). Anything else is *unidentified*: a WAV named `.flac`, a
+  truncated upload, an Ogg or MP4 file holding another codec.
+- **Checked once, when the file arrives.** A downloaded file is checked
+  in the fetch's temp folder, after the source's checksum has passed
+  and before tag filling, so the show enters the archive with its real
+  formats known. The check reads only the parts of the file that
+  identify it (the start, and for M4A the track description, which may
+  sit at the end); it never reads a whole file. Shows already in the
+  archive are checked once by the catch-up in §spec:real-format-catch-up.
+- **The result is recorded state.** Per checked file, the system records
+  the real format and class it found. The record belongs to the file as
+  the manifest records it (name, size, source checksum): a file the
+  source changes is downloaded and checked again. The record stays out
+  of the change-detection identity (§spec:sync-identity), so a check
+  never makes a show look changed upstream and never causes a download.
+  Restage, sync's staging, and reconform read the record and never
+  re-open a file to decide its format.
+- **The archive keeps the source's name.** `1-01 St. Stephen.flac`
+  stays `1-01 St. Stephen.flac` in the archive. Manifests, drift,
+  reconform, and tag records keep using the source's name.
+- **The library carries the real extension.** When a file's real format
+  differs from what its name says, its library hardlink is named with
+  the file's stem plus the real format's extension, lowercase:
+  `.flac`, `.mp3`, `.ogg`, `.m4a` (`1-01 St. Stephen.flac` → `1-01 St.
+  Stephen.m4a`). A file whose name already fits its content keeps its
+  exact name, letter case included. If the new name would equal
+  another library file of the same show, the misnamed file keeps its
+  source name instead, so no show file replaces another; the same
+  archive state and config always produce the same names
+  (§spec:library-ownership). The placement record holds the name
+  actually placed, so cleanup removes an old `.flac` link when the
+  `.m4a` link replaces it (§spec:library-cleanup).
+- **Tags go through the real format's writer.** Tag filling opens each
+  file with the writer for its recorded real format, so an M4A named
+  `.flac` is tagged as M4A (§spec:m4a-tags). A recognised file never
+  produces the "cannot be read as FLAC" warning.
+- **Unidentified files stay as they are, visibly.** An unidentified file
+  is archived and staged under its source name, ranked by its listing as
+  today, and never tagged, so it causes no tag warning. It is listed in
+  `status` and the dashboard (§spec:unidentified-audio).
+- **Log, not screen, for recognised mislabels.** The run log records one
+  line per file whose real format differs from its name. Nothing on the
+  dashboard or in `status` mentions a mislabel shakedown has handled: the
+  library name is the visible result (principle: UI copy is product).
+
+**Decision and constraint.** Check content once, at fetch, record the
+result beside the manifest, and rename only the library link. The
+constraints: the archive mirrors the source and its names are the
+change-detection key (§spec:sync-identity), so it cannot rename;
+Navidrome and other players read the extension, so the library must
+carry the real one; restage must stay under five minutes for ~14k items
+and never read every file (§req:quality-attributes: restage speed), so
+the format must be known from recorded state; and the fetch temp folder
+is the one point where every new file passes, already readable, before
+tagging. The format is identified through the established audio tagging
+library's own format readers, never from the file name and never by a
+hand-written parser (principles: boring edges, don't rebuild). This is a
+bounded exception to §spec:library-staging's "filenames always match the
+archive": only the extension changes, only when the content proves it
+wrong, and the stem still correlates the two trees.
+
+**Alternatives rejected.** *Rename in the archive too* — breaks the
+archive as a mirror of the source and every name-keyed record
+(manifests, drift, reconform, tag records); the operator ruled it out.
+*Keep the `.flac` name and only tag correctly* — players still treat the
+file as FLAC. *Check during restage* — reads every audio file on every
+restage, breaking the five-minute bar. *Check only files whose tagging
+failed* — misses mislabels on collections without `fill_tags` and MP3s
+named `.ogg` that happen to tag. *Report the mismatch instead of fixing
+it* — the operator wants a fix (§req:priorities #37). *Trust the
+source's format field* — it repeated the uploader's mistake in all
+three observed shows. *Identify by a file-type library outside the
+tagging library* — adds a dependency for an answer the tagging library
+already gives, and the tag writer must agree with the check anyway.
+
+**Tradeoffs.** A library tool that keys on paths (Navidrome play counts,
+stars) sees a remove plus an add for each renamed file, once. Checksum
+and fingerprint files in the library (`.md5`, `.ffp`) still name the
+source's file names: they describe the archive copy, not the library
+link. An Ogg Opus file named `.ogg` is listed as unidentified even
+though players may read it — accepted as rare and harmless, since it is
+still staged. Whether Navidrome mislabels an AAC file named `.flac` is
+unverified; the operator confirms playback on the three shows after the
+change (§req:success-criteria #34).
+
+**User-level test path.** Sync a fixture show whose three tracks are
+small M4A (AAC) files named `.flac`: the archive holds the three `.flac`
+names, the library holds `.m4a` files with the same stems, the run log
+has no "cannot be read as FLAC" warning, and `restage` rebuilds the same
+`.m4a` names without opening the files. Add a show with an MP3 named
+`.ogg` and a FLAC named `.mp3`: the library holds `.mp3` and `.flac`
+links. Sync again: no download, no change.
+
+## Best copy by real format §spec:real-format-ranking
+
+*Status: not started*
+
+The best-copy choice (§spec:quality-selection) uses a file's real
+format and class once it is known, so a copy listed as lossless that
+turns out lossy is ranked as lossy, and a better copy is fetched when
+the source offers one (§req:success-criteria #26, #34; §req:user-stories:
+the best copy, judged by what it really is).
+
+Observable behavior:
+
+- **Known formats replace listed ones.** Ranking works from the
+  listing as before, except that a file with a recorded check (and an
+  unchanged name, size, and checksum) counts by its recorded real
+  format and class. A copy whose checked files are not all lossless
+  ranks as lossy; among lossless copies, the real format sets the order
+  (FLAC, Apple Lossless, WAV, AIFF, then SHN), as §spec:quality-selection
+  states. A lossy copy still ranks by the source's listed bitrate when
+  every candidate lists one, and by size per track otherwise.
+- **Unchecked files count as listed.** Only downloaded files have been
+  checked. A copy the system never downloaded ranks by its listing, so a
+  lossless file named `.mp3` that was never selected stays unknown.
+- **A check that changes the ranking re-runs the choice in the same
+  run.** When a fetch's checks change a show's ranking, the show's
+  selection is made again with the real formats before the show enters
+  the archive, and any newly chosen files are downloaded and checked in
+  that same fetch. Each file is downloaded at most once per run, so the
+  re-ranking ends after at most as many rounds as the show has copies.
+  The show enters the archive once, with one handoff.
+- **Demoted copies stay.** A copy that loses its place by its real format
+  stays in the archive and leaves the library, as any file the rule no
+  longer selects does (§spec:quality-selection: files the rule no longer
+  selects stay).
+- **Stored shows re-rank on the same rule.** When the catch-up
+  (§spec:real-format-catch-up) changes a stored show's ranking, that show
+  is looked up in the same sync, even on an incremental collection
+  whose change signal says unchanged, and only files not already in the
+  archive are downloaded.
+- **Refused lossless keeps its meaning.** "Lossless refused by
+  archive.org; best lossy copy mirrored instead" still means the source
+  refused every lossless file. A served copy listed as lossless that
+  proves lossy does not produce that reason.
+- **The three Dead & Company shows keep their copy.** Their AAC set,
+  re-ranked as lossy and with no listed bitrate, still beats archive.org's
+  VBR MP3 derivative by size per track (archive.org's sizes put it at
+  about 2.3 times the MP3's), so nothing is downloaded.
+
+**Decision and constraint.** Recorded checks override the listing, and a
+changed ranking re-selects inside the same fetch. The constraints: the
+product's goal is the best version that truly exists (§req:problem-
+statement), so the listing's word cannot win over the bytes; the
+recorded check must feed every later lookup, or the next sync would rank
+the listing again and stage the demoted copy back; and a show entering
+the archive once keeps one handoff and one library update per show.
+
+**Alternatives rejected.** *Record the real class without re-ranking* —
+keeps a lossy copy when the source has a lossless one, against criterion
+26. *Re-rank on the next sync* — the library holds the wrong copy for a
+schedule interval and the show sends two handoffs. *Download every
+candidate copy to check it before choosing* — multiplies downloads for a
+rare case, against the no-bulk-download constraint.
+
+**Tradeoffs.** A mislabelled lossless-listed copy costs one extra
+download round when a better copy exists, and the demoted copy keeps its
+archive space. Files never downloaded keep their listed class.
+
+**User-level test path.** With a fixture source listing a show's "Flac"
+set (really AAC) and a real FLAC set under another format name, plus an
+MP3 derivative: sync; the run downloads the AAC set, finds it lossy,
+downloads the FLAC set in the same run, and the library holds the FLAC
+files while the archive also keeps the AAC set. Sync again: no download.
+With only the AAC set and the MP3 derivative: the AAC set is kept and
+staged as `.m4a`; the MP3 is not downloaded.
+
+## M4A tag filling §spec:m4a-tags
+
+*Status: not started*
+
+On a `fill_tags` collection, M4A files — honestly named `.m4a` files and
+files the check found to be M4A — have their missing tags filled like
+FLAC, MP3, and Ogg Vorbis files (§req:success-criteria #25, #34;
+§req:user-stories: my real .m4a shows browse too; §req:constraints:
+tag filling covers M4A).
+
+Observable behavior:
+
+- **Same rules, one more format.** Everything §spec:tag-filling states
+  holds for M4A: only absent tags are filled; nothing another tool or
+  the uploader wrote is changed; shakedown rewrites only a value it
+  recorded writing; the post-tag checksum and written values are
+  recorded; crash backups and `verify --deep` work the same.
+- **Where the values go.** Artist, album artist, album, date, track
+  title, and track number go in the iTunes-style atoms players read
+  (`©ART`, `aART`, `©alb`, `©day`, `©nam`, `trkn`); venue goes in the
+  iTunes freeform field named `VENUE`, the same name the Vorbis comment
+  and the ID3 user text field use.
+- **The writer follows the recorded format.** A file the check found to
+  be M4A is tagged as M4A whatever its name; a file named `.m4a` whose
+  content is FLAC is tagged as FLAC.
+- **Already-mirrored M4A files are tagged once.** On the first sync
+  after the upgrade, a `fill_tags` collection's shows that hold M4A
+  files are revisited once, as when a collection first opts in; files
+  already carrying every tag are only read.
+- **Uploader tags stay.** The three Dead & Company shows already carry
+  the uploader's iTunes tags (artist, album, date, title, track, disc);
+  filling adds only album artist and venue.
+
+**Decision and constraint.** M4A joins the tagged formats through the
+same maintained tagging library, with venue in a freeform field of the
+same name as in the other formats. The constraints: Navidrome groups
+by album artist, album, and date, so untagged `.m4a` shows browse badly
+(§req:user-stories); §req:constraints bounds tagging to filling absent
+basic tags; and one venue field name across formats keeps the tag a
+library tool reads predictable.
+
+**Alternatives rejected.** *Tag only mislabelled M4A files* — leaves
+every honest `.m4a` upload untagged, the wider form of the same gap; the
+operator chose both. *Leave M4A untagged and only rename* — the three
+shows would lack album artist and venue. *Put venue in the comment
+atom* — that field belongs to the uploader and would be overwritten
+or skipped.
+
+**Tradeoffs.** The first sync after the upgrade reads every M4A file of
+each `fill_tags` collection once and rewrites those with gaps. Writing
+tags may reorder an M4A file's boxes; the bytes then differ from the
+source's, as for any tagged file, and reconform restores them.
+
+**User-level test path.** On a `fill_tags` collection, sync a fixture
+show of genuine `.m4a` files without tags and one whose `.m4a` files
+carry an artist: the first gets artist, album artist, album, date,
+venue, title, and track number; the second keeps its artist and gains
+the rest. `verify --deep` reports no drift. Sync the M4A-named-`.flac`
+fixture: its `.m4a` library files carry the filled tags.
+
+## Stored shows checked once §spec:real-format-catch-up
+
+*Status: not started*
+
+Shows already in the archive get their audio checked once, without any
+download, so mislabelled files already stored are renamed in the
+library, tagged, and ranked by their real format
+(§req:success-criteria #34; §req:user-stories: the shows already stored
+fixed without downloading them again; §req:quality-attributes: restage
+speed).
+
+Observable behavior:
+
+- **Automatic, on the first locked run.** The first sync after the
+  upgrade checks every audio file in the checked set
+  (§spec:real-format) that has no recorded check, reading only the
+  identifying parts of each file. It checks a show as the sync
+  discovers it, before the show's copy is chosen, so the run shows the
+  work in the Discovering phase. The
+  operator runs nothing. The same catch-up checks a database rebuilt by
+  `reconcile`, which starts with no checks: unlike tag records, a check
+  is recoverable from the files themselves (§spec:state).
+- **Then the show is acted on as if just fetched.** A show whose check
+  finds a file whose format differs from its name gets its library link
+  renamed at the end of that sync's staging, has its tag pass run again
+  on a `fill_tags` collection, and is re-ranked
+  (§spec:real-format-ranking). No audio is downloaded for a show whose
+  ranking stays the same.
+- **Interruptible.** Each show's checks are recorded as they finish, so a
+  stopped or killed run resumes with the shows not yet checked. A file
+  that cannot be read (I/O error, missing) is left unchecked and tried
+  again on the next locked run; the show is not failed for it.
+- **Bounded cost.** About 14k shows of about 15 audio files each is
+  about 200k files, each opened once and read for a few kilobytes: on
+  the operator's NAS roughly 15–40 minutes, once. Later syncs and every
+  restage read no file to know its format.
+- **The three Dead & Company shows.** After the first sync, their 59
+  library files are `.m4a`, album artist and venue are filled (their
+  collection fills tags), the AAC set stays their copy, and nothing was
+  downloaded. A later sync and `verify --deep` report no download and no
+  drift; `verify --deep --reconform` restores the source bytes, leaves
+  the library names `.m4a`, and fills the tags again.
+
+**Decision and constraint.** One automatic catch-up over every stored
+file in the checked set, rather than a command or a narrower guess. The
+constraints: the operator must not have to notice the uploader's mistake
+(§req:user-stories); a mislabel is decidable only by reading the file,
+and no recorded state narrows the search (untaggable results were never
+recorded, and collections without `fill_tags` never tried); restage
+must stay under five minutes, so the reading happens once; and the same
+mechanism must restore checks after a `reconcile`. Precedents: the
+one-time library adoption walk (§spec:library-cleanup), the v11 tag
+catch-up, and the v12 figure backfill (§spec:state).
+
+**Alternatives rejected.** *An operator-run command* — the operator must
+know to run it, and must run it again after every `reconcile`. *Check
+only `fill_tags` collections, or only `.flac` files* — misses mislabels
+the check exists to find. *Check inside `verify --deep`*, which reads
+every byte anyway — `verify` is never scheduled and holds no writer
+lock, so the fix would wait on the operator and could not record its
+result. *Check on every restage* — breaks the restage bar.
+
+**Tradeoffs.** The first sync after the upgrade runs longer, once.
+Shows whose re-ranking finds a better copy download it in that sync —
+expected to be a small share, and the point of criterion 26.
+
+**User-level test path.** Build an archive and database at the previous
+schema holding the M4A-named-`.flac` fixture show, tagged-collection
+config, and an honest FLAC show. Upgrade and sync with the network
+blocked for audio: the fixture's library files become `.m4a` with album
+artist and venue filled, the FLAC show is untouched, and no audio
+request is made. Kill the sync midway on a larger fixture and sync
+again: it resumes. Run `reconcile`, then sync: the names stay `.m4a`.
+
+## Unidentified audio in status and the dashboard §spec:unidentified-audio
+
+*Status: not started*
+
+A file whose content matches none of the recognised formats
+(§spec:real-format) is listed in `status` and on the dashboard's Needs
+attention list, never only in a log (§req:success-criteria #31, #34;
+§req:user-stories: tell me what you cannot identify).
+
+Observable behavior:
+
+- **`status`.** Per collection, `status --json` carries
+  `unidentified_files`: the complete list of `{identifier, file}` for
+  every unidentified file of the collection's mirrored shows, `file`
+  being the source's name. `status` text prints a count per collection
+  and the first 10, as it does for other lists.
+- **`GET /api/attention`.** A new entry kind, `unidentified_files`, one
+  per collection with any: `identifiers` holds the affected shows,
+  `count` the number of files, `detail.unidentified_files` the first 10
+  `{identifier, file}` pairs, and `since` is null (no time recorded),
+  following `unplaced_files` (§spec:needs-attention).
+- **The page words the kind.** The Needs attention row reuses the
+  existing entry row, with a title and next step from the kind's word
+  entry, written to the Terms glossary; it shows the affected files the
+  way it shows unplaced files. The next step says the files are kept as
+  they are; there is nothing shakedown will do about them.
+- **When it clears.** The entry for a file goes when the file is no
+  longer unidentified: the source changes it and the new download is
+  recognised, or the show is pruned. Like `separations`, it can stay
+  until the source changes.
+
+**UI readiness.** The kit covers this: a new kind is one more row of an
+existing list, using the existing row component and kit tokens; no new
+screen and no Design task. No glossary term is added — the row speaks
+of shows and files. The implementing batch adds the kind to the
+`long-content` scenario (which holds every kind), renders the Needs
+attention card before and after for the operator's approval (a state
+nobody drew), and adds the state to `docs/ui/handoff/overview.md`. If
+its wording needs a term the glossary lacks, the batch asks.
+
+**Decision and constraint.** An attention entry per collection, shaped
+like `unplaced_files`. The constraints: the operator chose "needing
+attention, never only a log" (§req:success-criteria #34); the attention
+list groups by collection and kind (§spec:needs-attention); and the
+closest existing kind — files shakedown keeps but cannot act on — is
+`unplaced_files`, whose shape the page already renders.
+
+**Alternatives rejected.** *A library health fact* — health holds facts
+that need no look from the operator; an unidentified file may be a
+corrupt upload worth a look, and the operator chose attention. *One
+entry per file* — buries other entries (§spec:needs-attention: one entry
+per collection per kind). *Leave it to the log* — the observed failure.
+
+**Tradeoffs.** An exotic but playable file (an Ogg Opus named `.ogg`)
+keeps an entry until its source changes, as a clash keeps `separations`;
+the read-only dashboard cannot dismiss it.
+
+**User-level test path.** Sync a fixture show holding a WAV file named
+`.flac`: the show is mirrored, the file is staged under its name and not
+tagged, `status` lists it under the collection, and the dashboard's
+Needs attention shows one entry naming the show and file. Replace the
+file upstream with a real FLAC and sync: the entry is gone.
+
 ## Verification and drift §spec:verify-drift
 
 *Status: implemented, including reconform as single-show runs
 (§spec:single-show-runs), comparison against post-tag checksums, and
-refilling tags after a reconform (§spec:tag-filling).*
+refilling tags after a reconform (§spec:tag-filling); keeping a
+reconformed file's real-extension library name (§spec:real-format) not
+started.*
 
 `shakedown verify` is the explicit, operator-invoked integrity tool.
 It is never scheduled by default (§req:constraints).
@@ -1290,7 +1696,9 @@ It is never scheduled by default (§req:constraints).
   upstream — re-seeding, public mirrors, preservation
   (§req:success-criteria #5). Each reconformed show is fetched as a
   single-show run (§spec:single-show-runs) and, on a `fill_tags`
-  collection, has its missing tags filled again afterwards. Only the
+  collection, has its missing tags filled again afterwards with the
+  writer for the file's recorded real format; its library link keeps
+  the real extension (§spec:real-format). Only the
   drifted files are downloaded: any the source still serves, a picked
   copy or an archive-only one alike. A drifted file the source no
   longer serves (dropped or refused) is reported in the run as not
@@ -1536,6 +1944,16 @@ Sync state lives in a single-file embedded SQLite database at
   volume without that much free space fails the run, the migration
   rolls back whole, and the next run tries again. Additive: nothing
   else changes, and nothing is re-downloaded.
+- Schema v13 (not started) records, per checked audio file, the real
+  format and class found by its content (§spec:real-format), beside the
+  recorded manifest and outside its change-detection identity. It is
+  additive: it adds no check itself — the first sync after the upgrade
+  checks stored files (§spec:real-format-catch-up) — and it clears the
+  tag-filling fingerprint of every show holding a file named `.m4a`, so
+  a `fill_tags` collection's M4A files are filled once
+  (§spec:m4a-tags). A database rebuilt by `reconcile` starts with no
+  checks, and the next sync makes them again from the files. Nothing is
+  re-downloaded.
 - Only a command that holds the writer lock migrates the database.
   Commands that take no lock — `status`, `item show`, `sync --dry-run`,
   `verify` without `--reconform`, `validate`, and `serve`'s
@@ -2552,7 +2970,8 @@ shows, and they lead the recently-mirrored list.
 
 ## Needs attention §spec:needs-attention
 
-*Status: complete*
+*Status: complete; the `unidentified_files` kind
+(§spec:unidentified-audio) not started*
 
 The dashboard has one list of what needs the operator, naming the
 collection or show affected and the next available action, and a
@@ -2576,6 +2995,7 @@ Observable behavior:
   | `failure_notice_undelivered` | latest run's `failure_notice_error` | the error |
   | `separations` | `status`'s `separations` | identifiers and folders |
   | `unplaced_files` | `status`'s `unplaced_files` | paths |
+  | `unidentified_files` | `status`'s `unidentified_files` (§spec:unidentified-audio) | identifiers, `{identifier, file}` pairs |
 
   A good run is one whose result is `completed` or
   `completed_with_item_issues`, the same as a good sync in
@@ -2627,8 +3047,9 @@ removed_on}], removed_upstream_count, drift_files, not_playable:
 extra facts under `status`'s own field names; `identifiers` is empty
 for collection-wide kinds. Counts are complete; every list carries its
 first 10 shows or files, in order: `identifiers`, `detail.separations`,
-`detail.unplaced_files`, and the health lists. An entry's `count` is
-how many shows it affects (files, for `unplaced_files`); each health
+`detail.unplaced_files`, `detail.unidentified_files`, and the health lists. An entry's `count` is
+how many shows it affects (files, for `unplaced_files` and
+`unidentified_files`); each health
 list's `*_count` is how many shows it has. The page shows the first
 few and how many more. `status --json` keeps its lists complete.
 
