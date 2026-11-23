@@ -57,7 +57,8 @@ one per kind; collection right-aligned, xs muted, wrapping. Then, when
 present: "Next step: " + `recovery.safe_next_action` (server text, from
 `detail.recovery` or a `recovery` entry's detail); the reason text
 (`detail.last_reason` or `detail.failure_notice_error`, mono xs);
-show IDs (`identifiers`, or `detail.unplaced_files` paths) via
+show IDs (`identifiers`, `detail.unplaced_files` paths, or each of
+`detail.unidentified_files` as `<show ID>/<file>`) via
 `ShowIds` (first 3, "and N more"); "Since <clock>" when `since` is set
 (omitted for rescheduled, whose title carries it, and for
 ended_unexpectedly). The header carries a `secondary` Badge with the
@@ -79,7 +80,7 @@ cards `min-w-0`; gaps `gap-3` (stats) and `gap-4`.
 | default | `default` | 2 running (one with No progress), 4 entries, 4 recent runs |
 | quiet | `quiet` | Running now and Needs attention empty states |
 | first install | `first_install` | zero stats, empty states, "Never validated" |
-| long content | `long_content` | 8 entries of every kind, 300 failed show IDs, long names and server errors wrap |
+| long content | `long_content` | 9 entries of every kind, 300 failed show IDs, long names and server errors wrap |
 | waiting | `waiting` | a catch-up round: 2 running catch-ups, then 3 waiting rows in the order they start |
 | loading / can't reach / config broken | see `shell.md` | |
 
