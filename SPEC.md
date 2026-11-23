@@ -1381,9 +1381,13 @@ and fingerprint files in the library (`.md5`, `.ffp`) still name the
 source's file names: they describe the archive copy, not the library
 link. An Ogg Opus file named `.ogg` is listed as unidentified even
 though players may read it — accepted as rare and harmless, since it is
-still staged. Whether Navidrome mislabels an AAC file named `.flac` is
-unverified; the operator confirms playback on the three shows after the
-change (§req:success-criteria #34).
+still staged. Navidrome already reads these files by their content: on
+the operator's install (scan of 2026-11-21, read 2026-11-23) it lists
+all 59 tracks of the three shows with the uploader's tags and the right
+bitrates, but records their suffix as `flac`, so clients may be served
+the FLAC media type. The visible gains are the right suffix and media
+type, and the filled album artist and venue. The operator confirms
+playback after the change (§req:success-criteria #34).
 
 **User-level test path.** Sync a fixture show whose three tracks are
 small M4A (AAC) files named `.flac`: the archive holds the three `.flac`
@@ -1436,10 +1440,12 @@ Observable behavior:
   archive.org; best lossy copy mirrored instead" still means the source
   refused every lossless file. A served copy listed as lossless that
   proves lossy does not produce that reason.
-- **The three Dead & Company shows keep their copy.** Their AAC set,
-  re-ranked as lossy and with no listed bitrate, still beats archive.org's
-  VBR MP3 derivative by size per track (archive.org's sizes put it at
-  about 2.3 times the MP3's), so nothing is downloaded.
+- **The three Dead & Company shows keep their copy.** Their originals
+  — AAC in M4A for `deadco2022-06-13` and `deadco2022-06-14`, 320 kbps
+  MP3 for `deadco2022-06-18.deadco2022-06-18`, all named `.flac` — are
+  re-ranked as lossy. archive.org lists no bitrate for them, so they rank
+  by size per track and still beat archive.org's VBR MP3 derivatives
+  (about 1.6 to 2.3 times their size per track). Nothing is downloaded.
 
 **Decision and constraint.** Recorded checks override the listing, and a
 changed ranking re-selects inside the same fetch. The constraints: the
@@ -1497,9 +1503,14 @@ Observable behavior:
   after the upgrade, a `fill_tags` collection's shows that hold M4A
   files are revisited once, as when a collection first opts in; files
   already carrying every tag are only read.
-- **Uploader tags stay.** The three Dead & Company shows already carry
-  the uploader's iTunes tags (artist, album, date, title, track, disc);
-  filling adds only album artist and venue.
+- **Uploader tags stay.** The two Shoreline Amphitheatre shows
+  (`deadco2022-06-13`, `deadco2022-06-14`) already carry the uploader's
+  iTunes tags (artist "Dead and Company", album, date, title, track,
+  disc); filling adds only album artist and venue. Their artist keeps
+  the uploader's spelling, so a tag-driven player lists their tracks
+  under "Dead and Company" while the filled album artist, the show's
+  creator "Dead & Company", groups the albums with the collection's
+  other shows.
 
 **Decision and constraint.** M4A joins the tagged formats through the
 same maintained tagging library, with venue in a freeform field of the
@@ -1564,12 +1575,14 @@ Observable behavior:
   about 200k files, each opened once and read for a few kilobytes: on
   the operator's NAS roughly 15–40 minutes, once. Later syncs and every
   restage read no file to know its format.
-- **The three Dead & Company shows.** After the first sync, their 59
-  library files are `.m4a`, album artist and venue are filled (their
-  collection fills tags), the AAC set stays their copy, and nothing was
-  downloaded. A later sync and `verify --deep` report no download and no
-  drift; `verify --deep --reconform` restores the source bytes, leaves
-  the library names `.m4a`, and fills the tags again.
+- **The three Dead & Company shows.** After the first sync, the 38
+  library files of `deadco2022-06-13` and `deadco2022-06-14` are `.m4a`
+  and the 21 of `deadco2022-06-18.deadco2022-06-18` are `.mp3`; album
+  artist and venue are filled where absent (their collection fills
+  tags); each keeps its copy; and nothing was downloaded. A later sync
+  and `verify --deep` report no download and no drift;
+  `verify --deep --reconform` restores the source bytes, leaves the
+  library names `.m4a` and `.mp3`, and fills the tags again.
 
 **Decision and constraint.** One automatic catch-up over every stored
 file in the checked set, rather than a command or a narrower guess. The
