@@ -557,7 +557,7 @@ def test_a_value_shakedown_wrote_in_an_m4a_is_rewritten_when_it_changes(
 
 
 @pytest.mark.parametrize(
-    ("track", "written"), [("3/12", "3/12"), (" 07 ", "7"), ("A1", None), ("", None)]
+    ("track", "written"), [("3/12", "3/12"), (" 07 ", "7"), ("1/0", "1"), ("A1", None), ("", None)]
 )
 def test_an_m4a_track_number_is_written_as_a_number(
     tmp_path: Path, track: str, written: str | None

@@ -258,10 +258,6 @@ def _repair_link_frames(id3: ID3) -> None:
             id3.add(WOAS(url=url))
 
 
-# An M4A track number as its integer atom (trkn) can hold it: `n` or `n/total`.
-_TRACK_NUMBER = re.compile(r"^\s*(\d+)\s*(?:/\s*(\d+))?\s*$")
-
-
 class _Tags:
     """One file's tags behind format-neutral names, through mutagen, opened with the
     writer for the file's real format (never its name's). MP3 uses
@@ -303,14 +299,16 @@ class _Tags:
         """The value as this file would hold it once written, so it compares with what
         the file holds; None when the format cannot hold it. Only an M4A track number
         differs: trkn holds integers ("01" is held as "1"), and a value with no number
-        stays absent."""
+        stays absent. mutagen's own trkn setter decides the held form, through a
+        scratch tag, so the recorded value is exactly what the file will hold."""
         if self._mp4 is None or key != "tracknumber":
             return value
-        match = _TRACK_NUMBER.match(value)
-        if match is None:
+        scratch = EasyMP4Tags()
+        try:
+            scratch[key] = value
+        except ValueError:
             return None
-        number, total = match.groups()
-        return f"{int(number)}/{int(total)}" if total else str(int(number))
+        return scratch[key][0]
 
     def get(self, key: str) -> list[str] | None:
         if self._mp4 is not None:
