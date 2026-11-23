@@ -307,3 +307,146 @@ def test_each_checked_show_counts_as_progress(
     assert run_sync(config) == 0
 
     assert progress_at[2] > progress_at[0]
+
+
+# --- interruptible, and a file that cannot be read --------------------------------------
+
+SHOWS = tuple(f"show{n}" for n in range(5))
+
+
+def _five_mislabelled_shows(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    for identifier in SHOWS:
+        _show(identifier, {"t1.flac": "m4a", "t2.flac": "m4a"})
+    _mirror_before_the_check(config, monkeypatch)
+
+
+def _checked_shows(config: Config) -> list[str]:
+    return [identifier for identifier in SHOWS if _formats(config, identifier)]
+
+
+def _opened(monkeypatch: pytest.MonkeyPatch, *, on=None) -> list[str]:
+    """Every file the check opens, as `<show>/<file>`; `on(path)` runs first."""
+    real = realformat.check_file
+    opened: list[str] = []
+
+    def check(path: Path) -> FormatCheck:
+        opened.append(f"{path.parent.name}/{path.name}")
+        if on is not None:
+            on(path)
+        return real(path)
+
+    monkeypatch.setattr(realformat, "check_file", check)
+    return opened
+
+
+def test_a_stopped_check_resumes_with_the_shows_not_yet_checked(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+
+    from shakedown import stopping
+
+    config = make_config(*tmp_roots)
+    _five_mislabelled_shows(config, monkeypatch)
+    stopping.reset()
+
+    def stop_in_show2(path: Path) -> None:
+        if path.parent.name == "show2":
+            stopping.request(signal.SIGTERM)
+
+    try:
+        with monkeypatch.context() as m:
+            _opened(m, on=stop_in_show2)
+            assert run_sync(config) == 143
+        # The show in hand finished; the rest wait.
+        assert _checked_shows(config) == ["show0", "show1", "show2"]
+    finally:
+        stopping.reset()
+
+    opened = _opened(monkeypatch)
+    assert run_sync(config) == 0
+    assert opened == ["show3/t1.flac", "show3/t2.flac", "show4/t1.flac", "show4/t2.flac"]
+    for identifier in SHOWS:
+        assert _names(_library(config, identifier)) == {"t1.m4a", "t2.m4a"}
+
+
+def test_a_killed_check_keeps_the_shows_it_finished(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config(*tmp_roots)
+    _five_mislabelled_shows(config, monkeypatch)
+
+    def die_in_show2(path: Path) -> None:
+        if path.parent.name == "show2" and path.name == "t2.flac":
+            raise KeyboardInterrupt  # the process dies here
+
+    with monkeypatch.context() as m:
+        _opened(m, on=die_in_show2)
+        with pytest.raises(KeyboardInterrupt):
+            run_sync(config)
+    assert _checked_shows(config) == ["show0", "show1"]
+
+    opened = _opened(monkeypatch)
+    assert run_sync(config) == 0
+    assert [name for name in opened if name.startswith(("show0", "show1"))] == []
+    assert _checked_shows(config) == list(SHOWS)
+
+
+@pytest.mark.parametrize("fault", ["io-error", "reader-bug"])
+def test_a_file_that_cannot_be_checked_stays_unchecked_and_fails_nothing(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fault: str
+) -> None:
+    """An I/O error leaves that file unchecked until the next run; so does a reader
+    failing on odd content, which must not stop discovery of the whole collection. The
+    show is not failed, and its other files are checked."""
+    config = make_config(*tmp_roots)
+    _show("deadco2022-06-13", {"t1.flac": "m4a", "t2.flac": "m4a"})
+    _mirror_before_the_check(config, monkeypatch)
+    broken = _archive(config, "deadco2022-06-13") / "t2.flac"
+    real = realformat.check_file
+
+    def check(path: Path) -> FormatCheck:
+        if path == broken and fault == "io-error":
+            raise OSError(5, "Input/output error")
+        if path == broken and fault == "reader-bug":
+            raise ValueError("unexpected box")
+        return real(path)
+
+    caplog.clear()
+    with monkeypatch.context() as m:
+        m.setattr(realformat, "check_file", check)
+        with caplog.at_level(logging.WARNING):
+            assert run_sync(config) == 0
+
+    assert _formats(config, "deadco2022-06-13") == {"t1.flac": AAC}
+    assert "t2.flac" in caplog.text and "next run" in caplog.text
+    from shakedown.state import RunRepo
+
+    run = RunRepo(_db(config)).latest("fake-src", "coll1")
+    assert run is not None and run.items_failed == 0
+
+    opened = _opened(monkeypatch)
+    assert run_sync(config) == 0
+    assert opened == ["deadco2022-06-13/t2.flac"]
+    assert _formats(config, "deadco2022-06-13") == {"t1.flac": AAC, "t2.flac": AAC}
+
+
+def test_a_missing_file_is_left_to_the_syncs_own_repair(
+    tmp_roots, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The check skips a stored file that is gone, and fails nothing. The sync already
+    fetches a show's missing files again (§spec:sync-workflow), and that download is
+    checked when it arrives (§spec:real-format)."""
+    config = make_config(*tmp_roots)
+    _show("deadco2022-06-13", {"t1.flac": "m4a", "t2.flac": "m4a"})
+    _mirror_before_the_check(config, monkeypatch)
+    (_archive(config, "deadco2022-06-13") / "t2.flac").unlink()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING):
+        assert run_sync(config) == 0
+
+    assert "could not check the format of t2.flac" in caplog.text
+    assert FakePlugin.fetched_files["deadco2022-06-13"][-1:] == ["t2.flac"]
+    assert _formats(config, "deadco2022-06-13") == {"t1.flac": AAC, "t2.flac": AAC}
+    assert _names(_library(config, "deadco2022-06-13")) == {"t1.m4a", "t2.m4a"}

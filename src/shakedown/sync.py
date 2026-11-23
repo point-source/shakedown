@@ -1326,10 +1326,13 @@ def _check_stored_shows(
         stopping.check()  # the show in hand finishes; the rest wait for the next run
         progress.working(identifier)
         try:
-            checks = {mf.name: realformat.check_file(item.archive_path / mf.name)
-                      for mf in pending}
+            checks = _check_stored_files(
+                source_name, collection_name, identifier, item.archive_path, pending
+            )
         finally:
             progress.idle(identifier)
+        if not checks:
+            continue
         by_name = {mf.name: mf for mf in pending}
         with transaction(items.conn):
             for name, check in checks.items():
@@ -1345,6 +1348,28 @@ def _check_stored_shows(
         log.info("[%s/%s] checked the audio of %d stored show(s)",
                  source_name, collection_name, len(found))
     return found
+
+
+def _check_stored_files(
+    source_name: str,
+    collection_name: str,
+    identifier: str,
+    archive_path: Path,
+    files: Sequence[ManifestFile],
+) -> dict[str, FormatCheck]:
+    """Check one stored show's files. A file that cannot be checked (missing, an I/O
+    error, or a reader failing on odd content) is left unchecked and tried again on the
+    next run: neither the show nor the collection's discovery fails for it
+    (§spec:real-format-catch-up, §spec:per-item-isolation)."""
+    checks: dict[str, FormatCheck] = {}
+    for mf in files:
+        try:
+            checks[mf.name] = realformat.check_file(archive_path / mf.name)
+        except Exception as e:  # one file's fault stays with that file
+            log.warning("[%s/%s] %s: could not check the format of %s (%s); "
+                        "will retry on the next run",
+                        source_name, collection_name, identifier, mf.name, e)
+    return checks
 
 
 def _fire_notifications(
