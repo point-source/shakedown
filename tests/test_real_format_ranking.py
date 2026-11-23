@@ -234,6 +234,41 @@ def test_a_refetch_chooses_by_the_recorded_real_format(tmp_roots) -> None:
     assert _names(_archive(config)) == AAC_NAMES | FLAC_NAMES
 
 
+def test_a_replaced_aac_set_leaves_the_library_on_the_archived_flac_set(tmp_roots) -> None:
+    """The uploader replaces the AAC files: the listing ranks them first again, the
+    fetch downloads and checks them, and the choice returns to the FLAC set the
+    archive already holds, with nothing more downloaded."""
+    config = _config(tmp_roots)
+    item = _show(_aac_set(), _flac_set())
+    assert _sync(config) == 0
+    item.files[:] = [*_aac_set(filler=7000), *_flac_set()]
+    FakePlugin.fetched_files.clear()
+    assert _sync(config) == 0
+    assert FakePlugin.fetched_files[SHOW] == sorted(AAC_NAMES)
+    assert _names(_library(config)) == FLAC_NAMES
+    stored = ItemRepo(_db(config)).get("fake-src", "coll1", SHOW)
+    assert stored is not None and stored.recorded_manifest is not None
+    assert {f.name for f in stored.recorded_manifest.files if f.library} == FLAC_NAMES
+
+
+def test_a_refetch_downloads_the_copy_a_check_re_chooses_again(tmp_roots) -> None:
+    """A refetch downloads every selected file again (§spec:quality-selection), also
+    the archive-held copy its check re-chooses after the listing's choice proves
+    lossy."""
+    config = _config(tmp_roots)
+    item = _show(_aac_set(), _flac_set())
+    assert _sync(config) == 0
+    assert _names(_library(config)) == FLAC_NAMES
+    # The uploader replaces the AAC files: their old checks no longer apply, so the
+    # listing ranks them first again.
+    item.files[:] = [*_aac_set(filler=7000), *_flac_set()]
+    FakePlugin.fetched_files.clear()
+    with patch("shakedown.notify.httpx.post", side_effect=_Webhooks()):
+        assert refetch_item(config, SHOW) == 0
+    assert set(FakePlugin.fetched_files[SHOW]) == AAC_NAMES | FLAC_NAMES
+    assert _names(_library(config)) == FLAC_NAMES
+
+
 # --- refused lossless keeps its meaning --------------------------------------------------
 
 
@@ -419,3 +454,20 @@ def test_a_reconform_restores_only_the_drifted_file(tmp_roots) -> None:
                           reconform=True, list_drift=True, assume_yes=True) == 0
     assert FakePlugin.fetched_files[SHOW] == [drifted.name]
     assert _names(_archive(config)) == AAC_NAMES
+
+
+def test_a_flac_listed_aac_copy_kept_beside_refused_lossless_reports_the_refusal(
+    tmp_roots,
+) -> None:
+    """The check keeps the AAC copy chosen but makes it lossy: the source refused the
+    only lossless copy, and the show says so (§spec:real-format-ranking)."""
+    from shakedown.selection import LOSSLESS_REFUSED_REASON
+
+    config = _config(tmp_roots)
+    refused = [FakeFile(f"{t}_24.flac", flac_bytes(), format="24bit Flac", refused=True)
+               for t in TRACKS]
+    _show(_aac_set(filler=16000), refused, _mp3_set())
+    assert _sync(config) == 0
+    assert FakePlugin.fetched_files[SHOW] == sorted(AAC_NAMES)
+    item = ItemRepo(_db(config)).get("fake-src", "coll1", SHOW)
+    assert item is not None and item.restriction_reason == LOSSLESS_REFUSED_REASON

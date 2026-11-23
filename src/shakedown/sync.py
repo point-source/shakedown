@@ -143,6 +143,8 @@ class PlannedItem:
     # Whether those tags label the album with the identifier (a clash, TagIndex): the
     # fetch computes the tags again when a check changes its choice of files.
     labelled: bool = False
+    # A refetch: a choice the fetch makes again downloads every selected file too.
+    refetch: bool = False
 
 
 def plan_files(
@@ -2204,7 +2206,7 @@ def _reselect(
         mf = downloaded[name]
         records[name] = (mf.size, mf.md5, check)
     chosen = select(desc.listing, None, records)
-    manifest, fetch = plan_files(chosen.manifest, target.existing)
+    manifest, fetch = plan_files(chosen.manifest, target.existing, refetch=target.refetch)
     # A downloaded file the new choice drops is recorded as downloaded, replacing the
     # archive copy's old entry of the same name: the temp folder holds the new bytes.
     picked = {mf.name for mf in chosen.manifest.files}
@@ -2213,7 +2215,15 @@ def _reselect(
     if demoted:
         files = (*(mf for mf in manifest.files if mf.name not in demoted), *demoted.values())
         manifest = Manifest(files=tuple(sorted(files, key=lambda f: f.name)))
-    if manifest == desc.manifest:
+    # Compared with what staging reads, not by file identity alone: a choice that
+    # moves the library to a copy the archive already holds changes no file's bytes.
+    # The same files may also come with new reasons (a copy proved lossy beside a
+    # refused lossless one): the show is recorded with them, downloading nothing more.
+    if (
+        _entries(manifest) == _entries(desc.manifest)
+        and chosen.restriction_reason == desc.restriction_reason
+        and chosen.not_playable_reason == desc.not_playable_reason
+    ):
         return None
     reselected = replace(
         desc, manifest=manifest, formats=records,
@@ -2822,7 +2832,8 @@ def _single_show_phases(
                 # (§spec:verify-drift): without the listing, its fetch never chooses again.
                 listing = found.listing if drifted is None else ()
                 planned = PlannedItem(
-                    replace(found, manifest=manifest, listing=listing), existing, action, fetch
+                    replace(found, manifest=manifest, listing=listing), existing, action, fetch,
+                    refetch=drifted is None,
                 )
                 if planner is not None:
                     # A reconform restores the drifted files' source bytes, then fills their
