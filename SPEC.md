@@ -1291,7 +1291,7 @@ another tool; `verify --deep` reports exactly that file.
 The check at fetch, its record, the real-extension library name, the
 tag writer by real format, tagging M4A files (§spec:m4a-tags), and
 listing unidentified files (§spec:unidentified-audio) are done; checking
-stored shows (§spec:real-format-catch-up) is not started.
+stored shows (§spec:real-format-catch-up) is in progress.
 
 Compatibility: from "deployed — single operator install, no external
 consumers" (§req:constraints): every surface this feature touches is
@@ -1562,7 +1562,10 @@ fixture: its `.m4a` library files carry the filled tags.
 
 ## Stored shows checked once §spec:real-format-catch-up
 
-*Status: not started*
+*Status: in progress*
+
+The check of stored shows, the library rename, and the tag re-run are
+done; re-ranking a stored show (§spec:real-format-ranking) is not started.
 
 Shows already in the archive get their audio checked once, without any
 download, so mislabelled files already stored are renamed in the
