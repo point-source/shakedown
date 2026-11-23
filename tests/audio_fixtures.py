@@ -57,11 +57,12 @@ def _descriptor(tag: int, body: bytes) -> bytes:
     return bytes([tag, len(body)]) + body
 
 
-def m4a_bytes(codec: str = "aac", *, moov_last: bool = True) -> bytes:
+def m4a_bytes(codec: str = "aac", *, moov_last: bool = True, filler: int = 2000) -> bytes:
     """An MP4 audio file, as iTunes writes one: `ftyp`, `mdat` (filler), and a `moov`
     whose one sound track's `stsd` describes AAC-LC (`mp4a` + `esds`, 44.1 kHz stereo)
     or Apple Lossless (`alac`). `moov_last` puts the track description after the
-    audio, as in the observed uploads."""
+    audio, as in the observed uploads. `filler` sets the size of the audio data, so a
+    test can list an M4A set larger per track than another copy."""
     entry_head = bytes(6) + (1).to_bytes(2, "big") + bytes(8)
     entry_head += (2).to_bytes(2, "big") + (16).to_bytes(2, "big") + bytes(4)
     entry_head += (44100 << 16).to_bytes(4, "big")
@@ -97,7 +98,7 @@ def m4a_bytes(codec: str = "aac", *, moov_last: bool = True) -> bytes:
                      + (44100).to_bytes(4, "big") + bytes(80))
     moov = _box(b"moov", mvhd, _box(b"trak", tkhd, _box(b"mdia", mdhd, hdlr, minf)))
     ftyp = _box(b"ftyp", b"M4A " + bytes(4) + b"M4A mp42isom")
-    mdat = _box(b"mdat", bytes(2000))
+    mdat = _box(b"mdat", bytes(filler))
     return ftyp + (mdat + moov if moov_last else moov + mdat)
 
 

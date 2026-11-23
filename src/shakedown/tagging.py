@@ -201,6 +201,10 @@ class TagPlanner:
             identifier, metadata, manifest, labelled=self.index.labelled(identifier)
         )
 
+    def labelled(self, identifier: str) -> bool:
+        """Whether the show's planned album carries its identifier (a clash)."""
+        return self.index.labelled(identifier)
+
 
 def tag_failure(file_name: str, error: object) -> str:
     """Why a show's tags are missing after a tag write failed on the disk; the run

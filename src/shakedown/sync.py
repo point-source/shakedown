@@ -66,12 +66,14 @@ from shakedown.plugins import registry
 from shakedown.plugins.base import FailureCause, FetchResult, ListedItem, SourcePlugin
 from shakedown.realformat import (
     FormatCheck,
+    FormatRecord,
     format_label,
     is_checked,
     named_format,
     unchecked_files,
 )
 from shakedown.reschedule import record_skipped
+from shakedown.selection import may_change_rank, select
 from shakedown.staging import (
     METADATA_SIDECAR,
     manifest_reserves_sidecar_name,
@@ -91,6 +93,7 @@ from shakedown.tagging import (
     Desired,
     TagPlanner,
     TagWriteError,
+    desired_tags,
     effective_format,
     fill_collection_tags,
     fill_file,
@@ -137,6 +140,9 @@ class PlannedItem:
     # Each taggable file's computed tags, on a `fill_tags` collection: the downloaded
     # files are tagged before the show enters the archive (§spec:tag-filling).
     tags: Desired | None = None
+    # Whether those tags label the album with the identifier (a clash, TagIndex): the
+    # fetch computes the tags again when a check changes its choice of files.
+    labelled: bool = False
 
 
 def plan_files(
@@ -931,7 +937,13 @@ def _sync_collection_phases(
         enumerated_identifiers: set[str] = set()
         descriptors: list[ItemDescriptor] = []
         try:
-            for found in stream_items(plugin, collection, budget, enumerated_identifiers):
+            # The plan the real run would make: by the recorded real formats, read
+            # without migrating (§spec:real-format-ranking).
+            rank_records = _rank_records(items, source.name, collection.name)
+            for found in stream_items(
+                plugin, collection, budget, enumerated_identifiers,
+                formats_for=lambda identifier: rank_records.get(identifier, {}),
+            ):
                 if isinstance(found, LookupFailure):
                     _note_lookup_failure(stats, source.name, collection.name, found)
                 else:
@@ -1173,6 +1185,7 @@ def _pipelined_discover_and_fetch(
                     planned.tags = planner.plan(
                         desc.identifier, desc.metadata, planned.descriptor.manifest
                     )
+                    planned.labelled = planner.labelled(desc.identifier)
                 archive_root.mkdir(parents=True, exist_ok=True)
                 progress.to_fetch(_fetch_size(planned))
                 fut = fetch_pool.submit(
@@ -1192,7 +1205,7 @@ def _pipelined_discover_and_fetch(
                     manifest = Manifest(files=())
                 deferred.append(
                     PlannedItem(
-                        replace(planned.descriptor, manifest=manifest, metadata={}),
+                        _settled(planned.descriptor, manifest),
                         planned.existing,
                         PlanAction.UNCHANGED,
                     )
@@ -1204,7 +1217,7 @@ def _pipelined_discover_and_fetch(
                 _record_unavailable(items, source.name, collection.name, planned.descriptor)
                 deferred.append(
                     PlannedItem(
-                        replace(planned.descriptor, manifest=Manifest(files=()), metadata={}),
+                        _settled(planned.descriptor, Manifest(files=())),
                         planned.existing,
                         PlanAction.UNAVAILABLE,
                     )
@@ -1229,14 +1242,21 @@ def _pipelined_discover_and_fetch(
                 return False
             return True
 
+        # Each show's recorded checks that could rank it differently from its listing,
+        # filled once the stored shows are checked; read by the lookup workers.
+        rank_records: dict[str, dict[str, FormatRecord]] = {}
+
         def check_stored_shows() -> None:
             # Before any look-up decision, so the decision can read what the checks
             # found (§spec:real-format-ranking re-ranks a stored show from them).
             _check_stored_shows(items, source.name, collection.name, by_identifier, progress)
+            rank_records.update(_rank_records(items, source.name, collection.name))
 
         descriptor_stream = stream_items(
             plugin, collection, budget, enumerated, look_up=look_up,
-            prepare=check_stored_shows, progress=progress,
+            prepare=check_stored_shows,
+            formats_for=lambda identifier: rank_records.get(identifier, {}),
+            progress=progress,
         )
         def process(fut: Future[_FetchOutcome]) -> None:
             _process_fetch_result(
@@ -1374,6 +1394,37 @@ def _check_stored_files(
                         "will retry on the next run",
                         source_name, collection_name, identifier, mf.name, e)
     return checks
+
+
+def _rank_records(
+    items: ItemRepo, source_name: str, collection_name: str, identifier: str | None = None
+) -> dict[str, dict[str, FormatRecord]]:
+    """Each show's recorded checks that could rank a file differently from its listed
+    name (selection.may_change_rank): what the best-copy choice reads
+    (§spec:real-format-ranking). A check that agrees with its name ranks the file as
+    its listing does, so it is left out and the map stays small. With ``identifier``,
+    just that show's."""
+    formats = FormatRepo(items.conn)
+    if not formats.recorded():
+        return {}
+    every = (
+        formats.for_collection(source_name, collection_name)
+        if identifier is None
+        else {identifier: formats.for_show(source_name, collection_name, identifier)}
+    )
+    shows: dict[str, dict[str, FormatRecord]] = {}
+    for show, records in every.items():
+        relevant = {name: r for name, r in records.items() if may_change_rank(name, r[2])}
+        if relevant:
+            shows[show] = relevant
+    return shows
+
+
+def _settled(desc: ItemDescriptor, manifest: Manifest) -> ItemDescriptor:
+    """A descriptor nothing will fetch: only what re-staging and recording need. The
+    rest of the listed details are dropped now, so listed shows never pile up in
+    memory."""
+    return replace(desc, manifest=manifest, metadata={}, listing=(), formats={})
 
 
 def _fire_notifications(
@@ -1676,7 +1727,7 @@ def _process_fetch_result(
         return
 
     assert target.descriptor is not None  # NEW/CHANGED_UPSTREAM always have a descriptor
-    desc = target.descriptor
+    desc = outcome.descriptor or target.descriptor
 
     if outcome.unavailable:
         stats.unavailable += 1
@@ -1705,7 +1756,7 @@ def _process_fetch_result(
     with transaction(items.conn):
         _record_complete(items, source.name, collection, desc, outcome.archive_path)
         _record_formats(items, source.name, collection.name, desc, outcome.formats)
-        _record_download_tags(items, source.name, collection.name, target, outcome)
+        _record_download_tags(items, source.name, collection.name, desc.identifier, outcome)
     _log_mislabels(source.name, collection.name, desc.identifier, outcome.formats)
     stats.fetched[desc.identifier] = outcome.archive_path
     # Linked now, not at the end of the run, so a run that dies later keeps it staged.
@@ -1723,6 +1774,12 @@ class _FetchOutcome:
     tag_records: dict[str, TagRecord | None] | None = None
     # The real format of each downloaded file in the checked set (§spec:real-format).
     formats: dict[str, FormatCheck] = field(default_factory=dict)
+    # On success: the show as it enters the archive — its choice made again when the
+    # checks changed it (§spec:real-format-ranking) — the files downloaded, and the
+    # computed tags of its taggable files (None when the collection fills no tags).
+    descriptor: ItemDescriptor | None = None
+    downloaded: frozenset[str] = frozenset()
+    tags: Desired | None = None
 
 
 # Bounded core-owned retries for transient fetch faults (checksum mismatch,
@@ -1746,6 +1803,7 @@ def _fetch_with_retries(
     tmp_dir: Path,
     *,
     files: Sequence[ManifestFile] | None = None,
+    keep: Collection[str] = (),
     max_attempts: int = _MAX_FETCH_ATTEMPTS,
     progress: Progress | None = None,
 ) -> FetchResult:
@@ -1761,7 +1819,9 @@ def _fetch_with_retries(
     manifest's size and md5, and fetch the rest. Anything in the temp dir that is not
     a file to fetch is removed before each attempt.
 
-    ``files`` are the files to download (default: the whole manifest).
+    ``files`` are the files to download (default: the whole manifest). ``keep`` names
+    files already in the temp dir that stay: an earlier round of the same fetch
+    downloaded them (§spec:real-format-ranking).
 
     ``progress`` measures each attempt's bytes in the temp dir and records each failed
     attempt's cause, the retry, and the wait (§spec:network-activity).
@@ -1770,7 +1830,7 @@ def _fetch_with_retries(
     wanted = desc.manifest.files if files is None else tuple(files)
     for attempt in range(1, max_attempts + 1):
         stopping.check()
-        _prepare_tmp_dir(wanted, tmp_dir)
+        _prepare_tmp_dir(wanted, tmp_dir, keep)
 
         with progress.fetch_attempt(desc.identifier, tmp_dir):
             result = plugin.fetch(desc.identifier, wanted, tmp_dir)
@@ -1825,11 +1885,14 @@ def _record_failed_attempt(progress: Progress, identifier: str, result: FetchRes
     )
 
 
-def _prepare_tmp_dir(files: Sequence[ManifestFile], tmp_dir: Path) -> None:
+def _prepare_tmp_dir(
+    files: Sequence[ManifestFile], tmp_dir: Path, keep: Collection[str] = ()
+) -> None:
     """Create the temp dir, keeping files a previous attempt left for the names to
-    fetch (the plugin re-checks them before reuse) and removing everything else."""
+    fetch (the plugin re-checks them before reuse) and the ``keep`` names, and removing
+    everything else."""
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    wanted = {os.path.normpath(mf.name) for mf in files}
+    wanted = {os.path.normpath(name) for name in (*(mf.name for mf in files), *keep)}
     wanted_dirs = {os.path.dirname(name) for name in wanted}
     for dirpath, dirnames, filenames in os.walk(tmp_dir, topdown=False):
         rel_dir = os.path.relpath(dirpath, tmp_dir)
@@ -1885,7 +1948,10 @@ def _fetch_size(target: PlannedItem) -> int | None:
     """The bytes a fetch downloads, or None when the source lists a file's size as
     unknown."""
     assert target.descriptor is not None
-    files = target.descriptor.manifest.files if target.fetch is None else target.fetch
+    return _bytes_of(target.descriptor.manifest.files if target.fetch is None else target.fetch)
+
+
+def _bytes_of(files: Sequence[ManifestFile]) -> int | None:
     sizes = [mf.size for mf in files]
     return None if any(size is None for size in sizes) else sum(s for s in sizes if s)
 
@@ -1953,16 +2019,9 @@ def _fetch_one(
     # escape the item directory *before* fetch runs — the write happens during
     # fetch, so the post-fetch verify() can't catch an escape (it resolves to the
     # same out-of-tree path). This guards every plugin, not just well-behaved ones.
-    unsafe_names = [
-        mf.name for mf in desc.manifest.files if not is_within(dest, dest / mf.name)
-    ]
-    if unsafe_names:
-        log.warning("[%s] rejecting unsafe manifest file name(s): %r", desc.identifier, unsafe_names[:5])
-        return _FetchOutcome(
-            success=False,
-            archive_path=dest,
-            error=f"unsafe file name(s) escape item directory: {unsafe_names[:5]}",
-        )
+    unsafe = _unsafe_names(desc, dest)
+    if unsafe is not None:
+        return unsafe
 
     # Callers have already finished any swap a crashed run left half done
     # (`_recover_interrupted_swaps`) and routed shows the source refuses away from
@@ -1980,28 +2039,59 @@ def _fetch_one(
             error=f"{NO_FILES_REASON}; archive copy left untouched",
         )
 
+    # Download, then know each downloaded file by its content, after its checksum has
+    # passed and before tagging, so the show enters the archive with its real formats
+    # known (§spec:real-format). A file that cannot be read is an I/O fault, not a
+    # verdict: the fetch fails and the next run fetches it again. When the checks change
+    # the show's ranking, the choice is made again with the real formats and the newly
+    # chosen files are downloaded in the same fetch; each file at most once, so this
+    # ends within as many rounds as the show has copies (§spec:real-format-ranking).
     fetch = desc.manifest.files if target.fetch is None else target.fetch
-    fetch_result = _fetch_with_retries(plugin, desc, tmp_dir, files=fetch, progress=progress)
-    if fetch_result.unavailable:
-        # Nothing will resume a download the source refuses; the archive copy (if
-        # any) is untouched.
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
-        return _FetchOutcome(
-            success=False, archive_path=dest, error=fetch_result.error, unavailable=True
+    downloaded: dict[str, ManifestFile] = {}
+    formats: dict[str, FormatCheck] = {}
+    while fetch:
+        fetch_result = _fetch_with_retries(
+            plugin, desc, tmp_dir, files=fetch, keep=downloaded.keys(), progress=progress
         )
-    if not fetch_result.success:
-        # Leave tmp_dir for next-run cleanup; the archive copy (if any) is untouched.
-        return _FetchOutcome(
-            success=False,
-            archive_path=dest,
-            error=fetch_result.error,
-        )
+        if fetch_result.unavailable:
+            # Nothing will resume a download the source refuses; the archive copy (if
+            # any) is untouched.
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+            return _FetchOutcome(
+                success=False, archive_path=dest, error=fetch_result.error, unavailable=True
+            )
+        if not fetch_result.success:
+            # Leave tmp_dir for next-run cleanup; the archive copy (if any) is untouched.
+            return _FetchOutcome(
+                success=False,
+                archive_path=dest,
+                error=fetch_result.error,
+            )
+        downloaded.update((mf.name, mf) for mf in fetch)
+        for name in sorted(mf.name for mf in fetch if is_checked(mf.name)):
+            try:
+                formats[name] = realformat.check_file(tmp_dir / name)
+            except OSError as e:
+                return _FetchOutcome(
+                    success=False,
+                    archive_path=dest,
+                    error=f"could not read {name} to check its format ({e}); "
+                          "will retry on the next run",
+                )
+        reselected = _reselect(target, desc, downloaded, formats)
+        if reselected is None:
+            break
+        desc, fetch = reselected
+        unsafe = _unsafe_names(desc, dest)
+        if unsafe is not None:
+            return unsafe
+        if fetch and progress is not None:
+            progress.to_fetch(_bytes_of(fetch))
 
     # The files the archive copy already holds join the download by hardlink: no
     # bytes are read or hashed, and the swap below keeps them (§spec:quality-selection).
-    fetched = {mf.name for mf in fetch}
-    _link_kept(dest, tmp_dir, [mf for mf in desc.manifest.files if mf.name not in fetched])
+    _link_kept(dest, tmp_dir, [mf for mf in desc.manifest.files if mf.name not in downloaded])
 
     # Core-owned completeness guard before promotion: route the existence-only
     # check through the plugin's own verify() contract (no byte hashing —
@@ -2015,37 +2105,25 @@ def _fetch_one(
             error=f"missing after fetch: {verified.missing_files[:5]}",
         )
 
-    # Know each downloaded file by its content, after its checksum has passed and
-    # before tagging, so the show enters the archive with its real formats known
-    # (§spec:real-format). A file that cannot be read is an I/O fault, not a verdict:
-    # the fetch fails and the next run fetches it again.
-    formats: dict[str, FormatCheck] = {}
-    for name in sorted(n for n in fetched if is_checked(n)):
-        try:
-            formats[name] = realformat.check_file(tmp_dir / name)
-        except OSError as e:
-            return _FetchOutcome(
-                success=False,
-                archive_path=dest,
-                error=f"could not read {name} to check its format ({e}); "
-                      "will retry on the next run",
-            )
-
     # Fill the downloads' missing tags while they are still in the temp dir, so the
     # tagged bytes enter the archive atomically with the show (§spec:tag-filling).
     # Kept files are links to the live archive copy and are never touched here. The
-    # planned tags were taken by name; only files whose real format has a writer are
-    # tagged, through that writer.
+    # planned tags were taken by name, and again for the files a re-ranking chose;
+    # only files whose real format has a writer are tagged, through that writer.
+    tags = target.tags
+    if tags is not None and desc is not target.descriptor:
+        tags = desired_tags(desc.identifier, desc.metadata, desc.manifest,
+                            labelled=target.labelled)
     tag_records: dict[str, TagRecord | None] | None = None
-    if target.tags is not None:
+    if tags is not None:
         tag_records = {}
-        for name in sorted(fetched & target.tags.keys()):
+        for name in sorted(downloaded.keys() & tags.keys()):
             if not is_taggable(name, formats):
                 continue
             fmt = effective_format(name, formats)
             try:
                 tag_records[name] = fill_file(
-                    tmp_dir / name, target.tags[name], None, None, fmt
+                    tmp_dir / name, tags[name], None, None, fmt
                 ).record
             except TagWriteError as e:
                 # The download may be torn: drop it, and the next run fetches it again.
@@ -2080,7 +2158,63 @@ def _fetch_one(
         archive_path=dest,
         tag_records=tag_records,
         formats=formats,
+        descriptor=desc,
+        downloaded=frozenset(downloaded),
+        tags=tags,
     )
+
+
+def _unsafe_names(desc: ItemDescriptor, dest: Path) -> _FetchOutcome | None:
+    """A failed outcome when a manifest file name would escape the show's folder."""
+    unsafe_names = [
+        mf.name for mf in desc.manifest.files if not is_within(dest, dest / mf.name)
+    ]
+    if not unsafe_names:
+        return None
+    log.warning("[%s] rejecting unsafe manifest file name(s): %r", desc.identifier, unsafe_names[:5])
+    return _FetchOutcome(
+        success=False,
+        archive_path=dest,
+        error=f"unsafe file name(s) escape item directory: {unsafe_names[:5]}",
+    )
+
+
+def _reselect(
+    target: PlannedItem,
+    desc: ItemDescriptor,
+    downloaded: dict[str, ManifestFile],
+    formats: dict[str, FormatCheck],
+) -> tuple[ItemDescriptor, tuple[ManifestFile, ...]] | None:
+    """The show's choice made again with the real formats this fetch found, and the
+    files it newly needs, or None when the checks leave the choice as it is
+    (§spec:real-format-ranking).
+
+    Files the archive copy holds are kept, as on any selection change (plan_files),
+    and no file this fetch downloaded is downloaded again. A downloaded copy the new
+    choice demotes stays in the show, archive-only: demoted copies stay. A show
+    without its listing (a reconform, which restores only drifted files) is never
+    chosen again."""
+    if not desc.listing or not formats:
+        return None
+    records = dict(desc.formats)
+    for name, check in formats.items():
+        mf = downloaded[name]
+        records[name] = (mf.size, mf.md5, check)
+    chosen = select(desc.listing, None, records)
+    manifest, fetch = plan_files(chosen.manifest, target.existing)
+    kept = {mf.name for mf in manifest.files}
+    demoted = tuple(replace(mf, library=False) for name, mf in downloaded.items()
+                    if name not in kept)
+    if demoted:
+        manifest = Manifest(files=tuple(sorted(manifest.files + demoted, key=lambda f: f.name)))
+    if manifest == desc.manifest:
+        return None
+    reselected = replace(
+        desc, manifest=manifest, formats=records,
+        restriction_reason=chosen.restriction_reason,
+        not_playable_reason=chosen.not_playable_reason,
+    )
+    return reselected, tuple(mf for mf in fetch if mf.name not in downloaded)
 
 
 def _link_kept(dest: Path, tmp_dir: Path, kept: Sequence[ManifestFile]) -> None:
@@ -2240,28 +2374,27 @@ def _record_download_tags(
     items: ItemRepo,
     source_name: str,
     collection_name: str,
-    target: PlannedItem,
+    identifier: str,
     outcome: _FetchOutcome,
 ) -> None:
     """The downloaded files hold new bytes: their old tag records go, replaced by what
     fetch-time tagging wrote. The show's fingerprint is kept only when every taggable
     file was downloaded and tagged now; otherwise the run's pass over mirrored shows
     (or, with `fill_tags` off, a later opt-in) revisits it (§spec:tag-filling)."""
-    assert target.descriptor is not None
-    desc = target.descriptor
     repo = TagRepo(items.conn)
-    downloaded = {mf.name for mf in (target.fetch if target.fetch is not None else desc.manifest.files)}
-    repo.drop_files(source_name, collection_name, desc.identifier, sorted(downloaded))
+    downloaded = outcome.downloaded
+    repo.drop_files(source_name, collection_name, identifier, sorted(downloaded))
     for name, record in (outcome.tag_records or {}).items():
         if record is not None:
-            repo.put_file(source_name, collection_name, desc.identifier, name, record)
+            repo.put_file(source_name, collection_name, identifier, name, record)
     # The plan was taken by name; when a real format changes which files are taggable,
     # this fingerprint no longer matches the one computed from the recorded checks, so
     # the run's pass over mirrored shows revisits the show.
-    if target.tags is not None and outcome.tag_records is not None and target.tags.keys() <= downloaded:
-        repo.set_fingerprint(source_name, collection_name, desc.identifier, fingerprint(target.tags))
+    tags = outcome.tags
+    if tags is not None and outcome.tag_records is not None and tags.keys() <= downloaded:
+        repo.set_fingerprint(source_name, collection_name, identifier, fingerprint(tags))
     else:
-        repo.clear_fingerprint(source_name, collection_name, desc.identifier)
+        repo.clear_fingerprint(source_name, collection_name, identifier)
 
 
 def _record_back_to_complete(items: ItemRepo, existing: Item, reason: str | None) -> None:
@@ -2637,7 +2770,11 @@ def _single_show_phases(
                 if isinstance(details, LookupFailure):
                     _note_lookup_failure(stats, source.name, collection.name, details)
                     continue
-                found = describe(identifier, details)
+                # The show's recorded checks: it is chosen by its real formats
+                # (§spec:real-format-ranking).
+                found = describe(identifier, details,
+                                 formats=_rank_records(items, source.name, collection.name,
+                                                       identifier).get(identifier, {}))
                 if found.is_restricted:
                     # The source refuses the show: recorded unavailable, as a sync would.
                     log.info(
@@ -2680,6 +2817,7 @@ def _single_show_phases(
                     # A reconform restores the drifted files' source bytes, then fills their
                     # gaps again (§spec:verify-drift).
                     planned.tags = planner.plan(identifier, found.metadata, manifest)
+                    planned.labelled = planner.labelled(identifier)
                 archive_root.mkdir(parents=True, exist_ok=True)
                 progress.to_fetch(_fetch_size(planned))
                 fut = fetch_pool.submit(

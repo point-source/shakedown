@@ -1241,14 +1241,18 @@ class FormatRepo:
             shows.setdefault(row["identifier"], {})[row["file_name"]] = _format_record(row)
         return shows
 
+    def recorded(self) -> bool:
+        """Whether the database holds format records at all: a reader opening a
+        database from before them never migrates it."""
+        return self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audio_formats'"
+        ).fetchone() is not None
+
     def unidentified(self, source: str, collection: str) -> dict[str, dict[str, FormatRecord]]:
         """The records of unidentified files, by show, in identifier order
         (§spec:unidentified-audio). Empty on a database from before format records:
         readers never migrate."""
-        exists = self.conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audio_formats'"
-        ).fetchone()
-        if exists is None:
+        if not self.recorded():
             return {}
         cur = self.conn.execute(
             "SELECT identifier, file_name, size, md5, format, audio_class FROM audio_formats"
