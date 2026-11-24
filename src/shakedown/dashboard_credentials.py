@@ -9,7 +9,6 @@ under the edit lock: credentials are not in the file.
 """
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +27,7 @@ def put_credentials(config: Config, body: Any) -> dict[str, Any]:
     source = _credential_source(config, name)
     state_db = _state_db(config)
     with config_save.writing:
-        _write(state_db, lambda: store(state_db, name, login))
+        config_save.write_state(state_db, lambda: store(state_db, name, login))
     # Asked after storing and outside the lock: a slow or unreachable source never
     # holds up a save, and a rejected login stays stored for a retry.
     check = registry.for_source(source, login).check_login()
@@ -40,7 +39,7 @@ def delete_credentials(config: Config, name: str) -> dict[str, Any]:
     source = _credential_source(config, name)
     state_db = _state_db(config)
     with config_save.writing:
-        _write(state_db, lambda: forget(state_db, name))
+        config_save.write_state(state_db, lambda: forget(state_db, name))
     return {"source": name, "credentials": resolve(source, state_db)[0]}
 
 
@@ -67,9 +66,3 @@ def _state_db(config: Config) -> Path:
     assert config.state_db is not None  # filled in by Config validation
     return config.state_db
 
-
-def _write(state_db: Path, write: Any) -> None:
-    try:
-        write()
-    except (sqlite3.Error, OSError) as e:
-        raise Refusal(500, "write_failed", path=str(state_db)) from e

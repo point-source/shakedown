@@ -4061,9 +4061,10 @@ Observable behavior:
   decision, 2026-11-24), one row per source in a table outside schema
   versioning (§spec:state): `serve` writes it and never holds the writer
   lock that migrates. A save that moves the state database carries them
-  with the edit state (§spec:edit-lock). Removing a source from the file
-  forgets its stored credentials at that save, as does any save after a
-  hand edit removed one.
+  with the edit state (§spec:edit-lock) and leaves none in the old one.
+  Removing a source from the file forgets its stored credentials at that
+  save, as does any save after a hand edit removed one; a save that
+  fails to write the file forgets nothing.
 - **Never logged.** No log line, error message, validation result,
   export, or `status` output contains a stored or entered credential.
 - **Not under the edit lock.** Credentials are not in the file, so the

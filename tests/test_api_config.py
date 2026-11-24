@@ -694,3 +694,40 @@ async def test_a_refused_save_forgets_nothing(paths: dict[str, Path]) -> None:
         invalid = await _put(client, loaded["revision"], doc)
     assert stale.status_code == 409 and invalid.status_code == 422
     assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")
+
+
+@pytest.mark.asyncio
+async def test_moving_the_state_database_leaves_no_credentials_behind(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    from shakedown.credentials import Login, store, stored
+
+    loaded = await _unlocked(paths)
+    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
+    doc = loaded["document"]
+    doc["state_db"] = str(tmp_path / "state" / "state.db")
+    async with _client(paths) as client:
+        assert (await _put(client, loaded["revision"], doc)).status_code == 200
+    assert stored(paths["state_db"], "ia") is None
+
+
+@pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root writes anywhere")
+@pytest.mark.asyncio
+async def test_a_save_that_fails_to_write_keeps_the_credentials(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    from shakedown.credentials import Login, store, stored
+
+    loaded = await _unlocked(paths)
+    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
+    doc = loaded["document"]
+    doc["sources"] = [s for s in doc["sources"] if s["name"] != "ia"]
+    folder = paths["config"].parent
+    folder.chmod(0o555)
+    try:
+        async with _client(paths) as client:
+            response = await _put(client, loaded["revision"], doc)
+    finally:
+        folder.chmod(0o755)
+    assert response.status_code == 500
+    assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")
