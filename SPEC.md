@@ -3744,7 +3744,7 @@ Add `exec:` to a collection's handoff through the API: refused with
 ## Edit lock §spec:edit-lock
 
 *Status: in progress*
-The edit state, `POST /api/config/override`, the locked save, and the helper setup uses to write a new `editable` file are built; the dashboard's read-only view and override confirmation wait on the Design task.
+The edit state, `POST /api/config/override`, the locked save, and setup's new `editable` file (`POST /api/setup`) are built; the dashboard's read-only view and override confirmation wait on the Design task.
 
 A `shakedown.yaml` that Shakedown's setup wrote is editable from the
 dashboard from the start. A file that already existed — written by hand
@@ -4106,7 +4106,8 @@ answer says rejected.
 
 ## First-run setup §spec:first-run-setup
 
-*Status: not started*
+*Status: in progress*
+The API is built: `serve` starts with no file, `GET /api/setup`, and `POST /api/setup`; the setup flow on screen waits on the Design task.
 
 A homelab user starts the compose example with no `shakedown.yaml`.
 Opening the dashboard leads them through setup in the browser — paths
@@ -4128,7 +4129,8 @@ Observable behavior:
   `library_root` `/data/library`, `state_db`
   `/data/archive/.shakedown/state.db`, the source types available
   (`source_types`, as in §spec:dashboard-settings), and the default
-  first schedule (§spec:schedules). The page fills `timezone` from the
+  first schedule (§spec:schedules) as `schedule`, with `generated_at`
+  like every dashboard answer. The page fills `timezone` from the
   browser.
 - **Path check before finishing.** Setup runs the path checks through
   `POST /api/config/check-paths` (§spec:dashboard-settings); a failure is
@@ -4144,10 +4146,28 @@ Observable behavior:
   - `201 {revision, warnings, started}` — written; `started` is the
     scope the sync started (`{source, collection}`), or `null` with a
     `reason` code when it could not start; the file stays written;
-  - `422 {errors}` — refused, nothing written;
+  - `422 {errors}` — refused, nothing written. Besides the save's
+    codes, a document without exactly one source holding exactly one
+    collection is `setup_one_collection`, at `["sources"]` or
+    `["sources", 0, "collections"]`;
+  - `422 {code: "invalid_body"}` — a body of another shape, or
+    credentials that are not two non-empty strings; never the
+    field-by-field detail, which would quote them. Credentials for a
+    source type that takes none answer
+    `404 {code: "takes_no_credentials"}`, as in
+    §spec:dashboard-credentials;
   - `409 {code: "exists"}` — a file appeared at the path since setup
     began; nothing is overwritten and the page moves to Settings;
-  - `403` and `500 write_failed` as in `PUT /api/config`.
+  - `403` and `500 write_failed` as in `PUT /api/config`. The file is
+    written before the edit state and the credentials, so a file that
+    fails to write leaves no `editable` record to unlock a file written
+    later by hand; a state database that fails after it answers
+    `write_failed` naming the database, and the file stays.
+  `reason` is `busy` (another run holds the writer lock), `failed` (the
+  run could not be launched), or `exited_early` (it exited before it
+  started). Warnings are the path checks' failures and
+  `layout_not_unique`; setup moves nothing, so there is no
+  `path_moved`.
 - **The written file.** It holds only what setup set, plus a header
   comment saying the file is editable by hand or in the dashboard, and
   pointing at `shakedown.example.yaml` for the full option list.
