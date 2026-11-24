@@ -302,6 +302,37 @@ const VALIDATION_PROBLEMS = {
   ],
 }
 
+// Settings (§spec:dashboard-settings, §spec:edit-lock).
+function settingsLocked(): Answers {
+  const a = defaultAnswers()
+  a.config.edit = "locked"
+  a.config.credentials[0].credentials = "environment"
+  return a
+}
+
+// A file that parses but a run would refuse: errors against the settings they
+// name, and one against a key the page has no field for.
+function settingsInvalid(): Answers {
+  const a = defaultAnswers()
+  const doc = a.config.document!
+  doc.keep_run_errors_days = 10
+  doc.timezone = "Europe/Londn"
+  doc.sources[0].collections[1].library_layout = "{year}/{band}"
+  a.config.state = "invalid"
+  a.config.errors = [
+    { loc: ["keep_run_errors_days"], code: "greater_than_equal", message: "Input should be greater than or equal to 30" },
+    { loc: ["timezone"], code: "timezone_unknown", message: "unknown timezone" },
+    { loc: ["sources", 0, "collections", 1, "library_layout"], code: "layout_unknown_field", message: "unknown field 'band'" },
+    { loc: ["max_concurrent_collectons"], code: "extra_forbidden", message: "Extra inputs are not permitted" },
+  ]
+  a.config.next_syncs = []
+  return a
+}
+
+const SAVED_WITH_WARNINGS = { revision: "sha256:2", warnings: [
+  { loc: ["library_root"], code: "hardlink_failed" }, { loc: ["library_root"], code: "path_moved" },
+] }
+
 // The server lists runs newest first (§spec:run-history).
 function sorted(a: Answers): Answers {
   a["runs?days=30"].runs.sort((x, y) => Date.parse(y.started_at) - Date.parse(x.started_at))
@@ -326,6 +357,24 @@ export const SCENARIOS: Record<string, Scenario> = {
   sync_busy: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
     writes: { [PHISH_SYNC]: { status: 409, body: { detail: "a run is in progress; try again when it finishes" } },
       "POST validate": { status: 200, body: VALIDATION_PROBLEMS } } },
+  // Settings: editable (the default answers), locked, and a file with errors; then
+  // each answer a save, a login, a delete, and the override can get.
+  settings_locked: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsLocked()),
+    writes: { "POST api/config/override": { status: 200, body: { edit: "override" } } } },
+  settings_invalid: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsInvalid()) },
+  settings_saved: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 200, body: SAVED_WITH_WARNINGS },
+      "PUT api/credentials": { status: 200, body: { source: "internetarchive", credentials: "dashboard", check: "rejected" } },
+      "POST api/collections/purge": { status: 202, body: { started: "purge", source: "internetarchive", collection: "dmb", scope: "everything" } },
+      "POST api/history/trim": { status: 202, body: { started: "trim" } } } },
+  settings_refused: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 422, body: { errors: [
+      { loc: ["keep_run_errors_days"], code: "greater_than_equal", message: "Input should be greater than or equal to 30" },
+    ] } } } },
+  settings_conflict: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 409, body: { code: "changed" } } } },
+  settings_write_failed: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 500, body: { code: "write_failed", path: "/data/config/shakedown.yaml" } } } },
   // Behaviour scenarios (tests/behaviour.spec.ts, tests/freshness.spec.ts); no screenshots.
   // The browser's clock runs a minute ahead of the server's; the server answers normally.
   server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },

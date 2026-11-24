@@ -8,6 +8,7 @@ import { Overview } from "@/views/Overview"
 import { RunsView } from "@/views/Runs"
 import { SourcesView } from "@/views/Sources"
 import { LibraryView } from "@/views/Library"
+import { SettingsView } from "@/views/Settings"
 import { Notes } from "@/dash/actions"
 
 const TABS = [
@@ -15,11 +16,13 @@ const TABS = [
   { id: "runs", label: "Runs" },
   { id: "sources", label: "Sources" },
   { id: "library", label: "Library" },
+  { id: "settings", label: "Settings" },
 ] as const
 type TabId = (typeof TABS)[number]["id"]
 
 function tabFromHash(): TabId {
-  const h = location.hash.slice(1)
+  // "#settings/<source>/<collection>" opens a page inside a tab.
+  const h = location.hash.slice(1).split("/")[0]
   return TABS.some((t) => t.id === h) ? (h as TabId) : "overview"
 }
 
@@ -108,6 +111,9 @@ export function App() {
             <TabsContent value="runs"><RunsView runs={d.runs.data} library={d.library.data} now={now} /></TabsContent>
             <TabsContent value="sources"><SourcesView network={d.network.data} activity={d.activity.data} now={now} /></TabsContent>
             <TabsContent value="library"><LibraryView library={d.library.data} attention={d.attention.data} now={now} /></TabsContent>
+            <TabsContent value="settings">
+              <SettingsView config={d.config.data} now={now} onChanged={() => { d.config.refresh?.(); d.health.refresh?.() }} />
+            </TabsContent>
           </main>
         </Tabs>
       )}

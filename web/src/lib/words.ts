@@ -149,3 +149,45 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
       return { title: "Scheduled sync did not start", next: "It runs at its next scheduled time." }
   }
 }
+
+// ---- Settings (§spec:dashboard-settings, §spec:edit-lock, §spec:dashboard-credentials) ----
+
+/** A config error's words, against the setting its `loc` names. `message` is
+ *  developer text and never shown; the code is enough. */
+export function problemWords(code: string, loc: (string | number)[]): string {
+  const key = loc[loc.length - 1]
+  switch (code) {
+    case "greater_than_equal": return key === "keep_run_errors_days" ? "Enter 30 or more." : "Enter a bigger number."
+    case "greater_than": return "Enter a bigger number."
+    case "less_than_equal": case "less_than": return "Enter a smaller number."
+    case "int_parsing": case "int_type": case "int_from_float": return "Enter a whole number."
+    case "missing": return "This setting is needed."
+    case "string_type": case "bool_type": case "bool_parsing": return "This value isn't the right kind for this setting."
+    case "extra_forbidden": return "Shakedown doesn't know this setting. Remove it from shakedown.yaml."
+    case "schedule_invalid": return "Shakedown can't read this schedule. Use five fields: minute, hour, day of month, month, day of week."
+    case "timezone_unknown": return "Not a time zone Shakedown knows. Use a name like Europe/London."
+    case "duplicate_name": return "Another collection in this source has this name."
+    case "source_type_unknown": return "Shakedown has no source of this type."
+    case "layout_unknown_field": return "The layout uses a field this source doesn't have."
+    case "layout_unknown_filter": return "The layout uses a filter this source doesn't have."
+    case "layout_no_field": return "The layout needs at least one field, like {identifier}."
+    case "exec_file_only": return key === "library_root"
+      ? "Change this in shakedown.yaml: a collection's command uses it."
+      : "Commands are set in shakedown.yaml only."
+    default: return "Shakedown can't use this value."
+  }
+}
+
+/** A path check or layout warning from a save (§spec:dashboard-settings). */
+export const WARNING: Record<string, string> = {
+  not_writable: "Shakedown can't write to this folder. Runs won't start until it can.",
+  hardlink_failed: "Library files can't link to the archive here. Put both folders on the same drive.",
+  path_moved: "Shakedown moves nothing: the next sync downloads again what the old location held.",
+  layout_not_unique: "Two shows could land in one folder. Add {identifier} to keep them apart.",
+}
+
+export const CREDENTIALS: Record<"environment" | "dashboard" | "none", string> = {
+  environment: "From environment variables",
+  dashboard: "Saved in the dashboard",
+  none: "No login",
+}

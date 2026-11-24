@@ -146,5 +146,8 @@ export const config: ConfigAnswer = {
       "takes_credentials": true
     }
   ],
-  "unconfigured": []
+  // Removed from the file with its files kept (§spec:collection-removal).
+  "unconfigured": [
+    { "source": "internetarchive", "collection": "dmb", "shows": 312, "archive_bytes": 912000000000, "library_bytes": 912000000000 }
+  ]
 }

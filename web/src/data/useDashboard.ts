@@ -1,7 +1,7 @@
 // Polls the dashboard endpoints (§spec:dashboard): the live view every few
 // seconds, the others about every 30 seconds, nothing while the page is hidden.
 // Every request is a GET to a relative URL, so the page works under a proxy prefix.
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   ActivityAnswer, AttentionAnswer, ConfigAnswer, HealthAnswer, LibraryAnswer, NetworkAnswer, RunsAnswer,
 } from "@/api/types"
@@ -17,11 +17,14 @@ export interface Slot<T> {
   noConfig: boolean
   /** When `data` arrived, by the browser's clock; null before the first answer. */
   receivedAt: number | null
+  /** Ask again now (after a write that changes the answer). */
+  refresh?: () => void
 }
 
 function useEndpoint<T extends { generated_at: string }>(path: string, intervalMs: number): Slot<T> {
   const [slot, setSlot] = useState<Slot<T>>({ data: null, error: null, noConfig: false, receivedAt: null })
   const timer = useRef<number | undefined>(undefined)
+  const loadRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     let cancelled = false
@@ -59,6 +62,7 @@ function useEndpoint<T extends { generated_at: string }>(path: string, intervalM
       if (!document.hidden) load()
       schedule()
     }
+    loadRef.current = load
     load()
     schedule()
     document.addEventListener("visibilitychange", onVisibility)
@@ -69,7 +73,8 @@ function useEndpoint<T extends { generated_at: string }>(path: string, intervalM
     }
   }, [path, intervalMs])
 
-  return slot
+  const refresh = useCallback(() => loadRef.current(), [])
+  return useMemo(() => ({ ...slot, refresh }), [slot, refresh])
 }
 
 /** A clock that ticks so "x min ago" and staleness stay current between answers. */
