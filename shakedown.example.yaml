@@ -5,6 +5,10 @@ archive_root: /data/archive
 library_root: /data/library
 state_db: /data/archive/.shakedown/state.db
 
+# The clock collection schedules follow, as an IANA time zone name. Leave it out to
+# follow the container's local time (its TZ, UTC by default). SPEC.md §spec:schedules.
+timezone: Europe/Berlin
+
 # Global concurrency caps. `max_concurrent_downloads` bounds parallel file
 # downloads within one collection; `max_concurrent_collections` bounds how many
 # collections sync in parallel. Total fetch threads are the product of the two.
@@ -36,6 +40,13 @@ sources:
     collections:
       - name: grateful-dead
         query: 'collection:GratefulDead'
+        # When `shakedown schedule` starts this collection's sync: a standard five-field
+        # cron expression (minute hour day-of-month month day-of-week) in `timezone`.
+        # `30 3 * * *` is daily at 03:30; `0 3 * * 0` is weekly on Sunday at 03:00.
+        # Leave it out for manual only: the collection syncs only when someone starts
+        # it. Collections due in the same minute run one after the other.
+        # SPEC.md §spec:schedules.
+        schedule: '0 3 * * 0'
         # There are no file settings: every show keeps its best copy, a copy a common
         # player reads when the best one isn't (e.g. MP3 beside SHN), and every
         # non-audio file (SPEC.md §spec:quality-selection).
@@ -68,6 +79,7 @@ sources:
 
       - name: phish
         query: 'collection:Phish'
+        schedule: '0 4 * * 0'
         # Default library_layout is `passthrough`: mirrors the archive layout 1:1.
         # Opt-in fast-path for recurring no-op syncs (SPEC.md §spec:incremental-discovery):
         # when the source's cheap change signal is unchanged, skip the per-item metadata
@@ -86,6 +98,7 @@ sources:
         # Leave out collections the internetarchive source already mirrors, so
         # no show is downloaded and linked twice.
         query: 'collection:etree AND NOT collection:GratefulDead AND NOT collection:Phish'
+        schedule: '0 5 * * 0'
         # Available etree fields: identifier, title, creator, date, year,
         # venue, coverage. Filters: sanitize, short, lower, upper.
         library_layout: '{year}/{date} - {venue}/{identifier}'

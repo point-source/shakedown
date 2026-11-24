@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from cronsim import CronSim, CronSimError
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +38,36 @@ class ExecHandoff(BaseModel):
 
 
 Handoff = Annotated[WebhookHandoff | ExecHandoff, Field(union_mode="left_to_right")]
+
+
+# Validation messages never quote the value: config errors reach anyone who can open
+# serve's read endpoints (see _validation_problems).
+
+def _cron_expression(expr: str) -> str:
+    """A standard five-field cron expression (§spec:schedules). cronsim also takes a
+    sixth, seconds field, which the spec rules out, so the count is checked first."""
+    if len(expr.split()) != 5:
+        raise ValueError(
+            "must be a five-field cron expression "
+            "(minute hour day-of-month month day-of-week)"
+        )
+    try:
+        CronSim(expr, datetime(2000, 1, 1))
+    except CronSimError as e:
+        raise ValueError(f"not a valid cron expression: {e}") from None
+    return expr
+
+
+def _zone_name(name: str) -> str:
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("not a known IANA time zone name, such as Europe/Berlin") from None
+    return name
+
+
+CronExpression = Annotated[str, AfterValidator(_cron_expression)]
+ZoneName = Annotated[str, AfterValidator(_zone_name)]
 
 
 class CollectionConfig(BaseModel):
@@ -54,6 +94,9 @@ class CollectionConfig(BaseModel):
     # absent tags are filled. Off by default: the archive keeps the source's bytes.
     fill_tags: bool = False
     on_complete: Handoff | None = None
+    # When the scheduler starts this collection's sync (§spec:schedules): a five-field
+    # cron expression in the config's `timezone`. None is manual only.
+    schedule: CronExpression | None = None
 
 
 class SourceConfig(BaseModel):
@@ -97,6 +140,9 @@ class Config(BaseModel):
 
     sources: list[SourceConfig]
     notifications: NotificationsConfig | None = None
+    # The clock schedules follow, an IANA name; None is the container's local time
+    # (§spec:schedules).
+    timezone: ZoneName | None = None
 
     @model_validator(mode="after")
     def _default_state_db(self) -> Config:

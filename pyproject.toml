@@ -19,6 +19,8 @@ dependencies = [
     "urllib3>=2.8.0",
     "requests>=2.34.2",
     "mutagen>=1.48.1",
+    "cronsim>=2.8",
+    "tzdata>=2026.6",
 ]
 
 [project.optional-dependencies]
