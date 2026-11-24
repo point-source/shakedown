@@ -79,6 +79,15 @@ class ConfigTracker:
             self._state = ConfigState(None, datetime.now())
         return config
 
+    def last_good(self) -> Config | None:
+        """The file as it is now, else the last config this serve loaded; None when
+        it never loaded one."""
+        try:
+            return self.load_now()
+        except ConfigError:
+            with self._lock:
+                return self._last_good
+
     def for_dashboard(self) -> tuple[Config, ConfigState]:
         """The config to answer from: the file as it is now, else the last config
         this serve loaded. A serve that never loaded one answers 503 with the

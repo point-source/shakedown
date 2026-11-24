@@ -7,6 +7,9 @@ Two versioned, once-per-(collection, run) payloads over the same envelope:
   shows are ready.
 - ``sync.failed`` fires the global ``notifications.on_failure`` webhook when a
   run fails, carrying the run's ``errors`` array.
+- ``scheduler.stale`` fires the same webhook once when `serve` finds the scheduler
+  stopped (§spec:schedules), naming its last heartbeat; it is about no collection or
+  run, so those fields are null.
 
 A handoff is a trigger with a bounded wait: a webhook answered 2xx, or a command
 that exits 0, within five minutes delivers the notice. Anything else leaves it
@@ -112,6 +115,26 @@ class SyncFailedPayload:
         )
 
 
+@dataclass
+class SchedulerStalePayload:
+    """``scheduler.stale`` body: the shared envelope with no collection or run, the
+    scheduler's last heartbeat and release, and one ``errors`` line saying so."""
+    last_seen: str
+    release: str
+
+    def to_body(self) -> dict[str, Any]:
+        return {
+            "payload_version": PAYLOAD_VERSION,
+            "event": "scheduler.stale",
+            "source": None,
+            "collection": None,
+            "staging_root": None,
+            "run": None,
+            "scheduler": {"last_seen": self.last_seen, "release": self.release},
+            "errors": [f"the scheduler has not reported since {self.last_seen}"],
+        }
+
+
 def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) -> str | None:
     """Fire a collection's ``on_complete`` handoff. Returns why the notice was not
     delivered, or ``None`` when it was (or there is no handoff).
@@ -131,7 +154,8 @@ def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) ->
 
 
 def fire_failure(
-    notifications: NotificationsConfig | None, payload: SyncFailedPayload
+    notifications: NotificationsConfig | None,
+    payload: SyncFailedPayload | SchedulerStalePayload,
 ) -> str | None:
     """Fire the global ``notifications.on_failure`` webhook. Returns why it was not
     delivered, or ``None`` when it was (or none is configured). Not queued: a late
@@ -313,9 +337,9 @@ def _expand(template: str, body: dict[str, Any]) -> str:
     """Substitute ``{source}``/``{collection}``/``{staging_root}`` placeholders in
     the URL or command from the payload's top-level fields."""
     fields = {
-        "source": body.get("source", ""),
-        "collection": body.get("collection", ""),
-        "staging_root": body.get("staging_root", ""),
+        "source": body.get("source") or "",
+        "collection": body.get("collection") or "",
+        "staging_root": body.get("staging_root") or "",
     }
     try:
         return template.format(**fields)

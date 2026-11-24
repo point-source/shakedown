@@ -1,11 +1,13 @@
 """`GET /api/health`: release, config validity, last validation
-(§spec:dashboard-health)."""
+(§spec:dashboard-health), and whether the scheduler is running (§spec:schedules)."""
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from shakedown import __version__
 from shakedown.dashboard import DashboardContext, iso
+from shakedown.heartbeat import scheduler_state
 from shakedown.models import OperationType
 from shakedown.state import OperationOutcomeRepo
 
@@ -35,4 +37,5 @@ def health_answer(ctx: DashboardContext) -> dict[str, Any]:
             "last_loaded_at": iso(ctx.config_state.last_loaded_at),
         },
         "validation": validation,
+        "scheduler": scheduler_state(ctx.conn, datetime.now(UTC)),
     }

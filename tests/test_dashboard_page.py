@@ -94,7 +94,7 @@ async def test_api_routes_win_over_the_page(tmp_roots: tuple[Path, Path]) -> Non
     async with _client(app) as client:
         assert (await client.get("/healthz")).json() == {"status": "ok"}
         r = await client.get("/status")
-        assert r.status_code == 200 and isinstance(r.json(), list)
+        assert r.status_code == 200 and isinstance(r.json()["collections"], list)
         r = await client.get("/metrics")
         assert r.status_code == 200 and "shakedown_items_total" in r.text
         r = await client.get("/api/health")

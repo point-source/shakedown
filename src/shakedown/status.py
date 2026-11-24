@@ -267,6 +267,19 @@ def collection_summaries(config: Config, conn: sqlite3.Connection) -> list[dict[
     ]
 
 
+def status_answer(config: Config, conn: sqlite3.Connection) -> dict[str, Any]:
+    """`GET /status`: whether the scheduler is running (§spec:schedules), so an
+    outside monitor can watch it, and every collection's `status --json` summary."""
+    from datetime import UTC
+
+    from shakedown.heartbeat import scheduler_state
+
+    return {
+        "scheduler": scheduler_state(conn, datetime.now(UTC)),
+        "collections": collection_summaries(config, conn),
+    }
+
+
 def print_status(config: Config, *, as_json: bool) -> None:
     conn = connect_reader(config.state_db)  # type: ignore[arg-type]
     summaries = collection_summaries(config, conn)

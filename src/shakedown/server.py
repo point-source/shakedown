@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, closing, suppress
@@ -49,8 +50,9 @@ from shakedown.dashboard_network import network_answer
 from shakedown.dashboard_page import PAGE_DIR, register_page
 from shakedown.dashboard_runs import runs_answer
 from shakedown.db import connect_reader
+from shakedown.scheduler_watch import start_watching
 from shakedown.state import ItemRepo
-from shakedown.status import collection_summaries
+from shakedown.status import collection_summaries, status_answer
 from shakedown.trigger import (
     DEFAULT_ARGV_PREFIX,
     Busy,
@@ -87,7 +89,12 @@ def build_app(
     (§spec:dashboard-page)."""
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Watch the scheduler's heartbeat and send the stale-scheduler notice
+        # (§spec:schedules), from the last config this serve loaded.
+        watching = threading.Event()
+        start_watching(configs.last_good, watching)
         yield
+        watching.set()
         # Shutting down (SIGTERM, Ctrl-C): stop the runs this serve started, so they
         # end `stopped` rather than killed with serve's container (§spec:graceful-stop).
         await asyncio.to_thread(stop_runs, app.state.triggered)
@@ -212,8 +219,8 @@ def build_app(
     def status() -> JSONResponse:
         config = current_config()
         with closing(connect_reader(config.state_db)) as conn:  # type: ignore[arg-type]
-            summaries = collection_summaries(config, conn)
-        return JSONResponse(json.loads(json.dumps(summaries, default=str)))
+            answer = status_answer(config, conn)
+        return JSONResponse(json.loads(json.dumps(answer, default=str)))
 
     @app.get("/metrics")
     def metrics() -> PlainTextResponse:

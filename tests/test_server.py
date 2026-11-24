@@ -83,7 +83,7 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         # status: open, JSON
         r = await client.get("/status")
         assert r.status_code == 200
-        body = r.json()
+        body = r.json()["collections"]
         assert body[0]["source"] == "fake-src"
         assert body[0]["counts"]["complete"] == 1
         # Same summary as `status --json` (§spec:library-ownership, §spec:library-cleanup).
@@ -106,7 +106,7 @@ async def test_serve_endpoints_smoke(tmp_roots: tuple[Path, Path], monkeypatch) 
         assert r.json() == {"started": "sync", "source": None, "collection": None}
         await _finish(app)
         [opened] = app.state.triggered[0].runs
-        last_run = (await client.get("/status")).json()[0]["last_run"]
+        last_run = (await client.get("/status")).json()["collections"][0]["last_run"]
         assert last_run["run_id"] == opened["run_id"]
         assert last_run["items_new"] == 0  # idempotent: the separate run saw it mirrored
 
@@ -238,8 +238,8 @@ async def test_status_and_metrics_read_sizes_from_the_db(
     ) as client:
         r = await client.get("/status")
         assert r.status_code == 200
-        assert r.json()[0]["bytes_on_disk"] == 7
-        assert r.json()[0]["restricted"] == [{"identifier": "gd-sbd", "reason": "stream-only"}]
+        assert r.json()["collections"][0]["bytes_on_disk"] == 7
+        assert r.json()["collections"][0]["restricted"] == [{"identifier": "gd-sbd", "reason": "stream-only"}]
         r = await client.get("/metrics")
         assert r.status_code == 200
         assert 'shakedown_bytes_on_disk{collection="coll1",source="fake-src"} 7.0' in r.text
@@ -276,8 +276,8 @@ async def test_status_and_metrics_read_an_older_schema_without_migrating_it(
     ) as client:
         r = await client.get("/status")
         assert r.status_code == 200
-        assert r.json()[0]["counts"]["complete"] == 1
-        assert r.json()[0]["rescheduled"] is None
+        assert r.json()["collections"][0]["counts"]["complete"] == 1
+        assert r.json()["collections"][0]["rescheduled"] is None
         r = await client.get("/metrics")
         assert r.status_code == 200
         assert 'shakedown_bytes_on_disk{collection="coll1",source="fake-src"} 5.0' in r.text
@@ -304,12 +304,12 @@ async def test_endpoints_read_the_config_as_it_is_at_each_request(
         transport=httpx.ASGITransport(app=build_app(cfg_path)),
         base_url="http://testserver",
     ) as client:
-        assert [s["collection"] for s in (await client.get("/status")).json()] == ["coll1"]
+        assert [s["collection"] for s in (await client.get("/status")).json()["collections"]] == ["coll1"]
 
         config.sources[0].collections.append(CollectionConfig(name="coll2", query="*"))
         write_config(cfg_path, config)
         r = await client.get("/status")
-        assert [s["collection"] for s in r.json()] == ["coll1", "coll2"]
+        assert [s["collection"] for s in r.json()["collections"]] == ["coll1", "coll2"]
         r = await client.post("/validate", params={"collection": "coll2"}, headers=auth)
         assert r.status_code == 200  # the scope check sees the new collection too
 
@@ -377,7 +377,7 @@ async def test_sync_starts_a_fresh_run_on_the_config_as_edited(
         assert r.json() == {"started": "sync", "source": None, "collection": "coll1"}
         await _finish(app)
         assert (library / "fake-src" / "coll1" / "renamed" / "gd-x" / "x.flac").is_file()
-        last_run = (await client.get("/status")).json()[0]["last_run"]
+        last_run = (await client.get("/status")).json()["collections"][0]["last_run"]
         assert last_run["run_id"] == app.state.triggered[0].runs[0]["run_id"]
         assert last_run["finished_at"] is not None and last_run["items_new"] == 1
         assert 'shakedown_sync_runs_total{result="ok"} 1.0' in (
@@ -409,7 +409,9 @@ async def test_triggered_sync_catches_up_rescheduled_collections_after_its_own(
         assert r.status_code == 202
         await _finish(app)
         opened = {o["collection"]: o["run_id"] for o in app.state.triggered[0].runs}
-        status = {c["collection"]: c for c in (await client.get("/status")).json()}
+        status = {
+            c["collection"]: c for c in (await client.get("/status")).json()["collections"]
+        }
         metrics = (await client.get("/metrics")).text
     assert status["coll1"]["last_run"]["run_id"] == opened["coll1"]
     caught_up = status["coll2"]["last_run"]
@@ -516,7 +518,7 @@ async def test_a_killed_run_is_closed_and_counted_as_failed(
             await asyncio.sleep(0.02)
         triggered.process.send_signal(signal.SIGKILL)
         await _finish(app)
-        last_run = (await client.get("/status")).json()[0]["last_run"]
+        last_run = (await client.get("/status")).json()["collections"][0]["last_run"]
         assert last_run["run_id"] == triggered.runs[0]["run_id"]
         assert last_run["finished_at"] is not None
         assert "run ended unexpectedly (killed by SIGKILL)" in last_run["errors"]
@@ -564,7 +566,7 @@ async def test_status_carries_the_pending_handoff(tmp_roots: tuple[Path, Path]) 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app(config)), base_url="http://testserver"
     ) as client:
-        pending = (await client.get("/status")).json()[0]["handoff_pending"]
+        pending = (await client.get("/status")).json()["collections"][0]["handoff_pending"]
 
     assert pending["shows"] == 1
     assert pending["identifiers"] == ["gd-x"]
@@ -588,10 +590,10 @@ async def test_status_lists_shows_with_no_playable_copy(tmp_roots: tuple[Path, P
     ) as client:
         r = await client.get("/status")
     assert r.status_code == 200
-    assert r.json()[0]["not_playable"] == [
+    assert r.json()["collections"][0]["not_playable"] == [
         {"identifier": "gd-shn", "reason": "only in SHN; archive.org offers no playable copy"}
     ]
-    assert r.json()[0]["restricted"] == []
+    assert r.json()["collections"][0]["restricted"] == []
 
 
 @pytest.mark.asyncio
@@ -629,7 +631,7 @@ async def test_status_lists_shows_removed_upstream_from_the_db(
     ) as client:
         r = await client.get("/status")
     assert r.status_code == 200
-    [removed] = r.json()[0]["removed_upstream"]
+    [removed] = r.json()["collections"][0]["removed_upstream"]
     assert removed["identifier"] == "gd-gone"
     assert removed["removed_on"] in {before.isoformat(), after.isoformat()}
 
@@ -823,7 +825,7 @@ async def test_api_health_reports_release_config_and_last_validation(
         assert r.status_code == 200
         assert not [h for h in r.headers if h.lower().startswith("access-control-")]
         body = r.json()
-        assert set(body) == {"generated_at", "release", "config", "validation"}
+        assert set(body) == {"generated_at", "release", "config", "validation", "scheduler"}
         assert body["release"] == version("shakedown")
         assert body["config"]["valid"] is True and body["config"]["error"] is None
         assert datetime.fromisoformat(body["config"]["last_loaded_at"]).tzinfo is not None
@@ -1010,7 +1012,7 @@ async def test_stopping_serve_stops_the_runs_it_started(
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as client:
-        last_run = (await client.get("/status")).json()[0]["last_run"]
+        last_run = (await client.get("/status")).json()["collections"][0]["last_run"]
         assert last_run["result"] == "stopped"
         metrics = (await client.get("/metrics")).text
     assert 'shakedown_sync_runs_total{result="stopped"} 1.0' in metrics

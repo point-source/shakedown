@@ -7,13 +7,17 @@ facts; the page words the next action.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from shakedown.activity import HISTORY_DAYS, STOPPED_REPORTING, operation_of
+from shakedown.config import Config
 from shakedown.dashboard import DashboardContext, iso
+from shakedown.heartbeat import read_heartbeat, state_of
 from shakedown.history import GOOD_RESULTS, run_history
 from shakedown.models import ItemStatus, OperationStatus, OperationType, RunKind
+from shakedown.schedule import previous_tick, schedule_zone
 from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries
 
@@ -53,6 +57,64 @@ def _entry(
     }
 
 
+# A scheduled time this long past with nothing covering it is a missed tick
+# (§spec:schedules).
+OVERDUE_AFTER = timedelta(minutes=10)
+
+
+def _scheduler_stale(conn: sqlite3.Connection, config: Config,
+                     now: datetime) -> dict[str, Any] | None:
+    """The one `scheduler_stale` entry: while the scheduler is `stale` or has never
+    recorded a heartbeat, and any collection has a schedule (§spec:schedules). It is
+    about no collection; `since` is its last heartbeat."""
+    if not any(c.schedule for s in config.sources for c in s.collections):
+        return None
+    beat = read_heartbeat(conn)
+    if state_of(beat, now) not in ("stale", "never"):
+        return None
+    return {
+        "kind": "scheduler_stale",
+        "source": None,
+        "collection": None,
+        "since": iso(beat.at) if beat else None,
+        "identifiers": [],
+        "count": 0,
+        "detail": {},
+    }
+
+
+def _local(dt: datetime) -> str:
+    """``dt`` as run records store times: naive, serve-local."""
+    return dt.astimezone().replace(tzinfo=None).isoformat()
+
+
+def _missed_tick(conn: sqlite3.Connection, config: Config, summary: dict[str, Any],
+                 now: datetime) -> datetime | None:
+    """The collection's latest scheduled time when it passed more than ten minutes ago
+    with nothing covering it, else None (§spec:schedules). Covered means a sync or
+    catch-up of the collection started at or after it or was still running at it, or
+    the collection has a rescheduled entry: an entry keeps its oldest skip, so a tick
+    skipped later leaves no newer trace (operator, 2026-11-24)."""
+    collection = next(
+        c for s in config.sources if s.name == summary["source"]
+        for c in s.collections if c.name == summary["collection"]
+    )
+    if not collection.schedule or summary["rescheduled"]:
+        return None
+    tick = previous_tick(collection.schedule, schedule_zone(config), now)
+    if tick is None or now - tick <= OVERDUE_AFTER:
+        return None
+    at = _local(tick)
+    covered = conn.execute(
+        "SELECT 1 FROM runs WHERE source_name = ? AND collection_name = ? "
+        "AND kind IN (?, ?) "
+        "AND (started_at >= ? OR finished_at IS NULL OR finished_at >= ?) LIMIT 1",
+        (summary["source"], summary["collection"], RunKind.SYNC.value,
+         RunKind.CATCH_UP.value, at, at),
+    ).fetchone()
+    return None if covered else tick
+
+
 def _kind_group(kind: str) -> str:
     """The kind whose good run clears an unexpected end: a catch-up is a sync."""
     return RunKind.SYNC.value if kind == RunKind.CATCH_UP.value else kind
@@ -81,6 +143,7 @@ def _entries(
     summary: dict[str, Any],
     items: ItemRepo,
     runs: list[dict[str, Any]],
+    missed_tick: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """The collection's entries, in the kind order of §spec:needs-attention. A run
     still going and reporting has no recovery in `status`'s summary: the activity
@@ -148,6 +211,9 @@ def _entries(
         )
     if summary["stale"]:
         entries.append(_entry("stale", summary))
+    if missed_tick is not None:
+        entry = _entry("tick_overdue", summary)
+        entries.append({**entry, "since": iso(missed_tick)})
     if summary["rescheduled"]:
         entries.append(_entry("rescheduled", summary, since=summary["rescheduled"]["since"]))
     handoff = summary["handoff_pending"]
@@ -242,9 +308,13 @@ def attention_answer(ctx: DashboardContext) -> dict[str, Any]:
         scope = (summary["source"], summary["collection"])
         return [r for r in history if (r["source"], r["collection"]) == scope]
 
+    aware_now = datetime.now(UTC)
+    stale = _scheduler_stale(ctx.conn, ctx.config, aware_now)
     return {
-        "entries": [
-            entry for s in summaries for entry in _entries(s, items, runs_of(s))
-        ],
+        "entries": [*([stale] if stale else []), *(
+            entry for s in summaries
+            for entry in _entries(s, items, runs_of(s),
+                                  _missed_tick(ctx.conn, ctx.config, s, aware_now))
+        )],
         "health": [_health(s, items) for s in summaries],
     }
