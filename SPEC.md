@@ -3482,6 +3482,32 @@ Spec and code names in the last column never appear on screen.
 | Next step | The action `status` suggests for an unfinished or failed operation, shown as the server words it. | fix, action, hint | `safe_next_action` |
 | Updated (shows) | Shows a run fetched again because they changed upstream. | changed, refreshed | `items_updated` |
 | Updated \<time> | When the newest data on screen was computed. | refreshed, synced, as of | `generated_at` |
+| Settings (tab) | The tab where shakedown.yaml is changed. | config, configuration, preferences | Settings tab, `GET /api/config` |
+| Archive folder | Where the archive lives, as a path inside the container. | archive root, archive path | `archive_root` |
+| Library folder | Where the library lives, as a path inside the container. | staging root, library root | `library_root` |
+| Database file | The file that holds Shakedown's records. | state database, state DB | `state_db` |
+| Collections at once | How many collections sync at the same time. | concurrency, parallel collections | `max_concurrent_collections` |
+| Downloads at once | How many files one collection downloads at the same time. | workers, threads | `max_concurrent_downloads` |
+| Requests at once | The most connections Shakedown opens to one source, across its collections. | rate limit, connections | `max_concurrent_requests` |
+| Time zone | The clock schedules follow. | TZ, locale | `timezone` |
+| Keep run errors for | How many days a run keeps its per-show error lines. | retention, history days | `keep_run_errors_days` |
+| Trim history now | Start a Trim history run at once. | compact, vacuum, clean up | `POST /api/history/trim` |
+| Webhook URL | The address the failure notice is posted to. | endpoint, hook | `notifications.on_failure.webhook` |
+| Login | A source's email and password, for shows that need an account. | credentials, auth, account | `source_credentials`, `auth` |
+| From environment variables | The login comes from the container's environment and wins over one entered here. | env, set externally | `credentials: environment` |
+| Saved in the dashboard | The login was entered on the Settings tab. | stored, DB credentials | `credentials: dashboard` |
+| No login | The source has no login. | anonymous, none | `credentials: none` |
+| Login accepted / rejected / saved, not checked | What the source said when a login was saved. | valid, invalid, unverified | `check: accepted` / `rejected` / `unchecked` |
+| Forget (login) | Delete a login entered in the dashboard. | remove, clear, revoke | `DELETE /api/credentials` |
+| Removed collection | A collection shakedown.yaml no longer names whose files are still on disk. | unconfigured, orphaned, deleted | `unconfigured` |
+| Add back | Open a new collection with a removed collection's name. | restore, re-add | — |
+| Delete files… | Choose what to delete of a removed collection: Library folders, or Library folders and archived shows. | purge, wipe | `POST /api/collections/purge`, `scope` |
+| Read-only (settings) | shakedown.yaml was written outside Shakedown, so the dashboard shows it without changing it. | locked, managed, immutable | `edit: locked` |
+| Allow dashboard edits | Let the dashboard change a file it didn't write; stays on. | override, unlock, take over | `POST /api/config/override`, `edit: override` |
+| Unsaved changes | Edits on the Settings tab that are not in the file yet. | dirty, pending changes, draft | draft |
+| Saved, with warnings | The file was saved, and some settings need a look. | partial save | `200 {warnings}` |
+| Nothing saved | A save the file refused; the settings marked in red say why. | invalid, rejected, failed | `422 {errors}` |
+| shakedown.yaml changed | A save refused because the file changed since it was loaded. | conflict, stale revision | `409 changed` |
 
 "Updated" carries two meanings, kept on purpose (operator decision,
 2026-11-12): as a count of shows on Runs and Overview, and as the data
@@ -3492,15 +3518,16 @@ time in the header. No other term may take a second meaning.
 Each approved screen lists its handoff spec, its goldens
 (`web/tests/__screenshots__/<scenario>-<tab>-<size>-<theme>.png`, from
 `web/tests/screens.spec.ts`), and the round it was approved in. The page
-is one route (`GET /`) with four tabs.
+is one route (`GET /`) with five tabs.
 
 | Screen | Handoff spec | Golden scenarios | Approved |
 | --- | --- | --- | --- |
-| Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13 |
+| Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13; Settings tab, round S2 2026-11-24 |
 | Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content, waiting, scheduler-stopped, trims, purges | round 2, 2026-11-12; waiting rows 2026-11-20; unidentified files row 2026-11-23; Shakedown card with scheduler and run controls, trim and delete runs, round S1 2026-11-24 |
 | Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content, trims, purges; loading | round 1, 2026-11-12; loading 2026-11-13; trim and delete runs and the Action column, round S1 2026-11-24 |
 | Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
+| Settings tab | `docs/ui/handoff/settings.md` | default, settings-locked, settings-invalid; settings-dirty, -saved-warnings, -refused, -conflict, -login, -delete, -override (`web/tests/settings.spec.ts`) | round S2, 2026-11-24 |
 
 ### Harness
 
@@ -3603,7 +3630,7 @@ loads.
 ## Settings in the dashboard §spec:dashboard-settings
 
 *Status: in progress*
-The API is built: `GET /api/config` (with `unconfigured`, §spec:collection-removal), `PUT /api/config`, and `POST /api/config/check-paths`; the Settings screens wait on the Design task.
+The API is built, and the Settings tab is designed and built (§spec:ui-kit Screens, round S2); the collection editor and the path checks on screen wait on the Design task.
 
 Compatibility, from deployment status "deployed, one install, no
 outside consumers" (§req:constraints, operator-confirmed 2026-11-24):
@@ -3801,7 +3828,7 @@ Add `exec:` to a collection's handoff through the API: refused with
 ## Edit lock §spec:edit-lock
 
 *Status: in progress*
-The edit state, `POST /api/config/override`, the locked save, and setup's new `editable` file (`POST /api/setup`) are built; the dashboard's read-only view and override confirmation wait on the Design task.
+The edit state, `POST /api/config/override`, the locked save, and setup's new `editable` file (`POST /api/setup`) are built; the Settings tab's read-only view and the Allow dashboard edits confirmation are built (round S2); the collection editor's read-only view waits on the Design task.
 
 A `shakedown.yaml` that Shakedown's setup wrote is editable from the
 dashboard from the start. A file that already existed — written by hand
@@ -4085,7 +4112,7 @@ again: the entries clear and the next tick runs.
 ## Credentials in the dashboard §spec:dashboard-credentials
 
 *Status: in progress*
-The API, storage, and run resolution are built; the credential entry form waits on Design.
+The API, storage, run resolution, and the Settings tab's login entry (round S2) are built; the optional login in first-run setup waits on Design.
 
 A user can enter a source's archive.org credentials in the dashboard.
 They never appear in `shakedown.yaml`, on any page, in any API answer,
@@ -4353,7 +4380,7 @@ and without the dashboard's headers: `403`.
 ## Removing a collection §spec:collection-removal
 
 *Status: in progress*
-The unconfigured list, `POST /api/collections/purge`, and `shakedown purge` are built; the remove and delete confirmations and the unconfigured list on screen wait on Design.
+The unconfigured list, `POST /api/collections/purge`, and `shakedown purge` are built; the Removed collections list and its Delete files confirmation are built (round S2); the collection editor's remove confirmation waits on Design.
 
 Removing a collection stops syncing it. By default its archived shows
 and library folders stay. The dashboard says what happens before the
@@ -4469,8 +4496,8 @@ purge while a sync runs: refused as a run in progress.
 
 ## Run error retention §spec:run-error-retention
 
-*Status: in progress*
-The setting, the automatic trim, `shakedown trim-history`, and `POST /api/history/trim` are built; the Settings field and the Trim now button wait on Design.
+*Status: complete*
+The Settings field and Trim history now were built in Design round S2.
 
 Each run keeps its per-show error lines for 180 days by default, a
 setting the user can change in the dashboard; after that the run keeps

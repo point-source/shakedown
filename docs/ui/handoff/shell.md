@@ -1,6 +1,6 @@
 # Handoff: Page shell and page-wide states
 
-*Approved: round 2, 2026-11-12; never-reached state 2026-11-13 · Kit: §spec:ui-kit · Endpoints: all six `GET /api/*` (§spec:dashboard)*
+*Approved: round 2, 2026-11-12; never-reached state 2026-11-13; Settings tab, round S2 2026-11-24 · Kit: §spec:ui-kit · Endpoints: all six `GET /api/*` (§spec:dashboard)*
 *Code: `web/src/App.tsx`, `web/src/data/useDashboard.ts` · Fixtures: `web/src/fixtures/scenarios.ts`*
 
 ## Purpose
@@ -24,7 +24,7 @@ the config is broken, so old numbers are never passed off as current.
 "Shakedown" (`text-xl` semibold), release (`text-sm` muted), and
 Updated pushed right (`ml-auto`); wraps on narrow screens. Notices
 (Alert) sit under the header, above the tabs. Tabs (shadcn Tabs):
-Overview · Runs · Sources · Library; full width below 640 px
+Overview · Runs · Sources · Library · Settings; full width below 640 px
 (`w-full`), fitted and left-aligned from 640 px (`sm:w-fit
 sm:self-start`). Tab content sits in the single `main` landmark.
 
@@ -52,7 +52,7 @@ from <age> ago" uses the oldest `generated_at` on screen.
 Shakedown" · "Showing data from <age> ago." · "Nothing to show until it
 answers." · "shakedown.yaml has an error" · "Showing data from the
 config loaded at <time>." · "Nothing to show until it loads." · tab
-labels Overview, Runs, Sources, Library. Terms: Shakedown, Release
+labels Overview, Runs, Sources, Library, Settings. Terms: Shakedown, Release
 (§spec:ui-kit Terms).
 
 ## Behavior
@@ -68,8 +68,9 @@ labels Overview, Runs, Sources, Library. Terms: Shakedown, Release
   config-broken notice over the kept data.
 - A `useNow` clock ticks every 5 s so ages and staleness update between
   answers.
-- The open tab lives in the URL hash (`#runs`, `#sources`, `#library`;
-  none = Overview); switching tabs scrolls to top and adds one history
+- The open tab lives in the URL hash (`#runs`, `#sources`, `#library`,
+  `#settings`; none = Overview). The first `/`-separated segment picks
+  the tab, so `#settings/<source>/<collection>` opens Settings; switching tabs scrolls to top and adds one history
   entry, so Back/forward move between tabs.
 - Every source-derived string renders as React text, never markup.
 
