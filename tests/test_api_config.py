@@ -613,3 +613,58 @@ async def test_a_refused_save_leaves_the_new_state_database_alone(
         response = await _put(client, loaded["revision"], doc)
     assert (response.status_code, response.json()) == (409, {"code": "changed"})
     assert not new_db.exists()
+
+
+# -- Stored credentials follow the save (§spec:dashboard-credentials) -------------
+
+
+@pytest.mark.asyncio
+async def test_moving_the_state_database_moves_the_stored_credentials(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    from shakedown.credentials import Login, store, stored
+
+    loaded = await _unlocked(paths)
+    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
+    doc = loaded["document"]
+    new_db = tmp_path / "state" / "state.db"
+    doc["state_db"] = str(new_db)
+    async with _client(paths) as client:
+        assert (await _put(client, loaded["revision"], doc)).status_code == 200
+    assert stored(new_db, "ia") == Login("me@example.org", "pw")
+
+
+@pytest.mark.asyncio
+async def test_a_save_that_removes_a_source_forgets_its_credentials(
+    paths: dict[str, Path],
+) -> None:
+    from shakedown.credentials import Login, store, stored
+
+    loaded = await _unlocked(paths)
+    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
+    store(paths["state_db"], "lma", Login("x@example.org", "pw2"))
+    store(paths["state_db"], "hand-removed", Login("y@example.org", "pw3"))
+    doc = loaded["document"]
+    doc["sources"] = [s for s in doc["sources"] if s["name"] != "ia"]
+    async with _client(paths) as client:
+        response = await _put(client, loaded["revision"], doc)
+    assert response.status_code == 200, response.json()
+    assert stored(paths["state_db"], "ia") is None
+    assert stored(paths["state_db"], "hand-removed") is None
+    assert stored(paths["state_db"], "lma") == Login("x@example.org", "pw2")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_save_forgets_nothing(paths: dict[str, Path]) -> None:
+    from shakedown.credentials import Login, store, stored
+
+    loaded = await _unlocked(paths)
+    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
+    doc = loaded["document"]
+    doc["sources"] = [s for s in doc["sources"] if s["name"] != "ia"]
+    async with _client(paths) as client:
+        stale = await _put(client, "sha256:stale", doc)
+        doc["sources"][0]["collections"][0]["library_layout"] = "Shows/All"
+        invalid = await _put(client, loaded["revision"], doc)
+    assert stale.status_code == 409 and invalid.status_code == 422
+    assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")

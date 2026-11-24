@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from shakedown import credentials
 from shakedown.config import (
     ConfigFile,
     ConfigProblem,
@@ -64,10 +65,14 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
         if merged != current.data:
             if _bytes_now(path) != current.data:
                 raise Refusal(409, "changed")
-            # The edit state moves only with a save that is going through.
+            # The edit state and stored credentials move only with a save that is
+            # going through; so does forgetting the credentials of a removed source
+            # (§spec:dashboard-credentials), or of one a hand edit removed before.
             old_db, new_db = state_db_for(current), Path(new["state_db"])
             if old["state_db"] != new["state_db"] and old_db is not None:
                 _write_state(new_db, lambda: move_install_state(old_db, new_db))
+            names = {source["name"] for source in new["sources"]}
+            _write_state(new_db, lambda: credentials.forget_others(new_db, names))
             try:
                 atomic_replace(path, merged)
             except WriteFailed as e:
