@@ -34,6 +34,13 @@ def test_help_exits_zero() -> None:
     assert "release-validate" not in result.output
 
 
+def test_config_defaults_to_the_data_mount() -> None:
+    """The config file lives in the one data mount (§spec:configuration)."""
+    result = CliRunner().invoke(main, ["status"])
+    assert result.exit_code == 2
+    assert "config file not found: /data/shakedown-config/shakedown.yaml" in result.output
+
+
 def test_missing_config_exits_two(tmp_path: Path) -> None:
     result = CliRunner().invoke(main, ["--config", str(tmp_path / "missing.yaml"), "status"])
     assert result.exit_code == 2

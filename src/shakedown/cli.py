@@ -12,7 +12,7 @@ from shakedown.activity import note_started_by_serve
 from shakedown.filesystem import FilesystemError, ensure_hardlinkable
 from shakedown.trigger import announce_failed, launched_by_serve
 
-DEFAULT_CONFIG_PATH = Path("/config/shakedown.yaml")
+DEFAULT_CONFIG_PATH = Path("/data/shakedown-config/shakedown.yaml")
 
 log = logging.getLogger("shakedown")
 
