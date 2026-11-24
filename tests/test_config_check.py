@@ -53,6 +53,16 @@ def test_every_error_is_returned_with_its_place_and_code() -> None:
     ]
 
 
+def test_a_collection_repeated_under_a_second_source_entry_of_the_same_name() -> None:
+    """Archived shows live under source and collection names, so the pair is unique
+    across the whole file, not only within one source entry."""
+    raw = _doc()
+    raw["sources"].append(
+        {"name": "ia", "type": "ia", "collections": [{"name": "gd", "query": "q"}]}
+    )
+    assert _codes(raw) == [(["sources", 1, "collections", 0, "name"], "duplicate_name")]
+
+
 def test_model_errors_carry_pydantic_codes() -> None:
     raw = _doc(bogus=1, fill_tags="maybe")
     raw["max_concurrent_downloads"] = 0

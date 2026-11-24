@@ -379,14 +379,16 @@ def _yaml_problem(e: yaml.YAMLError) -> str:
 
 
 def _check_names(raw: dict[str, Any], errors: list[ConfigProblem]) -> None:
-    """Collection names are unique within their source: the archive is keyed by them."""
+    """Each (source, collection) pair is unique across the file: the archive is keyed
+    by those names."""
+    seen: set[tuple[str, str]] = set()
     for i, source in entries(raw, "sources"):
-        seen: set[str] = set()
+        source_name = source.get("name")
         for j, collection in entries(source, "collections"):
             name = collection.get("name")
-            if not isinstance(name, str):
+            if not isinstance(source_name, str) or not isinstance(name, str):
                 continue
-            if name in seen:
+            if (source_name, name) in seen:
                 errors.append(
                     ConfigProblem(
                         ("sources", i, "collections", j, "name"),
@@ -394,7 +396,7 @@ def _check_names(raw: dict[str, Any], errors: list[ConfigProblem]) -> None:
                         "another collection in this source has the same name",
                     )
                 )
-            seen.add(name)
+            seen.add((source_name, name))
 
 
 def _check_layouts(
