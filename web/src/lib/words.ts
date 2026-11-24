@@ -121,5 +121,11 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
         title: `${plural(e.count, "file", "files")} Shakedown can't identify`,
         next: "Shakedown keeps them as they are and does nothing more with them.",
       }
+    // provisional: Design task 325c24ff confirms the glossary term
+    case "scheduler_stale":
+      return { title: "Scheduled syncs are not starting", next: "Start the shakedown-scheduler container." }
+    // provisional: Design task 325c24ff confirms the glossary term
+    case "tick_overdue":
+      return { title: "Scheduled sync did not start", next: "It runs at its next scheduled time." }
   }
 }

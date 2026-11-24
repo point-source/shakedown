@@ -262,4 +262,5 @@ export const health: HealthAnswer = {
     { source: "internetarchive", collection: "phish", status: "completed_with_item_issues", at: at(20_150) },
     { source: "etree-lma", collection: "etree-lma", status: null, at: null },
   ],
+  scheduler: { state: "running", last_seen: at(0), release: "1.9.0" },
 }

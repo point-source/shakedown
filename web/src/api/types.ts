@@ -165,7 +165,7 @@ export interface LibraryAnswer {
 export type AttentionKind =
   | "failed_shows" | "recovery" | "ended_unexpectedly" | "stale" | "rescheduled"
   | "handoff_pending" | "failure_notice_undelivered" | "separations" | "unplaced_files"
-  | "unidentified_files"
+  | "unidentified_files" | "scheduler_stale" | "tick_overdue"
 
 /** An audio file whose content matches no recognised format, by its source name. */
 export interface UnidentifiedFile {
@@ -197,8 +197,9 @@ export interface Recovery {
 
 export interface AttentionEntry {
   kind: AttentionKind
-  source: string
-  collection: string
+  /** Null for an entry about no collection (scheduler_stale). */
+  source: string | null
+  collection: string | null
   since: Iso | null
   /** The first ten affected shows; `count` says how many there are. */
   identifiers: string[]
@@ -232,4 +233,6 @@ export interface HealthAnswer {
   release: string
   config: { valid: boolean; error: string | null; last_loaded_at: Iso | null }
   validation: { source: string; collection: string; status: OperationStatus | null; at: Iso | null }[]
+  /** Whether the scheduler is running (§spec:schedules). Not drawn yet: Design's. */
+  scheduler: { state: "running" | "stale" | "no_schedule" | "never"; last_seen: Iso | null; release: string | null }
 }

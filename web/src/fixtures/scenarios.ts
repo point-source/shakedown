@@ -228,6 +228,21 @@ function quietFinishOrder(): Answers {
   return a
 }
 
+// The scheduler stopped 45 minutes ago and nothing has run since, so a tick that
+// passed meanwhile is overdue (§spec:schedules). The server puts scheduler_stale
+// first, then each collection's entries in kind order.
+function schedulerStopped(): Answers {
+  const a = quiet()
+  a.attention.entries = [
+    { kind: "scheduler_stale", source: null, collection: null, since: at(45),
+      identifiers: [], count: 0, detail: {} },
+    { kind: "tick_overdue", source: "internetarchive", collection: "grateful-dead", since: at(40),
+      identifiers: [], count: 0, detail: {} },
+  ]
+  a.health.scheduler = { state: "stale", last_seen: at(45), release: "1.9.0" }
+  return a
+}
+
 // The server lists runs newest first (§spec:run-history).
 function sorted(a: Answers): Answers {
   a["runs?days=30"].runs.sort((x, y) => Date.parse(y.started_at) - Date.parse(x.started_at))
@@ -245,6 +260,7 @@ export const SCENARIOS: Record<string, Scenario> = {
   never_reached: { now: NOW, mode: { kind: "refused" }, answers: sorted(defaultAnswers()) },
   long_content: { now: NOW, mode: { kind: "ok" }, answers: sorted(longContent()) },
   waiting: { now: NOW, mode: { kind: "ok" }, answers: sorted(waitingRound()) },
+  scheduler_stopped: { now: NOW, mode: { kind: "ok" }, answers: sorted(schedulerStopped()) },
   // Behaviour scenarios (tests/behaviour.spec.ts, tests/freshness.spec.ts); no screenshots.
   // The browser's clock runs a minute ahead of the server's; the server answers normally.
   server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },

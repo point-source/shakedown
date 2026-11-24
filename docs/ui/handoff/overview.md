@@ -82,6 +82,7 @@ cards `min-w-0`; gaps `gap-3` (stats) and `gap-4`.
 | first install | `first_install` | zero stats, empty states, "Never validated" |
 | long content | `long_content` | 9 entries of every kind, 300 failed show IDs, long names and server errors wrap |
 | waiting | `waiting` | a catch-up round: 2 running catch-ups, then 3 waiting rows in the order they start |
+| scheduler stopped (provisional) | `scheduler_stopped` | the quiet page with 2 entries: `scheduler_stale` (about no collection, so no collection name) and `tick_overdue`, on the existing entry row; their words are provisional until Design task 325c24ff confirms the terms |
 | loading / can't reach / config broken | see `shell.md` | |
 
 ## Copy
