@@ -375,6 +375,31 @@ _FORMAT_SCHEMA = [
 ]
 _SCHEMA += _FORMAT_SCHEMA
 
+# The scheduler's current state (§spec:schedules): its heartbeat, and whether serve has
+# sent the stale-scheduler notice for the current episode. One row each, replaced,
+# never a history. They sit outside schema versioning and never migrate: their writer
+# (the scheduler, serve) is never the writer-lock holder that migrates, so each
+# creates its own table when an older database lacks it — a table a run of an older
+# release never reads — and leaves `schema_version` alone (shakedown.heartbeat).
+SCHEDULER_HEARTBEAT_TABLE = """
+    CREATE TABLE IF NOT EXISTS scheduler_heartbeat (
+        id              INTEGER PRIMARY KEY CHECK (id = 1),
+        at              TEXT NOT NULL,
+        release         TEXT NOT NULL,
+        schedule_valid  INTEGER NOT NULL,
+        next_tick_at    TEXT
+    )
+    """
+SCHEDULER_NOTICE_TABLE = """
+    CREATE TABLE IF NOT EXISTS scheduler_notice (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        episode_last_seen  TEXT NOT NULL,
+        sent_at            TEXT NOT NULL,
+        error              TEXT
+    )
+    """
+_SCHEMA += [SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE]
+
 
 # Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer
 # reads its index alone, never the rows, whose manifests and source metadata fill
