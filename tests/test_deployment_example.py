@@ -34,3 +34,56 @@ def test_image_reads_the_config_from_the_data_mount_by_default() -> None:
     assert json.loads(volume) == ["/data"]
     assert not any("/config" in line for line in stage)
     assert not any("SHAKEDOWN_CONFIG" in line for line in stage)
+
+
+def _compose() -> dict:
+    import yaml
+
+    return yaml.safe_load((REPO / "docker-compose.example.yaml").read_text())
+
+
+SOCKET = "/var/run/docker.sock"
+
+
+def test_example_compose_has_no_ofelia() -> None:
+    """Schedules live in shakedown.yaml and the scheduler container starts them;
+    ofelia and its per-collection job labels are gone (§spec:deployment)."""
+    text = (REPO / "docker-compose.example.yaml").read_text()
+    assert not any("ofelia" in name for name in _compose()["services"])
+    assert "ofelia.job" not in text
+
+
+def test_serve_mounts_the_data_share_once_and_publishes_on_loopback() -> None:
+    """One /data mount, so serve can write /data/shakedown-config/ and archive
+    and library share a mount; no /config; the port only on host loopback."""
+    serve = _compose()["services"]["shakedown-serve"]
+    assert serve["volumes"] == ["/share/data:/data"]
+    assert serve["ports"] == ["127.0.0.1:8080:8080"]
+    assert "SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN:-}" in serve["environment"]
+    assert any(e.startswith("TZ=") for e in serve["environment"])
+
+
+def test_scheduler_shares_serve_image_and_user_and_cannot_write_the_config() -> None:
+    """The scheduler runs `shakedown schedule` from the same image as the same
+    user, publishes no port, reads the config folder through a read-only mount
+    over the data share, and reports its heartbeat as the container's health."""
+    services = _compose()["services"]
+    serve, scheduler = services["shakedown-serve"], services["shakedown-scheduler"]
+    assert scheduler["image"] == serve["image"]
+    assert scheduler["user"] == serve["user"]
+    assert scheduler["command"] == ["schedule"]
+    assert "ports" not in scheduler
+    assert scheduler["volumes"] == [
+        "/share/data:/data",
+        "/share/data/shakedown-config:/data/shakedown-config:ro",
+    ]
+    assert scheduler["healthcheck"]["test"] == ["CMD", "shakedown", "schedule", "--check"]
+    assert scheduler["restart"] == "unless-stopped"
+    assert scheduler["stop_grace_period"] == serve["stop_grace_period"] == "2m"
+    assert any(e.startswith("TZ=") for e in scheduler["environment"])
+
+
+def test_no_shakedown_container_mounts_the_docker_socket() -> None:
+    services = _compose()["services"]
+    for name in ("shakedown-serve", "shakedown-scheduler"):
+        assert not any(SOCKET in v for v in services[name].get("volumes", []))

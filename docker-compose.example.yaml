@@ -11,89 +11,45 @@
 # Setup:
 #   1. File Station: create /share/data/{archive,library,navidrome,shakedown-config}
 #   2. File Station: upload an initial shakedown.yaml to /share/data/shakedown-config/
+#      (start from shakedown.example.yaml). Inside the containers it is
+#      /data/shakedown-config/shakedown.yaml, the path Shakedown reads by default.
 #   3. Container Station → Applications → Create: paste this YAML and your env vars.
 #      SHAKEDOWN_IMAGE is required — Create fails until you set it, e.g. to
-#      ghcr.io/<owner>/shakedown:latest. Ofelia pulls the image before every
-#      tick, so `latest` updates Shakedown automatically to each release that
-#      passed CI. To hold a version instead, use a release tag such as 1.1.0.
+#      ghcr.io/<owner>/shakedown:latest. To hold a version instead, use a
+#      release tag such as 1.1.0.
 #
-# How scheduling works (SPEC.md §spec:deployment): ofelia is the only
-# scheduler. On each cron tick it launches a FRESH shakedown container
-# (ofelia job-run), which runs one `sync` and exits — matching shakedown's
-# one-shot, stateless-between-runs design. The one long-running Shakedown
-# service is shakedown-serve (the dashboard and control plane, below); it
-# never schedules. Navidrome, below, is how you listen. Change a schedule by
-# editing the ofelia labels in this file (Container Station → edit compose).
+# How scheduling works (SPEC.md §spec:deployment): each collection's
+# `schedule` in shakedown.yaml is a five-field cron expression (`30 3 * * *`
+# is daily at 03:30). shakedown-scheduler, below, starts each scheduled sync
+# as a fresh one-shot run and notices a changed shakedown.yaml within a
+# minute — no redeploy. A collection with no `schedule` syncs only when
+# someone starts it.
 #
 # Nothing syncs on `up`: each collection syncs only on its own schedule. To
-# sync immediately without waiting for the next tick, either (a) set
-# SHAKEDOWN_API_TOKEN and POST /sync to shakedown-serve (no SSH), or (b) start a one-off
-# container from Container Station → Create with command
-# `sync --collection <name>`, the same mounts, and user SHAKEDOWN_USER —
-# the manual equivalent of a tick.
+# sync immediately, either (a) set SHAKEDOWN_API_TOKEN and POST /sync to
+# shakedown-serve (no SSH), or (b) start a one-off container from Container
+# Station → Create with command `sync --collection <name>`, the same image,
+# mount, and user as shakedown-serve.
+#
+# `user` keeps every Shakedown container on ONE owner: root-owned files would
+# lock the other containers and manual runs out. Set SHAKEDOWN_USER (uid:gid)
+# to the owner of /share/data/archive, /share/data/library, and
+# /share/data/shakedown-config; it defaults to the image's user, 1000:1000.
 
 services:
-  ofelia:
-    image: mcuadros/ofelia:latest
-    container_name: shakedown-ofelia
-    command: daemon --docker
-    restart: unless-stopped
-    volumes:
-      # Read-only docker socket: ofelia needs it to start per-tick containers.
-      # This grants host-root-equivalent access — place the stack accordingly.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    labels:
-      # One job per collection. Each tick starts a fresh shakedown container
-      # from the image, runs one sync, then is removed (job-run + delete), so
-      # the run's output lands in THIS container's (shakedown-ofelia) log.
-      # Every label of a job must share one `ofelia.job-run.<name>.` prefix; a
-      # mismatched job type or name fails only in that log. After Create,
-      # check it shows one "New job registered" line per collection.
-      # The mounts mirror a manual run: the whole data share as one volume
-      # (hardlinks need it), plus config at /config. The config folder is
-      # also mounted read-only inside /data, so no run can rewrite it. The
-      # entrypoint is `shakedown --config /config/shakedown.yaml`, so `command`
-      # only carries the subcommand. Slice values (volume/environment) are
-      # JSON arrays.
-      #
-      # `user` keeps every Shakedown container on ONE owner. Without it ofelia
-      # runs jobs as root, and root-owned files then lock out serve and manual
-      # runs. Set SHAKEDOWN_USER (uid:gid) to the owner of /share/data/archive
-      # and /share/data/library; it defaults to the image's user, 1000:1000.
-      ofelia.job-run.dead-sync.schedule: "0 0 3 * * 0"   # Sunday 03:00
-      ofelia.job-run.dead-sync.image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
-      ofelia.job-run.dead-sync.command: "sync --collection grateful-dead"
-      ofelia.job-run.dead-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/data/shakedown-config:ro", "/share/data/shakedown-config:/config:ro"]'
-      ofelia.job-run.dead-sync.delete: "true"
-      ofelia.job-run.dead-sync.user: "${SHAKEDOWN_USER:-1000:1000}"
-      # Download-restricted collections only: uncomment to pass IA credentials
-      # to this job. If any collection needs them, give them to EVERY job: a
-      # job whose sync finishes also syncs the collections whose ticks it
-      # blocked, so it may run the restricted one. NOTE: values embedded here
-      # are visible via `docker inspect` on the ofelia container — omit unless
-      # a collection actually needs authentication.
-      # ofelia.job-run.dead-sync.environment: '["IA_EMAIL=${IA_EMAIL:-}", "IA_PASSWORD=${IA_PASSWORD:-}"]'
-
-      ofelia.job-run.phish-sync.schedule: "0 0 4 * * 0"  # Sunday 04:00
-      ofelia.job-run.phish-sync.image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
-      ofelia.job-run.phish-sync.command: "sync --collection phish"
-      ofelia.job-run.phish-sync.volume: '["/share/data:/data", "/share/data/shakedown-config:/data/shakedown-config:ro", "/share/data/shakedown-config:/config:ro"]'
-      ofelia.job-run.phish-sync.delete: "true"
-      ofelia.job-run.phish-sync.user: "${SHAKEDOWN_USER:-1000:1000}"
-      # ofelia.job-run.phish-sync.environment: '["IA_EMAIL=${IA_EMAIL:-}", "IA_PASSWORD=${IA_PASSWORD:-}"]'
-
-  # shakedown-serve: the read-only web dashboard and its GET /api/* data, plus the
+  # shakedown-serve: the web dashboard and its GET /api/* data, plus the
   # control plane (GET /status, GET /metrics for Prometheus, ad-hoc triggers).
-  # It runs all the time because the dashboard needs it; it never schedules.
-  # A stack without it loses only the dashboard and the triggers.
+  # It runs all the time because the dashboard needs it, and it writes
+  # shakedown.yaml when you save settings in the dashboard.
   #
   # The dashboard and its GET /api/* data have no login of their own, like
   # GET /status: put serve behind your reverse proxy (e.g. Authelia) and let
   # the proxy decide who opens it. The port is published on loopback only, so
   # the proxy is the one way in: anyone who reached it directly would see
-  # operational data (counts, paths, timings, errors — never credentials). A
-  # proxy on the host uses http://127.0.0.1:8080; a proxy in another container
-  # on this stack's network uses http://shakedown-serve:8080.
+  # operational data (counts, paths, timings, errors — never credentials) and
+  # could change settings. A proxy on the host uses http://127.0.0.1:8080; a
+  # proxy in another container on this stack's network uses
+  # http://shakedown-serve:8080.
   #
   # SHAKEDOWN_API_TOKEN is optional. It lets scripts and curl call the
   # mutating endpoints (POST /sync, POST /verify, POST /validate, and live
@@ -103,9 +59,12 @@ services:
   #   curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" \
   #     "https://<serve behind your proxy>/sync?collection=grateful-dead"
   #
-  # serve starts each triggered sync/verify as its own run, so it needs the
-  # same image, mounts, and user as the ofelia job (and the IA credentials env
-  # if a collection needs them).
+  # serve and the scheduler each start runs themselves, so both get the same
+  # image, data mount, user, and environment. Download-restricted collections
+  # only: uncomment the IA_* lines on BOTH and set IA_EMAIL / IA_PASSWORD. The
+  # values are visible via `docker inspect` — omit them unless a collection
+  # needs authentication. TZ is the clock for schedules when shakedown.yaml
+  # sets no `timezone`, and for log times (an IANA name such as Europe/Berlin).
   shakedown-serve:
     image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
     container_name: shakedown-serve
@@ -115,15 +74,46 @@ services:
     stop_grace_period: 2m
     volumes:
       - /share/data:/data
-      - /share/data/shakedown-config:/data/shakedown-config:ro
-      - /share/data/shakedown-config:/config:ro
     environment:
       - SHAKEDOWN_API_TOKEN=${SHAKEDOWN_API_TOKEN:-}
+      - TZ=${TZ:-UTC}
       # - IA_EMAIL=${IA_EMAIL:-}
       # - IA_PASSWORD=${IA_PASSWORD:-}
     ports:
       - "127.0.0.1:8080:8080"
     command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
+
+  # shakedown-scheduler: starts each collection's scheduled syncs. It listens
+  # on no port and never writes the config: the config folder is mounted again,
+  # read-only, over the data share, so no scheduled run can rewrite it.
+  # Scheduled runs log to THIS container's log.
+  #
+  # Its health is its heartbeat: `shakedown schedule --check` fails when the
+  # scheduler has not reported for three minutes. It also shows unhealthy until
+  # shakedown.yaml exists, because the heartbeat is kept in the state database
+  # the config names. Without this container, scheduled syncs do not run, and
+  # a tick missed while it is stopped is shown in the dashboard, not caught up.
+  shakedown-scheduler:
+    image: "${SHAKEDOWN_IMAGE:?set SHAKEDOWN_IMAGE to ghcr.io/<owner>/shakedown:latest}"
+    container_name: shakedown-scheduler
+    user: "${SHAKEDOWN_USER:-1000:1000}"
+    restart: unless-stopped
+    # On stop, the scheduler stops the runs it started and waits for them.
+    stop_grace_period: 2m
+    volumes:
+      - /share/data:/data
+      - /share/data/shakedown-config:/data/shakedown-config:ro
+    environment:
+      - TZ=${TZ:-UTC}
+      # - IA_EMAIL=${IA_EMAIL:-}
+      # - IA_PASSWORD=${IA_PASSWORD:-}
+    command: ["schedule"]
+    healthcheck:
+      test: ["CMD", "shakedown", "schedule", "--check"]
+      interval: 1m
+      timeout: 10s
+      retries: 1
+      start_period: 3m
 
   # Listening: Navidrome reads Shakedown's library tree directly. Its folder
   # watcher (on by default) picks up each newly synced show on its own, so no
