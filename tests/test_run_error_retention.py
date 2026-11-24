@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from shakedown import lock, retention
-from shakedown.activity import ABANDONED_ERROR
+from shakedown.activity import ABANDONED_ERROR, ActivityKind, ActivityRepo
 from shakedown.config import Config
 from shakedown.db import SCHEMA_VERSION, connect, open_unmigrated
 from shakedown.history import last_good_sync_at, run_end, run_history
@@ -223,9 +223,12 @@ def test_a_reader_of_a_v13_database_answers_without_migrating(tmp_path: Path) ->
     db = tmp_path / "state.db"
     with closing(connect(db)) as conn:
         _run(conn, timedelta(days=1), PER_SHOW)
+        ActivityRepo(conn).create(S, C, ActivityKind.VERIFY, run_id=None,
+                                  started_by_serve=False, at=datetime.now())
     _to_v13(db)
     with closing(open_unmigrated(db)) as conn:
-        [row] = run_history(conn, datetime.now(), 30)
-        assert row["errors"] == PER_SHOW and row["detail_trimmed"] is False
+        verify, sync = run_history(conn, datetime.now(), 30)
+        assert sync["errors"] == PER_SHOW and sync["detail_trimmed"] is False
+        assert (verify["kind"], verify["runs_trimmed"]) == ("verify", None)
     with closing(sqlite3.connect(db)) as conn:
         assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 13

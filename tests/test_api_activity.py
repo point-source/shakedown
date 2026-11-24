@@ -39,6 +39,7 @@ FIELDS = {
     "result", "end_reason", "phase", "items_listed", "items_to_look_up",
     "items_looked_up", "items_to_fetch", "items_done", "items_failed", "current_items",
     "bytes_downloaded", "bytes_to_fetch", "speed_bytes_per_second", "eta_seconds",
+    "runs_trimmed", "bytes_freed",
 }
 
 

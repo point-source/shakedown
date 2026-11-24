@@ -273,6 +273,12 @@ def build_app(
             args += ["--reconform", "--yes"]
         return start_run(config, "verify", source, collection, args)
 
+    @app.post("/api/history/trim", status_code=202, dependencies=[Depends(write_gate)])
+    def trim_history() -> dict[str, Any]:
+        """A fresh `trim` run (§spec:run-error-retention)."""
+        start_run(current_config(), "trim", None, None, ["trim-history"])
+        return {"started": "trim"}
+
     @app.post("/validate", dependencies=[Depends(write_gate)])
     def validate(
         request: Request,

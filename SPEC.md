@@ -1744,6 +1744,7 @@ exits (§req:constraints). The command surface:
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
+| `trim-history` | Drop run error lines older than `keep_run_errors_days` now and compact the state database (§spec:run-error-retention). |
 | `validate [--source S] [--collection C] [--live-handoff] [--json]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
 | `item show \| refetch <identifier>` | Single-item inspection and refetch; `refetch` is a single-show run (§spec:single-show-runs). |
 | `serve [--host] [--port]` | Optional HTTP control plane (§spec:serve). |
@@ -1755,8 +1756,8 @@ exits (§req:constraints). The command surface:
   does nothing and exits 0 (§req:quality-attributes: scheduled runs are
   observable).
 - Writing commands — `sync` (except `--dry-run`), `restage`,
-  `reconcile`, `item refetch`, and `verify --reconform`, whether run from
-  the CLI, the scheduler, or `serve` — hold one exclusive writer lock
+  `reconcile`, `item refetch`, `verify --reconform`, and `trim-history`,
+  whether run from the CLI, the scheduler, or `serve` — hold one exclusive writer lock
   (a kernel `flock` on `<state_db>.lock`). A second writer exits non-zero
   at once, naming the lock, instead of racing the first over shared temp
   folders. The kernel releases the lock when the holder exits, even on a
@@ -2645,14 +2646,15 @@ Observable behavior:
   database, so a run started by hand while `serve` is down shows the
   moment `serve` starts.
 - **What an entry says.** Collection; kind (`sync`, `catch_up`,
-  `refetch`, `reconform`, `restage`, `verify`, `reconcile`); whether
+  `refetch`, `reconform`, `restage`, `verify`, `reconcile`, `trim`); whether
   `serve` started it; start time; current phase (`starting`, `listing`,
   `discovering`, `downloading`, `tagging`, `staging`, `notifying`,
   `verifying`, `finishing`); shows listed, shows to look up and looked
   up; shows to fetch, done, and failed; the shows being worked on now;
   bytes downloaded so far; current speed; and an estimated time left.
   Kinds without a phase or counter leave it null (a restage lists
-  nothing). A sync's lookups and downloads overlap
+  nothing; a trim has neither, belongs to no collection, and reports the
+  runs it trimmed and the bytes freed instead, §spec:run-error-retention). A sync's lookups and downloads overlap
   (§spec:discovery-pipeline), so both counters show at once and the
   phase reads `discovering` until the listing's lookups are done.
 - **Honest totals.** Shows to fetch, and their bytes, are only known once
@@ -2723,8 +2725,8 @@ answers `{generated_at, runs: [...], waiting: [...], network: [...]}`.
 | --- | --- |
 | `activity_id` | The entry's id |
 | `run_id` | The run record's id when the kind has one (sync, catch_up, refetch, reconform), else null — the id `status` and `POST /sync` report |
-| `source`, `collection` | The collection the entry covers |
-| `kind` | `sync`, `catch_up`, `refetch`, `reconform`, `restage`, `verify`, `reconcile` |
+| `source`, `collection` | The collection the entry covers; null for a `trim` |
+| `kind` | `sync`, `catch_up`, `refetch`, `reconform`, `restage`, `verify`, `reconcile`, `trim` |
 | `started_by_serve` | true when `serve` launched the run |
 | `started_at`, `finished_at` | ISO times; `finished_at` null while running |
 | `last_heartbeat_at`, `last_progress_at` | ISO times |
@@ -2738,6 +2740,7 @@ answers `{generated_at, runs: [...], waiting: [...], network: [...]}`.
 | `bytes_downloaded`, `bytes_to_fetch` | bytes; `bytes_to_fetch` null until known |
 | `speed_bytes_per_second` | over the last ~10 seconds |
 | `eta_seconds` | null when not computable |
+| `runs_trimmed`, `bytes_freed` | a `trim`'s runs trimmed and bytes the database shrank by, set as it ends; null for other kinds |
 
 `runs` holds running entries and entries that ended in the last ten
 minutes, running first, then newest first.
@@ -2905,7 +2908,7 @@ last good sync age).
 Observable behavior:
 
 - **Every run, one list.** Syncs, catch-ups, refetches, reconforms,
-  restages, verifies, and reconciles of the last 30 days, newest first,
+  restages, verifies, reconciles, and trims of the last 30 days, newest first,
   each with kind, collection, start, duration, result, shows discovered,
   new, updated, and failed, bytes downloaded, its errors, and an
   undelivered failure notice. Runs that have a run record (sync,
@@ -2923,10 +2926,14 @@ otherwise `422`) answers `{generated_at, runs: [...]}`. Each run:
 `{run_id, activity_id, kind, source, collection, started_at,
 finished_at, duration_seconds, result, end_reason, items_discovered,
 items_new, items_updated, items_failed, bytes_downloaded, errors,
-failure_notice_error, detail_trimmed}`; `run_id` or `activity_id` is null when the run
-has none, and `duration_seconds` and `finished_at` are null while it
-runs. `detail_trimmed` is true once the run's error lines were dropped
-(§spec:run-error-retention); `status` reports it on each `last_run` too. `last_successful_sync_at` is part of each collection in
+failure_notice_error, detail_trimmed, runs_trimmed, bytes_freed}`;
+`run_id` or `activity_id` is null when the run has none, and
+`duration_seconds` and `finished_at` are null while it runs.
+`detail_trimmed` is true once the run's error lines were dropped
+(§spec:run-error-retention); `status` reports it on each `last_run` too.
+A `trim` has null `source` and `collection`, its runs trimmed and bytes
+freed in `runs_trimmed` and `bytes_freed` (null for other kinds), and
+its compaction failure, if any, in `errors`. `last_successful_sync_at` is part of each collection in
 §spec:library-stats.
 
 **Decision and constraint.** Read sync figures from the run records
@@ -4302,10 +4309,11 @@ Observable behavior:
 - **Trim now.** `POST /api/history/trim` starts a fresh run, kind
   `trim`, under the writer lock. It applies the same rule at once, then
   compacts the state database so the freed space returns to the disk.
-  Answers: `202 {started: "trim"}`; `409` with "a run is in progress"
-  when another run holds the lock. The run shows in the live view and
-  run history (§spec:run-activity, §spec:run-history) with the runs it
-  trimmed and the bytes the database shrank by. If the disk lacks room
+  It passes the write gate (§spec:dashboard-run-controls). Answers:
+  `202 {started: "trim"}`; `409` with "a run is in progress" when another
+  run holds the lock. The run shows in the live view and run history
+  (§spec:run-activity, §spec:run-history) with the runs it trimmed and
+  the bytes the database shrank by (`runs_trimmed`, `bytes_freed`). If the disk lacks room
   to compact (it needs about the database's size free), the trim still
   happens, the run reports the compaction failure, and the database
   keeps its size until the next attempt. The same run is

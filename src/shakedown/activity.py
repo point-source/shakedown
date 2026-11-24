@@ -42,6 +42,9 @@ class ActivityKind(StrEnum):
     RESTAGE = "restage"
     VERIFY = "verify"
     RECONCILE = "reconcile"
+    # Trims run error detail and compacts the database; it belongs to no collection
+    # (§spec:run-error-retention).
+    TRIM = "trim"
 
 
 class Phase(StrEnum):
@@ -133,11 +136,16 @@ def _parse(value: str | None) -> datetime | None:
 
 
 def _live_entry(row: sqlite3.Row) -> dict[str, Any]:
+    # A trim belongs to no source or collection; its row stores them empty.
+    scoped = row["kind"] != ActivityKind.TRIM
+    # Absent before schema v14, which readers open unmigrated (§spec:state). A Row's
+    # `in` tests its values, so its keys are asked for by name.
+    has_trim = "runs_trimmed" in row.keys()  # noqa: SIM118
     return {
         "activity_id": row["id"],
         "run_id": row["run_id"],
-        "source": row["source_name"],
-        "collection": row["collection_name"],
+        "source": row["source_name"] if scoped else None,
+        "collection": row["collection_name"] if scoped else None,
         "kind": row["kind"],
         "started_by_serve": bool(row["started_by_serve"]),
         "started_at": _parse(row["started_at"]),
@@ -154,6 +162,9 @@ def _live_entry(row: sqlite3.Row) -> dict[str, Any]:
         "bytes_to_fetch": row["bytes_to_fetch"],
         "speed_bytes_per_second": row["speed_bytes_per_second"],
         "eta_seconds": row["eta_seconds"],
+        # What a trim did (§spec:run-error-retention); null for every other kind.
+        "runs_trimmed": row["runs_trimmed"] if has_trim else None,
+        "bytes_freed": row["bytes_freed"] if has_trim else None,
     }
 
 
@@ -336,6 +347,13 @@ class ActivityRepo:
             (ENDED, result, _iso(finished_at), _iso(finished_at), activity_id, RUNNING),
         )
 
+    def record_trim(self, activity_id: int, runs_trimmed: int, bytes_freed: int) -> None:
+        """A trim's figures: the runs it trimmed and the bytes the database shrank by."""
+        self.conn.execute(
+            "UPDATE run_activity SET runs_trimmed=?, bytes_freed=? WHERE id=?",
+            (runs_trimmed, bytes_freed, activity_id),
+        )
+
     def last_heartbeat_for_run(self, run_id: int) -> datetime | None:
         row = self.conn.execute(
             "SELECT MAX(last_heartbeat_at) AS hb FROM run_activity WHERE run_id=?",
@@ -449,6 +467,7 @@ _KIND_COUNTERS: dict[ActivityKind, tuple[str, ...]] = {
     ActivityKind.RESTAGE: _FETCHING,
     ActivityKind.VERIFY: _FETCHING,
     ActivityKind.RECONCILE: _LISTING,
+    ActivityKind.TRIM: (),
 }
 _DOWNLOADING_KINDS = frozenset(
     {ActivityKind.SYNC, ActivityKind.CATCH_UP, ActivityKind.REFETCH, ActivityKind.RECONFORM}
@@ -553,9 +572,10 @@ class Progress:
 
     # -- hooks the run calls --------------------------------------------------------
 
-    def phase(self, phase: Phase) -> None:
+    def phase(self, phase: Phase | None) -> None:
+        """The run's phase now; None for a run with no phases (a trim)."""
         with self._lock:
-            self._phase = phase.value
+            self._phase = phase.value if phase is not None else None
 
     def _bump(self, counter: str, by: int) -> None:
         if counter in self._counts and by:

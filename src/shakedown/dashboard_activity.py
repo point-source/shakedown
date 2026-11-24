@@ -37,6 +37,8 @@ def _network_now(conn: sqlite3.Connection, running: list[dict[str, Any]]) -> lis
     earliest of them started — the run in progress, not an earlier one."""
     sources: dict[str, dict[str, Any]] = {}
     for entry in running:
+        if entry["source"] is None:
+            continue  # a trim reaches no source
         now = sources.setdefault(entry["source"], {
             "speed": 0.0, "in_flight": 0, "since": entry["started_at"],
         })

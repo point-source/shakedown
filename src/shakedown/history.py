@@ -133,6 +133,8 @@ def _from_record(run: Run, entry: dict[str, Any] | None, now: datetime) -> dict[
         "errors": run.errors,
         "failure_notice_error": run.failure_notice_error,
         "detail_trimmed": run.detail_trimmed_at is not None,
+        "runs_trimmed": None,
+        "bytes_freed": None,
     }
 
 
@@ -162,6 +164,9 @@ def _from_entry(entry: dict[str, Any], outcomes: OperationOutcomeRepo) -> dict[s
         "errors": outcome.errors if outcome else None,
         "failure_notice_error": None,
         "detail_trimmed": False,
+        # A trim's figures (§spec:run-error-retention); null for every other kind.
+        "runs_trimmed": entry["runs_trimmed"],
+        "bytes_freed": entry["bytes_freed"],
     }
 
 

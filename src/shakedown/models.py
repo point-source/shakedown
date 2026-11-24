@@ -30,6 +30,7 @@ class OperationType(StrEnum):
     VALIDATE = "validate"
     REFETCH = "refetch"
     RECONFORM = "reconform"
+    TRIM = "trim"
 
 
 # The command that reruns each operation, for an outcome's next safe action.
@@ -40,6 +41,7 @@ RERUN_COMMAND = {
     OperationType.VALIDATE: "validate",
     OperationType.REFETCH: "item refetch",
     OperationType.RECONFORM: "verify --deep --reconform",
+    OperationType.TRIM: "trim-history",
 }
 
 

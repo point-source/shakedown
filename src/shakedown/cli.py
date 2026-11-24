@@ -226,6 +226,16 @@ def reconcile(ctx: click.Context) -> None:
     ctx.exit(exit_code)
 
 
+@main.command("trim-history")
+@click.pass_context
+def trim_history(ctx: click.Context) -> None:
+    """Drop old run error lines now and compact the state database."""
+    cfg = _load_config(ctx)
+    from shakedown.retention import run_trim_history
+
+    ctx.exit(run_trim_history(cfg))
+
+
 @main.group()
 def item() -> None:
     """Single-item operations."""

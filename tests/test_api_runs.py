@@ -31,7 +31,7 @@ FIELDS = {
     "run_id", "activity_id", "kind", "source", "collection", "started_at",
     "finished_at", "duration_seconds", "result", "end_reason", "items_discovered",
     "items_new", "items_updated", "items_failed", "bytes_downloaded", "errors",
-    "failure_notice_error", "detail_trimmed",
+    "failure_notice_error", "detail_trimmed", "runs_trimmed", "bytes_freed",
 }
 # The figures a run record holds, as `status --json`'s `last_run` reports them.
 RECORD_FIGURES = (
