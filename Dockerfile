@@ -47,10 +47,9 @@ ENV PATH=/opt/venv/bin:$PATH
 
 USER 1000:1000
 
-# /config holds shakedown.yaml; /data holds archive + library.
-VOLUME ["/config", "/data"]
+# /data holds the archive, the library, and shakedown-config/shakedown.yaml,
+# which every command reads by default (§spec:deployment).
+VOLUME ["/data"]
 
-ENV SHAKEDOWN_CONFIG=/config/shakedown.yaml
-
-ENTRYPOINT ["shakedown", "--config", "/config/shakedown.yaml"]
+ENTRYPOINT ["shakedown"]
 CMD ["--help"]
