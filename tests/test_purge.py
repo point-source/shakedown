@@ -186,6 +186,21 @@ def test_a_file_swapped_in_at_a_placed_path_stays(synced: Config) -> None:
         assert PlacementRepo(conn).list_unplaced(S, C) == ["show-a/t1.flac"]
 
 
+def test_a_linked_folder_inside_the_library_is_never_deleted_through(synced: Config) -> None:
+    """The archive copy of a placed file shares its inode: reached through a link in
+    the library tree, it would pass the placed-file check."""
+    show = _library(synced) / "show-a"
+    for f in show.iterdir():
+        f.unlink()
+    show.rmdir()
+    show.symlink_to(_archive(synced) / "show-a")
+
+    assert _purge(synced) == 1
+
+    assert (_archive(synced) / "show-a" / "t1.flac").exists()
+    assert "is a link" in " ".join(_errors(synced))
+
+
 def test_adding_the_collection_back_after_a_library_delete_restages_without_downloading(
     synced: Config,
 ) -> None:

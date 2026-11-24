@@ -274,6 +274,12 @@ class _Deletes:
 
     def _unplace(self, rel: str, inode: int) -> None:
         path = self.library_base / rel
+        linked = self._linked_folder(path)
+        if linked is not None:
+            # A placed file's archive copy shares its inode, so the check below
+            # would pass for the archive file reached through the link.
+            self.errors.append(f"{linked} is a link; {path} was kept")
+            return  # stays recorded
         try:
             if path.lstat().st_ino != inode:
                 self.placements.remove_placement(self.source, self.collection, rel)
@@ -285,6 +291,16 @@ class _Deletes:
             if not self._unlink(path):
                 return  # stays recorded, so a later purge retries it
         self.placements.remove_placement(self.source, self.collection, rel)
+
+    def _linked_folder(self, path: Path) -> Path | None:
+        """The first folder between the collection's library folder and ``path``
+        that is a link, or None."""
+        folder = self.library_base
+        for part in path.relative_to(self.library_base).parts[:-1]:
+            folder = folder / part
+            if folder.is_symlink():
+                return folder
+        return None
 
     def archive(self) -> None:
         """Delete each show's archive folder and, once it is gone, the show's
