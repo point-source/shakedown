@@ -114,7 +114,9 @@ def staggered_default(config: Config) -> str:
     taken: set[int] = set()
     for _source, _collection, expr in scheduled(config):
         sim = CronSim(expr, datetime(2000, 1, 1))
-        if sim.weekdays & SUNDAY:
+        # cronsim keeps `SUN#1` and `0L` as (weekday, which) pairs.
+        days = {d[0] if isinstance(d, tuple) else d for d in sim.weekdays}
+        if days & SUNDAY:
             taken |= sim.hours
     for hour in range(STAGGER_FIRST_HOUR, 24):
         if hour not in taken:

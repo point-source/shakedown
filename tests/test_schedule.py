@@ -106,6 +106,8 @@ def test_next_syncs_is_none_for_manual_collections() -> None:
     (("0 3 * * 0", "30 4 * * *"), "0 5 * * 0"),  # daily at 04:30 fires on Sundays too
     (("0 3 * * 7",), "0 4 * * 0"),  # 7 is Sunday as well as 0
     (("0 3 * * 1",), "0 3 * * 0"),  # Mondays leave Sunday 03:00 free
+    (("0 3 * * SUN#1",), "0 4 * * 0"),  # the first Sunday of the month is a Sunday
+    (("0 3 * * 0L",), "0 4 * * 0"),  # and so is the last
     (("0 3-23 * * *",), "0 3 * * 0"),  # every hour from 03:00 taken: 03:00
 ])
 def test_staggered_default(existing: tuple[str | None, ...], expected: str) -> None:
