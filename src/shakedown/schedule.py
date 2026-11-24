@@ -61,7 +61,12 @@ def _ticks(expr: str, zone: ZoneInfo, start: datetime, *, reverse: bool) -> Iter
     # cronsim steps in wall time, so from the repeated hour's second pass it can
     # return a time of its first pass, already gone: compared as instants, in UTC.
     begin = start.astimezone(UTC)
-    for dt in CronSim(expr, start.astimezone(zone), reverse=reverse):
+    wall = start.astimezone(zone)
+    if reverse and _repeated(wall):
+        # Backward from the second pass's wall time would skip the first pass's
+        # later minutes, already gone: search from the repeated interval's end.
+        wall += wall.replace(fold=0).utcoffset() - wall.utcoffset()  # type: ignore[operator]
+    for dt in CronSim(expr, wall, reverse=reverse):
         instant = dt.astimezone(UTC)
         if _repeated(dt) or (instant > begin if reverse else instant <= begin):
             continue

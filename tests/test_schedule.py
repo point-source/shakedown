@@ -74,6 +74,14 @@ def test_a_time_the_clock_repeats_fires_once(expr: str, per_day: int) -> None:
     assert all(t.utcoffset() == fired[0].utcoffset() for t in fired)
 
 
+def test_the_previous_tick_in_the_repeated_hour_is_the_first_pass_one() -> None:
+    # 02:10 the second time (01:10 UTC): today's 02:30 already fired, at 00:30 UTC.
+    at = datetime(2026, 10, 25, 1, 10, tzinfo=UTC)
+    tick = schedule.previous_tick("30 2 * * *", BERLIN, at)
+    assert tick is not None
+    assert tick.astimezone(UTC) == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+
+
 @pytest.mark.parametrize("expr", ["30 2 * * *", "*/30 2 * * *"])
 def test_a_scheduler_started_in_the_repeated_hour_never_gets_a_past_tick(expr: str) -> None:
     # 02:10 the second time (01:10 UTC): the first 02:30 (00:30 UTC) is already past.
