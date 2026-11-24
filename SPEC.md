@@ -2562,9 +2562,13 @@ Observable behavior:
   its endpoints are unauthenticated, like the existing read endpoints;
   the operator's reverse proxy (for example Authelia) decides who may
   open them. They expose operational data only — counts, identifiers,
-  paths, timings, error text — never credentials, tokens, or secrets
-  (§req:quality-attributes: security of secrets). Writes pass the write
-  gate of §spec:dashboard-run-controls.
+  paths, timings, error text — never credentials or secrets
+  (§req:quality-attributes: security of secrets). The settings resource
+  shows the config file's own values as the file holds them, webhook
+  URLs included, since an editor must show what it edits and anyone who
+  can open the page can already replace them (operator decision,
+  2026-11-24). Writes pass the write gate of
+  §spec:dashboard-run-controls.
 - **Works behind a proxy, at any path.** The page addresses its assets
   and endpoints by relative URL, so it works at a host's root or under a
   path prefix the proxy adds, with no setting.
