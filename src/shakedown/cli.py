@@ -287,5 +287,28 @@ def serve(ctx: click.Context, host: str, port: int) -> None:
     run_server(config_path, host=host, port=port)
 
 
+@main.command()
+@click.option("--check", "check_only", is_flag=True,
+              help="Exit non-zero when the scheduler's heartbeat is missing or older "
+                   "than three minutes (a container health check).")
+@click.pass_context
+def schedule(ctx: click.Context, check_only: bool) -> None:
+    """Start each collection's scheduled syncs, until stopped (§spec:schedules)."""
+    import signal
+    from datetime import UTC, datetime
+
+    from shakedown.scheduler import Scheduler, check
+
+    config_path: Path = ctx.obj["config_path"]
+    if check_only:
+        healthy, why = check(config_path, datetime.now(UTC))
+        click.echo(why, err=not healthy)
+        ctx.exit(0 if healthy else 1)
+    scheduler = Scheduler(config_path)
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_: scheduler.request_stop())
+    ctx.exit(scheduler.run_forever())
+
+
 if __name__ == "__main__":  # pragma: no cover
     main()
