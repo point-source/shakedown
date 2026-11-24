@@ -44,6 +44,7 @@ from shakedown.dashboard import (
 )
 from shakedown.dashboard_activity import activity_answer
 from shakedown.dashboard_attention import attention_answer
+from shakedown.dashboard_config import config_answer
 from shakedown.dashboard_health import health_answer
 from shakedown.dashboard_library import library_answer
 from shakedown.dashboard_network import network_answer
@@ -210,6 +211,12 @@ def build_app(
     @app.get("/api/network")
     def network(days: int = Query(HISTORY_DAYS, ge=1, le=HISTORY_DAYS)) -> dict[str, Any]:
         return shared_answer(app, ("/api/network", days), VIEW_TTL_S, network_answer(days))
+
+    # The config resource (§spec:dashboard-settings): read at each request, never a
+    # shared answer, so a hand edit shows on the next refresh.
+    @app.get("/api/config")
+    def config_resource() -> dict[str, Any]:
+        return config_answer(config_path)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

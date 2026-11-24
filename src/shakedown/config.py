@@ -311,15 +311,27 @@ def check_document(raw: Any) -> Checked:
             None,
             [ConfigProblem((), "root_not_mapping", "config root must be a mapping")],
         )
+    config: Config | None = None
+    errors: list[ConfigProblem] = []
+    warnings: list[ConfigProblem] = []
     try:
         config = Config.model_validate(raw)
     except ValidationError as e:
-        return Checked(None, _validation_problems(e))
-    errors: list[ConfigProblem] = []
-    warnings: list[ConfigProblem] = []
-    _check_names(config, errors)
-    _check_layouts(config, errors, warnings)
+        errors += _validation_problems(e)
+    # The rules the model cannot hold read the document itself, so a file with a
+    # model error still has its names and layouts checked.
+    _check_names(raw, errors)
+    _check_layouts(raw, errors, warnings)
     return Checked(None if errors else config, errors, warnings)
+
+
+def _entries(node: Any, key: str) -> list[tuple[int, dict[str, Any]]]:
+    """The mappings in the list ``node[key]``, with their indexes; anything not shaped
+    that way is the model's to report."""
+    items = node.get(key) if isinstance(node, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [(i, item) for i, item in enumerate(items) if isinstance(item, dict)]
 
 
 def _line(raw: Any, problem: ConfigProblem) -> str:
@@ -366,12 +378,15 @@ def _yaml_problem(e: yaml.YAMLError) -> str:
     return f"invalid YAML at {places[0]}" + "".join(f" (found at {p})" for p in places[1:])
 
 
-def _check_names(config: Config, errors: list[ConfigProblem]) -> None:
+def _check_names(raw: dict[str, Any], errors: list[ConfigProblem]) -> None:
     """Collection names are unique within their source: the archive is keyed by them."""
-    for i, source in enumerate(config.sources):
+    for i, source in _entries(raw, "sources"):
         seen: set[str] = set()
-        for j, collection in enumerate(source.collections):
-            if collection.name in seen:
+        for j, collection in _entries(source, "collections"):
+            name = collection.get("name")
+            if not isinstance(name, str):
+                continue
+            if name in seen:
                 errors.append(
                     ConfigProblem(
                         ("sources", i, "collections", j, "name"),
@@ -379,11 +394,11 @@ def _check_names(config: Config, errors: list[ConfigProblem]) -> None:
                         "another collection in this source has the same name",
                     )
                 )
-            seen.add(collection.name)
+            seen.add(name)
 
 
 def _check_layouts(
-    config: Config, errors: list[ConfigProblem], warnings: list[ConfigProblem]
+    raw: dict[str, Any], errors: list[ConfigProblem], warnings: list[ConfigProblem]
 ) -> None:
     """Guard `library_layout` templates against fields the plugin can't surface and
     against layouts that cannot distinguish two items (§spec:layout-collision-safety).
@@ -406,9 +421,12 @@ def _check_layouts(
     from shakedown.plugins import registry
     from shakedown.utils.templates import FILTER_NAMES, fields_in, unknown_filters
 
-    for i, source in enumerate(config.sources):
+    for i, source in _entries(raw, "sources"):
+        source_type = source.get("type")
+        if not isinstance(source_type, str):
+            continue
         try:
-            plugin_cls = registry.plugin_class(source.type)
+            plugin_cls = registry.plugin_class(source_type)
         except registry.UnknownPluginError:
             errors.append(
                 ConfigProblem(
@@ -420,11 +438,12 @@ def _check_layouts(
             continue
         allowed = set(plugin_cls.template_fields)
         unique = set(plugin_cls.per_item_unique_fields)
-        for j, collection in enumerate(source.collections):
-            if collection.library_layout == "passthrough":
+        for j, collection in _entries(source, "collections"):
+            layout = collection.get("library_layout", "passthrough")
+            if not isinstance(layout, str) or layout == "passthrough":
                 continue
             loc: Loc = ("sources", i, "collections", j, "library_layout")
-            if unknown_filters(collection.library_layout):
+            if unknown_filters(layout):
                 errors.append(
                     ConfigProblem(
                         loc,
@@ -433,7 +452,7 @@ def _check_layouts(
                         f"define; valid filters: {', '.join(FILTER_NAMES)}",
                     )
                 )
-            referenced = fields_in(collection.library_layout)
+            referenced = fields_in(layout)
             if referenced - allowed:
                 errors.append(
                     ConfigProblem(

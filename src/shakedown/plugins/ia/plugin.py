@@ -188,6 +188,8 @@ class IAPlugin(SourcePlugin):
     # `identifier` is the item's IA identifier — globally unique, the composite key
     # (§spec:layout-collision-safety); no other surfaced field is guaranteed distinct.
     per_item_unique_fields = ("identifier",)
+    # Download-restricted items need an archive.org login (`auth`).
+    takes_credentials = True
 
     def __init__(self, source_config: SourceConfig) -> None:
         super().__init__(source_config)

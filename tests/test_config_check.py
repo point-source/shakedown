@@ -67,6 +67,18 @@ def test_model_errors_carry_pydantic_codes() -> None:
     ])
 
 
+def test_model_errors_do_not_hide_layout_and_name_errors() -> None:
+    raw = _doc(library_layout="Shows/All")
+    raw["max_concurrent_downloads"] = 0
+    raw["sources"][0]["collections"].append({"name": "gd", "query": 7})
+    assert sorted(_codes(raw)) == sorted([
+        (["max_concurrent_downloads"], "greater_than_equal"),
+        (["sources", 0, "collections", 1, "query"], "string_type"),
+        (["sources", 0, "collections", 1, "name"], "duplicate_name"),
+        (["sources", 0, "collections", 0, "library_layout"], "layout_no_field"),
+    ])
+
+
 def test_a_shared_field_layout_is_a_warning_not_an_error() -> None:
     checked = check_document(_doc(library_layout="{year}/{venue}"))
     assert checked.errors == [] and checked.config is not None

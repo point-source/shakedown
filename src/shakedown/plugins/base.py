@@ -403,3 +403,7 @@ class SourcePlugin(ABC):
     # the same staging path (§spec:layout-collision-safety). Empty means the plugin
     # vouches for no field's uniqueness.
     per_item_unique_fields: tuple[str, ...] = ()
+
+    # Whether the source uses login credentials, so the dashboard offers them
+    # (§spec:dashboard-settings `source_types`).
+    takes_credentials: bool = False
