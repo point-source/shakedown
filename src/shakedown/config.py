@@ -57,10 +57,17 @@ def _cron_expression(expr: str) -> str:
             "(minute hour day-of-month month day-of-week)",
         )
     try:
-        CronSim(expr, datetime(2000, 1, 1))
+        sim = CronSim(expr, datetime.now())
     except CronSimError as e:
         raise PydanticCustomError(
             "schedule_invalid", "not a valid cron expression: {reason}", {"reason": str(e)}
+        ) from None
+    try:
+        next(sim)
+    except StopIteration:
+        # cronsim parses some expressions that never match, such as `* * */20 * 1L`.
+        raise PydanticCustomError(
+            "schedule_invalid", "this cron expression never fires"
         ) from None
     return expr
 

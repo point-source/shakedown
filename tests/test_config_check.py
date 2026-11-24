@@ -77,6 +77,12 @@ def test_model_errors_carry_pydantic_codes() -> None:
     ])
 
 
+def test_a_schedule_that_parses_but_never_fires_is_refused() -> None:
+    raw = _doc()
+    raw["sources"][0]["collections"][0]["schedule"] = "* * */20 * 1L"
+    assert _codes(raw) == [(["sources", 0, "collections", 0, "schedule"], "schedule_invalid")]
+
+
 def test_model_errors_do_not_hide_layout_and_name_errors() -> None:
     raw = _doc(library_layout="Shows/All")
     raw["max_concurrent_downloads"] = 0
