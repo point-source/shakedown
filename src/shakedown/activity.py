@@ -45,6 +45,9 @@ class ActivityKind(StrEnum):
     # Trims run error detail and compacts the database; it belongs to no collection
     # (§spec:run-error-retention).
     TRIM = "trim"
+    # Deletes a collection the config file no longer names: its library files, or
+    # its library and archive (§spec:collection-removal).
+    PURGE = "purge"
 
 
 class Phase(StrEnum):
@@ -356,6 +359,12 @@ class ActivityRepo:
             (runs_trimmed, bytes_freed, activity_id),
         )
 
+    def record_freed(self, activity_id: int, bytes_freed: int) -> None:
+        """A purge's figure: the disk its deletes gave back."""
+        self.conn.execute(
+            "UPDATE run_activity SET bytes_freed=? WHERE id=?", (bytes_freed, activity_id)
+        )
+
     def last_heartbeat_for_run(self, run_id: int) -> datetime | None:
         row = self.conn.execute(
             "SELECT MAX(last_heartbeat_at) AS hb FROM run_activity WHERE run_id=?",
@@ -478,6 +487,7 @@ _KIND_COUNTERS: dict[ActivityKind, tuple[str, ...]] = {
     ActivityKind.VERIFY: _FETCHING,
     ActivityKind.RECONCILE: _LISTING,
     ActivityKind.TRIM: (),
+    ActivityKind.PURGE: (),
 }
 _DOWNLOADING_KINDS = frozenset(
     {ActivityKind.SYNC, ActivityKind.CATCH_UP, ActivityKind.REFETCH, ActivityKind.RECONFORM}

@@ -1,6 +1,7 @@
 """One writer at a time: an exclusive lock file shared by every command that writes
 to the archive, library, or state DB (sync, restage, reconcile, item refetch,
-verify --reconform), whether started from the CLI, the scheduler, or `serve`.
+verify --reconform, trim-history, purge), whether started from the CLI, the
+scheduler, or `serve`.
 
 Two writers would share per-item temp folders and wipe each other's half-written
 files, so a second writer exits with a clear error instead of waiting. The lock is
