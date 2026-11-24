@@ -3825,9 +3825,10 @@ Observable behavior:
   planning stopped.
 - **Heartbeat.** About once a minute the scheduler records a heartbeat
   in the state database: the time, its release, whether it holds a
-  valid schedule, and the next tick it plans. Recording never takes the
-  writer lock and never migrates, like a rescheduled-sync entry
-  (§spec:rescheduled-syncs). `shakedown schedule --check` exits non-zero
+  valid schedule, and the next tick it plans. The heartbeat is one
+  record, replaced each time, never a history, so it does not grow.
+  Recording never takes the writer lock and never migrates, like a
+  rescheduled-sync entry (§spec:rescheduled-syncs). `shakedown schedule --check` exits non-zero
   when the heartbeat is older than three minutes or missing; the compose
   example uses it as the scheduler container's health check, so Container
   Station shows the container unhealthy.
@@ -3858,9 +3859,17 @@ Observable behavior:
   the clock changes, a time that does not exist fires once at the next
   valid minute, and a time that occurs twice fires once.
 - **Idle costs nothing.** Between ticks the scheduler waits on a timer,
-  checks the file's modification time, and writes one heartbeat row,
+  checks the file's modification time, and replaces its heartbeat,
   about once a minute; it adds no polling of sources and no work on the
   NAS.
+- **No new history to trim.** What this increment stores is current
+  state, not a log: the heartbeat, the edit state (§spec:edit-lock), and
+  whether the stale-scheduler notification was sent for this episode are
+  one record each; stored credentials are one record per source and go
+  with the source. Scheduled syncs and purges write the run records and
+  activity entries every run already writes, at the rate ofelia's ticks
+  did; activity is kept 30 days and run records are kept, as before
+  (§spec:state).
 - **Manual runs are unchanged.** `shakedown sync` typed by hand or run
   in a one-off container works exactly as before, with or without the
   scheduler or `serve`.
