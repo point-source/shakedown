@@ -2,9 +2,11 @@
 // shapes of src/api/types.ts, with a fixed clock. Served to the real page by
 // intercepting its requests (scripts/render.mjs, tests/screens.spec.ts).
 import type {
-  ActivityAnswer, AttentionAnswer, AttentionEntry, HealthAnswer, HistoryRun, LibraryAnswer, NetworkAnswer, RunsAnswer,
+  ActivityAnswer, AttentionAnswer, AttentionEntry, ConfigAnswer, HealthAnswer, HistoryRun, LibraryAnswer, NetworkAnswer,
+  RunsAnswer,
 } from "@/api/types"
 import * as base from "./default.ts"
+import { config as baseConfig } from "./config.ts"
 
 export type Answers = {
   activity: ActivityAnswer
@@ -13,7 +15,12 @@ export type Answers = {
   library: LibraryAnswer
   attention: AttentionAnswer
   health: HealthAnswer
+  config: ConfigAnswer
 }
+
+/** An answer to a write (POST/PUT/DELETE), keyed "<METHOD> <path after the page>",
+ *  e.g. "POST sync?source=internetarchive&collection=phish" or "PUT api/config". */
+export type Writes = Record<string, { status: number; body: unknown }>
 
 export interface Scenario {
   now: string
@@ -22,6 +29,8 @@ export interface Scenario {
   mode: { kind: "ok" } | { kind: "no_config"; detail: string } | { kind: "goes_away"; minutes: number } | { kind: "hangs" }
     | { kind: "restarts_broken"; detail: string; minutes: number } | { kind: "refused" }
   answers: Answers
+  /** Answers to the page's writes; a write with no entry answers 404. */
+  writes?: Writes
   /** Endpoints that always answer this HTTP error status instead of their answer. */
   fail?: Partial<Record<keyof Answers, number>>
 }
@@ -38,6 +47,7 @@ const defaultAnswers = (): Answers => clone({
   library: base.library,
   attention: base.attention,
   health: base.health,
+  config: baseConfig,
 })
 
 const CONFIG_ERROR = "config validation failed:\nmax_concurrent_collectons: Extra inputs are not permitted"
@@ -277,7 +287,19 @@ function schedulerStopped(): Answers {
       identifiers: [], count: 0, detail: {} },
   ]
   a.health.scheduler = { state: "stale", last_seen: at(45), release: "1.9.0" }
+  // grateful-dead syncs daily at 21:00; the 21:00 tick passed with the scheduler down.
+  a.config.document!.sources[0].collections[0].schedule = "0 21 * * *"
+  a.config.next_syncs[0].next_at = "2026-11-13T21:00:00+00:00"
   return a
+}
+
+const PHISH_SYNC = "POST sync?source=internetarchive&collection=phish"
+const VALIDATION_PROBLEMS = {
+  ready: false,
+  groups: [
+    { source: null, collection: null, ok: true, checks: [] },
+    { source: "internetarchive", collection: "phish", ok: false, checks: [] },
+  ],
 }
 
 // The server lists runs newest first (§spec:run-history).
@@ -298,6 +320,12 @@ export const SCENARIOS: Record<string, Scenario> = {
   long_content: { now: NOW, mode: { kind: "ok" }, answers: sorted(longContent()) },
   waiting: { now: NOW, mode: { kind: "ok" }, answers: sorted(waitingRound()) },
   scheduler_stopped: { now: NOW, mode: { kind: "ok" }, answers: sorted(schedulerStopped()) },
+  // Run controls (review): Sync now answered at once, refused as busy; Validate.
+  sync_started: { now: NOW, mode: { kind: "ok" }, answers: sorted(quiet()),
+    writes: { [PHISH_SYNC]: { status: 202, body: { started: "sync", source: "internetarchive", collection: "phish" } } } },
+  sync_busy: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { [PHISH_SYNC]: { status: 409, body: { detail: "a run is in progress; try again when it finishes" } },
+      "POST validate": { status: 200, body: VALIDATION_PROBLEMS } } },
   // Behaviour scenarios (tests/behaviour.spec.ts, tests/freshness.spec.ts); no screenshots.
   // The browser's clock runs a minute ahead of the server's; the server answers normally.
   server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },

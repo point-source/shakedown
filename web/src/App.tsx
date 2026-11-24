@@ -8,6 +8,7 @@ import { Overview } from "@/views/Overview"
 import { RunsView } from "@/views/Runs"
 import { SourcesView } from "@/views/Sources"
 import { LibraryView } from "@/views/Library"
+import { Notes } from "@/dash/actions"
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -56,6 +57,7 @@ export function App() {
   const updated = d.activity.data?.generated_at ?? null
 
   return (
+    <Notes>
     <div className="mx-auto flex min-w-0 max-w-6xl flex-col gap-4 p-4 sm:p-6">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <h1 className="text-xl font-semibold">Shakedown</h1>
@@ -110,5 +112,6 @@ export function App() {
         </Tabs>
       )}
     </div>
+    </Notes>
   )
 }

@@ -3209,7 +3209,8 @@ API: `GET /api/health` (unauthenticated) answers `{generated_at,
 release, config: {valid, error, last_loaded_at}, validation: [{source,
 collection, status, at}], scheduler: {state, last_seen, release}}` where
 `status` is an outcome code and absent values are null; `scheduler` is
-§spec:schedules's, not drawn until Design draws it.
+§spec:schedules's, drawn as the Scheduler line on Overview's Shakedown
+card (§spec:ui-kit).
 
 **Decision and constraint.** Report the validation already recorded
 rather than run one, because visiting the dashboard must not touch
@@ -3306,6 +3307,18 @@ Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
   arrived.
 - CardTitle renders an `h2` (kit change), so screen readers can jump
   between cards. A figure inside a card is plain text, never a CardTitle.
+- Form parts (round S1, 2026-11-24), stock shadcn/ui new-york: Button
+  (`default`, `destructive`, `outline`, `secondary`, `ghost`, `link`;
+  sizes `default`, `sm`, `lg`, `icon`), Input, Textarea, Label, Select,
+  Switch, Checkbox, RadioGroup, Field (label, control, one-line
+  description, and an error line with `role="alert"`), Dialog,
+  AlertDialog, and Toast (variants `default`, `success`, `warning`,
+  `danger`, the tone on the title). Field outlines are the stock
+  `--input` color. They measure about 1.3:1 against the page, below
+  WCAG 1.4.11's 3:1 for controls. A stronger grey reaching 3.1:1 was
+  rendered and offered; the operator kept the stock look (operator
+  decision, 2026-11-24). Every field carries a visible label, so a
+  field never depends on its outline alone to be found.
 
 **Usage rules.**
 
@@ -3331,6 +3344,14 @@ Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
   because a phone cannot hover to read the rest.
 - A list shows its first few items and "and N more"; there are no
   expanders.
+- An action's answer (Sync now, Validate) shows as a Toast: `success`
+  when it started or passed, `warning` when it was refused for a run in
+  progress or found problems, `danger` when Shakedown refused it or
+  could not be reached. The button reads "Starting…" or "Validating…"
+  while the request is out. A toast never holds the only copy of a
+  result the page shows elsewhere.
+- Irreversible actions confirm in an AlertDialog whose action button is
+  `destructive` and names the loss.
 
 **Operator decisions on the screens (2026-11-12).**
 
@@ -3356,8 +3377,11 @@ Separator, Alert, Tooltip, Skeleton, Tabs, Chart. Kit additions:
   below 1024 px Needs attention comes first.
 
 The kit sheet (`web/src/KitSheet.tsx`, `?view=kit`) shows every token
-and component state. The operator approved it on 2026-11-12 (round 2);
-its goldens are `web/tests/__screenshots__/kit-<size>-<theme>.png`.
+and component state. The operator approved it on 2026-11-12 (round 2)
+and its form parts on 2026-11-24 (round S1); its goldens are
+`web/tests/__screenshots__/kit-<size>-<theme>.png`, and
+`kit-overlay-<size>-<theme>.png` (`?view=kit&overlay=1`) shows the
+AlertDialog and a Toast open over it.
 The representative screen the token sets were compared on was replaced
 by the designed page.
 
@@ -3389,7 +3413,8 @@ Spec and code names in the last column never appear on screen.
 | Archive | Shakedown's own copy of every downloaded file. | mirror, store, disk | archive tree, `archive_bytes`, `bytes_on_disk` |
 | Library | The folders your music tools read. Its files are links into the archive and take no extra space. | staging, archive | library tree, `library_bytes` |
 | Free space | Space left on the drive that holds the archive. | available, disk free | `disk.free_bytes` |
-| Run | One piece of work Shakedown does on one collection. | job, task, activity | activity entry, run record |
+| Run | One piece of work Shakedown does on one collection, or on its own records. | job, task, activity | activity entry, run record |
+| Action (column) | The kind of a run, as the Runs table heads that column (operator decision, 2026-11-24). | run, type, event | `kind` |
 | Sync | A run that checks the source and downloads new and changed shows. | update, refresh | `sync` |
 | Catch-up sync | A sync that waited for another run to finish, then ran. | retry, rescheduled sync | `catch_up` |
 | Refetch | A run that downloads one show again. | redownload | `refetch` |
@@ -3397,6 +3422,21 @@ Spec and code names in the last column never appear on screen.
 | Restage | A run that rebuilds the library folders from the archive. | rebuild, relink | `restage` |
 | Verify | A run that checks archive files against what Shakedown recorded. | scan, audit | `verify` |
 | Reconcile | A run that rebuilds Shakedown's records from the archive. | rescan, recover | `reconcile` |
+| Trim history | A run that drops old runs' error details and gives the space back to the disk. | purge history, compact, vacuum | `trim`, `shakedown trim-history` |
+| Delete files | A run that deletes a removed collection's library folders, or its library folders and archived shows. | purge, wipe, clean up | `purge`, `shakedown purge` |
+| *N* runs trimmed | How many runs a trim history run dropped error details from. | pruned, cleaned | `runs_trimmed` |
+| *size* freed | Space a trim history or delete files run gave back to the disk; not shown when about nothing was freed. | reclaimed, saved | `bytes_freed` |
+| Error details trimmed | A run whose per-show error lines were dropped after the retention period; its result and counts stay. | pruned, expired, purged | `detail_trimmed` |
+| Scheduler | The part of Shakedown that starts syncs on their schedules. | cron, ticker, daemon | scheduler, heartbeat |
+| Working (scheduler) | The scheduler is reporting in. | running, OK, alive | `scheduler.state: running` |
+| Not responding | The scheduler has not reported in since the time shown. | stopped, down, stale | `scheduler.state: stale` |
+| Nothing scheduled | No collection has a schedule. | idle, off | `scheduler.state: no_schedule` |
+| Never started | The scheduler has never reported in. | missing, not running | `scheduler.state: never` |
+| Next sync | When a collection's next scheduled sync starts. | next run, next tick | `next_syncs[].next_at` |
+| Manual only | A collection with no schedule; it syncs only on Sync now. | unscheduled, disabled | no `schedule` key |
+| Sync now | Start a sync of one collection now. | run now, trigger | `POST /sync` |
+| Validate | Run validation now, for every collection. | test, check | `POST /validate` |
+| A run is in progress | An action refused because another run holds the lock. | busy, locked | 409 busy |
 | Validation | A check that the config, sources, and handoff targets work, run with `shakedown validate`. | test, preflight | readiness validation |
 | Release | The Shakedown version answering this page. | version, build | `release` |
 | Running | A run that is working and reporting. | active, in progress | `state: running` |
@@ -3406,6 +3446,7 @@ Spec and code names in the last column never appear on screen.
 | Stopped | A run someone stopped before it finished (`docker stop`, Ctrl-C); the next run continues where it left off. | interrupted, cancelled, aborted | `stopped`, stopped on request |
 | Completed | The run finished and every show it worked on succeeded. | done, succeeded, OK | `completed` |
 | Completed, some shows failed | The run finished; some shows failed and the next sync retries them. | partial, partly failed | `completed_with_item_issues` |
+| Completed, some files not deleted | A delete files run finished, but some files could not be deleted; deleting again retries them. | partial, partly failed | purge `completed_with_item_issues` |
 | Failed | The run ended before it finished. | error, aborted | `failed_before_completion` |
 | Listing incomplete | The source's list of shows did not load, so nothing was removed. | stale | `stale_enumeration`, stale |
 | Estimating | A total or time left that is not known yet. | unknown, calculating, — | null `items_to_fetch`, `bytes_to_fetch`, `eta_seconds` |
@@ -3456,8 +3497,8 @@ is one route (`GET /`) with four tabs.
 | Screen | Handoff spec | Golden scenarios | Approved |
 | --- | --- | --- | --- |
 | Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13 |
-| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content, waiting | round 2, 2026-11-12; waiting rows 2026-11-20; unidentified files row 2026-11-23 |
-| Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
+| Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content, waiting, scheduler-stopped, trims, purges | round 2, 2026-11-12; waiting rows 2026-11-20; unidentified files row 2026-11-23; Shakedown card with scheduler and run controls, trim and delete runs, round S1 2026-11-24 |
+| Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content, trims, purges; loading | round 1, 2026-11-12; loading 2026-11-13; trim and delete runs and the Action column, round S1 2026-11-24 |
 | Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
 
@@ -3476,7 +3517,9 @@ is one route (`GET /`) with four tabs.
   approved screens and the approved kit sheet. A font or renderer
   difference is a finding, never a reason to loosen the threshold.
   Every baseline was rendered on Linux x86-64 (Rocky Linux 9.8) with
-  Playwright 1.65.0's Chromium and the bundled fonts. The screenshot
+  Playwright 1.65.0's Chromium and the bundled fonts; baselines from
+  2026-11-24 on were rendered on Rocky Linux 9.9 with Playwright
+  1.65.1, where every earlier baseline still passes. The screenshot
   tests run on a developer's machine before a UI change merges, not in
   CI (operator decision, 2026-11-12): CI checks types and the build
   only.
@@ -4225,8 +4268,8 @@ finishes.
 
 ## Run controls in the dashboard §spec:dashboard-run-controls
 
-*Status: in progress*
-The write gate is built; the Sync now and Validate buttons wait on Design.
+*Status: complete*
+The write gate is built, and Overview's Shakedown card carries Validate and, per collection, Sync now (Design round S1, 2026-11-24).
 
 From the dashboard a user can start a sync of one collection and run
 setup validation, and watch the result in the live view. These, and

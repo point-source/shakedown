@@ -238,3 +238,87 @@ export interface HealthAnswer {
   /** Whether the scheduler is running (§spec:schedules). Not drawn yet: Design's. */
   scheduler: { state: "running" | "stale" | "no_schedule" | "never"; last_seen: Iso | null; release: string | null }
 }
+
+// ---- Config management (§spec:dashboard-settings and the sections it names) ----
+
+export type ConfigState = "missing" | "unreadable" | "invalid" | "valid"
+export type EditState = "editable" | "locked" | "override"
+export type CredentialStatus = "environment" | "dashboard" | "none"
+/** Keys and list indexes to the setting a problem names, e.g. ["sources", 0, "collections", 1, "query"]. */
+export type Loc = (string | number)[]
+
+export interface ConfigProblem { loc: Loc; code: string; message: string }
+export interface ConfigWarning { loc: Loc; code: string }
+
+export interface CollectionConfig {
+  name: string
+  query: string
+  library_layout: string
+  prune_disappeared: boolean
+  incremental_discovery: boolean
+  preserve_source_metadata: boolean
+  fill_tags: boolean
+  on_complete: { webhook: string } | { exec: string } | null
+  /** Five-field cron; null for manual only (§spec:schedules). */
+  schedule: string | null
+}
+
+export interface SourceConfig {
+  name: string
+  type: string
+  auth: { email_env: string | null; password_env: string | null } | null
+  collections: CollectionConfig[]
+  max_concurrent_requests: number | null
+}
+
+export interface ConfigDocument {
+  archive_root: string
+  library_root: string
+  state_db: string | null
+  max_concurrent_downloads: number
+  max_concurrent_collections: number
+  keep_run_errors_days: number
+  sources: SourceConfig[]
+  notifications: { on_failure: { webhook: string | null } | null } | null
+  timezone: string | null
+}
+
+export interface SourceType {
+  type: string
+  layout_fields: string[]
+  layout_filters: string[]
+  takes_credentials: boolean
+}
+
+export interface UnconfiguredCollection {
+  source: string
+  collection: string
+  shows: number
+  archive_bytes: number
+  library_bytes: number
+}
+
+export interface ConfigAnswer {
+  generated_at: Iso
+  state: ConfigState
+  path: string
+  revision: string | null
+  edit: EditState
+  document: ConfigDocument | null
+  errors: ConfigProblem[]
+  credentials: { source: string; credentials: CredentialStatus }[]
+  next_syncs: { source: string; collection: string; next_at: Iso | null }[]
+  source_types: SourceType[]
+  unconfigured: UnconfiguredCollection[]
+}
+
+/** `POST /validate` (§spec:setup-readiness-validation). */
+export interface ValidationReport {
+  ready: boolean
+  groups: {
+    source: string | null
+    collection: string | null
+    ok: boolean
+    checks: { name: string; ok: boolean; target: string | null; consequence: string | null; action: string | null }[]
+  }[]
+}

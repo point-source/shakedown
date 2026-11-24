@@ -13,7 +13,7 @@ function RunRow({ run, now }: { run: ActivityRun; now: string }) {
   const nowMs = Date.parse(now)
   const stalledFor = (nowMs - Date.parse(run.last_progress_at)) / 1000
   const ended = run.state === "ended"
-  const end = outcome(run.result, run.end_reason)
+  const end = outcome(run.result, run.end_reason, run.kind)
   const pct = run.items_to_fetch ? (100 * (run.items_done ?? 0)) / run.items_to_fetch : null
   const discovering = run.phase === "discovering" || run.phase === "listing"
   // A trim or a purge has no shows, phases, or progress to report: its row is the
@@ -22,8 +22,10 @@ function RunRow({ run, now }: { run: ActivityRun; now: string }) {
   return (
     <li className="flex flex-col gap-2 py-4 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="min-w-0 font-medium wrap-anywhere">{run.collection ?? "—"}</span>
-        <span className="text-muted-foreground">· {KIND[run.kind]}</span>
+        {run.collection !== null && <span className="min-w-0 font-medium wrap-anywhere">{run.collection}</span>}
+        <span className={run.collection === null ? "font-medium" : "text-muted-foreground"}>
+          {run.collection !== null && "· "}{KIND[run.kind]}
+        </span>
         <span className="ml-auto flex flex-wrap gap-1">
           {ended && end ? (
             <ToneBadge tone={end.tone}>{end.label} at {clock(run.finished_at!, now)}</ToneBadge>

@@ -3,7 +3,7 @@
 // Every request is a GET to a relative URL, so the page works under a proxy prefix.
 import { useEffect, useRef, useState } from "react"
 import type {
-  ActivityAnswer, AttentionAnswer, HealthAnswer, LibraryAnswer, NetworkAnswer, RunsAnswer,
+  ActivityAnswer, AttentionAnswer, ConfigAnswer, HealthAnswer, LibraryAnswer, NetworkAnswer, RunsAnswer,
 } from "@/api/types"
 
 export const LIVE_MS = 5_000
@@ -89,7 +89,8 @@ export function useDashboard() {
   const library = useEndpoint<LibraryAnswer>("library", VIEW_MS)
   const attention = useEndpoint<AttentionAnswer>("attention", VIEW_MS)
   const health = useEndpoint<HealthAnswer>("health", VIEW_MS)
-  return { activity, network, runs, library, attention, health }
+  const config = useEndpoint<ConfigAnswer>("config", VIEW_MS)
+  return { activity, network, runs, library, attention, health, config }
 }
 
 export type Dashboard = ReturnType<typeof useDashboard>
@@ -104,7 +105,7 @@ export type Dashboard = ReturnType<typeof useDashboard>
 export function staleSince(d: Dashboard, now: number): number | null {
   const slots: [Slot<unknown>, number][] = [
     [d.activity, LIVE_MS], [d.network, VIEW_MS], [d.runs, VIEW_MS],
-    [d.library, VIEW_MS], [d.attention, VIEW_MS], [d.health, VIEW_MS],
+    [d.library, VIEW_MS], [d.attention, VIEW_MS], [d.health, VIEW_MS], [d.config, VIEW_MS],
   ]
   let stale = false
   let oldest: number | null = null
