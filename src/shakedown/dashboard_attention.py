@@ -11,7 +11,13 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from shakedown.activity import HISTORY_DAYS, STOPPED_REPORTING, operation_of
+from shakedown.activity import (
+    HISTORY_DAYS,
+    RUNNING,
+    STALE_AFTER_S,
+    STOPPED_REPORTING,
+    operation_of,
+)
 from shakedown.config import Config
 from shakedown.dashboard import DashboardContext, iso
 from shakedown.heartbeat import read_heartbeat, state_of
@@ -92,7 +98,8 @@ def _missed_tick(conn: sqlite3.Connection, config: Config, summary: dict[str, An
                  now: datetime) -> datetime | None:
     """The collection's latest scheduled time when it passed more than ten minutes ago
     with nothing covering it, else None (§spec:schedules). Covered means a sync or
-    catch-up of the collection started at or after it or was still running at it, or
+    catch-up of the collection started at or after it or was still running at it (and,
+    when its record is open, still reporting), or
     the collection has a rescheduled entry: an entry keeps its oldest skip, so a tick
     skipped later leaves no newer trace (operator, 2026-11-24)."""
     collection = next(
@@ -105,12 +112,18 @@ def _missed_tick(conn: sqlite3.Connection, config: Config, summary: dict[str, An
     if tick is None or now - tick <= OVERDUE_AFTER:
         return None
     at = _local(tick)
+    # An open record counts only while its run still reports: one left open by a run
+    # that died (the NAS lost power) stays open until the next run takes the writer
+    # lock, and must not hide the ticks missed meanwhile.
+    live_since = _local(now - timedelta(seconds=STALE_AFTER_S))
     covered = conn.execute(
         "SELECT 1 FROM runs WHERE source_name = ? AND collection_name = ? "
-        "AND kind IN (?, ?) "
-        "AND (started_at >= ? OR finished_at IS NULL OR finished_at >= ?) LIMIT 1",
+        "AND kind IN (?, ?) AND (started_at >= ? OR finished_at >= ? "
+        "OR (finished_at IS NULL AND EXISTS (SELECT 1 FROM run_activity a "
+        "WHERE a.run_id = runs.id AND a.state = ? AND a.last_heartbeat_at >= ?))) "
+        "LIMIT 1",
         (summary["source"], summary["collection"], RunKind.SYNC.value,
-         RunKind.CATCH_UP.value, at, at),
+         RunKind.CATCH_UP.value, at, at, RUNNING, live_since),
     ).fetchone()
     return None if covered else tick
 

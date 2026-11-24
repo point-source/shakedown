@@ -188,6 +188,50 @@ def test_a_sync_running_across_the_tick_covers_it(tmp_roots: tuple[Path, Path]) 
     ]
 
 
+def _activity(config: Config, collection: str, heartbeat_age: timedelta) -> None:
+    """The live-progress row of the collection's latest run record, last heard from
+    ``heartbeat_age`` ago."""
+    assert config.state_db is not None
+    beat = (datetime.now() - heartbeat_age).isoformat()
+    with closing(connect(config.state_db)) as conn:
+        run_id = conn.execute(
+            "SELECT MAX(id) FROM runs WHERE collection_name = ?", (collection,)
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO run_activity (source_name, collection_name, kind, run_id, "
+            "started_at, last_heartbeat_at, last_progress_at, state) "
+            "VALUES ('fake-src', ?, 'sync', ?, ?, ?, ?, 'running')",
+            (collection, run_id, beat, beat, beat),
+        )
+
+
+def test_a_sync_still_reporting_across_the_tick_covers_it(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    now = datetime.now(UTC)
+    tick = (now - timedelta(minutes=15)).replace(second=0, microsecond=0)
+    config = _scheduled(make_config(*tmp_roots), _daily_at(tick))
+    _run(config, "coll1", tick - timedelta(days=2), None)
+    _activity(config, "coll1", timedelta(seconds=2))
+    assert ("tick_overdue", "fake-src", "coll1") not in _kinds(config)
+
+
+def test_a_dead_runs_open_record_does_not_cover_later_ticks(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """The NAS lost power mid-sync: its record stays open until the next run takes
+    the writer lock, but a run that stopped reporting covers no tick."""
+    now = datetime.now(UTC)
+    tick = (now - timedelta(minutes=15)).replace(second=0, microsecond=0)
+    config = _scheduled(make_config(*tmp_roots), _daily_at(tick), _daily_at(tick))
+    _run(config, "coll1", tick - timedelta(days=2), None)
+    _activity(config, "coll1", timedelta(days=2))
+    _run(config, "coll2", tick - timedelta(days=2), None)  # no live-progress row at all
+    kinds = _kinds(config)
+    assert ("tick_overdue", "fake-src", "coll1") in kinds
+    assert ("tick_overdue", "fake-src", "coll2") in kinds
+
+
 def test_an_outstanding_rescheduled_entry_covers_the_tick(
     tmp_roots: tuple[Path, Path],
 ) -> None:
