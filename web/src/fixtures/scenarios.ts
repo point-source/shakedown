@@ -128,6 +128,7 @@ function longContent(): Answers {
     items_failed: i % 5 === 0 ? 2 : 0, bytes_downloaded: i * 1_200_000_000,
     errors: i % 5 === 0 ? ["source enumeration failed: HTTPSConnectionPool(host='archive.org', port=443): Read timed out. (read timeout=30)", "gd1977-05-08: checksum mismatch after 3 attempts", "gd1978-01-22: checksum mismatch after 3 attempts"] : [],
     failure_notice_error: i === 5 ? "apprise: no service accepted the notification" : null,
+    detail_trimmed: false, runs_trimmed: null, bytes_freed: null,
   }))
   a["runs?days=30"].runs.push(...extra)
   a.library.collections[0].collection = long
@@ -146,6 +147,43 @@ function verifyRunning(): Answers {
     phase: "verifying", current_items: [], bytes_downloaded: null, bytes_to_fetch: null,
     speed_bytes_per_second: null, eta_seconds: null,
   })
+  return a
+}
+
+// Trim runs (§spec:run-error-retention), shaped as serve answers them: a trim
+// running now, one that ended without room to compact, one that freed space, and
+// a sync whose per-show error lines were dropped. A trim belongs to no collection.
+function trims(): Answers {
+  const a = defaultAnswers()
+  const trim = (activity_id: number, started: number, finished: number | null) => ({
+    activity_id, run_id: null, source: null, collection: null, kind: "trim" as const,
+    started_by_serve: true, started_at: at(started), finished_at: finished === null ? null : at(finished),
+    last_heartbeat_at: at(finished ?? 0.05), last_progress_at: at(started), current_items: [], phase: null,
+    items_listed: null, items_to_look_up: null, items_looked_up: null, items_to_fetch: null,
+    items_done: null, items_failed: null, bytes_downloaded: null, bytes_to_fetch: null,
+    speed_bytes_per_second: null, eta_seconds: null, end_reason: null,
+  })
+  const ran = (activity_id: number, started: number, finished: number | null,
+    result: HistoryRun["result"], errors: string[] | null, runs_trimmed: number | null, bytes_freed: number | null): HistoryRun => ({
+    run_id: null, activity_id, kind: "trim", source: null, collection: null, started_at: at(started),
+    finished_at: finished === null ? null : at(finished), duration_seconds: finished === null ? null : (started - finished) * 60,
+    result, end_reason: null, items_discovered: null, items_new: null, items_updated: null, items_failed: null,
+    bytes_downloaded: null, errors, failure_notice_error: null, detail_trimmed: false, runs_trimmed, bytes_freed,
+  })
+  // Only one run holds the writer lock: the trim runs alone.
+  a.activity.runs = [
+    { ...trim(931, 8, null), state: "running", result: null, runs_trimmed: null, bytes_freed: null },
+    { ...trim(930, 9, 8.5), state: "ended", result: "failed_before_completion", runs_trimmed: 214, bytes_freed: 0 },
+  ]
+  a.activity.network = []
+  a["runs?days=30"].runs = a["runs?days=30"].runs.filter((r) => r.finished_at)
+  a["runs?days=30"].runs.push(
+    ran(931, 8, null, null, null, null, null),
+    ran(930, 9, 8.5, "failed_before_completion", ["compaction failed: database or disk is full"], 214, 0),
+    ran(929, 3000, 2998, "completed", [], 1890, 412_000_000),
+  )
+  const synced = a["runs?days=30"].runs.find((r) => r.run_id === 485)!
+  Object.assign(synced, { errors: [], detail_trimmed: true })
   return a
 }
 
@@ -211,6 +249,7 @@ export const SCENARIOS: Record<string, Scenario> = {
   // The browser's clock runs a minute ahead of the server's; the server answers normally.
   server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },
   verify_running: { now: NOW, mode: { kind: "ok" }, answers: sorted(verifyRunning()) },
+  trims: { now: NOW, mode: { kind: "ok" }, answers: sorted(trims()) },
   restarts_broken: { now: NOW, mode: { kind: "restarts_broken", detail: CONFIG_ERROR, minutes: 1 }, answers: sorted(defaultAnswers()) },
   library_fails: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()), fail: { library: 500 } },
   removed_undated: { now: NOW, mode: { kind: "ok" }, answers: sorted(removedUndated()) },

@@ -13,6 +13,20 @@ test("a running verify with no download facts still draws", async ({ page, baseU
   await expect(running.getByText("· Verify")).toHaveCount(1)
 })
 
+test("trim runs draw on the existing rows, and a trimmed run shows no error lines", async ({ page, baseURL }) => {
+  await openScenario(page, baseURL!, "trims")
+  const running = page.locator('[data-slot="card"]').filter({ has: page.getByText("Running now", { exact: true }) })
+  await expect(running.getByText("· Trim history")).toHaveCount(1)
+  await expect(running.getByText("—", { exact: true })).toHaveCount(1)
+  await expect(running.getByText("Started 21:32 · 8 min ago")).toBeVisible()
+  for (const fact of ["Shows", "Time left", "Downloaded"]) await expect(running.getByText(fact, { exact: true })).toHaveCount(0)
+  await page.getByRole("tab", { name: "Runs" }).click()
+  const table = page.locator("table")
+  await expect(table.getByText("Trim history", { exact: true })).toHaveCount(3)
+  await expect(table.getByText("compaction failed: database or disk is full")).toBeVisible()
+  await expect(page.getByText("lma-ph2003-07-15: checksum mismatch after 3 attempts")).toHaveCount(0)
+})
+
 test("a serve that restarts with a broken config says so and keeps the data", async ({ page, baseURL }) => {
   await openScenario(page, baseURL!, "restarts_broken")
   await expect(page.getByText("shakedown.yaml has an error")).toBeVisible()

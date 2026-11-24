@@ -10,6 +10,7 @@ export type Tone = "success" | "warning" | "danger"
 export const KIND: Record<RunKind, string> = {
   sync: "Sync", catch_up: "Catch-up sync", refetch: "Refetch", reconform: "Reconform",
   restage: "Restage", verify: "Verify", reconcile: "Reconcile",
+  trim: "Trim history", // provisional: Design task 325c24ff confirms the glossary term
 }
 const kindLower = (k: RunKind) => KIND[k].toLowerCase()
 

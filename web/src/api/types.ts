@@ -6,7 +6,7 @@
 export type Iso = string
 
 export type RunKind =
-  | "sync" | "catch_up" | "refetch" | "reconform" | "restage" | "verify" | "reconcile"
+  | "sync" | "catch_up" | "refetch" | "reconform" | "restage" | "verify" | "reconcile" | "trim"
 export type Phase =
   | "starting" | "listing" | "discovering" | "downloading" | "tagging" | "staging"
   | "notifying" | "verifying" | "finishing"
@@ -18,8 +18,9 @@ export type EndReason = "stopped_reporting"
 export interface ActivityRun {
   activity_id: number
   run_id: number | null
-  source: string
-  collection: string
+  /** Null for a trim, which belongs to no collection. */
+  source: string | null
+  collection: string | null
   kind: RunKind
   started_by_serve: boolean
   started_at: Iso
@@ -42,6 +43,9 @@ export interface ActivityRun {
   bytes_to_fetch: number | null
   speed_bytes_per_second: number | null
   eta_seconds: number | null
+  /** A trim's runs trimmed and bytes the database shrank by; null for other kinds. */
+  runs_trimmed: number | null
+  bytes_freed: number | null
 }
 
 export type NetworkEventKind =
@@ -104,8 +108,9 @@ export interface HistoryRun {
   run_id: number | null
   activity_id: number | null
   kind: RunKind
-  source: string
-  collection: string
+  /** Null for a trim, which belongs to no collection. */
+  source: string | null
+  collection: string | null
   started_at: Iso
   finished_at: Iso | null
   duration_seconds: number | null
@@ -118,6 +123,10 @@ export interface HistoryRun {
   bytes_downloaded: number | null
   errors: string[] | null
   failure_notice_error: string | null
+  /** The run's per-show error lines were dropped (§spec:run-error-retention). */
+  detail_trimmed: boolean
+  runs_trimmed: number | null
+  bytes_freed: number | null
 }
 
 export interface RunsAnswer {
