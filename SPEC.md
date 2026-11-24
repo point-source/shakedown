@@ -1845,7 +1845,7 @@ notice sent, both shows' bytes restored.
 ## Configuration §spec:configuration
 
 *Status: in progress*
-The config-management increment (§spec:dashboard-settings, §spec:schedules) adds the `schedule` and `timezone` keys, which are built, and moves the file into the data mount, which is not built yet.
+The config-management increment (§spec:dashboard-settings, §spec:schedules) adds the `schedule` and `timezone` keys, which are built, and moves the file into the data mount: the CLI default is `/data/shakedown-config/shakedown.yaml`, and the image and compose example still pass `/config/shakedown.yaml` until §spec:deployment's change lands.
 
 All configuration lives in a single YAML file at
 `/data/shakedown-config/shakedown.yaml`, inside the one data mount
@@ -1907,10 +1907,11 @@ the run rather than being ignored).
 
 Complete through schema v14.
 
-The scheduler's heartbeat and the stale-scheduler notice record
-(§spec:schedules) are one row each in tables outside schema versioning:
-each writer (the scheduler, `serve`) creates its own table when the
-database lacks it and leaves `schema_version` alone, so neither ever
+The scheduler's heartbeat, the stale-scheduler notice record
+(§spec:schedules), and the config file's edit state (`config_edit`,
+§spec:edit-lock) are one row each in tables outside schema versioning:
+each writer (the scheduler, `serve`, setup) creates its own table when
+the database lacks it and leaves `schema_version` alone, so none ever
 migrates and a previous release ignores them.
 
 Sync state lives in a single-file embedded SQLite database at
@@ -3542,7 +3543,8 @@ loads.
 
 ## Settings in the dashboard §spec:dashboard-settings
 
-*Status: not started*
+*Status: in progress*
+The API is built: `GET /api/config` (without `unconfigured`, which §spec:collection-removal adds), `PUT /api/config`, and `POST /api/config/check-paths`; the Settings screens wait on the Design task.
 
 Compatibility, from deployment status "deployed, one install, no
 outside consumers" (§req:constraints, operator-confirmed 2026-11-24):
@@ -3607,8 +3609,10 @@ Observable behavior:
   ranges, duplicate collection names, an unknown source type, a layout
   with an unknown field or filter or none at all, plus the schedule and
   timezone rules of §spec:schedules. Answers:
-  - `200 {revision, warnings}` — written; `warnings` lists path-check
-    results (below), each `{loc, code}`;
+  - `200 {revision, warnings}` — written; `warnings` lists, each
+    `{loc, code}`: the path-check results (below) with `path_moved`, and
+    `layout_not_unique` for a layout the run also only warns about
+    (§spec:layout-collision-safety);
   - `422 {errors}` — refused, same `{loc, code, message}` shape as
     above, every error found, not only the first; the file is untouched;
   - `409 {code: "changed"}` — the file's revision is no longer the one
@@ -3618,10 +3622,23 @@ Observable behavior:
   - `403 {code: "cross_site"}` — the write gate refused the request
     (§spec:dashboard-run-controls);
   - `500 {code: "write_failed", path}` — the file or its folder cannot
-    be written (for example, a read-only mount); the file is untouched.
+    be written (for example, a read-only mount); the file is untouched;
+  - `409 {code: "missing"}` or `409 {code: "unreadable"}` — there is no
+    file, or it is not valid YAML: no editor exists for either (below),
+    and the override answers the same.
   A document a save accepts is one the next run accepts, and the reverse
   (§req:quality-attributes: a save tells the truth): both paths call one
   validation, never two copies of it.
+  Codes: an error's `code` is pydantic's own error type for a type,
+  range, or unknown-key rule (`extra_forbidden`, `missing`,
+  `greater_than_equal`, …), and for the rules of our own:
+  `schedule_invalid`, `timezone_unknown`, `duplicate_name`,
+  `source_type_unknown`, `layout_unknown_filter`,
+  `layout_unknown_field`, `layout_no_field`, and `exec_file_only`. An
+  unreadable file has one error at `loc: []`: `yaml_invalid`,
+  `root_not_mapping`, or `read_failed`. Path-check warnings are
+  `not_writable` (at the setting whose folder fails) and
+  `hardlink_failed` (at `library_root`).
 - **Paths warn, never block.** When a save changes `archive_root`,
   `library_root`, or `state_db`, the system runs the path checks of
   §spec:setup-readiness-validation on the new values — each folder
@@ -3631,8 +3648,9 @@ Observable behavior:
   Shakedown moves nothing, so a run against a new, empty archive or state
   database downloads again what the old one held. `POST
   /api/config/check-paths` with `{archive_root, library_root, state_db}`
-  runs the same checks without saving, for an editor or setup that wants
-  the answer before Save. Runs still refuse to start on a path that
+  (`state_db` optional, defaulting beside the archive) runs the same
+  checks without saving and answers `200 {warnings}`, for an editor or
+  setup that wants the answer before Save. Runs still refuse to start on a path that
   fails (§spec:system-shape).
 - **Hand edits survive.** Writing changes only the settings that
   changed. Comments, key order, quoting, and blank lines elsewhere in
@@ -3702,9 +3720,10 @@ YAML round-trip dependency. Users who want a command handoff edit the
 file. Renaming a collection costs a remove and an add.
 
 **User-level test path.** Open Settings on a phone; change a
-collection's layout to `{year}/{venue}` with no identifier field: Save
-is refused with the layout error naming that setting, and the file is
-unchanged. Fix it and save: `shakedown.yaml` holds the new layout, its
+collection's layout to `Shows/All`, with no source field: Save is
+refused with the layout error naming that setting, and the file is
+unchanged. A layout with no identifier field, such as `{year}/{venue}`,
+saves with the `layout_not_unique` warning, as the run warns. Fix it and save: `shakedown.yaml` holds the new layout, its
 comments are still there, and the next sync stages under it. Edit the
 file by hand with Settings open and save again: the save is refused as
 changed. Point `library_root` at a folder on another filesystem: the
@@ -3714,7 +3733,8 @@ Add `exec:` to a collection's handoff through the API: refused with
 
 ## Edit lock §spec:edit-lock
 
-*Status: not started*
+*Status: in progress*
+The edit state, `POST /api/config/override`, the locked save, and the helper setup uses to write a new `editable` file are built; the dashboard's read-only view and override confirmation wait on the Design task.
 
 A `shakedown.yaml` that Shakedown's setup wrote is editable from the
 dashboard from the start. A file that already existed — written by hand
