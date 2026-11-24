@@ -1006,6 +1006,13 @@ async def test_stopping_serve_stops_the_runs_it_started(
         # outside it, so serve's SIGTERM is its first signal, not a second one.
         (running,) = app.state.triggered
         assert os.getpgid(running.process.pid) != os.getpgrp()
+        # 202 means the child holds the lock, not that it has opened its run record
+        # yet; a stop before that records no run (§spec:graceful-stop), so wait.
+        for _ in range(200):
+            if running.runs:
+                break
+            await asyncio.sleep(0.05)
+        assert running.runs, "the run never opened its record"
     (triggered,) = app.state.triggered
     assert triggered.done.is_set()
     assert triggered.process.returncode == 143
