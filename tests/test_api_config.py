@@ -441,6 +441,33 @@ async def test_a_command_handoff_in_the_file_stays_as_written(
         assert [e["code"] for e in response.json()["errors"]] == ["exec_file_only"]
 
 
+@pytest.mark.parametrize(
+    ("command", "status"),
+    [
+        pytest.param("sh -c 'import {{staging_root}}'", 422, id="uses-the-path"),
+        pytest.param("/bin/notify {{collection}}", 200, id="does-not"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_library_path_a_command_handoff_uses_stays_in_the_file(
+    paths: dict[str, Path], tmp_path: Path, command: str, status: int
+) -> None:
+    """A command that hands the path to a shell would run whatever the dashboard
+    saved as the path. (The file text is a format string: braces are doubled.)"""
+    loaded = await _unlocked(paths, WITH_EXEC.replace("/bin/notify", command))
+    before = paths["config"].read_bytes()
+    doc = loaded["document"]
+    doc["library_root"] = str(tmp_path / "music; touch pwned")
+    async with _client(paths) as client:
+        response = await _put(client, loaded["revision"], doc)
+    assert response.status_code == status, response.json()
+    if status == 422:
+        assert [(e["loc"], e["code"]) for e in response.json()["errors"]] == [
+            (["library_root"], "exec_file_only")
+        ]
+        assert paths["config"].read_bytes() == before
+
+
 @pytest.mark.asyncio
 async def test_a_hand_written_file_is_locked_until_the_override(
     paths: dict[str, Path],

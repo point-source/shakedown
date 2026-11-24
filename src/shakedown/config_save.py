@@ -58,7 +58,8 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
             raise Refusal(409, "changed")
 
         checked = check_document(document)
-        errors = checked.errors + exec_problems(current.raw, document)
+        errors = (checked.errors + exec_problems(current.raw, document)
+                  + path_problems(current.raw, document))
         if errors:
             raise ConfigRejected(errors)
         assert checked.config is not None
@@ -196,6 +197,23 @@ def exec_problems(old_raw: Any, new_raw: Any) -> list[ConfigProblem]:
             )
         )
     return problems
+
+
+def path_problems(old_raw: Any, new_raw: Any) -> list[ConfigProblem]:
+    """A library path an `exec` command fills in as `{staging_root}` stays in the
+    file too (§spec:dashboard-settings): a command that hands it to a shell would
+    run whatever the dashboard saved as the path."""
+    if not isinstance(old_raw, dict) or not isinstance(new_raw, dict):
+        return []
+    if old_raw.get("library_root") == new_raw.get("library_root"):
+        return []
+    if not any(isinstance(command, str) and "{staging_root}" in command
+               for _key, command, _loc in _exec_values(old_raw)):
+        return []
+    return [ConfigProblem(
+        ("library_root",), EXEC_FILE_ONLY,
+        "a command handoff uses this path, so it is set in the config file only",
+    )]
 
 
 def _exec_values(raw: Any) -> list[tuple[tuple[Any, Any], Any, tuple[str | int, ...]]]:

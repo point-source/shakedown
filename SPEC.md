@@ -3692,9 +3692,13 @@ Observable behavior:
 - **The command handoff stays in the file.** The dashboard shows a
   collection's `on_complete: exec` command but cannot set, change, or
   remove it, and a save whose document adds or changes an `exec` value
-  is refused with code `exec_file_only`. Webhook handoffs and the
-  failure-notification webhook are editable (operator decision,
-  2026-11-24).
+  is refused with code `exec_file_only`. While any `exec` command uses
+  `{staging_root}`, `library_root` stays in the file too: a save that
+  changes it is refused with `exec_file_only` on `library_root`, because
+  a command that hands the path to a shell would run whatever the
+  dashboard saved as the path (operator decision, 2026-11-24). Webhook
+  handoffs and the failure-notification webhook are editable (operator
+  decision, 2026-11-24).
 - **A broken file.** An `invalid` file is shown in the editor with its
   errors against the settings they name, and a save that fixes them
   succeeds. An `unreadable` file (bad YAML) has no editor: the dashboard
