@@ -24,10 +24,11 @@ from shakedown.activity import ABANDONED_ERROR, ActivityKind, ActivityRepo
 from shakedown.dashboard import LIVE_TTL_S
 from shakedown.db import connect
 from shakedown.network import EventKind, NetworkEvent, NetworkRepo
-from shakedown.server import TOKEN_ENV, build_app
+from shakedown.server import build_app
 from shakedown.state import RunRepo
 from shakedown.status import print_status
 from shakedown.sync import run_sync
+from shakedown.write_gate import TOKEN_ENV
 from tests.conftest import make_config, write_config
 from tests.serve_child import SPEC_ENV
 from tests.test_server import AUTH, CHILD_PREFIX, REPO_ROOT, _Clock, _finish, run_now

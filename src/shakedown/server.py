@@ -1,23 +1,23 @@
 """Optional HTTP control plane: `shakedown serve`. PRD §10.
 
 Lives behind an extras dep (`pip install shakedown[serve]`) so the core CLI
-container stays small. Auth is a shared secret via `Authorization: Bearer`;
-the endpoints are explicitly NOT for public exposure.
+container stays small. Every mutating endpoint passes the write gate
+(`shakedown.write_gate`): the bearer token, or the dashboard's own page. The
+operator's reverse proxy decides who reaches serve at all; the port is not for
+public exposure.
 """
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
-import os
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, closing, suppress
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import (
@@ -60,10 +60,10 @@ from shakedown.trigger import (
     stop_runs,
 )
 from shakedown.validate import validate_config
+from shakedown.write_gate import install_refusals, require_token, write_gate
 
 log = logging.getLogger(__name__)
 
-TOKEN_ENV = "SHAKEDOWN_API_TOKEN"
 BUSY_MESSAGE = "a run is in progress; try again when it finishes"
 # A run stopped on request exits 128 + SIGTERM or SIGINT (§spec:graceful-stop).
 STOPPED_EXIT_CODES = (143, 130)
@@ -96,6 +96,7 @@ def build_app(
     # Answers and page assets over a kilobyte go out gzipped to a client that asks;
     # a proxy that passes Content-Encoding through hands them on (§spec:dashboard).
     app.add_middleware(GZipMiddleware, minimum_size=1000)
+    install_refusals(app)
     app.state.answers = SharedAnswers(clock, spawn)
     # Every load goes through the tracker, so the dashboard knows the last config
     # this serve loaded, including the one at start-up.
@@ -131,20 +132,6 @@ def build_app(
         ["result"],
         registry=registry,
     )
-
-    def require_token(authorization: str | None) -> None:
-        expected = os.environ.get(TOKEN_ENV)
-        if not expected:
-            raise HTTPException(
-                503, f"mutating endpoints disabled: set {TOKEN_ENV} in env"
-            )
-        scheme, _, token = (authorization or "").partition(" ")
-        # Compare as bytes: hmac.compare_digest rejects non-ASCII str operands
-        # with TypeError, which would surface a malformed header as a 500.
-        if scheme.lower() != "bearer" or not hmac.compare_digest(
-            token.encode(), expected.encode()
-        ):
-            raise HTTPException(401, "invalid or missing bearer token")
 
     def scope_args(source: str | None, collection: str | None) -> list[str]:
         return [
@@ -246,13 +233,13 @@ def build_app(
         body = generate_latest(registry)
         return PlainTextResponse(body.decode(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.post("/sync", status_code=202)
+    # The write gate runs as a route dependency, before the handler: a refused caller
+    # learns nothing about the config or its scopes (§spec:dashboard-run-controls).
+    @app.post("/sync", status_code=202, dependencies=[Depends(write_gate)])
     def trigger_sync(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
-        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        require_token(authorization)
         config = current_config()
         require_scope(config, source, collection)
 
@@ -268,15 +255,13 @@ def build_app(
             on_exit=count,
         )
 
-    @app.post("/verify", status_code=202)
+    @app.post("/verify", status_code=202, dependencies=[Depends(write_gate)])
     def trigger_verify(
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
         deep: bool = Query(default=False),
         reconform: bool = Query(default=False),
-        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        require_token(authorization)
         config = current_config()
         require_scope(config, source, collection)
         if reconform and not deep:
@@ -288,19 +273,18 @@ def build_app(
             args += ["--reconform", "--yes"]
         return start_run(config, "verify", source, collection, args)
 
-    @app.post("/validate")
+    @app.post("/validate", dependencies=[Depends(write_gate)])
     def validate(
+        request: Request,
         source: str | None = Query(default=None),
         collection: str | None = Query(default=None),
         live_handoff: bool = Query(default=False),
-        authorization: str | None = Header(default=None),
     ) -> JSONResponse:
-        # Default validation is read-only and follows the /status posture (no token).
-        # A live handoff test sends a real webhook / runs the configured command, so it
-        # is a mutating operation and carries the same bearer-token posture as ad-hoc
-        # sync and verify (§spec:serve, §spec:setup-readiness-validation).
+        # Validation records its outcomes, so it passes the write gate. A live handoff
+        # test sends a real webhook or runs the configured command, and the dashboard
+        # never offers it: it takes the token only (§spec:dashboard-run-controls).
         if live_handoff:
-            require_token(authorization)
+            require_token(request)
         config = current_config()
         require_scope(config, source, collection)
         report = validate_config(
