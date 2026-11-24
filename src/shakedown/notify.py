@@ -231,8 +231,8 @@ def send_handoff_test(
     Sends the marked validation webhook or runs the configured command with the marked
     test payload on stdin, and returns a delivery-error string or ``None`` on success.
     This is the explicit, auditable opt-in: it exercises the real handoff path, so it
-    is protected by the same bearer-token posture as ad-hoc sync when reached over the
-    control plane (§spec:serve)."""
+    takes the bearer token only when reached over the control plane
+    (§spec:dashboard-run-controls)."""
     body = _validation_body(source, collection, "<validation>")
     try:
         return _dispatch(handoff, body)
