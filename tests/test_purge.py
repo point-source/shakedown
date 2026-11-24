@@ -283,6 +283,32 @@ def test_a_collection_name_that_leaves_its_folder_is_refused(synced: Config) -> 
     assert (_archive(synced) / "show-a" / "t1.flac").exists()
 
 
+@pytest.mark.parametrize("linked", ["source", "collection"])
+def test_a_collection_folder_replaced_by_a_link_is_never_deleted_through(
+    synced: Config, linked: str,
+) -> None:
+    """A link in place of the source or collection folder would aim the deletes at
+    wherever it points, outside the collection: the purge deletes nothing."""
+    folder = _archive(synced) if linked == "collection" else synced.archive_root / S
+    elsewhere = synced.archive_root.parent / "elsewhere"
+    folder.rename(elsewhere)
+    folder.symlink_to(elsewhere)
+
+    assert _purge(synced, everything=True) == 1
+
+    kept = elsewhere if linked == "collection" else elsewhere / C
+    assert (kept / "show-a" / "t1.flac").exists()
+    assert "is a link" in " ".join(_errors(synced))
+
+
+def _errors(config: Config) -> list[str]:
+    assert config.state_db is not None
+    with closing(connect(config.state_db)) as conn:
+        outcome = OperationOutcomeRepo(conn).get(_entry(config)["outcome_id"])
+    assert outcome is not None
+    return outcome.errors
+
+
 # --- the CLI ------------------------------------------------------------------------
 
 

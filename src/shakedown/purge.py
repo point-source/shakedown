@@ -155,7 +155,7 @@ def _run_purge(
         announce_opened(None, outcome.id, source, collection)
 
         deletes = _Deletes(config, conn, source, collection)
-        refusal = _refusal(config_path, source, collection, conn)
+        refusal = _refusal(config, config_path, source, collection, conn)
         if refusal is not None:
             log.error("%s", refusal)
             deletes.errors.append(refusal)
@@ -190,12 +190,19 @@ def _run_purge(
 
 
 def _refusal(
-    config_path: Path, source: str, collection: str, conn: sqlite3.Connection
+    config: Config, config_path: Path, source: str, collection: str,
+    conn: sqlite3.Connection,
 ) -> str | None:
     """Why the purge may not delete, decided under the lock from the file as it is
     now: a collection added back since the request keeps every file."""
     if not (_one_folder(source) and _one_folder(collection)):
         return f"{source!r}/{collection!r} is not one folder name; nothing deleted"
+    # A link in place of the source or collection folder would aim every delete at
+    # wherever it points: outside the collection.
+    for root in (config.library_root, config.archive_root):
+        for folder in (root / source, root / source / collection):
+            if folder.is_symlink():
+                return f"{folder} is a link; nothing deleted"
     try:
         current = load(config_path)
     except ConfigError as e:
