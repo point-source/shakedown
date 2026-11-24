@@ -34,7 +34,9 @@ from shakedown.write_gate import Refusal
 PATH_KEYS = ("archive_root", "library_root", "state_db")
 EXEC_FILE_ONLY = "exec_file_only"
 
-_writing = threading.Lock()
+# Serializes every write serve makes to the config file and the install state
+# beside it (the edit state, stored credentials).
+writing = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,7 @@ class Saved:
 
 def save(path: Path, revision: str | None, document: Any) -> Saved:
     """Check ``document`` and write it over the file loaded at ``revision``."""
-    with _writing:
+    with writing:
         current = _editable_file(path)
         if revision != current.revision:
             raise Refusal(409, "changed")
@@ -82,7 +84,7 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
 
 def override(path: Path) -> None:
     """Turn the override on (§spec:edit-lock); idempotent."""
-    with _writing:
+    with writing:
         file = read_config_file(path)
         if file.state in ("missing", "unreadable"):
             raise Refusal(409, file.state)
