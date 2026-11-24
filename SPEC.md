@@ -4162,7 +4162,10 @@ bootstrap setting for an attack the example layout already blunts.
 runs, and delete an unconfigured collection's files — the posture the
 operator chose. The same-origin rule stops browsers, not scripts: a
 script that reaches `serve` directly can forge the headers, so the proxy
-and the loopback-only port remain the real gate.
+and the loopback-only port remain the real gate. Browsers send fetch
+metadata only to HTTPS and localhost origins, so dashboard writes work
+through the HTTPS proxy or at `http://127.0.0.1`, and are refused from a
+page opened over plain HTTP at another address.
 
 **User-level test path.** Tap Sync now on a collection: it starts and
 shows in the live view. Tap it again while that sync runs: the
