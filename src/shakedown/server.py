@@ -333,12 +333,12 @@ def build_app(
         except ValueError:
             raise Refusal(422, "invalid_body") from None
         return await asyncio.to_thread(
-            dashboard_credentials.put_credentials, current_config(), body
+            dashboard_credentials.put_credentials, current_config, body
         )
 
     @app.delete("/api/credentials", dependencies=[Depends(write_gate)])
     def delete_credentials(source: str = Query()) -> dict[str, Any]:
-        return dashboard_credentials.delete_credentials(current_config(), source)
+        return dashboard_credentials.delete_credentials(current_config, source)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

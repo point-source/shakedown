@@ -9,6 +9,7 @@ under the edit lock: credentials are not in the file.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +22,13 @@ from shakedown.write_gate import Refusal
 LOGIN_FIELDS = {"email", "password"}
 
 
-def put_credentials(config: Config, body: Any) -> dict[str, Any]:
-    """Store the body's login for its source, then ask the source about it."""
+def put_credentials(load: Callable[[], Config], body: Any) -> dict[str, Any]:
+    """Store the body's login for its source, then ask the source about it. The
+    config is read under the lock a save holds, so a save that removes the source or
+    moves the database cannot land between the lookup and the store."""
     name, login = _login_of(body)
-    source = credential_source(config, name)
-    state_db = _state_db(config)
     with config_save.writing:
+        source, state_db = _target(load(), name)
         config_save.write_state(state_db, lambda: store(state_db, name, login))
     # Asked after storing and outside the lock: a slow or unreachable source never
     # holds up a save, and a rejected login stays stored for a retry.
@@ -34,13 +36,18 @@ def put_credentials(config: Config, body: Any) -> dict[str, Any]:
     return {"source": name, "credentials": resolve(source, state_db)[0], "check": check}
 
 
-def delete_credentials(config: Config, name: str) -> dict[str, Any]:
+def delete_credentials(load: Callable[[], Config], name: str) -> dict[str, Any]:
     """Forget what is stored for the source."""
-    source = credential_source(config, name)
-    state_db = _state_db(config)
     with config_save.writing:
+        source, state_db = _target(load(), name)
         config_save.write_state(state_db, lambda: forget(state_db, name))
-    return {"source": name, "credentials": resolve(source, state_db)[0]}
+        return {"source": name, "credentials": resolve(source, state_db)[0]}
+
+
+def _target(config: Config, name: str) -> tuple[SourceConfig, Path]:
+    source = credential_source(config, name)
+    assert config.state_db is not None  # filled in by Config validation
+    return source, config.state_db
 
 
 def _login_of(body: Any) -> tuple[str, Login]:
@@ -72,9 +79,3 @@ def credential_source(config: Config, name: str) -> SourceConfig:
     if not registry.plugin_class(source.type).takes_credentials:
         raise Refusal(404, "takes_no_credentials")
     return source
-
-
-def _state_db(config: Config) -> Path:
-    assert config.state_db is not None  # filled in by Config validation
-    return config.state_db
-

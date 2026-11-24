@@ -273,3 +273,30 @@ async def test_an_unwritable_database_is_write_failed(
         500, {"code": "write_failed", "path": str(paths["state_db"])}
     )
     assert archive.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_store_waiting_on_a_save_that_removes_the_source_stores_nothing(
+    paths: dict[str, Path], archive: FakeArchive
+) -> None:
+    """The source is looked up under the lock a save holds: a store that waited on a
+    save removing the source answers unknown_source, and never brings the login
+    back."""
+    import asyncio
+
+    from shakedown import config_save
+
+    archive.login(login_accepted())
+    async with _client(paths) as client:
+        config_save.writing.acquire()
+        try:
+            waiting = asyncio.create_task(_put(client, _body()))
+            await asyncio.sleep(0.3)  # the request is in, waiting on the save
+            text = paths["config"].read_text()
+            paths["config"].write_text(text[: text.index("  - name: ia")]
+                                       + text[text.index("  - name: lma"):])
+        finally:
+            config_save.writing.release()
+        response = await waiting
+    assert (response.status_code, response.json()) == (404, {"code": "unknown_source"})
+    assert stored(paths["state_db"], "ia") is None
