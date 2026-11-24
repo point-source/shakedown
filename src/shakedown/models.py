@@ -184,6 +184,8 @@ class Run:
     # Why this run's failure alert was not delivered; not resent (§spec:durable-handoff).
     failure_notice_error: str | None = None
     kind: RunKind = RunKind.SYNC
+    # When its per-show error lines were dropped (§spec:run-error-retention).
+    detail_trimmed_at: datetime | None = None
 
 
 @dataclass

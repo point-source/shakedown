@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
@@ -73,7 +73,8 @@ _SCHEMA = [
         errors             TEXT NOT NULL DEFAULT '[]',
         stale              INTEGER NOT NULL DEFAULT 0,
         failure_notice_error TEXT,
-        kind               TEXT NOT NULL DEFAULT 'sync'
+        kind               TEXT NOT NULL DEFAULT 'sync',
+        detail_trimmed_at  TEXT
     )
     """,
     """
@@ -274,7 +275,9 @@ _ACTIVITY_SCHEMA = [
         bytes_to_fetch          INTEGER,
         speed_bytes_per_second  REAL,
         eta_seconds             INTEGER,
-        requests_in_flight      INTEGER
+        requests_in_flight      INTEGER,
+        runs_trimmed            INTEGER,
+        bytes_freed             INTEGER
     )
     """,
     """
@@ -673,6 +676,19 @@ def _migrate_to_13(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_14(conn: sqlite3.Connection) -> None:
+    """v13 → v14, run error retention (§spec:state, §spec:run-error-retention): each
+    run records when its error detail was trimmed, and a `trim` run's activity entry
+    records the runs it trimmed and the bytes the database shrank by. Additive: the
+    columns start empty and nothing else changes. A database migrated from before v10
+    created its activity table with the columns already."""
+    if not _has_column(conn, "runs", "detail_trimmed_at"):
+        conn.execute("ALTER TABLE runs ADD COLUMN detail_trimmed_at TEXT")
+    for column in ("runs_trimmed", "bytes_freed"):
+        if not _has_column(conn, "run_activity", column):
+            conn.execute(f"ALTER TABLE run_activity ADD COLUMN {column} INTEGER")
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -687,6 +703,7 @@ _MIGRATIONS = {
     11: _migrate_to_11,
     12: _migrate_to_12,
     13: _migrate_to_13,
+    14: _migrate_to_14,
 }
 
 

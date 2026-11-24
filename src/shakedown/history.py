@@ -37,6 +37,14 @@ _RUNNING = RunEnd(None, None, None)
 _CRASH_PREFIXES = tuple(f"{kind.value} crashed: " for kind in RunKind)
 
 
+def result_lines(errors: list[str]) -> list[str]:
+    """The run-level lines a finished record's result is read from once its activity
+    entry is gone: that it ended unexpectedly, or that it crashed. Trimming a run's
+    error detail keeps exactly these, so it never changes a result or the last good
+    sync (§spec:run-error-retention)."""
+    return [e for e in errors if e.startswith((ENDED_UNEXPECTEDLY, *_CRASH_PREFIXES))]
+
+
 def run_end(run: Run, entry: dict[str, Any] | None, now: datetime) -> RunEnd:
     """How a run record's run ended, from its activity entry (as
     `ActivityRepo.since` reads it) when that has ended, else from the record. Shared
@@ -66,11 +74,12 @@ def _record_end(run: Run, now: datetime) -> RunEnd:
         if stopped_reporting(run.started_at, now):
             return RunEnd(failed, STOPPED_REPORTING, run.started_at)
         return _RUNNING
-    if any(error.startswith(ENDED_UNEXPECTEDLY) for error in run.errors):
+    lines = result_lines(run.errors)
+    if any(line.startswith(ENDED_UNEXPECTEDLY) for line in lines):
         return RunEnd(failed, STOPPED_REPORTING, run.finished_at)
     if run.stale:
         result = OperationStatus.STALE_ENUMERATION.value
-    elif any(error.startswith(_CRASH_PREFIXES) for error in run.errors):
+    elif lines:
         result = failed
     elif run.items_failed > 0:
         result = OperationStatus.COMPLETED_WITH_ITEM_ISSUES.value
@@ -123,6 +132,7 @@ def _from_record(run: Run, entry: dict[str, Any] | None, now: datetime) -> dict[
         "bytes_downloaded": run.bytes_downloaded,
         "errors": run.errors,
         "failure_notice_error": run.failure_notice_error,
+        "detail_trimmed": run.detail_trimmed_at is not None,
     }
 
 
@@ -151,6 +161,7 @@ def _from_entry(entry: dict[str, Any], outcomes: OperationOutcomeRepo) -> dict[s
         "bytes_downloaded": entry["bytes_downloaded"],
         "errors": outcome.errors if outcome else None,
         "failure_notice_error": None,
+        "detail_trimmed": False,
     }
 
 

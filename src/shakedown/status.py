@@ -205,6 +205,8 @@ def _summarize_run(run: Any, end: RunEnd | None = None) -> dict[str, Any]:
         "errors": run.errors,
         # Why this run's failure alert was not delivered (§spec:durable-handoff).
         "failure_notice_error": run.failure_notice_error,
+        # Its per-show error lines were dropped (§spec:run-error-retention).
+        "detail_trimmed": run.detail_trimmed_at is not None,
         # The run's outcome code, as `GET /api/runs` gives it: null while it runs, or
         # `stopped` when it was stopped on request (§spec:graceful-stop).
         "result": end.result if end else None,

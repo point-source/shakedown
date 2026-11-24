@@ -546,6 +546,13 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         stale=bool(row["stale"]),
         failure_notice_error=row["failure_notice_error"],
         kind=RunKind(row["kind"]),
+        # Absent before schema v14, which readers open unmigrated (§spec:state). A
+        # Row's `in` tests its values, so its keys are asked for by name.
+        detail_trimmed_at=(
+            _parse_iso(row["detail_trimmed_at"])
+            if "detail_trimmed_at" in row.keys()  # noqa: SIM118
+            else None
+        ),
     )
 
 

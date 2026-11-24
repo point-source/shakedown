@@ -1903,7 +1903,7 @@ the run rather than being ignored).
 
 *Status: complete*
 
-Complete through schema v13.
+Complete through schema v14.
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -1992,6 +1992,10 @@ Sync state lives in a single-file embedded SQLite database at
   (§spec:m4a-tags). A database rebuilt by `reconcile` starts with no
   checks, and the next sync makes them again from the files. Nothing is
   re-downloaded.
+- Schema v14 records, per run, when its error detail was trimmed, and
+  on a `trim` run's activity entry the runs it trimmed and the bytes the
+  database shrank by (§spec:run-error-retention). Additive: the columns
+  start empty and nothing else changes.
 - Only a command that holds the writer lock migrates the database.
   Commands that take no lock — `status`, `item show`, `sync --dry-run`,
   `verify` without `--reconform`, `validate`, and `serve`'s
@@ -2919,9 +2923,10 @@ otherwise `422`) answers `{generated_at, runs: [...]}`. Each run:
 `{run_id, activity_id, kind, source, collection, started_at,
 finished_at, duration_seconds, result, end_reason, items_discovered,
 items_new, items_updated, items_failed, bytes_downloaded, errors,
-failure_notice_error}`; `run_id` or `activity_id` is null when the run
+failure_notice_error, detail_trimmed}`; `run_id` or `activity_id` is null when the run
 has none, and `duration_seconds` and `finished_at` are null while it
-runs. `last_successful_sync_at` is part of each collection in
+runs. `detail_trimmed` is true once the run's error lines were dropped
+(§spec:run-error-retention); `status` reports it on each `last_run` too. `last_successful_sync_at` is part of each collection in
 §spec:library-stats.
 
 **Decision and constraint.** Read sync figures from the run records
@@ -4287,9 +4292,13 @@ Observable behavior:
   `keep_run_errors_days` ago, together with the error lines of their
   operation outcomes, as it already trims 30-day history (§spec:state).
   A trimmed run keeps its kind, collection, start and end, result, item
-  counts, and bytes, and records that its detail was trimmed; `status`
-  and the dashboard show those as before. Last good sync, staleness, and
-  sync identity never read error lines, so trimming never changes them.
+  counts, and bytes, and records that its detail was trimmed
+  (`detail_trimmed` in `status` and §spec:run-history); `status` and the
+  dashboard show those as before. A run whose activity entry is gone
+  reads its result from one run-level line — that it crashed, or ended
+  unexpectedly — so the trim keeps that line and drops the per-show
+  lines. Staleness and sync identity never read error lines, so trimming
+  never changes them, the result, or the last good sync.
 - **Trim now.** `POST /api/history/trim` starts a fresh run, kind
   `trim`, under the writer lock. It applies the same rule at once, then
   compacts the state database so the freed space returns to the disk.

@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 
-from shakedown import activity, stopping
+from shakedown import activity, retention, stopping
 from shakedown.config import Config
 from shakedown.db import connect
 from shakedown.growth import GrowthRepo
@@ -64,7 +64,8 @@ def run_exclusive(
     """Run a writing command under the writer lock; return 1 with a logged error
     when another run holds it, after calling ``on_busy`` if given. Taking the lock
     first closes what killed runs left open (§spec:run-activity); its end records
-    the library's growth (§spec:library-stats).
+    the library's growth (§spec:library-stats) and drops error lines older than
+    `keep_run_errors_days` (§spec:run-error-retention).
 
     While the command holds the lock, SIGTERM and SIGINT ask it to stop; a command
     that was asked returns the stop's exit code, 143 or 130 (§spec:graceful-stop)."""
@@ -77,6 +78,7 @@ def run_exclusive(
                 code = 1  # replaced below: a stop was requested
             finally:
                 _record_growth(config)
+                _trim_run_errors(config)
             if stopping.requested():
                 log.warning("stopped on request; the next run continues from here")
                 return stopping.exit_code()
@@ -113,3 +115,13 @@ def _record_growth(config: Config) -> None:
             growth.trim(now)
     except Exception as e:
         log.warning("could not record library growth: %s", e)
+
+
+def _trim_run_errors(config: Config) -> None:
+    """Drop the error lines of runs older than the setting. Best effort: a run's
+    result never depends on it."""
+    try:
+        with contextlib.closing(connect(config.state_db)) as conn:  # type: ignore[arg-type]
+            retention.trim_run_errors(conn, datetime.now(), config.keep_run_errors_days)
+    except Exception as e:
+        log.warning("could not trim old run errors: %s", e)

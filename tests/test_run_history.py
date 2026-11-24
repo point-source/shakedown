@@ -92,6 +92,7 @@ def test_runs_with_and_without_records_form_one_list_newest_first(db: Path) -> N
         "duration_seconds": 1800, "result": "completed", "end_reason": None,
         "items_discovered": 12, "items_new": 3, "items_updated": 1, "items_failed": 0,
         "bytes_downloaded": 4096, "errors": [], "failure_notice_error": None,
+        "detail_trimmed": False,
     }
     assert verify_row["result"] == "completed_with_item_issues"
     assert verify_row["duration_seconds"] == 240
