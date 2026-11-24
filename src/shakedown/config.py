@@ -1,10 +1,12 @@
 """Configuration loader for shakedown.yaml. Mirrors PRD §11."""
 from __future__ import annotations
 
+import hashlib
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -17,6 +19,7 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 
 log = logging.getLogger(__name__)
 
@@ -41,20 +44,24 @@ Handoff = Annotated[WebhookHandoff | ExecHandoff, Field(union_mode="left_to_righ
 
 
 # Validation messages never quote the value: config errors reach anyone who can open
-# serve's read endpoints (see _validation_problems).
+# serve's read endpoints (§spec:dashboard-settings `errors`). Each rule of our own
+# raises a coded error, so a save answers `{loc, code, message}`.
 
 def _cron_expression(expr: str) -> str:
     """A standard five-field cron expression (§spec:schedules). cronsim also takes a
     sixth, seconds field, which the spec rules out, so the count is checked first."""
     if len(expr.split()) != 5:
-        raise ValueError(
+        raise PydanticCustomError(
+            "schedule_invalid",
             "must be a five-field cron expression "
-            "(minute hour day-of-month month day-of-week)"
+            "(minute hour day-of-month month day-of-week)",
         )
     try:
         CronSim(expr, datetime(2000, 1, 1))
     except CronSimError as e:
-        raise ValueError(f"not a valid cron expression: {e}") from None
+        raise PydanticCustomError(
+            "schedule_invalid", "not a valid cron expression: {reason}", {"reason": str(e)}
+        ) from None
     return expr
 
 
@@ -62,7 +69,9 @@ def _zone_name(name: str) -> str:
     try:
         ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
-        raise ValueError("not a known IANA time zone name, such as Europe/Berlin") from None
+        raise PydanticCustomError(
+            "timezone_unknown", "not a known IANA time zone name, such as Europe/Berlin"
+        ) from None
     return name
 
 
@@ -147,25 +156,47 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _default_state_db(self) -> Config:
         if self.state_db is None:
-            self.state_db = self.archive_root / ".shakedown" / "state.db"
+            self.state_db = default_state_db(self.archive_root)
         return self
 
-    @model_validator(mode="after")
-    def _unique_collection_names(self) -> Config:
-        seen: set[tuple[str, str]] = set()
-        for src in self.sources:
-            for coll in src.collections:
-                key = (src.name, coll.name)
-                if key in seen:
-                    raise ValueError(
-                        f"duplicate (source, collection) pair: ({src.name!r}, {coll.name!r})"
-                    )
-                seen.add(key)
-        return self
+
+def default_state_db(archive_root: Path) -> Path:
+    """Where the state database lives when the file names none."""
+    return archive_root / ".shakedown" / "state.db"
+
+
+Loc = tuple[str | int, ...]
+
+
+@dataclass(frozen=True)
+class ConfigProblem:
+    """One error or warning about the config: ``loc`` is the path to the setting as
+    keys and indexes, ``code`` a stable machine code, ``message`` developer-facing
+    text that never quotes a value from the file (§spec:dashboard-settings)."""
+    loc: Loc
+    code: str
+    message: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"loc": list(self.loc), "code": self.code, "message": self.message}
+
+    def __str__(self) -> str:
+        where = ".".join(str(part) for part in self.loc)
+        return f"{where}: {self.message}" if where else self.message
+
+
+@dataclass(frozen=True)
+class Checked:
+    """What `check_document` found: the config when there are no errors."""
+    config: Config | None
+    errors: list[ConfigProblem] = field(default_factory=list)
+    warnings: list[ConfigProblem] = field(default_factory=list)
 
 
 class ConfigError(Exception):
-    pass
+    def __init__(self, message: str, problems: list[ConfigProblem] | None = None) -> None:
+        super().__init__(message)
+        self.problems = problems or []
 
 
 class UnknownScopeError(ConfigError):
@@ -197,33 +228,125 @@ def check_scope(
         )
 
 
-def load(path: Path) -> Config:
-    if not path.exists():
-        raise ConfigError(f"config file not found: {path}")
+ConfigState = Literal["missing", "unreadable", "invalid", "valid"]
+
+
+@dataclass(frozen=True)
+class ConfigFile:
+    """The config file as it is now (§spec:dashboard-settings `state`): its bytes and
+    their revision token, the parsed document, and what checking it found. ``raw`` is
+    the parsed YAML (None when missing or unreadable); ``checked`` is None unless the
+    file parsed to a mapping."""
+    path: Path
+    state: ConfigState
+    data: bytes | None = None
+    revision: str | None = None
+    raw: Any = None
+    checked: Checked | None = None
+    errors: list[ConfigProblem] = field(default_factory=list)
+
+    @property
+    def config(self) -> Config | None:
+        return self.checked.config if self.checked else None
+
+
+def revision_of(data: bytes) -> str:
+    """An opaque token for the exact file content."""
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def read_config_file(path: Path) -> ConfigFile:
+    """Read and check the config file. Never raises for a missing, unreadable, or
+    invalid file: each is a state with its errors."""
     try:
-        raw = yaml.safe_load(path.read_text())
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return ConfigFile(path, "missing")
+    except OSError as e:
+        problem = ConfigProblem((), "read_failed", f"cannot read the file: {e.strerror}")
+        return ConfigFile(path, "unreadable", errors=[problem])
+    revision = revision_of(data)
+    try:
+        raw = yaml.safe_load(data)
     except yaml.YAMLError as e:
-        raise ConfigError(f"failed to parse YAML at {path}: {_yaml_problem(e)}") from e
+        problem = ConfigProblem((), "yaml_invalid", _yaml_problem(e))
+        return ConfigFile(path, "unreadable", data, revision, errors=[problem])
     if not isinstance(raw, dict):
-        raise ConfigError(f"config root must be a mapping, got {type(raw).__name__}")
-    try:
-        config = Config.model_validate(raw)
-    except ValidationError as e:
-        raise ConfigError(f"config validation failed:\n{_validation_problems(e)}") from e
-    _validate_layouts(config)
+        problem = ConfigProblem(
+            (), "root_not_mapping", f"config root must be a mapping, got {type(raw).__name__}"
+        )
+        return ConfigFile(path, "unreadable", data, revision, raw, errors=[problem])
+    checked = check_document(raw)
+    state: ConfigState = "invalid" if checked.errors else "valid"
+    return ConfigFile(path, state, data, revision, raw, checked, list(checked.errors))
+
+
+def load(path: Path) -> Config:
+    """The config every run starts from; raises ConfigError naming every problem."""
+    file = read_config_file(path)
+    if file.state == "missing":
+        raise ConfigError(f"config file not found: {path}")
+    if file.state == "unreadable":
+        problem = file.errors[0]
+        if problem.code == "yaml_invalid":
+            raise ConfigError(f"failed to parse YAML at {path}: {problem.message}", file.errors)
+        raise ConfigError(problem.message, file.errors)
+    assert file.checked is not None
+    if file.checked.errors:
+        lines = [_line(file.raw, p) for p in file.checked.errors]
+        raise ConfigError("config validation failed:\n" + "\n".join(lines), file.checked.errors)
+    config = file.checked.config
+    assert config is not None
+    for warning in file.checked.warnings:
+        log.warning("%s", _line(file.raw, warning))
     return config
 
 
-# A config error reaches anyone who can open serve's read endpoints (§spec:dashboard:
-# never credentials, tokens, or secrets), so it names the key and the problem but
-# never echoes a value from the file: a webhook URL often embeds its token.
+def check_document(raw: Any) -> Checked:
+    """The one config validation: run startup (`load`) and a dashboard save both call
+    it, so a document a save accepts is one the next run accepts (§spec:dashboard-
+    settings). Returns every error, not only the first, and the warnings."""
+    if not isinstance(raw, dict):
+        return Checked(
+            None,
+            [ConfigProblem((), "root_not_mapping", "config root must be a mapping")],
+        )
+    try:
+        config = Config.model_validate(raw)
+    except ValidationError as e:
+        return Checked(None, _validation_problems(e))
+    errors: list[ConfigProblem] = []
+    warnings: list[ConfigProblem] = []
+    _check_names(config, errors)
+    _check_layouts(config, errors, warnings)
+    return Checked(None if errors else config, errors, warnings)
 
 
-def _validation_problems(e: ValidationError) -> str:
-    return "\n".join(
-        f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+def _line(raw: Any, problem: ConfigProblem) -> str:
+    """A problem as the run reports it: its place, the `source/collection` it sits in
+    when the document names them, and its message."""
+    collection = _collection_name(raw, problem.loc)
+    return f"{problem} ({collection})" if collection else str(problem)
+
+
+def _collection_name(raw: Any, loc: Loc) -> str | None:
+    if len(loc) < 4 or loc[0] != "sources" or loc[2] != "collections":
+        return None
+    try:
+        source = raw["sources"][loc[1]]
+        name = source["collections"][loc[3]]["name"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if isinstance(source.get("name"), str) and isinstance(name, str):
+        return f"{source['name']}/{name}"
+    return None
+
+
+def _validation_problems(e: ValidationError) -> list[ConfigProblem]:
+    return [
+        ConfigProblem(tuple(err["loc"]), err["type"], err["msg"])
         for err in e.errors(include_url=False, include_input=False, include_context=False)
-    )
+    ]
 
 
 def _yaml_problem(e: yaml.YAMLError) -> str:
@@ -243,67 +366,101 @@ def _yaml_problem(e: yaml.YAMLError) -> str:
     return f"invalid YAML at {places[0]}" + "".join(f" (found at {p})" for p in places[1:])
 
 
-def _validate_layouts(config: Config) -> None:
+def _check_names(config: Config, errors: list[ConfigProblem]) -> None:
+    """Collection names are unique within their source: the archive is keyed by them."""
+    for i, source in enumerate(config.sources):
+        seen: set[str] = set()
+        for j, collection in enumerate(source.collections):
+            if collection.name in seen:
+                errors.append(
+                    ConfigProblem(
+                        ("sources", i, "collections", j, "name"),
+                        "duplicate_name",
+                        "another collection in this source has the same name",
+                    )
+                )
+            seen.add(collection.name)
+
+
+def _check_layouts(
+    config: Config, errors: list[ConfigProblem], warnings: list[ConfigProblem]
+) -> None:
     """Guard `library_layout` templates against fields the plugin can't surface and
     against layouts that cannot distinguish two items (§spec:layout-collision-safety).
 
     Four checks on every non-passthrough layout, in order of certainty:
 
-    - **Unknown filter → hard error.** A misspelled filter (`|sanitise`) would otherwise
+    - **Unknown filter → error.** A misspelled filter (`|sanitise`) would otherwise
       raise TemplateError mid-sync, or mid-restage after the library was cleared.
-    - **Unknown field → hard error.** A placeholder the plugin doesn't expose (the
+    - **Unknown field → error.** A placeholder the plugin doesn't expose (the
       first-run `{filename}` footgun) would otherwise raise TemplateError mid-sync.
-    - **No plugin field at all → hard error.** A constant template renders every item
+    - **No plugin field at all → error.** A constant template renders every item
       to the same path — a guaranteed total collapse config can prove, so it fails
       fast like every other config fault (§spec:configuration).
     - **No per-item-unique field → warning.** The layout keys only on shared fields
       (e.g. `{year}/{venue}`); two items with the same values render the same folder
       and are separated into folders labelled with their identifier at staging time
       (§spec:library-ownership). Config can't prove an arbitrary *combination* clashes,
-      so this is a proactive heads-up, not a hard error.
+      so this is a proactive heads-up, not an error.
     """
     from shakedown.plugins import registry
     from shakedown.utils.templates import FILTER_NAMES, fields_in, unknown_filters
 
-    for source in config.sources:
+    for i, source in enumerate(config.sources):
         try:
             plugin_cls = registry.plugin_class(source.type)
-        except registry.UnknownPluginError as e:
-            raise ConfigError(str(e)) from e
+        except registry.UnknownPluginError:
+            errors.append(
+                ConfigProblem(
+                    ("sources", i, "type"),
+                    "source_type_unknown",
+                    f"unknown source type; available: {', '.join(registry.known_types())}",
+                )
+            )
+            continue
         allowed = set(plugin_cls.template_fields)
         unique = set(plugin_cls.per_item_unique_fields)
-        for collection in source.collections:
+        for j, collection in enumerate(source.collections):
             if collection.library_layout == "passthrough":
                 continue
-            bad_filters = unknown_filters(collection.library_layout)
-            if bad_filters:
-                raise ConfigError(
-                    f"{source.name}/{collection.name}: library_layout uses unknown "
-                    f"filter(s) {sorted(bad_filters)!r}; valid filters: "
-                    f"{', '.join(FILTER_NAMES)}"
+            loc: Loc = ("sources", i, "collections", j, "library_layout")
+            if unknown_filters(collection.library_layout):
+                errors.append(
+                    ConfigProblem(
+                        loc,
+                        "layout_unknown_filter",
+                        "library_layout uses a filter the template engine does not "
+                        f"define; valid filters: {', '.join(FILTER_NAMES)}",
+                    )
                 )
             referenced = fields_in(collection.library_layout)
-            unknown = referenced - allowed
-            if unknown:
-                raise ConfigError(
-                    f"{source.name}/{collection.name}: library_layout references "
-                    f"unknown field(s) {sorted(unknown)!r}; plugin {source.type!r} "
-                    f"surfaces {sorted(allowed)!r}"
+            if referenced - allowed:
+                errors.append(
+                    ConfigProblem(
+                        loc,
+                        "layout_unknown_field",
+                        "library_layout uses a field this source does not provide; it "
+                        f"provides: {', '.join(sorted(allowed))}",
+                    )
                 )
-            if not referenced:
-                raise ConfigError(
-                    f"{source.name}/{collection.name}: library_layout references no "
-                    f"source field, so every "
-                    f"item renders to the same path; include a per-item field such as "
-                    f"{{identifier}}"
+            elif not referenced:
+                errors.append(
+                    ConfigProblem(
+                        loc,
+                        "layout_no_field",
+                        "library_layout references no source field, so every item "
+                        "renders to the same path; include a per-item field such as "
+                        "{identifier}",
+                    )
                 )
-            if not (referenced & unique):
-                log.warning(
-                    "%s/%s: library_layout %r references no per-item-unique field %s; "
-                    "two items sharing these fields get folders labelled with their "
-                    "identifier — add a unique component such as {identifier} to the leaf",
-                    source.name,
-                    collection.name,
-                    collection.library_layout,
-                    sorted(unique) or "(none declared by plugin)",
+            elif not (referenced & unique):
+                warnings.append(
+                    ConfigProblem(
+                        loc,
+                        "layout_not_unique",
+                        "library_layout references no per-item-unique field "
+                        f"{sorted(unique) or '(none declared by plugin)'}; two items "
+                        "sharing these fields get folders labelled with their identifier "
+                        "— add a unique component such as {identifier} to the leaf",
+                    )
                 )

@@ -130,7 +130,11 @@ sources:
 """)
     with pytest.raises(ConfigError) as exc_info:
         load(p)
-    assert "filename" in str(exc_info.value)
+    # Named by its setting, never quoted: a layout can hold pasted text.
+    message = str(exc_info.value)
+    assert "sources.0.collections.0.library_layout" in message
+    assert "uses a field this source does not provide" in message
+    assert "filename" not in message
 
 
 def test_layout_with_unknown_filter_rejected(tmp_path: Path) -> None:
@@ -149,7 +153,8 @@ sources:
     with pytest.raises(ConfigError) as exc_info:
         load(p)
     message = str(exc_info.value)
-    assert "sanitise" in message
+    assert "sources.0.collections.0.library_layout" in message
+    assert "sanitise" not in message
     assert "lower, sanitize, short, upper" in message
 
 
