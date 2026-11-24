@@ -76,3 +76,22 @@ async def test_setup_defaults_work_on_the_example_stack(config_path: Path) -> No
     assert answer["source_types"] == config["source_types"]
     assert answer["generated_at"]
     assert not config_path.parent.exists()  # nothing was written
+
+
+# -- the path check before finishing -------------------------------------------
+
+@pytest.mark.asyncio
+async def test_check_paths_with_no_file_creates_the_folders(
+    config_path: Path, tmp_path: Path
+) -> None:
+    archive, library = tmp_path / "data" / "archive", tmp_path / "data" / "library"
+    async with _client(build_app(config_path)) as client:
+        response = await client.post(
+            "/api/config/check-paths",
+            headers=SAME_ORIGIN,
+            json={"archive_root": str(archive), "library_root": str(library)},
+        )
+    assert (response.status_code, response.json()) == (200, {"warnings": []})
+    assert archive.is_dir() and library.is_dir()
+    assert (archive / ".shakedown").is_dir()  # the default state_db's folder
+    assert not config_path.parent.exists()
