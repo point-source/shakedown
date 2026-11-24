@@ -1896,7 +1896,7 @@ the run rather than being ignored).
   of timing truth and Shakedown out of the scheduler business. The
   operator moved timing into the dashboard on 2026-11-24
   (§req:constraints); the file is still the one source of timing truth,
-  now read by `serve`.
+  now read by Shakedown's scheduler.
 
 ## State persistence and recovery §spec:state
 
@@ -2161,14 +2161,15 @@ appears in Navidrome with no handoff configured.
 ## Serve control plane §spec:serve
 
 *Status: in progress*
-The config-management increment adds scheduling, the settings, setup, credentials, and purge endpoints, and the write gate; none is built yet.
+The config-management increment adds the settings, setup, credentials, and purge endpoints, scheduler health, and the write gate; none is built yet.
 
 `shakedown serve` exposes a small HTTP API for ad-hoc triggers and
 monitoring without `docker exec` (§req:priorities #10), serves the web
-dashboard, and starts each collection's scheduled syncs
-(§spec:schedules). It runs as the one long-lived container in the
-compose stack. Until the config-management increment it never
-scheduled and ofelia did (§req:constraints, superseded 2026-11-24).
+dashboard, and watches the scheduler (§spec:schedules). It runs as a
+long-lived container beside the scheduler's. It never schedules: the
+separate `shakedown schedule` container does, and until the
+config-management increment ofelia did (§req:constraints, superseded
+2026-11-24).
 
 | Endpoint | Behavior |
 | --- | --- |
@@ -2212,8 +2213,9 @@ scrapers generally can't send tokens. The dashboard page and its
 `/api/*` endpoints are read endpoints under the same posture; the
 operator's reverse proxy decides who opens them (§spec:dashboard).
 `serve` is required for the dashboard (§req:success-criteria #28–#33)
-and for scheduled syncs (§spec:schedules): a sync started by hand runs
-and records its progress the same with `serve` stopped.
+and for nothing else: scheduled syncs need the scheduler, not `serve`
+(§spec:schedules), and every sync runs and records its progress the
+same with `serve` stopped.
 
 ## API-triggered runs §spec:api-sync-runs
 
@@ -3751,18 +3753,21 @@ Settings shows every value with no Save, and `PUT /api/config` answers
 change saves. Restart `serve`: still `override`. On a fresh stack, finish
 setup: Settings is editable without any override.
 
-## Schedules in serve §spec:schedules
+## Schedules and the scheduler §spec:schedules
 
 *Status: not started*
 
 Each collection's schedule lives in `shakedown.yaml` and is set from the
-dashboard. The always-on `serve` process starts each scheduled sync; the
-compose stack carries no separate scheduler
-(§req:success-criteria #1, #6, #38; §req:constraints: one-shot CLI, external scheduler — superseded
-for scheduling, schedule input; §req:quality-attributes: sane by
-default, schedules cost nothing while idle). This supersedes the "no
-`schedule:` field" rule of §spec:configuration and ofelia's role in
-§spec:deployment.
+dashboard. A long-running Shakedown scheduler, in its own container
+beside `serve`, starts each scheduled sync; the compose stack carries no
+third-party scheduler. A scheduler that stops is never silent: the
+dashboard, `GET /status`, and the failure notification say so
+(§req:success-criteria #1, #6, #38; §req:constraints: one-shot CLI,
+external scheduler — superseded for scheduling, schedule input;
+§req:quality-attributes: sane by default, schedules cost nothing while
+idle, scheduled runs are observable and self-contained). This
+supersedes the "no `schedule:` field" rule of §spec:configuration and
+ofelia's role in §spec:deployment.
 
 Observable behavior:
 
@@ -3771,8 +3776,8 @@ Observable behavior:
   collection with no `schedule` is manual only: it syncs only when
   someone starts it. A top-level `timezone` (an IANA name such as
   `Europe/Berlin`) says which clock schedules follow; without it they
-  follow `serve`'s local time (the container's `TZ`, UTC by default).
-  An expression that does not parse, or a timezone that does not exist,
+  follow the container's local time (`TZ`, UTC by default). An
+  expression that does not parse, or a timezone that does not exist,
   fails validation like any other bad key (§spec:configuration), so a
   save refuses it (§spec:dashboard-settings).
 - **Presets and cron.** The dashboard offers Daily at a time, Weekly on
@@ -3787,68 +3792,130 @@ Observable behavior:
   saving. (Provisional default; the operator may change the cadence or
   start hour.)
 - **Next sync.** `GET /api/config` carries each collection's next
-  scheduled sync (`next_syncs`, §spec:dashboard-settings), computed in
-  the schedule's timezone.
-- **A tick is a scheduled sync.** At each scheduled time, `serve`
+  scheduled sync (`next_syncs`, §spec:dashboard-settings), computed from
+  the file in the schedule's timezone by the same rules the scheduler
+  uses.
+- **The scheduler.** `shakedown schedule` is a long-running command
+  that does nothing but start scheduled syncs. It listens on no port,
+  reads the config file without writing it, and runs as its own
+  container (`shakedown-scheduler`, §spec:deployment), so a crash, hang,
+  restart, or update of `serve` never stops a tick.
+- **A tick is a scheduled sync.** At each scheduled time, the scheduler
   starts the collection's sync as a fresh one-shot run that reads the
   file at start — the same `sync --collection` run a scheduler tick has
-  always launched, recorded as started by `serve`. When another run
-  holds the writer lock, the tick is rescheduled and caught up exactly
-  as §spec:rescheduled-syncs describes for a scheduler tick, never
-  refused like an API trigger. Collections due in the same minute start
-  in file order; the later ones find the lock held and are rescheduled.
-- **Changes apply at the next tick.** `serve` notices a changed file —
-  saved from the dashboard or edited by hand — within a minute and
-  plans the next ticks from it, with no restart. A run already going is
-  untouched. While the file is invalid, `serve` keeps the schedules of
-  the last valid file; a tick that fires then starts its run, which
-  fails on the config error like any run on a broken file, visibly in
-  run history.
-- **Only while serve runs.** With `serve` stopped, no scheduled sync
-  starts. A tick missed then is not caught up: the collection syncs at
-  its next tick after `serve` starts (§req:constraints). On a day the
-  clock changes, a time that does not exist fires once at the next valid
-  minute, and a time that occurs twice fires once.
-- **Idle costs nothing.** Between ticks `serve` waits on a timer and
-  checks the file's modification time about once a minute; it adds no
-  polling of sources and no work on the NAS.
+  always launched. When another run holds the writer lock, the tick is
+  rescheduled and caught up exactly as §spec:rescheduled-syncs describes
+  for a scheduler tick, never refused like an API trigger. Collections
+  due in the same minute start in file order; the later ones find the
+  lock held and are rescheduled. When a run the scheduler started dies
+  without closing its run record, the scheduler closes it, as `serve`
+  does for the runs it starts (§spec:api-sync-runs).
+- **Changes apply at the next tick.** The scheduler notices a changed
+  file — saved from the dashboard or edited by hand — within a minute
+  and plans the next ticks from it, with no restart. A run already going
+  is untouched. While the file is invalid, the scheduler keeps the
+  schedules of the last valid file it read; a tick that fires then starts
+  its run, which fails on the config error like any run on a broken
+  file, visibly in run history. A scheduler that starts on an invalid
+  file has no schedules until the file is fixed, and reports that in its
+  heartbeat.
+- **Fails loudly, restarts itself.** Any fault in the scheduler's own
+  planning ends the process with a non-zero exit, so the container's
+  restart policy starts it again; it never keeps running with its
+  planning stopped.
+- **Heartbeat.** About once a minute the scheduler records a heartbeat
+  in the state database: the time, its release, whether it holds a
+  valid schedule, and the next tick it plans. Recording never takes the
+  writer lock and never migrates, like a rescheduled-sync entry
+  (§spec:rescheduled-syncs). `shakedown schedule --check` exits non-zero
+  when the heartbeat is older than three minutes or missing; the compose
+  example uses it as the scheduler container's health check, so Container
+  Station shows the container unhealthy.
+- **Nobody has to watch for it.** `serve`, independently of the
+  scheduler, reads the heartbeat and the run records:
+  - `GET /api/health` and `GET /status` carry `scheduler: {state,
+    last_seen, release}`, `state` one of `running`, `stale` (heartbeat
+    older than three minutes), `no_schedule` (running, but the file it
+    holds has no valid schedule), or `never` (no heartbeat recorded), and
+    `last_seen` formatted like every other time (§spec:dashboard-health);
+  - Needs attention (§spec:needs-attention) gains `scheduler_stale`, one
+    entry while the scheduler is `stale` or `never` and any collection
+    has a schedule, and `tick_overdue`, one per collection whose
+    scheduled time passed more than ten minutes ago with no sync of it
+    started at or after that time and no rescheduled entry recorded for
+    it since. Each clears on its own when the scheduler is back or a
+    run starts;
+  - when the scheduler turns `stale`, `serve` sends the configured
+    failure notification (`notifications.on_failure`,
+    §spec:handoff) once for that episode, naming the scheduler and its
+    last heartbeat.
+  An outside monitor (Uptime Kuma, Homepage) can watch the same field in
+  `GET /status`.
+- **Only while the scheduler runs.** With the scheduler stopped, no
+  scheduled sync starts. A tick missed then is not caught up: the
+  collection syncs at its next tick after the scheduler starts, and the
+  miss shows as `tick_overdue` until then (§req:constraints). On a day
+  the clock changes, a time that does not exist fires once at the next
+  valid minute, and a time that occurs twice fires once.
+- **Idle costs nothing.** Between ticks the scheduler waits on a timer,
+  checks the file's modification time, and writes one heartbeat row,
+  about once a minute; it adds no polling of sources and no work on the
+  NAS.
 - **Manual runs are unchanged.** `shakedown sync` typed by hand or run
-  in a one-off container works exactly as before, with or without
-  `serve`.
+  in a one-off container works exactly as before, with or without the
+  scheduler or `serve`.
 
-**Decision and constraint.** `serve` schedules because the operator
+**Decision and constraint.** Shakedown schedules because the operator
 moved timing into the dashboard and out of the compose file
 (§req:constraints, operator decision, 2026-11-24): one place to edit, no
-redeploy, and no Docker socket for anything the dashboard writes. The schedule lives in the file
-because the file stays the source of truth, so an IaC deployment sets
-schedules the same way it sets everything else. Cron is the standard
-schedule format (boring edge), and presets are written as cron so the
-file holds one form and a power user can always read it. A tick
-launches the same one-shot run ofelia launched, so runs stay
-stateless, crash-isolated from `serve`, and pick up the current file;
-and a tick keeps scheduler semantics under the lock because
-§req:success-criteria #27 requires a long run to delay, never cancel,
-other collections' syncs. The timezone is a setting, not only an
+redeploy, and no Docker socket for anything the dashboard writes. The
+scheduler is its own container, not part of `serve`, because
+§req:success-criteria #1 makes "the sync ran on schedule" the product's
+core promise, and the web side is the part most exposed to hangs, leaks,
+restarts, and outside requests; a scheduler with no port and a
+read-only config is unaffected by all of them (operator decision,
+2026-11-24). It is honest about what the split does not buy: a
+compromised `serve` can still change schedules through the file, as the
+dashboard is meant to. Liveness is checked from outside the scheduler —
+by `serve` and by Docker's health check — because a process cannot report
+its own death; the heartbeat is the decidable fact, and an overdue tick
+is decided from the schedule and the run records `serve` already holds.
+The schedule lives in the file because the file stays the source of
+truth, so an IaC deployment sets schedules the same way it sets
+everything else. Cron is the standard schedule format (boring edge), and
+presets are written as cron so the file holds one form and a power user
+can always read it. A tick launches the same one-shot run ofelia
+launched, so runs stay stateless and crash-isolated and pick up the
+current file; and a tick keeps scheduler semantics under the lock
+because §req:success-criteria #27 requires a long run to delay, never
+cancel, other collections' syncs. The timezone is a setting, not only an
 environment variable, so a new user who sets "daily at 03:00" in setup
 gets their own 03:00 without touching compose (§req:constraints: what
 stays outside the dashboard).
 
-**Alternatives rejected.** *Keep ofelia and have the dashboard rewrite
-its labels* — needs the Docker socket and a stack redeploy, the pain
-§req:success-criteria #2 removes. *Run syncs inside `serve`'s process*
-— rejected before (§spec:api-sync-runs): a crash or leak in a days-long
-sync would take the dashboard down. *A structured schedule format
-(`every: weekly, at: "03:00"`) instead of cron* — readable, but a custom
-format with its own parser and docs; cron with preset read-back gives
-both. *Catch up ticks missed while `serve` was down* — out of scope
-(§req:constraints). *Seconds in the expression, as ofelia used* — no
-requirement needs it, and five fields is the cron people know.
+**Alternatives rejected.** *Schedule inside `serve`, with the same
+detection* — one container fewer, but a web hang or restart stops ticks,
+and nothing can send an alert when the one process is down; the
+operator chose the separate container. *Keep ofelia and have the
+dashboard rewrite its labels or job file* — rejected in
+§spec:deployment. *Run syncs inside the scheduler's process* — rejected
+before (§spec:api-sync-runs): a crash or leak in a days-long sync would
+take the scheduler down. *A structured schedule format (`every: weekly,
+at: "03:00"`) instead of cron* — readable, but a custom format with its
+own parser and docs; cron with preset read-back gives both. *Catch up
+ticks missed while the scheduler was down* — out of scope
+(§req:constraints); the miss is shown instead. *Fail `serve`'s
+`/healthz` when the scheduler is stale* — Docker would mark the wrong
+container unhealthy, and the dashboard must stay up to say what is
+wrong. *Seconds in the expression, as ofelia used* — no requirement
+needs it, and five fields is the cron people know.
 
-**Tradeoffs.** `serve` becomes required for scheduled syncs. Restarting
-`serve` stops the runs it started (§spec:graceful-stop), including a
-scheduled sync, which resumes at its next run. A change takes up to a
-minute to reach the planner. Two collections given the same minute by
-hand run one after the other.
+**Tradeoffs.** One more long-running container. Scheduled syncs need the
+scheduler running; dashboard actions need `serve`. Recreating the
+scheduler stops the runs it started (§spec:graceful-stop), which resume
+at their next run. A change takes up to a minute to reach the planner,
+and a stopped scheduler takes up to three minutes to show as stale. Two
+collections given the same minute by hand run one after the other.
 
 **User-level test path.** Add a collection with the default schedule:
 it lands on the first free Sunday hour and its next sync shows. Set it
@@ -3858,9 +3925,12 @@ change. Start a long sync of another collection first: the tick is
 rescheduled and runs when that sync finishes. Edit `schedule:` by hand
 to a cron expression: the dashboard shows it as cron and the next sync
 moves. Set a bad expression by hand: Settings shows the error on that
-schedule, and the other collections keep their ticks. Stop `serve`
-across a tick and start it again: that tick does not run; the next one
-does.
+schedule, and the other collections keep their ticks. Restart `serve`
+across a tick: the tick still runs. Stop the scheduler: within three
+minutes the dashboard shows it stopped, Needs attention lists it, the
+failure webhook fires once, and Container Station shows the container
+unhealthy; a tick that passes meanwhile shows as overdue. Start it
+again: the entries clear and the next tick runs.
 
 ## Credentials in the dashboard §spec:dashboard-credentials
 
@@ -3999,7 +4069,7 @@ action.
 
 **Tradeoffs.** Setup covers one source and one collection; anything
 more is a second visit to Settings. A stack that never finishes setup
-runs `serve` with no schedules.
+runs the scheduler with no schedules.
 
 **User-level test path.** On a clean stack from the compose example,
 open the dashboard on a phone: setup appears. Accept the default paths;
@@ -4187,32 +4257,44 @@ step (§req:success-criteria #6). See
 [`docker-compose.example.yaml`](docker-compose.example.yaml) for the
 canonical example.
 
-**One long-lived Shakedown container.** `shakedown-serve` serves the
-web dashboard (§spec:dashboard), the control plane (§spec:serve), and
-starts each collection's scheduled syncs (§spec:schedules). Every run —
-scheduled, Sync now, API-triggered — is a fresh one-shot `shakedown`
-process `serve` starts, which reads the config at start and exits
-(§req:constraints: runs stay one-shot and stateless). When a tick fires,
-the sync runs — or, if another run holds the writer lock, it is
-rescheduled and runs when that run finishes (§spec:rescheduled-syncs);
-"the schedule is configured" and "the sync ran" are the same event while
-`serve` is up (§req:success-criteria #1).
+**Two long-lived Shakedown containers, one image.**
+
+- **`shakedown-serve`** serves the web dashboard (§spec:dashboard) and
+  the control plane (§spec:serve), starts Sync now and API-triggered
+  runs, and watches the scheduler.
+- **`shakedown-scheduler`** runs `shakedown schedule` and starts each
+  collection's scheduled syncs (§spec:schedules). It publishes no port,
+  mounts the config folder read-only, and has a health check
+  (`shakedown schedule --check`).
+
+Every run is a fresh one-shot `shakedown` process started by one of the
+two, which reads the config at start and exits (§req:constraints: runs
+stay one-shot and stateless). When a tick fires, the sync runs — or, if
+another run holds the writer lock, it is rescheduled and runs when that
+run finishes (§spec:rescheduled-syncs); "the schedule is configured" and
+"the sync ran" are the same event while the scheduler is up
+(§req:success-criteria #1), and a missed tick shows in the dashboard
+(§spec:schedules).
 
 What stays in the compose file — only what must exist before `serve`
 can show a page (§req:constraints: what stays outside the dashboard):
 
 - the image (`SHAKEDOWN_IMAGE`) and the container user
-  (`SHAKEDOWN_USER`, the owner of the data share);
+  (`SHAKEDOWN_USER`, the owner of the data share), the same for both
+  containers;
 - one volume: the data share mounted once as `/data`. Archive, library,
   and the config folder (`/data/shakedown-config/`) all live under it,
   so archive and library share a filesystem *and* a mount — Linux
   refuses hardlinks across separate mounts (§spec:system-shape) — and
-  `serve` can write the config file (§spec:dashboard-settings);
+  `serve` can write the config file (§spec:dashboard-settings). The
+  scheduler adds a read-only mount of the config folder over it, so no
+  scheduled run can rewrite the config;
 - the port, published on the host's loopback only, so the operator's
   reverse proxy is the one way in (operator decision, 2026-11-12);
 - optionally `SHAKEDOWN_API_TOKEN` for scripts
-  (§spec:dashboard-run-controls), archive.org credentials as
-  environment variables (§spec:dashboard-credentials), and `TZ`.
+  (§spec:dashboard-run-controls), and archive.org credentials as
+  environment variables (§spec:dashboard-credentials) and `TZ`, given to
+  both containers.
 
 Everything else — paths, collections, schedules, the timezone,
 credentials, notifications — is set in the dashboard
@@ -4245,15 +4327,15 @@ designed out; the web-UI paths exist so it is never *required*
 
 **Updates (operator decision, 2026-11-24).** The compose example runs
 Watchtower, which pulls a newer `SHAKEDOWN_IMAGE` and recreates
-`shakedown-serve` from it, so a tag such as `latest` keeps updating
+`shakedown-serve` and `shakedown-scheduler` from it, so a tag such as `latest` keeps updating
 Shakedown with no action, as ofelia's per-tick pull did:
 
 - **Shakedown only.** Watchtower updates only containers labelled for
-  it, and the example labels only `shakedown-serve`; Navidrome and other
+  it, and the example labels only the two Shakedown containers; Navidrome and other
   services are never touched.
 - **At a fixed time.** It checks once a day at a set time (provisional
   default: 12:00 in the container's timezone), so an update never lands
-  at a random moment. Recreating `serve` stops the runs it started and
+  at a random moment. Recreating a container stops the runs it started and
   waits for them (§spec:graceful-stop); an interrupted sync resumes at
   its next run.
 - **Through a socket proxy.** Watchtower reaches Docker only through a
@@ -4269,8 +4351,8 @@ status). Nothing downloads again, because the archive, library, and
 state database stay where they are:
 
 1. Replace the compose file with the new example: drop the ofelia
-   service; add Watchtower and the socket proxy; give `serve` the single
-   `/data` mount and no `/config` mount.
+   service; add `shakedown-scheduler`, Watchtower, and the socket proxy;
+   give `serve` the single `/data` mount and no `/config` mount.
 2. The existing `shakedown.yaml` already sits at
    `/share/data/shakedown-config/`, which is
    `/data/shakedown-config/` inside the container. Shakedown did not
@@ -4284,7 +4366,7 @@ state database stay where they are:
 
 The release notes carry these steps.
 
-**Why `serve` schedules, rather than ofelia.** Until the
+**Why a Shakedown scheduler, rather than ofelia.** Until the
 config-management increment, ofelia — itself a container — launched a
 fresh container per tick from Docker labels, keeping all timing in one
 compose file with no scheduler code in Shakedown. Adding a collection
@@ -4292,7 +4374,7 @@ then meant two edits in two places and a stack redeploy, and a schedule
 could not be shown or set from the dashboard; the operator moved timing
 into Shakedown (§req:constraints, operator decision, 2026-11-24).
 Launching a fresh one-shot process per tick keeps the property ofelia
-gave: no run state lives in `serve`, and a tick can never silently no-op
+gave: no run state lives in the scheduler, and a tick can never silently no-op
 because a prior run exited. Nothing the dashboard writes ever reaches a
 container that holds the Docker socket: the only socket user is
 Watchtower, behind the proxy, and its configuration is fixed in the
@@ -4312,17 +4394,20 @@ injected volume or command is root on the host (operator decision,
 mounted read-only and store dashboard edits elsewhere* — breaks the file
 as the source of truth (§req:constraints).
 
-**Tradeoffs.** `serve` is now required for scheduled syncs, and a tick
-missed while it is stopped is not caught up (§req:constraints). An update
-recreates `serve`, which stops a running sync until its next run. The
+**Tradeoffs.** The scheduler is now required for scheduled syncs, and a
+tick missed while it is stopped is not caught up, only shown
+(§req:constraints, §spec:schedules). An update recreates both
+containers, which stops a running sync until its next run. The
 socket proxy shrinks what Watchtower can ask Docker for, but creating
 containers is still host-root-equivalent in principle: the proxy narrows
 the attack surface, not the privilege, so operators still place the
-stack accordingly. Two more containers run in the stack. Runs can
-now write the config folder, which the read-only mount used to prevent;
-no run writes it, and the command handoff that could is set only in the
-file (§spec:dashboard-settings). Scheduled run output goes to the
-`serve` container's log, beside the run records, instead of ofelia's.
+stack accordingly. Three more containers run in the stack (the
+scheduler, Watchtower, the proxy) where ofelia was one. Runs `serve`
+starts can write the config folder, which the read-only mount used to
+prevent; no run writes it, and the command handoff that could is set
+only in the file (§spec:dashboard-settings). Scheduled runs still cannot.
+Scheduled run output goes to the scheduler container's log, beside the
+run records, instead of ofelia's.
 
 ## Setup readiness validation §spec:setup-readiness-validation
 

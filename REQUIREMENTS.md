@@ -126,16 +126,17 @@ the run logs.
 1. **Unattended weekly mirror that actually fires.** A weekly sync of
    the IA Grateful Dead collection runs unattended for a month with no
    manual intervention and no duplicate downloads. Every scheduled tick
-   actually executes its sync while the always-on `serve` container is
+   actually executes its sync while Shakedown's scheduler container is
    up, and a prior run having completed and exited never causes a tick
    to be silently skipped. "The schedule is configured" and "the sync
    ran on schedule" are the same thing, verifiable from run logs /
    `status`. A tick that cannot start because another run holds the
    writer lock is not silently lost: it is rescheduled and caught up
-   (criterion 27). While `serve` is stopped, no scheduled sync starts;
-   a tick missed then is not caught up, and the collection syncs at its
-   next tick (revised 2026-11-24: schedules move into `serve`,
-   criterion 38).
+   (criterion 27). While the scheduler is stopped, no scheduled sync
+   starts; a tick missed then is not caught up, and the collection syncs
+   at its next tick. A stopped scheduler or a missed tick is never
+   silent: the dashboard shows it and the failure notification fires
+   (revised 2026-11-24: schedules move into Shakedown, criterion 38).
 2. **New collections need no code.** Adding a second collection requires
    only a settings change in the dashboard or a YAML edit — no code
    changes, no compose edit, and no stack redeploy (revised
@@ -523,9 +524,9 @@ the run logs.
     only, or a cron expression. A newly added collection gets a
     default schedule offset from the existing collections', so
     collections do not all start at once. The dashboard shows each
-    collection's next scheduled sync. The always-on `serve` container
-    starts the scheduled syncs, and the compose example no longer
-    carries a separate scheduler.
+    collection's next scheduled sync. Shakedown's own scheduler, a
+    long-running container separate from `serve`, starts the scheduled
+    syncs, and the compose example no longer carries ofelia.
 39. **A file I manage elsewhere is never silently overwritten.** When
     `shakedown.yaml` was written by something other than Shakedown's
     setup (by hand, or deployed from git or an infrastructure-as-code
@@ -1000,10 +1001,12 @@ Technical, operational, and scope bounds on the solution space.
   run under the same one-writer-at-a-time rule as scheduled runs.
   **Superseded for scheduling by the config-management increment
   (operator decision, 2026-11-24):** schedules move into the dashboard
-  and the always-on `serve` container starts scheduled syncs; ofelia
-  leaves the compose stack. Serve becomes required for scheduled syncs,
-  and while it is stopped no scheduled sync runs; a tick missed then is
-  not caught up. Runs stay one-shot and stateless, and the
+  and a long-running Shakedown scheduler starts scheduled syncs; ofelia
+  leaves the compose stack. The scheduler runs as its own container,
+  separate from `serve`, so a dashboard crash, hang, or restart never
+  stops a tick (operator decision, 2026-11-24). It becomes required for
+  scheduled syncs, and while it is stopped no scheduled sync runs; a
+  tick missed then is not caught up, but it is shown. Runs stay one-shot and stateless, and the
   one-writer-at-a-time rule and the reschedule-on-lock catch-up below
   are unchanged. One
   bounded exception (operator decision, 2026-11-11): shakedown
@@ -1158,12 +1161,11 @@ Technical, operational, and scope bounds on the solution space.
   existing collections'.
 - **The dashboard lives in the always-on serve container.** Running the
   dashboard means running the `serve` container all the time; the
-  operator accepts that. From the config-management increment, `serve`
-  also starts scheduled syncs and is required for them. It never starts
-  a run on its own initiative beyond the configured schedules and the
-  reschedule-on-lock catch-up. Syncs keep running as fresh one-shot
-  runs, and a sync started by hand works exactly as before when
-  `serve` is not running.
+  operator accepts that. From the config-management increment, a
+  separate scheduler container starts scheduled syncs; `serve` never
+  schedules and never starts a run on its own initiative. Syncs keep
+  running as fresh one-shot runs, and a sync started by hand works
+  exactly as before when `serve` is not running.
 - **No login of its own.** The operator's reverse proxy (for example
   Authelia) handles who may open the dashboard. Shakedown serves the
   dashboard unauthenticated, like `GET /status`, and must work correctly
