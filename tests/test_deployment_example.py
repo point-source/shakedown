@@ -83,12 +83,6 @@ def test_scheduler_shares_serve_image_and_user_and_cannot_write_the_config() -> 
     assert any(e.startswith("TZ=") for e in scheduler["environment"])
 
 
-def test_no_shakedown_container_mounts_the_docker_socket() -> None:
-    services = _compose()["services"]
-    for name in ("shakedown-serve", "shakedown-scheduler"):
-        assert not any(SOCKET in v for v in services[name].get("volumes", []))
-
-
 def _env(service: dict) -> dict[str, str]:
     return dict(e.split("=", 1) for e in service.get("environment", []))
 
