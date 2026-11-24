@@ -280,3 +280,70 @@ def test_watcher_closes_the_runs_of_a_killed_child(
     finally:
         gate.with_name("g2").touch()
         assert later.run.done.wait(timeout=30)
+
+
+# --- runs the scheduler starts (§spec:schedules) ------------------------------------
+
+def test_a_run_the_scheduler_starts_is_rescheduled_not_refused_when_busy(
+    tmp_roots: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """A tick keeps scheduler semantics under the writer lock: it records its skip, and
+    it is not counted as started by serve (§spec:rescheduled-syncs)."""
+    from shakedown import db, trigger
+    from shakedown.state import RescheduledRepo
+
+    config = make_config(*tmp_roots)
+    assert config.state_db is not None
+    db.connect(config.state_db).close()  # an install where runs have written it
+    path = write_config(tmp_path / "cfg.yaml", config)
+    with writer_lock(config):
+        result = trigger.launch(
+            path, ["sync", "--source", "fake-src", "--collection", "coll1"],
+            state_db=config.state_db, argv_prefix=CHILD_PREFIX,
+            env={"PYTHONPATH": str(REPO_ROOT)}, started_by="scheduler",
+        )
+    assert isinstance(result, trigger.Busy)
+    conn = db.connect_reader(config.state_db)
+    try:
+        assert RescheduledRepo(conn).get("fake-src", "coll1") is not None
+    finally:
+        conn.close()
+
+
+def test_launch_stops_waiting_for_a_silent_child_and_keeps_watching_it(
+    tmp_path: Path,
+) -> None:
+    """A child that says nothing (stuck on a hung mount) never holds up the caller:
+    after the bound it is watched in the background like any started run."""
+    from shakedown import trigger
+
+    exits: list[int] = []
+    result = trigger.launch(
+        tmp_path / "cfg.yaml", [], state_db=tmp_path / "state.db",
+        argv_prefix=(sys.executable, "-c", "import time; time.sleep(1)"),
+        on_exit=exits.append, started_by="scheduler", first_line_timeout=0.2,
+    )
+    assert isinstance(result, trigger.Unconfirmed)
+    assert not result.run.done.is_set()
+    assert result.run.done.wait(timeout=30)
+    assert exits == [0]
+
+
+def test_the_first_line_wait_works_on_a_high_numbered_fd() -> None:
+    """serve and the scheduler live for months with many files open: the wait must
+    not depend on the pipe's fd number (select() refuses any fd from 1024 up)."""
+    import resource
+
+    from shakedown.trigger import _readable
+
+    high = 1500
+    assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] > high, "test needs fds > 1500"
+    r, w = os.pipe()
+    os.dup2(r, high)
+    try:
+        assert not _readable(high, 0.05)
+        os.write(w, b"x\n")
+        assert _readable(high, 0.05)
+    finally:
+        for fd in (r, w, high):
+            os.close(fd)

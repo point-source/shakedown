@@ -16,7 +16,15 @@ opens, as each collection starts — ``{"state": "opened", "run_id": …,
 "outcome_id": …, "source": …, "collection": …}`` — so serve can close, by exact id,
 the records a killed run left open. The fd closes when the child exits.
 
-Without SHAKEDOWN_READY_FD (CLI and scheduler runs) every announce is a no-op.
+The scheduler (`shakedown schedule`, §spec:schedules) starts its ticks the same way,
+for the same reasons: it waits for the line so collections due in the same minute
+start in file order, and it closes, by id, the records a killed tick left open. It
+also sets SHAKEDOWN_STARTED_BY=scheduler, so the child keeps a scheduled sync's
+semantics: refused by the writer lock, a `sync --collection` is rescheduled
+(§spec:rescheduled-syncs) rather than refused like a trigger, and its activity is not
+marked as started by serve.
+
+Without SHAKEDOWN_READY_FD (runs typed at the CLI) every announce is a no-op.
 sd_notify was not used: it needs a datagram socket and its own message format, and
 all we carry is a few lines.
 """
@@ -26,6 +34,7 @@ import contextlib
 import json
 import logging
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -35,13 +44,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from shakedown.models import ENDED_UNEXPECTEDLY
 
 log = logging.getLogger(__name__)
 
 READY_FD_ENV = "SHAKEDOWN_READY_FD"
+STARTED_BY_ENV = "SHAKEDOWN_STARTED_BY"
+SCHEDULER = "scheduler"
 
 
 # The readiness fd, kept after ``started`` for the ``opened`` lines; None otherwise.
@@ -75,9 +86,9 @@ def _announce(message: dict[str, Any], *, keep: bool = False) -> None:
 
 
 def launched_by_serve() -> bool:
-    """Whether `serve` started this run. Ask before the first announce, which
-    consumes the variable."""
-    return READY_FD_ENV in os.environ
+    """Whether `serve` started this run (not the scheduler, which also passes a
+    readiness fd). Ask before the first announce, which consumes the variable."""
+    return READY_FD_ENV in os.environ and os.environ.get(STARTED_BY_ENV) != SCHEDULER
 
 
 def announce_busy() -> None:
@@ -127,6 +138,14 @@ class Started:
 
 
 @dataclass
+class Unconfirmed:
+    """The child said nothing within the caller's bound; it is watched like a started
+    run, whatever it says later."""
+
+    run: TriggeredRun
+
+
+@dataclass
 class Busy:
     """Another run holds the writer lock; nothing was started or queued."""
 
@@ -143,7 +162,7 @@ class ExitedEarly:
     returncode: int
 
 
-Launch = Started | Busy | Failed | ExitedEarly
+Launch = Started | Unconfirmed | Busy | Failed | ExitedEarly
 
 
 def launch(
@@ -154,6 +173,8 @@ def launch(
     on_exit: Callable[[int], None] | None = None,
     argv_prefix: tuple[str, ...] = DEFAULT_ARGV_PREFIX,
     env: dict[str, str] | None = None,
+    started_by: str = "serve",
+    first_line_timeout: float | None = None,
 ) -> Launch:
     """Start `shakedown --config <config_path> <args>` and wait for its one line.
 
@@ -161,9 +182,16 @@ def launch(
     or failed before starting. A started child is watched on a daemon thread, which
     collects the run records it opens as it announces them; when it exits, any of
     them it left open are closed, then ``on_exit`` gets its return code.
+    ``started_by="scheduler"`` gives the child a scheduled sync's semantics. With
+    ``first_line_timeout``, a child silent that long is watched from then on and
+    reported as Unconfirmed.
     """
     r, w = os.pipe()
     child_env = {**os.environ, **(env or {}), READY_FD_ENV: str(w)}
+    if started_by == SCHEDULER:
+        child_env[STARTED_BY_ENV] = SCHEDULER
+    else:
+        child_env.pop(STARTED_BY_ENV, None)
     try:
         process = subprocess.Popen(
             [*argv_prefix, "--config", str(config_path), *args],
@@ -176,6 +204,10 @@ def launch(
     finally:
         os.close(w)  # only the child holds the write end, so its exit means EOF
     reader = os.fdopen(r, "rb")
+    if first_line_timeout is not None and not _readable(r, first_line_timeout):
+        silent = TriggeredRun(process=process, runs=[])
+        _watch(silent, reader, state_db, on_exit)
+        return Unconfirmed(silent)
     line = reader.readline()
     message: dict[str, Any] = json.loads(line) if line else {}
     state = message.get("state")
@@ -189,6 +221,25 @@ def launch(
         return ExitedEarly(returncode)
 
     triggered = TriggeredRun(process=process, runs=[])
+    _watch(triggered, reader, state_db, on_exit)
+    return Started(triggered)
+
+
+def _readable(fd: int, timeout: float) -> bool:
+    """Whether ``fd`` has something to read (or is closed) within ``timeout`` seconds.
+    poll, not select: select cannot watch an fd numbered 1024 or above."""
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    return bool(poller.poll(timeout * 1000))
+
+
+def _watch(
+    triggered: TriggeredRun, reader: BinaryIO, state_db: Path,
+    on_exit: Callable[[int], None] | None,
+) -> None:
+    """Watch a child on a daemon thread to its exit: collect the run records it
+    announces, close any it left open, then hand ``on_exit`` its return code."""
+    process = triggered.process
 
     def watch() -> None:
         with reader:
@@ -209,7 +260,6 @@ def launch(
             triggered.done.set()
 
     threading.Thread(target=watch, name=f"watch-{process.pid}", daemon=True).start()
-    return Started(triggered)
 
 
 # How long serve's shutdown waits for the runs it started to stop: inside the 120 s
