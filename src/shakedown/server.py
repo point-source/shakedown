@@ -78,6 +78,8 @@ log = logging.getLogger(__name__)
 BUSY_MESSAGE = "a run is in progress; try again when it finishes"
 # A run stopped on request exits 128 + SIGTERM or SIGINT (§spec:graceful-stop).
 STOPPED_EXIT_CODES = (143, 130)
+# Why setup's first sync did not start (§spec:first-run-setup `reason`).
+SETUP_REASONS: dict[type, str] = {Busy: "busy", Failed: "failed", ExitedEarly: "exited_early"}
 
 
 class SaveBody(BaseModel):
@@ -188,6 +190,25 @@ def build_app(
     ) -> dict[str, Any]:
         """Start the run as a separate one-shot process and answer once it holds the
         writer lock (§spec:api-sync-runs)."""
+        refused = launch_run(config, args, on_exit=on_exit)
+        if isinstance(refused, Busy):
+            raise HTTPException(409, BUSY_MESSAGE)
+        if isinstance(refused, Failed):
+            raise HTTPException(503, refused.error)
+        if isinstance(refused, ExitedEarly):
+            raise HTTPException(
+                500,
+                f"the run exited before starting (exit {refused.returncode}); "
+                f"see the serve logs",
+            )
+        # Each collection's run record opens when it starts; GET /status shows its id
+        # as the collection's latest run (§spec:api-sync-runs).
+        return {"started": verb, "source": source, "collection": collection}
+
+    def launch_run(
+        config: Config, args: list[str], *, on_exit: Callable[[int], None] | None = None
+    ) -> Busy | Failed | ExitedEarly | None:
+        """Start the run; None once it holds the writer lock, else why it did not."""
         assert config.state_db is not None  # filled in by Config validation
         result = launch(
             config_path,
@@ -197,22 +218,19 @@ def build_app(
             argv_prefix=argv_prefix,
             env=child_env,
         )
-        if isinstance(result, Busy):
-            raise HTTPException(409, BUSY_MESSAGE)
-        if isinstance(result, Failed):
-            raise HTTPException(503, result.error)
-        if isinstance(result, ExitedEarly):
-            raise HTTPException(
-                500,
-                f"the run exited before starting (exit {result.returncode}); "
-                f"see the serve logs",
-            )
+        if isinstance(result, Busy | Failed | ExitedEarly):
+            return result
         # serve lives for months: keep only the runs still going, plus this one.
         app.state.triggered = [t for t in app.state.triggered if not t.done.is_set()]
         app.state.triggered.append(result.run)
-        # Each collection's run record opens when it starts; GET /status shows its id
-        # as the collection's latest run (§spec:api-sync-runs).
-        return {"started": verb, "source": source, "collection": collection}
+        return None
+
+    def count_sync(returncode: int) -> None:
+        c_sync.labels(
+            "ok" if returncode == 0
+            else "stopped" if returncode in STOPPED_EXIT_CODES
+            else "fail"
+        ).inc()
 
     def current_config() -> Config:
         try:
@@ -252,6 +270,35 @@ def build_app(
     @app.get("/api/setup")
     def setup_defaults() -> dict[str, Any]:
         return first_run.setup_defaults()
+
+    # Finishing setup: write the file, then start the collection's first sync as
+    # POST /sync does. The file stays written when the sync cannot start. The body
+    # is read by hand so a bad one never answers FastAPI's detail, which quotes it.
+    @app.post("/api/setup", dependencies=[Depends(write_gate)])
+    async def finish_setup(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except ValueError:
+            raise Refusal(422, "invalid_body") from None
+        try:
+            done = await asyncio.to_thread(first_run.finish, config_path, body)
+        except ConfigRejected as e:
+            return JSONResponse({"errors": [p.to_dict() for p in e.errors]}, status_code=422)
+        config = await asyncio.to_thread(configs.load_now)
+        refused = await asyncio.to_thread(
+            launch_run,
+            config,
+            ["sync", *scope_args(done.source, done.collection)],
+            on_exit=count_sync,
+        )
+        answer: dict[str, Any] = {"revision": done.revision, "warnings": done.warnings}
+        if refused is None:
+            answer["started"] = {"source": done.source, "collection": done.collection}
+        else:
+            log.warning("setup's first sync did not start: %s", refused)
+            answer["started"] = None
+            answer["reason"] = SETUP_REASONS[type(refused)]
+        return JSONResponse(answer, status_code=201)
 
     # Saving it (§spec:dashboard-settings) and the edit lock's override
     # (§spec:edit-lock), behind the write gate like every write.
@@ -331,17 +378,9 @@ def build_app(
     ) -> dict[str, Any]:
         config = current_config()
         require_scope(config, source, collection)
-
-        def count(returncode: int) -> None:
-            c_sync.labels(
-                "ok" if returncode == 0
-                else "stopped" if returncode in STOPPED_EXIT_CODES
-                else "fail"
-            ).inc()
-
         return start_run(
             config, "sync", source, collection, ["sync", *scope_args(source, collection)],
-            on_exit=count,
+            on_exit=count_sync,
         )
 
     @app.post("/verify", status_code=202, dependencies=[Depends(write_gate)])
