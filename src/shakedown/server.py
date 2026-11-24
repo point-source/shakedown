@@ -32,7 +32,13 @@ from pydantic import BaseModel
 
 from shakedown import __version__, config_save
 from shakedown.activity import HISTORY_DAYS
-from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope
+from shakedown.config import (
+    Config,
+    ConfigError,
+    ConfigRejected,
+    UnknownScopeError,
+    check_scope,
+)
 from shakedown.dashboard import (
     LIVE_TTL_S,
     VIEW_TTL_S,
@@ -239,7 +245,7 @@ def build_app(
     def save_config(body: SaveBody) -> JSONResponse:
         try:
             saved = config_save.save(config_path, body.revision, body.document)
-        except config_save.Rejected as e:
+        except ConfigRejected as e:
             return JSONResponse({"errors": [p.to_dict() for p in e.errors]}, status_code=422)
         return JSONResponse({"revision": saved.revision, "warnings": saved.warnings})
 

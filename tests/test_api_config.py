@@ -552,3 +552,64 @@ async def test_check_paths_saves_nothing(paths: dict[str, Path], tmp_path: Path)
         {"loc": ["library_root"], "code": "hardlink_failed"},
     ]}
     assert paths["config"].read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_a_name_that_is_not_text_is_refused_not_a_crash(paths: dict[str, Path]) -> None:
+    loaded = await _unlocked(paths)
+    doc = loaded["document"]
+    _gd(doc)["name"] = ["x"]
+    doc["sources"][1]["name"] = {"a": 1}
+    async with _client(paths) as client:
+        response = await _put(client, loaded["revision"], doc)
+    assert response.status_code == 422
+    assert {e["code"] for e in response.json()["errors"]} == {"string_type"}
+
+
+@pytest.mark.asyncio
+async def test_a_source_name_split_over_two_entries_saves(paths: dict[str, Path]) -> None:
+    """One source may span two entries (§spec:source-budget shares one host's
+    budget by name); a save matches each entry by its occurrence."""
+    loaded = await _unlocked(paths)
+    doc = loaded["document"]
+    doc["sources"].append({"name": "ia", "type": "ia", "collections": [
+        {"name": "other", "query": "q"}]})
+    async with _client(paths) as client:
+        first = await _put(client, loaded["revision"], doc)
+        assert first.status_code == 200, first.json()
+        doc["sources"][2]["collections"][0]["query"] = "q2"
+        doc["sources"][0]["collections"][1]["fill_tags"] = True
+        second = await _put(client, first.json()["revision"], doc)
+        assert second.status_code == 200, second.json()
+        saved = (await client.get("/api/config")).json()["document"]
+    assert [s["name"] for s in saved["sources"]] == ["ia", "lma", "ia"]
+    assert saved["sources"][2]["collections"][0]["query"] == "q2"
+    assert saved["sources"][0]["collections"][1]["fill_tags"] is True
+    assert saved["sources"][0]["collections"][0]["name"] == "gd"
+    assert "      # The Dead, every Sunday." in paths["config"].read_text()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_save_leaves_the_new_state_database_alone(
+    paths: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The edit state moves only with a save that goes through: a hand edit landing
+    while the save runs leaves no unlocked record in the database it named."""
+    from shakedown import config_save
+
+    loaded = await _unlocked(paths)
+    doc = loaded["document"]
+    new_db = tmp_path / "moved" / "state.db"
+    doc["state_db"] = str(new_db)
+    real_merge = config_save.merge
+
+    def merge_then_hand_edit(*args):  # type: ignore[no-untyped-def]
+        merged = real_merge(*args)
+        paths["config"].write_text(paths["config"].read_text() + "# hand edit\n")
+        return merged
+
+    monkeypatch.setattr(config_save, "merge", merge_then_hand_edit)
+    async with _client(paths) as client:
+        response = await _put(client, loaded["revision"], doc)
+    assert (response.status_code, response.json()) == (409, {"code": "changed"})
+    assert not new_db.exists()

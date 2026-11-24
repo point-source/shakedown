@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from shakedown import db
-from shakedown.config import ConfigFile, default_state_db
+from shakedown.config import ConfigFile, raw_state_db
 
 EditState = Literal["editable", "locked", "override"]
 Recorded = Literal["editable", "override"]
@@ -61,11 +61,4 @@ def state_db_for(file: ConfigFile) -> Path | None:
     is missing or unreadable, or names neither."""
     if file.config is not None:
         return file.config.state_db
-    if not isinstance(file.raw, dict):
-        return None
-    state_db, archive_root = file.raw.get("state_db"), file.raw.get("archive_root")
-    if isinstance(state_db, str) and state_db:
-        return Path(state_db)
-    if isinstance(archive_root, str) and archive_root:
-        return default_state_db(Path(archive_root))
-    return None
+    return raw_state_db(file.raw)

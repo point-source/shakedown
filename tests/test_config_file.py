@@ -13,10 +13,9 @@ from typing import Any
 import pytest
 import yaml
 
-from shakedown.config import check_document, read_config_file
+from shakedown.config import ConfigRejected, check_document, read_config_file
 from shakedown.config_file import (
     ConfigExists,
-    ConfigRejected,
     WriteFailed,
     atomic_replace,
     create_config,

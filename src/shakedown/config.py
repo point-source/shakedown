@@ -19,7 +19,7 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from pydantic_core import PydanticCustomError
+from pydantic_core import PydanticCustomError, PydanticUndefined
 
 log = logging.getLogger(__name__)
 
@@ -191,6 +191,45 @@ class Checked:
     config: Config | None
     errors: list[ConfigProblem] = field(default_factory=list)
     warnings: list[ConfigProblem] = field(default_factory=list)
+
+
+class ConfigRejected(Exception):
+    """A document the config validation refuses, with every error found."""
+
+    def __init__(self, errors: list[ConfigProblem]) -> None:
+        super().__init__("; ".join(str(e) for e in errors))
+        self.errors = errors
+
+
+# The lists of named entries, and the model of each entry: a name is the entry's
+# identity, fixed once created (§spec:dashboard-settings).
+NAMED_LISTS: dict[str, type[BaseModel]] = {
+    "sources": SourceConfig, "collections": CollectionConfig,
+}
+
+
+def model_defaults(model: type[BaseModel] | None) -> dict[str, Any]:
+    """The settings ``model`` fills in when a document leaves them out."""
+    if model is None:
+        return {}
+    return {
+        name: info.default
+        for name, info in model.model_fields.items()
+        if info.default is not PydanticUndefined
+    }
+
+
+def raw_state_db(raw: Any) -> Path | None:
+    """The state database a document names, read without validating it: its
+    `state_db`, else the default beside its `archive_root`."""
+    if not isinstance(raw, dict):
+        return None
+    state_db, archive_root = raw.get("state_db"), raw.get("archive_root")
+    if isinstance(state_db, str) and state_db:
+        return Path(state_db)
+    if isinstance(archive_root, str) and archive_root:
+        return default_state_db(Path(archive_root))
+    return None
 
 
 class ConfigError(Exception):
@@ -380,7 +419,7 @@ def _yaml_problem(e: yaml.YAMLError) -> str:
 
 def _check_names(raw: dict[str, Any], errors: list[ConfigProblem]) -> None:
     """Each (source, collection) pair is unique across the file: the archive is keyed
-    by those names."""
+    by those names. A source name may span entries; its collections may not repeat."""
     seen: set[tuple[str, str]] = set()
     for i, source in entries(raw, "sources"):
         source_name = source.get("name")

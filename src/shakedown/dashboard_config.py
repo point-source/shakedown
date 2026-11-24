@@ -13,14 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
-from pydantic_core import PydanticUndefined
 
 from shakedown.config import (
-    CollectionConfig,
+    NAMED_LISTS,
     Config,
     ConfigFile,
-    SourceConfig,
-    default_state_db,
+    model_defaults,
+    raw_state_db,
     read_config_file,
 )
 from shakedown.dashboard import iso
@@ -64,21 +63,17 @@ def document_of(file: ConfigFile) -> dict[str, Any] | None:
     if not isinstance(file.raw, dict):
         return None
     doc = _filled(file.raw, Config)
-    archive_root = doc.get("archive_root")
-    if doc.get("state_db") is None and isinstance(archive_root, str) and archive_root:
-        doc["state_db"] = str(default_state_db(Path(archive_root)))
+    state_db = raw_state_db(file.raw)
+    if doc.get("state_db") is None and state_db is not None:
+        doc["state_db"] = str(state_db)
     return doc
-
-
-_NESTED: dict[str, type[BaseModel]] = {"sources": SourceConfig, "collections": CollectionConfig}
 
 
 def _filled(raw: dict[Any, Any], model: type[BaseModel]) -> dict[str, Any]:
     doc = {str(key): _plain(value) for key, value in raw.items()}
-    for name, info in model.model_fields.items():
-        if name not in doc and info.default is not PydanticUndefined:
-            doc[name] = _plain(info.default)
-    for key, nested in _NESTED.items():
+    for name, default in model_defaults(model).items():
+        doc.setdefault(name, _plain(default))
+    for key, nested in NAMED_LISTS.items():
         if key in model.model_fields and isinstance(raw.get(key), list):
             doc[key] = [
                 _filled(item, nested) if isinstance(item, dict) else _plain(item)

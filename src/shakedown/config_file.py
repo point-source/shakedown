@@ -20,17 +20,16 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel
-from pydantic_core import PydanticUndefined
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.scalarstring import ScalarString
 
 from shakedown.config import (
-    CollectionConfig,
+    NAMED_LISTS,
     Config,
-    ConfigProblem,
-    SourceConfig,
+    ConfigRejected,
     check_document,
+    model_defaults,
     revision_of,
 )
 from shakedown.edit_lock import record_edit
@@ -39,10 +38,6 @@ from shakedown.edit_lock import record_edit
 # (2, 4, 2) is the example file's: mappings by 2, list items by 4 with the dash at 2.
 _INDENTS = ((2, 4, 2), (2, 2, 0), (4, 4, 2), (4, 6, 4), (4, 4, 0))
 _NEW_FILE_INDENT = (2, 4, 2)
-
-# The keys holding lists of named entries, matched by name: names are fixed once
-# created (§spec:dashboard-settings), so a name is the entry's identity.
-_NAMED_LISTS = {"sources": SourceConfig, "collections": CollectionConfig}
 
 
 class WriteFailed(Exception):
@@ -55,14 +50,6 @@ class WriteFailed(Exception):
 
 class ConfigExists(Exception):
     """A new config was asked for where a file already is."""
-
-
-class ConfigRejected(Exception):
-    """A document the config validation refuses."""
-
-    def __init__(self, errors: list[ConfigProblem]) -> None:
-        super().__init__("; ".join(str(e) for e in errors))
-        self.errors = errors
 
 
 class MergeFailed(Exception):
@@ -126,7 +113,7 @@ def _merge_map(
 ) -> None:
     for key in [k for k in node if k not in new]:
         del node[key]  # e.g. a handoff switched from one kind to the other
-    defaults = _defaults(model)
+    defaults = model_defaults(model)
     for key, value in new.items():
         before = old.get(key, defaults.get(key))
         if key in node:
@@ -135,15 +122,15 @@ def _merge_map(
             elif value != before:
                 node[key] = _merge_value(node[key], before, value, key)
         elif value != before and value is not None:
-            node[key] = _fresh(value, _NAMED_LISTS.get(key))
+            node[key] = _fresh(value, NAMED_LISTS.get(key))
 
 
 def _merge_value(node: Any, old: Any, new: Any, key: str) -> Any:
     if isinstance(node, CommentedMap) and isinstance(old, dict) and isinstance(new, dict):
         _merge_map(node, old, new, None)
         return node
-    if key in _NAMED_LISTS and isinstance(node, CommentedSeq) and isinstance(new, list):
-        _merge_named(node, old if isinstance(old, list) else [], new, _NAMED_LISTS[key])
+    if key in NAMED_LISTS and isinstance(node, CommentedSeq) and isinstance(new, list):
+        _merge_named(node, old if isinstance(old, list) else [], new, NAMED_LISTS[key])
         return node
     if isinstance(node, ScalarString) and isinstance(new, str):
         return type(node)(new)  # keep the value's quoting
@@ -155,50 +142,54 @@ def _merge_named(
     model: type[BaseModel],
 ) -> None:
     """Entries matched by name: changed in place, removed, added, then put in the
-    document's order."""
-    old_by_name = {entry["name"]: entry for entry in old}
-    wanted = [entry["name"] for entry in new]
-    for i in reversed(range(len(seq))):
-        if _name(seq[i]) not in wanted:
-            del seq[i]
-    by_name = {_name(item): item for item in seq}
-    for entry in new:
-        item = by_name.get(entry["name"])
-        if item is None:
-            seq.append(_fresh(entry, model))
+    document's order. A name the list repeats (one source split over two entries)
+    is matched by its occurrence."""
+    old_by_key = dict(zip(_keys(old), old, strict=True))
+    node_by_key = dict(zip(_keys(list(seq)), list(seq), strict=True))
+    items = []
+    for key, entry in zip(_keys(new), new, strict=True):
+        node = node_by_key.get(key)
+        if node is None:
+            node = _fresh(entry, model)
         else:
-            _merge_map(item, old_by_name.get(entry["name"], {}), entry, model)
-    if [_name(item) for item in seq] != wanted:
-        order = {name: i for i, name in enumerate(wanted)}
-        items = sorted(seq, key=lambda item: order[_name(item)])
+            _merge_map(node, old_by_key.get(key, {}), entry, model)
+        items.append(node)
+    kept = {id(node) for node in items}
+    for i in reversed(range(len(seq))):
+        if id(seq[i]) not in kept:
+            del seq[i]
+    present = {id(node) for node in seq}
+    seq.extend(node for node in items if id(node) not in present)
+    if [id(node) for node in seq] != [id(node) for node in items]:
         seq.clear()
         seq.extend(items)
+
+
+def _keys(entries: list[Any]) -> list[tuple[Any, int]]:
+    """Each entry's name with its occurrence: ("ia", 0), ("etree", 0), ("ia", 1)."""
+    seen: dict[Any, int] = {}
+    keys = []
+    for entry in entries:
+        name = _name(entry)
+        keys.append((name, seen.get(name, 0)))
+        seen[name] = seen.get(name, 0) + 1
+    return keys
 
 
 def _name(item: Any) -> Any:
     return item.get("name") if isinstance(item, dict) else None
 
 
-def _defaults(model: type[BaseModel] | None) -> dict[str, Any]:
-    if model is None:
-        return {}
-    return {
-        name: info.default
-        for name, info in model.model_fields.items()
-        if info.default is not PydanticUndefined
-    }
-
-
 def _fresh(value: Any, model: type[BaseModel] | None) -> Any:
     """A new node for ``value``. A new source or collection is written with only
     what differs from the defaults, as a person would write it."""
     if isinstance(value, dict):
-        defaults = _defaults(model)
+        defaults = model_defaults(model)
         node = CommentedMap()
         for key, item in value.items():
             if item is None or (key in defaults and item == defaults[key]):
                 continue
-            node[key] = _fresh(item, _NAMED_LISTS.get(key))
+            node[key] = _fresh(item, NAMED_LISTS.get(key))
         return node
     if isinstance(value, list):
         return CommentedSeq(_fresh(item, model) for item in value)

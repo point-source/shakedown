@@ -179,3 +179,4 @@ def test_the_revision_follows_the_exact_bytes(tmp_path: Path) -> None:
     assert read_config_file(path).revision == first
     path.write_text(yaml.safe_dump(_doc()) + "# a comment\n")
     assert read_config_file(path).revision != first
+

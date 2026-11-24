@@ -17,6 +17,7 @@ from typing import Any
 from shakedown.config import (
     ConfigFile,
     ConfigProblem,
+    ConfigRejected,
     check_document,
     default_state_db,
     entries,
@@ -35,14 +36,6 @@ EXEC_FILE_ONLY = "exec_file_only"
 _writing = threading.Lock()
 
 
-class Rejected(Exception):
-    """A document the save refuses: `422 {errors}`, every error found."""
-
-    def __init__(self, errors: list[ConfigProblem]) -> None:
-        super().__init__("; ".join(str(e) for e in errors))
-        self.errors = errors
-
-
 @dataclass(frozen=True)
 class Saved:
     revision: str
@@ -59,23 +52,22 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
         checked = check_document(document)
         errors = checked.errors + _exec_problems(current.raw, document)
         if errors:
-            raise Rejected(errors)
+            raise ConfigRejected(errors)
         assert checked.config is not None
         old = document_of(current)
         assert old is not None
         new = checked.config.model_dump(mode="json")
 
         warnings = _path_warnings(old, new) + [_warning(w) for w in checked.warnings]
-        if old["state_db"] != new["state_db"]:
-            old_db, new_db = state_db_for(current), Path(new["state_db"])
-            if old_db is not None:
-                _write_state(new_db, lambda: move_install_state(old_db, new_db))
-
         assert current.data is not None
         merged = merge(current.data.decode(), old, new).encode()
         if merged != current.data:
             if _bytes_now(path) != current.data:
                 raise Refusal(409, "changed")
+            # The edit state moves only with a save that is going through.
+            old_db, new_db = state_db_for(current), Path(new["state_db"])
+            if old["state_db"] != new["state_db"] and old_db is not None:
+                _write_state(new_db, lambda: move_install_state(old_db, new_db))
             try:
                 atomic_replace(path, merged)
             except WriteFailed as e:
@@ -155,6 +147,8 @@ def _exec_values(raw: Any) -> list[tuple[tuple[Any, Any], Any, tuple[str | int, 
             handoff = collection.get("on_complete")
             command = handoff.get("exec") if isinstance(handoff, dict) else None
             key = (source.get("name"), collection.get("name"))
+            if not all(isinstance(name, str) for name in key):
+                continue  # refused by the validation; and never a match below
             values.append((key, command, ("sources", i, "collections", j, "on_complete")))
     return values
 
