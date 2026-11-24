@@ -107,14 +107,12 @@ def check_purgeable(config: Config, source: str, collection: str) -> None:
     database holds files for it. Reads only."""
     if (source, collection) in configured_pairs(config):
         raise PurgeRefused("configured", _configured_message(source, collection))
-    held = False
     state_db = config.state_db
-    if state_db is not None and state_db.exists():
-        try:
-            with closing(open_read_only(state_db)) as conn:
-                held = is_held(conn, source, collection)
-        except sqlite3.Error:
-            held = False
+    assert state_db is not None  # filled in by Config validation
+    held = False
+    if state_db.exists():  # no database yet: nothing is held
+        with closing(open_read_only(state_db)) as conn:
+            held = is_held(conn, source, collection)
     if not held:
         raise PurgeRefused("not_held", f"nothing is held for {source}/{collection}")
 
@@ -126,7 +124,7 @@ def _configured_message(source: str, collection: str) -> str:
 def _one_folder(name: str) -> bool:
     """A name that is exactly one folder below its parent, so a delete aimed at it
     can never reach the archive or library root."""
-    return name not in ("", ".", "..") and "/" not in name and "\0" not in name
+    return name not in ("", ".", "..") and "/" not in name
 
 
 def run_purge(
@@ -238,13 +236,18 @@ class _Deletes:
         by_show: dict[str, list[sqlite3.Row]] = {}
         for row in rows:
             by_show.setdefault(row["identifier"], []).append(row)
-        touched: set[Path] = set()
+        # Every folder a placement or a show's folder record names is swept, so a
+        # show whose files were already gone (by hand, or a stopped purge) leaves
+        # no empty folder behind.
+        touched = {(self.library_base / row["path"]).parent for row in rows}
+        touched |= {self.library_base / folder
+                    for folder in self.placements.folders(self.source, self.collection).values()}
         for placed in by_show.values():
             if stopping.requested():
                 return
             with transaction(self.conn):
                 for row in placed:
-                    self._unplace(row["path"], row["inode"], touched)
+                    self._unplace(row["path"], row["inode"])
         with transaction(self.conn):
             self.conn.execute(
                 "DELETE FROM library_folders WHERE source_name=? AND collection_name=?",
@@ -262,7 +265,7 @@ class _Deletes:
                     break  # holds someone's file, or one that could not be deleted
                 current = current.parent
 
-    def _unplace(self, rel: str, inode: int, touched: set[Path]) -> None:
+    def _unplace(self, rel: str, inode: int) -> None:
         path = self.library_base / rel
         try:
             if path.lstat().st_ino != inode:
@@ -274,7 +277,6 @@ class _Deletes:
         else:
             if not self._unlink(path):
                 return  # stays recorded, so a later purge retries it
-            touched.add(path.parent)
         self.placements.remove_placement(self.source, self.collection, rel)
 
     def archive(self) -> None:
@@ -289,10 +291,11 @@ class _Deletes:
         for identifier in shows:
             if stopping.requested():
                 return
-            if not _one_folder(identifier) or not self._delete_tree(
-                    self.archive_base / identifier):
-                if not _one_folder(identifier):
-                    self.errors.append(f"{identifier!r} is not one folder name; kept")
+            if not _one_folder(identifier):
+                self.errors.append(f"{identifier!r} is not one folder name; kept")
+                kept += 1
+                continue
+            if not self._delete_tree(self.archive_base / identifier):
                 kept += 1
                 continue
             with transaction(self.conn):

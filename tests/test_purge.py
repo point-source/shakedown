@@ -148,6 +148,31 @@ def test_an_emptied_collection_library_folder_goes_too(synced: Config) -> None:
     assert (synced.library_root / S).is_dir()
 
 
+def test_show_folders_already_emptied_go_too(synced: Config) -> None:
+    """A show whose files are already gone (deleted by hand, or by a purge stopped
+    after it) still leaves its folder for a later purge to sweep."""
+    for f in (_library(synced) / "show-a").iterdir():
+        f.unlink()
+
+    assert _purge(synced) == 0
+
+    assert not _library(synced).exists()
+
+
+def test_a_purge_stopped_midway_is_finished_by_the_next(
+    synced: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = purge.stopping.requested
+    calls = iter([False, True])  # stop after the first show
+    monkeypatch.setattr(purge.stopping, "requested", lambda: next(calls, True))
+    _purge(synced)
+    assert _library(synced).exists()
+
+    monkeypatch.setattr(purge.stopping, "requested", real)
+    assert _purge(synced) == 0
+    assert not _library(synced).exists()
+
+
 def test_a_file_swapped_in_at_a_placed_path_stays(synced: Config) -> None:
     swapped = _library(synced) / "show-a" / "t1.flac"
     swapped.unlink()
