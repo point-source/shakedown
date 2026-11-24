@@ -37,7 +37,10 @@ def lock_path(config: Config) -> Path:
 
 
 def lock_path_of(state_db: Path) -> Path:
-    return state_db.with_name(state_db.name + ".lock")
+    """Beside the database file itself: two spellings of one database (a link, a
+    relative path) share one lock."""
+    real = state_db.resolve()
+    return real.with_name(real.name + ".lock")
 
 
 @contextlib.contextmanager

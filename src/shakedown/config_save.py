@@ -108,10 +108,13 @@ def _move(path: Path, before: bytes, merged: bytes, old_db: Path, new_db: Path) 
             try:
                 move_install_state(old_db, new_db)
             except (sqlite3.Error, OSError) as e:
-                try:
-                    atomic_replace(path, before)
-                except WriteFailed:
-                    log.error("could not put back %s after a failed save", path)
+                # Put back only this save's own bytes: a hand edit made meanwhile
+                # stays.
+                if _bytes_now(path) == merged:
+                    try:
+                        atomic_replace(path, before)
+                    except WriteFailed:
+                        log.error("could not put back %s after a failed save", path)
                 raise Refusal(500, "write_failed", path=str(new_db)) from e
     except LockHeld:
         raise Refusal(409, "busy") from None

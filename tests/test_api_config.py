@@ -810,6 +810,64 @@ async def test_a_move_whose_file_cannot_be_written_copies_no_credentials(
 
 
 @pytest.mark.asyncio
+async def test_a_failed_move_never_puts_back_the_file_over_a_hand_edit(
+    paths: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from shakedown import config_save
+
+    loaded = await _unlocked(paths)
+    doc = loaded["document"]
+    doc["state_db"] = str(tmp_path / "state" / "state.db")
+    hand_edit = paths["config"].read_text() + "# edited by hand meanwhile\n"
+
+    def copy_fails(_old: Path, _new: Path) -> None:
+        paths["config"].write_text(hand_edit)
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(config_save, "move_install_state", copy_fails)
+    async with _client(paths) as client:
+        response = await _put(client, loaded["revision"], doc)
+    assert response.status_code == 500
+    assert paths["config"].read_text() == hand_edit
+
+
+@pytest.mark.asyncio
+async def test_a_failed_move_puts_back_the_file(
+    paths: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    from shakedown import config_save
+
+    loaded = await _unlocked(paths)
+    before = paths["config"].read_bytes()
+    doc = loaded["document"]
+    doc["state_db"] = str(tmp_path / "state" / "state.db")
+
+    def copy_fails(_old: Path, _new: Path) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(config_save, "move_install_state", copy_fails)
+    async with _client(paths) as client:
+        response = await _put(client, loaded["revision"], doc)
+    assert response.status_code == 500
+    assert paths["config"].read_bytes() == before
+
+
+def test_two_spellings_of_one_database_share_one_writer_lock(tmp_path: Path) -> None:
+    from shakedown.lock import LockHeld, writer_lock_at
+
+    real = tmp_path / "state.db"
+    real.touch()
+    (tmp_path / "alias.db").symlink_to(real)
+    alias = tmp_path / "alias.db"
+    with writer_lock_at(real), pytest.raises(LockHeld), writer_lock_at(alias):
+        pass
+
+
+@pytest.mark.asyncio
 async def test_a_save_that_removes_a_source_forgets_its_credentials(
     paths: dict[str, Path],
 ) -> None:
