@@ -1848,8 +1848,7 @@ notice sent, both shows' bytes restored.
 
 ## Configuration §spec:configuration
 
-*Status: in progress*
-The config-management increment's `schedule` and `timezone` keys (§spec:schedules) and the move of the file into the data mount (§spec:deployment) are built; credentials entered in the dashboard wait on §spec:dashboard-credentials.
+*Status: complete*
 
 All configuration lives in a single YAML file at
 `/data/shakedown-config/shakedown.yaml`, inside the one data mount
@@ -2180,8 +2179,7 @@ appears in Navidrome with no handoff configured.
 
 ## Serve control plane §spec:serve
 
-*Status: in progress*
-The write gate guards every mutating endpoint built so far; the config resource, credentials, trim, purge, and scheduler health are built, and the setup endpoints are not built yet.
+*Status: complete*
 
 `shakedown serve` exposes a small HTTP API for ad-hoc triggers and
 monitoring without `docker exec` (§req:priorities #10), serves the web
@@ -2199,7 +2197,7 @@ config-management increment ofelia did (§req:constraints, superseded
 | `POST /sync?source=&collection=` | Start an ad-hoc sync and answer at once (write gate; §spec:api-sync-runs) |
 | `POST /verify` | Start a verify run and answer at once (write gate; §spec:api-sync-runs) |
 | `POST /validate` | Run setup readiness validation (write gate; live handoff validation takes the token only) |
-| `GET /` | The read-only web dashboard (§spec:dashboard) |
+| `GET /` | The web dashboard (§spec:dashboard) |
 | `GET /api/activity` | Live runs and network now (§spec:run-activity, §spec:network-activity) |
 | `GET /api/network` | Per-source network history (§spec:network-activity) |
 | `GET /api/runs` | Runs of the last 30 days (§spec:run-history) |
@@ -4442,7 +4440,8 @@ Observable behavior:
   (§spec:run-activity, §spec:run-history) with the runs it trimmed and
   the bytes the database shrank by (`runs_trimmed`, `bytes_freed`). If the disk lacks room
   to compact (it needs about the database's size free), the trim still
-  happens, the run reports the compaction failure, and the database
+  happens, the run ends failed with the compaction failure as its error
+  line (the CLI exits 1; operator decision, 2026-11-24), and the database
   keeps its size until the next attempt; the write-ahead log the failed
   attempt grew is emptied, so a failed compaction never leaves the disk
   fuller. A reader that keeps the log from emptying fails the compaction
