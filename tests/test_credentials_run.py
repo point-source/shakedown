@@ -316,3 +316,25 @@ def test_validate_without_a_login_still_names_missing_variables(archive: FakeArc
     assert probe.ok is False and "MY_EMAIL" in (probe.consequence or "")
     assert IAPlugin(_source()).check_credentials().ok is True
     assert archive.calls == []
+
+
+def test_validate_without_a_login_names_the_standard_fallback_it_needs(
+    archive: FakeArchive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file names only the email variable: the run needs IA_PASSWORD too, so
+    validate must not pass while the run would be anonymous."""
+    monkeypatch.setenv("MY_EMAIL", "mine@example.org")
+    probe = IAPlugin(_source(IAAuth(email_env="MY_EMAIL"))).check_credentials()
+    assert probe.ok is False
+    assert "IA_PASSWORD" in (probe.consequence or "")
+    assert "MY_EMAIL" not in (probe.consequence or "")
+
+
+def test_validate_counts_a_blank_variable_as_missing(
+    archive: FakeArchive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MY_EMAIL", "mine@example.org")
+    monkeypatch.setenv("MY_PASSWORD", " \r\n")
+    auth = IAAuth(email_env="MY_EMAIL", password_env="MY_PASSWORD")
+    probe = IAPlugin(_source(auth)).check_credentials()
+    assert probe.ok is False and "MY_PASSWORD" in (probe.consequence or "")

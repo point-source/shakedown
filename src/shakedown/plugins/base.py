@@ -4,7 +4,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import math
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
@@ -19,7 +18,7 @@ import requests
 import urllib3.exceptions
 
 from shakedown.config import CollectionConfig, SourceConfig
-from shakedown.credentials import Login, LoginCheck
+from shakedown.credentials import Login, LoginCheck, env_names, env_value
 from shakedown.models import ManifestFile
 
 _HASH_CHUNK = 1024 * 1024
@@ -372,10 +371,12 @@ class SourcePlugin(ABC):
         auth = self.source_config.auth
         if auth is None:
             return ProbeResult(ok=True)
+        # The names the run reads (`credentials.resolve`): a name `auth` leaves out
+        # falls back to the type's standard one, and a blank value counts as unset.
         missing = [
             name
-            for name in (auth.email_env, auth.password_env)
-            if name and not os.environ.get(name)
+            for name in env_names(auth, self.credential_env)
+            if name and not env_value(name)
         ]
         if missing:
             return ProbeResult(

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Literal
 from shakedown import db
 
 if TYPE_CHECKING:
-    from shakedown.config import SourceConfig
+    from shakedown.config import IAAuth, SourceConfig
 
 # Where a source's login comes from (§spec:dashboard-credentials "Status, never
 # values"), and the source's verdict on a login ("Write-only").
@@ -53,18 +53,31 @@ def resolve(source: SourceConfig, state_db: Path | None) -> tuple[Status, Login 
     plugin = registry.plugin_class(source.type)
     if not plugin.takes_credentials:
         return "none", None
-    email_name, password_name = plugin.credential_env or (None, None)
-    if source.auth is not None:
-        email_name = source.auth.email_env or email_name
-        password_name = source.auth.password_env or password_name
-    email = os.environ.get(email_name, "").strip() if email_name else ""
-    password = os.environ.get(password_name, "").strip() if password_name else ""
+    email_name, password_name = env_names(source.auth, plugin.credential_env)
+    email, password = env_value(email_name), env_value(password_name)
     if email and password:
         return "environment", Login(email, password)
     login = stored(state_db, source.name)
     if login is not None:
         return "dashboard", login
     return "none", None
+
+
+def env_names(
+    auth: IAAuth | None, standard: tuple[str, str] | None
+) -> tuple[str | None, str | None]:
+    """The (email, password) environment variables a source reads: the names its
+    `auth` gives, each falling back to the type's standard name."""
+    email_name, password_name = standard or (None, None)
+    if auth is not None:
+        email_name = auth.email_env or email_name
+        password_name = auth.password_env or password_name
+    return email_name, password_name
+
+
+def env_value(name: str | None) -> str:
+    """A credential variable's value, trimmed; empty when unset or unnamed."""
+    return os.environ.get(name, "").strip() if name else ""
 
 
 def login_for(source: SourceConfig, state_db: Path | None) -> Login | None:
