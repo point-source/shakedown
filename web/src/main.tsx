@@ -5,8 +5,10 @@ import { App } from "./App"
 import { KitSheet } from "./KitSheet"
 
 // ?view=kit shows the kit sheet (covered by its own screenshot test).
-const kit = new URLSearchParams(location.search).get("view") === "kit"
+const params = new URLSearchParams(location.search)
+const kit = params.get("view") === "kit"
+const overlay = params.get("overlay") === "1"
 
 createRoot(document.getElementById("root")!).render(
-  <StrictMode>{kit ? <KitSheet /> : <App />}</StrictMode>,
+  <StrictMode>{kit ? <KitSheet overlay={overlay} /> : <App />}</StrictMode>,
 )
