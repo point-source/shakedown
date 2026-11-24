@@ -1745,6 +1745,7 @@ exits (§req:constraints). The command surface:
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
 | `trim-history` | Drop run error lines older than `keep_run_errors_days` now and compact the state database (§spec:run-error-retention). |
+| `purge --source S --collection C [--archive]` | Delete the library files of a collection the config file no longer names, and with `--archive` its archive folder and shows' records (§spec:collection-removal). |
 | `validate [--source S] [--collection C] [--live-handoff] [--json]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
 | `item show \| refetch <identifier>` | Single-item inspection and refetch; `refetch` is a single-show run (§spec:single-show-runs). |
 | `serve [--host] [--port]` | Optional HTTP control plane (§spec:serve). |
@@ -1757,7 +1758,8 @@ exits (§req:constraints). The command surface:
   does nothing and exits 0 (§req:quality-attributes: scheduled runs are
   observable).
 - Writing commands — `sync` (except `--dry-run`), `restage`,
-  `reconcile`, `item refetch`, `verify --reconform`, and `trim-history`,
+  `reconcile`, `item refetch`, `verify --reconform`, `trim-history`, and
+  `purge`,
   whether run from the CLI, the scheduler, or `serve` — hold one exclusive writer lock
   (a kernel `flock` on `<state_db>.lock`). A second writer exits non-zero
   at once, naming the lock, instead of racing the first over shared temp
@@ -2175,7 +2177,7 @@ appears in Navidrome with no handoff configured.
 ## Serve control plane §spec:serve
 
 *Status: in progress*
-The write gate is built and guards `POST /sync`, `/verify`, and `/validate`; the config-management increment's settings, setup, credentials, purge, and trim endpoints and scheduler health are not built yet.
+The write gate guards every mutating endpoint built so far; the config resource, trim, purge, and scheduler health are built, and the setup and credentials endpoints are not built yet.
 
 `shakedown serve` exposes a small HTTP API for ad-hoc triggers and
 monitoring without `docker exec` (§req:priorities #10), serves the web
@@ -2654,7 +2656,8 @@ Observable behavior:
   database, so a run started by hand while `serve` is down shows the
   moment `serve` starts.
 - **What an entry says.** Collection; kind (`sync`, `catch_up`,
-  `refetch`, `reconform`, `restage`, `verify`, `reconcile`, `trim`); whether
+  `refetch`, `reconform`, `restage`, `verify`, `reconcile`, `trim`,
+  `purge`); whether
   `serve` started it; start time; current phase (`starting`, `listing`,
   `discovering`, `downloading`, `tagging`, `staging`, `notifying`,
   `verifying`, `finishing`); shows listed, shows to look up and looked
@@ -2662,7 +2665,9 @@ Observable behavior:
   bytes downloaded so far; current speed; and an estimated time left.
   Kinds without a phase or counter leave it null (a restage lists
   nothing; a trim has neither, belongs to no collection, and reports the
-  runs it trimmed and the bytes freed instead, §spec:run-error-retention). A sync's lookups and downloads overlap
+  runs it trimmed and the bytes freed instead, §spec:run-error-retention;
+  a purge has neither and reports the bytes it freed,
+  §spec:collection-removal). A sync's lookups and downloads overlap
   (§spec:discovery-pipeline), so both counters show at once and the
   phase reads `discovering` until the listing's lookups are done.
 - **Honest totals.** Shows to fetch, and their bytes, are only known once
@@ -2734,7 +2739,7 @@ answers `{generated_at, runs: [...], waiting: [...], network: [...]}`.
 | `activity_id` | The entry's id |
 | `run_id` | The run record's id when the kind has one (sync, catch_up, refetch, reconform), else null — the id `status` and `POST /sync` report |
 | `source`, `collection` | The collection the entry covers; null for a `trim` |
-| `kind` | `sync`, `catch_up`, `refetch`, `reconform`, `restage`, `verify`, `reconcile`, `trim` |
+| `kind` | `sync`, `catch_up`, `refetch`, `reconform`, `restage`, `verify`, `reconcile`, `trim`, `purge` |
 | `started_by_serve` | true when `serve` launched the run |
 | `started_at`, `finished_at` | ISO times; `finished_at` null while running |
 | `last_heartbeat_at`, `last_progress_at` | ISO times |
@@ -2748,7 +2753,7 @@ answers `{generated_at, runs: [...], waiting: [...], network: [...]}`.
 | `bytes_downloaded`, `bytes_to_fetch` | bytes; `bytes_to_fetch` null until known |
 | `speed_bytes_per_second` | over the last ~10 seconds |
 | `eta_seconds` | null when not computable |
-| `runs_trimmed`, `bytes_freed` | a `trim`'s runs trimmed and bytes the database shrank by, set as it ends; null for other kinds |
+| `runs_trimmed`, `bytes_freed` | a `trim`'s runs trimmed and bytes the database shrank by, set as it ends; a `purge`'s bytes freed in `bytes_freed`; null for other kinds |
 
 `runs` holds running entries and entries that ended in the last ten
 minutes, running first, then newest first.
@@ -2916,7 +2921,7 @@ last good sync age).
 Observable behavior:
 
 - **Every run, one list.** Syncs, catch-ups, refetches, reconforms,
-  restages, verifies, reconciles, and trims of the last 30 days, newest first,
+  restages, verifies, reconciles, trims, and purges of the last 30 days, newest first,
   each with kind, collection, start, duration, result, shows discovered,
   new, updated, and failed, bytes downloaded, its errors, and an
   undelivered failure notice. Runs that have a run record (sync,
@@ -2941,7 +2946,8 @@ failure_notice_error, detail_trimmed, runs_trimmed, bytes_freed}`;
 (§spec:run-error-retention); `status` reports it on each `last_run` too.
 A `trim` has null `source` and `collection`, its runs trimmed and bytes
 freed in `runs_trimmed` and `bytes_freed` (null for other kinds), and
-its compaction failure, if any, in `errors`. `last_successful_sync_at` is part of each collection in
+its compaction failure, if any, in `errors`. A `purge` has its bytes
+freed in `bytes_freed` and the deletes that failed in `errors`. `last_successful_sync_at` is part of each collection in
 §spec:library-stats.
 
 **Decision and constraint.** Read sync figures from the run records
@@ -3544,7 +3550,7 @@ loads.
 ## Settings in the dashboard §spec:dashboard-settings
 
 *Status: in progress*
-The API is built: `GET /api/config` (without `unconfigured`, which §spec:collection-removal adds), `PUT /api/config`, and `POST /api/config/check-paths`; the Settings screens wait on the Design task.
+The API is built: `GET /api/config` (with `unconfigured`, §spec:collection-removal), `PUT /api/config`, and `POST /api/config/check-paths`; the Settings screens wait on the Design task.
 
 Compatibility, from deployment status "deployed, one install, no
 outside consumers" (§req:constraints, operator-confirmed 2026-11-24):
@@ -4243,7 +4249,8 @@ and without the dashboard's headers: `403`.
 
 ## Removing a collection §spec:collection-removal
 
-*Status: not started*
+*Status: in progress*
+The unconfigured list, `POST /api/collections/purge`, and `shakedown purge` are built; the remove and delete confirmations and the unconfigured list on screen wait on Design.
 
 Removing a collection stops syncing it. By default its archived shows
 and library folders stay. The dashboard says what happens before the
@@ -4263,6 +4270,10 @@ Observable behavior:
   or library files for that the file no longer names: `{source,
   collection, shows, archive_bytes, library_bytes}`. A collection
   dropped from the file by hand or by an IaC deploy appears there too.
+  `shows` and `archive_bytes` count the shows with an archive copy, as
+  `status` does; `library_bytes` counts those of them the library still
+  holds, so it reads 0 after a library delete. The list is empty when the
+  file is not `valid` or no state database exists yet.
   Adding a collection with the same source and name brings it back: its
   archived shows are reused and nothing downloads again.
 - **Two deletes.** `POST /api/collections/purge` with `{source,
@@ -4283,7 +4294,29 @@ Observable behavior:
   run history as kind `purge` (§spec:run-activity, §spec:run-history)
   and frees the space it reports. It also drops the collection's
   rescheduled entry and pending handoffs. The same run is
-  `shakedown purge --source S --collection C [--archive]` on the CLI.
+  `shakedown purge --source S --collection C [--archive]` on the CLI,
+  which refuses a configured collection, or one with nothing held, as a
+  usage error.
+  - **What a purge deletes.** A file at a placed path that is not the
+    file placed (its inode differs) is someone else's: it stays and is
+    recorded as not placed by Shakedown (§spec:library-ownership).
+    Folders left empty go, up to and including the collection's library
+    folder; a folder holding a user's file stays. The archive goes show
+    by show: a show's records go once its folder is gone, so a show whose
+    folder could not be deleted keeps them, the collection stays listed,
+    and a later purge retries it. A delete that fails is an error line
+    naming the path, and the run ends `completed_with_item_issues`; it
+    never stops at one file.
+  - **The space it reports** (`bytes_freed` on its live-view and
+    run-history entries) counts only files whose last link it removed.
+    Library files are hardlinks into the archive (§spec:library-stats),
+    so a library delete reports about 0 bytes, and an everything delete
+    the archive's size.
+  - **Read again under the lock.** The run reads the config file again
+    once it holds the writer lock and deletes nothing if the file names
+    the collection again, cannot be read, or nothing is held; the run then
+    fails with that reason. A source or collection name that is not one
+    folder name is refused the same way.
 - **Before confirming.** The remove and delete confirmations state what
   each choice deletes, that deletion cannot be undone, and the shows
   and space it covers, from the `unconfigured` figures or the
