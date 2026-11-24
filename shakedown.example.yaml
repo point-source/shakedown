@@ -5,11 +5,22 @@ archive_root: /data/archive
 library_root: /data/library
 state_db: /data/archive/.shakedown/state.db
 
+# The clock collection schedules follow, as an IANA time zone name. Leave it out to
+# follow the container's local time (its TZ, UTC by default). SPEC.md §spec:schedules.
+timezone: Europe/Berlin
+
 # Global concurrency caps. `max_concurrent_downloads` bounds parallel file
 # downloads within one collection; `max_concurrent_collections` bounds how many
 # collections sync in parallel. Total fetch threads are the product of the two.
 max_concurrent_downloads: 4
 max_concurrent_collections: 2
+
+# Days each run keeps its per-show error lines (SPEC.md §spec:run-error-retention).
+# After that the run keeps its result, counts, and dates, and drops the lines.
+# Whole days; 180 when unset; at least 30, because run history shows the last 30
+# days with their errors. `shakedown trim-history` applies it at once and takes
+# the space back on disk.
+keep_run_errors_days: 180
 
 sources:
   - name: internetarchive
@@ -23,12 +34,22 @@ sources:
     # smallest either sets. Falls back to max_concurrent_downloads when unset.
     max_concurrent_requests: 4
     auth:
-      # Only needed for download-restricted items. Leave unset to skip auth.
+      # Only needed for download-restricted items: the environment variables that
+      # hold your archive.org email and password. Leave `auth` out to read IA_EMAIL
+      # and IA_PASSWORD, or to use credentials entered in the dashboard; environment
+      # variables, when set, win over those.
       email_env: IA_EMAIL
       password_env: IA_PASSWORD
     collections:
       - name: grateful-dead
         query: 'collection:GratefulDead'
+        # When `shakedown schedule` starts this collection's sync: a standard five-field
+        # cron expression (minute hour day-of-month month day-of-week) in `timezone`.
+        # `30 3 * * *` is daily at 03:30; `0 3 * * 0` is weekly on Sunday at 03:00.
+        # Leave it out for manual only: the collection syncs only when someone starts
+        # it. Collections due in the same minute run one after the other.
+        # SPEC.md §spec:schedules.
+        schedule: '0 3 * * 0'
         # There are no file settings: every show keeps its best copy, a copy a common
         # player reads when the best one isn't (e.g. MP3 beside SHN), and every
         # non-audio file (SPEC.md §spec:quality-selection).
@@ -61,6 +82,7 @@ sources:
 
       - name: phish
         query: 'collection:Phish'
+        schedule: '0 4 * * 0'
         # Default library_layout is `passthrough`: mirrors the archive layout 1:1.
         # Opt-in fast-path for recurring no-op syncs (SPEC.md §spec:incremental-discovery):
         # when the source's cheap change signal is unchanged, skip the per-item metadata
@@ -79,6 +101,7 @@ sources:
         # Leave out collections the internetarchive source already mirrors, so
         # no show is downloaded and linked twice.
         query: 'collection:etree AND NOT collection:GratefulDead AND NOT collection:Phish'
+        schedule: '0 5 * * 0'
         # Available etree fields: identifier, title, creator, date, year,
         # venue, coverage. Filters: sanitize, short, lower, upper.
         library_layout: '{year}/{date} - {venue}/{identifier}'

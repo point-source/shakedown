@@ -627,8 +627,10 @@ Plugins shipped in v1:
   files already on disk before a download, never the bytes it just
   wrote, so the plugin checks each downloaded file's size and md5
   against the manifest before reporting success. Optional credentials
-  (for download-restricted items) are read from environment variables
-  only.
+  (for download-restricted items) come from environment variables or
+  from the dashboard (§spec:dashboard-credentials); the plugin logs in
+  to archive.org with the email and password and signs its requests
+  with the keys and cookies the login returns.
 - **etree (`etree`).** A second, independently written plugin that
   proves the seam is real (§req:success-criteria #8): it drives
   archive.org's public HTTP/JSON API directly — a different integration
@@ -1681,7 +1683,7 @@ per collection per kind). *Leave it to the log* — the observed failure.
 
 **Tradeoffs.** An exotic but playable file (an Ogg Opus named `.ogg`)
 keeps an entry until its source changes, as a clash keeps `separations`;
-the read-only dashboard cannot dismiss it.
+the dashboard cannot dismiss it.
 
 **User-level test path.** Sync a fixture show holding a WAV file named
 `.flac`: the show is mirrored, the file is staged under its name and not
@@ -1744,9 +1746,12 @@ exits (§req:constraints). The command surface:
 | `verify [--source S] [--collection C] [--deep] [--list] [--reconform] [--yes]` | Integrity check (§spec:verify-drift). |
 | `restage [--source S] [--collection C]` | Rebuild the staging tree from the archive without downloading. |
 | `reconcile` | Rebuild the state database from the archive tree plus current source manifests (§spec:state). |
+| `trim-history` | Drop run error lines older than `keep_run_errors_days` now and compact the state database (§spec:run-error-retention). |
+| `purge --source S --collection C [--archive]` | Delete the library files of a collection the config file no longer names, and with `--archive` its archive folder and shows' records (§spec:collection-removal). |
 | `validate [--source S] [--collection C] [--live-handoff] [--json]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
 | `item show \| refetch <identifier>` | Single-item inspection and refetch; `refetch` is a single-show run (§spec:single-show-runs). |
 | `serve [--host] [--port]` | Optional HTTP control plane (§spec:serve). |
+| `schedule [--check]` | Long-running scheduler that starts each collection's scheduled sync; `--check` exits non-zero when its heartbeat is missing or older than three minutes (§spec:schedules). |
 
 - Commands shall exit non-zero on failure so failures surface at the
   scheduler/container layer (§req:quality-attributes: operability).
@@ -1755,9 +1760,11 @@ exits (§req:constraints). The command surface:
   does nothing and exits 0 (§req:quality-attributes: scheduled runs are
   observable).
 - Writing commands — `sync` (except `--dry-run`), `restage`,
-  `reconcile`, `item refetch`, and `verify --reconform`, whether run from
-  the CLI, the scheduler, or `serve` — hold one exclusive writer lock
-  (a kernel `flock` on `<state_db>.lock`). A second writer exits non-zero
+  `reconcile`, `item refetch`, `verify --reconform`, `trim-history`, and
+  `purge`,
+  whether run from the CLI, the scheduler, or `serve` — hold one exclusive writer lock
+  (a kernel `flock` on `<state_db>.lock`, beside the database file
+  itself, so every spelling of one database shares it). A second writer exits non-zero
   at once, naming the lock, instead of racing the first over shared temp
   folders. The kernel releases the lock when the holder exits, even on a
   crash, so a stale lock file never blocks the next run. A
@@ -1844,10 +1851,14 @@ notice sent, both shows' bytes restored.
 
 *Status: complete*
 
-All configuration lives in a single YAML file mounted at
-`/config/shakedown.yaml`, editable through File Station or any text
-editor — adding or changing a collection is a YAML edit, never a code
-change (§req:success-criteria #2). See
+All configuration lives in a single YAML file at
+`/data/shakedown-config/shakedown.yaml`, inside the one data mount
+(§spec:deployment), editable from the dashboard
+(§spec:dashboard-settings), through File Station, or with any text
+editor — adding or changing a collection is a settings change or a YAML
+edit, never a code change (§req:success-criteria #2). Until the
+config-management increment the file was mounted read-only at
+`/config/shakedown.yaml`; `--config` still points a run anywhere. See
 [`shakedown.example.yaml`](shakedown.example.yaml) for the canonical
 annotated example.
 
@@ -1856,8 +1867,10 @@ Structure: top-level roots (`archive_root`, `library_root`,
 `max_concurrent_collections`); a list of `sources` (name, plugin
 `type`, optional auth) each containing `collections` (name, `query`,
 `library_layout`, `prune_disappeared`, `incremental_discovery`,
-`preserve_source_metadata`, `fill_tags`, `on_complete`); and global
-`notifications`. The ownership, handoff, and discovery increment adds
+`preserve_source_metadata`, `fill_tags`, `on_complete`, `schedule`);
+global `notifications`; an optional `timezone` for schedules
+(§spec:schedules); and `keep_run_errors_days`, how long runs keep their
+error lines (§spec:run-error-retention). The ownership, handoff, and discovery increment adds
 the per-collection `fill_tags` opt-in (§spec:tag-filling) and removes
 `format_filters`, `exclude_filters`, and `fallback_format_filters`:
 which files to mirror follows the product rule (§spec:quality-selection).
@@ -1880,22 +1893,32 @@ the run rather than being ignored).
   with nobody watching.
 - **Secrets never appear in the YAML** (§req:quality-attributes:
   security). Credential fields name environment variables (e.g.
-  `email_env: IA_EMAIL`) rather than holding values, so the config
-  file is safe to back up, share, and commit.
-- **There is no `schedule:` field.** Timing lives entirely in the
-  deployment (ofelia labels in the compose file, §spec:deployment).
-  **Why:** one place to answer "when does what run," and Shakedown
-  stays out of the scheduler business — no cron parser, no timing of
-  its own, no drift between two sources of timing truth. The one
-  bounded exception, catching up syncs skipped because the writer lock
-  was held, adds no config key and no timing: a finishing sync runs
-  them (§spec:rescheduled-syncs).
+  `email_env: IA_EMAIL`) rather than holding values, and credentials
+  entered in the dashboard are stored in the state database
+  (§spec:dashboard-credentials), so the config file is safe to back up,
+  share, and commit.
+- **Each collection's `schedule` lives in the file** (§spec:schedules).
+  Until the config-management increment there was no `schedule:` field:
+  timing lived in ofelia labels in the compose file, to keep one source
+  of timing truth and Shakedown out of the scheduler business. The
+  operator moved timing into the dashboard on 2026-11-24
+  (§req:constraints); the file is still the one source of timing truth,
+  now read by Shakedown's scheduler.
 
 ## State persistence and recovery §spec:state
 
 *Status: complete*
 
-Complete through schema v13.
+Complete through schema v14.
+
+The scheduler's heartbeat, the stale-scheduler notice record
+(§spec:schedules), the config file's edit state (`config_edit`,
+§spec:edit-lock), and the credentials entered in the dashboard
+(`source_credentials`, one row per source, §spec:dashboard-credentials)
+are rows in tables outside schema versioning:
+each writer (the scheduler, `serve`, setup) creates its own table when
+the database lacks it and leaves `schema_version` alone, so none ever
+migrates and a previous release ignores them.
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -1984,6 +2007,10 @@ Sync state lives in a single-file embedded SQLite database at
   (§spec:m4a-tags). A database rebuilt by `reconcile` starts with no
   checks, and the next sync makes them again from the files. Nothing is
   re-downloaded.
+- Schema v14 records, per run, when its error detail was trimmed, and
+  on a `trim` run's activity entry the runs it trimmed and the bytes the
+  database shrank by (§spec:run-error-retention). Additive: the columns
+  start empty and nothing else changes.
 - Only a command that holds the writer lock migrates the database.
   Commands that take no lock — `status`, `item show`, `sync --dry-run`,
   `verify` without `--reconform`, `validate`, and `serve`'s
@@ -2021,7 +2048,10 @@ shows flow into the library tool with nobody watching
 (§req:user-stories). Two mechanisms, webhook as default and exec as
 fallback (§req:constraints), both fired once per (collection, run) with
 the `{source}`/`{collection}`/`{staging_root}` template fields available
-in the URL or command:
+in the URL or command. A command is split into its arguments as the file
+writes it before the fields are filled in, so a value with a space or a
+quote in it (a library path saved from the dashboard) stays inside its
+one argument:
 
 - **Webhook** (`on_complete.webhook: <url>`): HTTP POST of a versioned
   JSON body listing the staged shows with their archive and library
@@ -2155,46 +2185,60 @@ appears in Navidrome with no handoff configured.
 
 *Status: complete*
 
-An optional `shakedown serve` command exposes a small HTTP API for
-users who want ad-hoc triggers and monitoring without `docker exec`
-(§req:priorities #10). It runs as a separate long-lived container in
-the compose stack. It never schedules — ofelia remains the only
-scheduler (§req:constraints).
+`shakedown serve` exposes a small HTTP API for ad-hoc triggers and
+monitoring without `docker exec` (§req:priorities #10), serves the web
+dashboard, and watches the scheduler (§spec:schedules). It runs as a
+long-lived container beside the scheduler's. It never schedules: the
+separate `shakedown schedule` container does, and until the
+config-management increment ofelia did (§req:constraints, superseded
+2026-11-24).
 
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /healthz` | Liveness |
-| `GET /status` | JSON equivalent of `shakedown status` |
+| `GET /status` | JSON equivalent of `shakedown status`, under `collections`, beside `scheduler` (§spec:schedules) |
 | `GET /metrics` | Prometheus metrics |
-| `POST /sync?source=&collection=` | Start an ad-hoc sync and answer at once (auth required; §spec:api-sync-runs) |
-| `POST /verify` | Start a verify run and answer at once (auth required; §spec:api-sync-runs) |
-| `POST /validate` | Run setup readiness validation; live handoff validation is auth required |
-| `GET /` | The read-only web dashboard (§spec:dashboard) |
+| `POST /sync?source=&collection=` | Start an ad-hoc sync and answer at once (write gate; §spec:api-sync-runs) |
+| `POST /verify` | Start a verify run and answer at once (write gate; §spec:api-sync-runs) |
+| `POST /validate` | Run setup readiness validation (write gate; live handoff validation takes the token only) |
+| `GET /` | The web dashboard (§spec:dashboard) |
 | `GET /api/activity` | Live runs and network now (§spec:run-activity, §spec:network-activity) |
 | `GET /api/network` | Per-source network history (§spec:network-activity) |
 | `GET /api/runs` | Runs of the last 30 days (§spec:run-history) |
 | `GET /api/library` | Library, database, disk, and growth (§spec:library-stats) |
 | `GET /api/attention` | Needs attention and library health (§spec:needs-attention) |
 | `GET /api/health` | Release, config validity, last validation (§spec:dashboard-health) |
+| `GET /api/config` | The config file's settings, edit state, credential status, next syncs, unconfigured collections (§spec:dashboard-settings) |
+| `PUT /api/config` | Save settings (write gate; §spec:dashboard-settings, §spec:edit-lock) |
+| `POST /api/config/check-paths` | Path checks without saving (write gate; §spec:dashboard-settings) |
+| `POST /api/config/override` | Turn on the edit override (write gate; §spec:edit-lock) |
+| `GET /api/setup`, `POST /api/setup` | First-run setup (write gate on `POST`; §spec:first-run-setup) |
+| `PUT /api/credentials`, `DELETE /api/credentials` | Store or forget a source's credentials (write gate; §spec:dashboard-credentials) |
+| `POST /api/collections/purge` | Delete an unconfigured collection's files (write gate; §spec:collection-removal) |
+| `POST /api/history/trim` | Trim old run error detail now and compact the database (write gate; §spec:run-error-retention) |
 
 `POST /sync`, `/verify`, and `/validate` answer `404`, naming the
 configured sources or collections, when `source` or `collection` names
 nothing configured.
 
 Security posture (this endpoint accepts requests that cause network
-fetches and disk writes): mutating endpoints shall require a bearer
-token supplied via environment variable; **when no token is
-configured, mutating endpoints are disabled** rather than open — a
-homelab reverse-proxy misconfiguration must not turn into an
-unauthenticated write API. Read endpoints (`/healthz`, `/status`,
+fetches and disk writes): every mutating endpoint passes the write gate
+of §spec:dashboard-run-controls — the bearer token supplied via
+environment variable, or a same-origin request from the dashboard's own
+page. Until the config-management increment the token was the only way
+in and, unset, disabled every mutating endpoint, so a reverse-proxy
+misconfiguration could not turn into an unauthenticated write API; the
+operator chose the proxy as the one gate for dashboard writes on
+2026-11-24 (§req:constraints: no login of its own). Read endpoints (`/healthz`, `/status`,
 `/metrics`) are unauthenticated: they expose only operational
 metadata (paths, counts, timings — no credentials), and health/metrics
 scrapers generally can't send tokens. The dashboard page and its
 `/api/*` endpoints are read endpoints under the same posture; the
 operator's reverse proxy decides who opens them (§spec:dashboard).
 `serve` is required for the dashboard (§req:success-criteria #28–#33)
-and for nothing else: syncs run and record their progress the same with
-`serve` stopped.
+and for nothing else: scheduled syncs need the scheduler, not `serve`
+(§spec:schedules), and every sync runs and records its progress the
+same with `serve` stopped.
 
 ## API-triggered runs §spec:api-sync-runs
 
@@ -2242,7 +2286,7 @@ Observable behavior:
   invalid, each endpoint that needs it answers `503` with the config
   error naming the offending key (§spec:configuration; operator
   decision, 2026-11-10); `serve` keeps running
-  so the operator can fix the file and retry. Auth (bearer token) and
+  so the operator can fix the file and retry. The write gate and
   unknown-scope `404` behave as before (§spec:serve).
 - **The run counter keeps its meaning.** `serve` watches each sync it
   started and counts it in `shakedown_sync_runs_total` as `ok`,
@@ -2458,9 +2502,10 @@ C and drops its entry. Start a skipped tick with the previous release
 still writing: it exits 1, records nothing, and the running sync
 finishes normally.
 
-## Read-only web dashboard §spec:dashboard
+## Web dashboard §spec:dashboard
 
-*Status: complete*
+*Status: in progress*
+The config-management increment lifts the read-only rule for explicit actions (§spec:dashboard-run-controls); that part is not built yet.
 
 Compatibility, from deployment status "deployed, no outside consumers"
 (§req:constraints, operator-confirmed 2026-11-12): HTTP API — free; CLI
@@ -2481,10 +2526,16 @@ glossary, screen states — is owned by the Design task and recorded in
 
 Observable behavior:
 
-- **It only looks.** The page has no control that starts a run, edits
-  config, or changes state — no "sync now" or "validate" even though
-  the API offers both (§req:constraints: read-only dashboard). Every
-  dashboard endpoint is a `GET`. Answering one never starts a run,
+- **Looking changes nothing.** Only an explicit action changes
+  anything: saving settings (§spec:dashboard-settings), turning on the
+  edit override (§spec:edit-lock), entering credentials
+  (§spec:dashboard-credentials), finishing setup
+  (§spec:first-run-setup), Sync now and Validate
+  (§spec:dashboard-run-controls), and deleting an unconfigured
+  collection's files (§spec:collection-removal). Until the
+  config-management increment the page had no such control
+  (§req:constraints, superseded 2026-11-24). Every dashboard read
+  endpoint is a `GET`. Answering one never starts a run,
   never sends a request to a source, never writes to the archive, the
   library, or the state database, and never takes the writer lock. Its
   only inputs are the state database, the config file, and the free
@@ -2515,9 +2566,13 @@ Observable behavior:
   its endpoints are unauthenticated, like the existing read endpoints;
   the operator's reverse proxy (for example Authelia) decides who may
   open them. They expose operational data only — counts, identifiers,
-  paths, timings, error text — never credentials, tokens, or secrets
-  (§req:quality-attributes: security of secrets). The mutating
-  endpoints keep their bearer token unchanged (§spec:serve).
+  paths, timings, error text — never credentials or secrets
+  (§req:quality-attributes: security of secrets). The settings resource
+  shows the config file's own values as the file holds them, webhook
+  URLs included, since an editor must show what it edits and anyone who
+  can open the page can already replace them (operator decision,
+  2026-11-24). Writes pass the write gate of
+  §spec:dashboard-run-controls.
 - **Works behind a proxy, at any path.** The page addresses its assets
   and endpoints by relative URL, so it works at a host's root or under a
   path prefix the proxy adds, with no setting.
@@ -2584,8 +2639,8 @@ the same exposure `GET /status` has today.
 
 **User-level test path.** Open the dashboard through the proxy on a phone and a
 desktop: the dashboard loads with no request leaving the LAN (browser
-network panel). It has no button that changes anything; every request it
-makes is a `GET`. Put it behind a proxy under `/shakedown/`: it still
+network panel). Browsing every tab without pressing an action makes only
+`GET` requests. Put it behind a proxy under `/shakedown/`: it still
 loads. Stop `serve` with the page open: within a minute the page says it
 cannot reach shakedown and shows the age of what it shows. Give a test
 show a title containing `<script>`: it renders as literal text. Break
@@ -2608,17 +2663,21 @@ Observable behavior:
   single-show refetch or reconform (§spec:single-show-runs), a restage,
   a verify, and a reconcile each record one activity entry per
   collection it works on. The run itself records it, into the state
-  database, so a run started by ofelia while `serve` is down shows the
+  database, so a run started by hand while `serve` is down shows the
   moment `serve` starts.
 - **What an entry says.** Collection; kind (`sync`, `catch_up`,
-  `refetch`, `reconform`, `restage`, `verify`, `reconcile`); whether
+  `refetch`, `reconform`, `restage`, `verify`, `reconcile`, `trim`,
+  `purge`); whether
   `serve` started it; start time; current phase (`starting`, `listing`,
   `discovering`, `downloading`, `tagging`, `staging`, `notifying`,
   `verifying`, `finishing`); shows listed, shows to look up and looked
   up; shows to fetch, done, and failed; the shows being worked on now;
   bytes downloaded so far; current speed; and an estimated time left.
   Kinds without a phase or counter leave it null (a restage lists
-  nothing). A sync's lookups and downloads overlap
+  nothing; a trim has neither, belongs to no collection, and reports the
+  runs it trimmed and the bytes freed instead, §spec:run-error-retention;
+  a purge has neither and reports the bytes it freed,
+  §spec:collection-removal). A sync's lookups and downloads overlap
   (§spec:discovery-pipeline), so both counters show at once and the
   phase reads `discovering` until the listing's lookups are done.
 - **Honest totals.** Shows to fetch, and their bytes, are only known once
@@ -2689,8 +2748,8 @@ answers `{generated_at, runs: [...], waiting: [...], network: [...]}`.
 | --- | --- |
 | `activity_id` | The entry's id |
 | `run_id` | The run record's id when the kind has one (sync, catch_up, refetch, reconform), else null — the id `status` and `POST /sync` report |
-| `source`, `collection` | The collection the entry covers |
-| `kind` | `sync`, `catch_up`, `refetch`, `reconform`, `restage`, `verify`, `reconcile` |
+| `source`, `collection` | The collection the entry covers; null for a `trim` |
+| `kind` | `sync`, `catch_up`, `refetch`, `reconform`, `restage`, `verify`, `reconcile`, `trim`, `purge` |
 | `started_by_serve` | true when `serve` launched the run |
 | `started_at`, `finished_at` | ISO times; `finished_at` null while running |
 | `last_heartbeat_at`, `last_progress_at` | ISO times |
@@ -2704,6 +2763,7 @@ answers `{generated_at, runs: [...], waiting: [...], network: [...]}`.
 | `bytes_downloaded`, `bytes_to_fetch` | bytes; `bytes_to_fetch` null until known |
 | `speed_bytes_per_second` | over the last ~10 seconds |
 | `eta_seconds` | null when not computable |
+| `runs_trimmed`, `bytes_freed` | a `trim`'s runs trimmed and bytes the database shrank by, set as it ends; a `purge`'s bytes freed in `bytes_freed`; null for other kinds |
 
 `runs` holds running entries and entries that ended in the last ten
 minutes, running first, then newest first.
@@ -2871,7 +2931,7 @@ last good sync age).
 Observable behavior:
 
 - **Every run, one list.** Syncs, catch-ups, refetches, reconforms,
-  restages, verifies, and reconciles of the last 30 days, newest first,
+  restages, verifies, reconciles, trims, and purges of the last 30 days, newest first,
   each with kind, collection, start, duration, result, shows discovered,
   new, updated, and failed, bytes downloaded, its errors, and an
   undelivered failure notice. Runs that have a run record (sync,
@@ -2889,9 +2949,15 @@ otherwise `422`) answers `{generated_at, runs: [...]}`. Each run:
 `{run_id, activity_id, kind, source, collection, started_at,
 finished_at, duration_seconds, result, end_reason, items_discovered,
 items_new, items_updated, items_failed, bytes_downloaded, errors,
-failure_notice_error}`; `run_id` or `activity_id` is null when the run
-has none, and `duration_seconds` and `finished_at` are null while it
-runs. `last_successful_sync_at` is part of each collection in
+failure_notice_error, detail_trimmed, runs_trimmed, bytes_freed}`;
+`run_id` or `activity_id` is null when the run has none, and
+`duration_seconds` and `finished_at` are null while it runs.
+`detail_trimmed` is true once the run's error lines were dropped
+(§spec:run-error-retention); `status` reports it on each `last_run` too.
+A `trim` has null `source` and `collection`, its runs trimmed and bytes
+freed in `runs_trimmed` and `bytes_freed` (null for other kinds), and
+its compaction failure, if any, in `errors`. A `purge` has its bytes
+freed in `bytes_freed` and the deletes that failed in `errors`. `last_successful_sync_at` is part of each collection in
 §spec:library-stats.
 
 **Decision and constraint.** Read sync figures from the run records
@@ -2910,7 +2976,7 @@ list; their outcomes still show through `status`'s recovery field.
 
 **User-level test path.** After a night with two scheduled syncs, a
 verify, and a failed catch-up, the list shows all four with matching
-figures in `status --json`. Disable one collection's ofelia job: its
+figures in `status --json`. Set one collection to manual only: its
 last-good-sync age keeps growing day by day.
 
 ## Library, database, and disk §spec:library-stats
@@ -3026,6 +3092,8 @@ Observable behavior:
   | `separations` | `status`'s `separations` | identifiers and folders |
   | `unplaced_files` | `status`'s `unplaced_files` | paths |
   | `unidentified_files` | `status`'s `unidentified_files` (§spec:unidentified-audio) | identifiers, `{identifier, file}` pairs |
+  | `scheduler_stale` | the scheduler's heartbeat (§spec:schedules); one entry, about no collection | `since`: the last heartbeat |
+  | `tick_overdue` | the collection's schedule and its run records (§spec:schedules) | `since`: the missed scheduled time |
 
   A good run is one whose result is `completed` or
   `completed_with_item_issues`, the same as a good sync in
@@ -3075,7 +3143,8 @@ removed_on}], removed_upstream_count, drift_files, not_playable:
 [{identifier, reason}], not_playable_count, playable_copies:
 [identifier], playable_copies_count}]}`. `detail` holds the kind's
 extra facts under `status`'s own field names; `identifiers` is empty
-for collection-wide kinds. Counts are complete; every list carries its
+for collection-wide kinds; `source` and `collection` are null for
+`scheduler_stale`, which comes first. Counts are complete; every list carries its
 first 10 shows or files, in order: `identifiers`, `detail.separations`,
 `detail.unplaced_files`, `detail.unidentified_files`, and the health lists. An entry's `count` is
 how many shows it affects (files, for `unplaced_files` and
@@ -3138,8 +3207,9 @@ Observable behavior:
 
 API: `GET /api/health` (unauthenticated) answers `{generated_at,
 release, config: {valid, error, last_loaded_at}, validation: [{source,
-collection, status, at}]}` where `status` is an outcome code and absent
-values are null.
+collection, status, at}], scheduler: {state, last_seen, release}}` where
+`status` is an outcome code and absent values are null; `scheduler` is
+§spec:schedules's, not drawn until Design draws it.
 
 **Decision and constraint.** Report the validation already recorded
 rather than run one, because visiting the dashboard must not touch
@@ -3487,118 +3557,1086 @@ and polls `./api/*` there. `GET /status` and `GET /api/health` answer as
 before. Upgrade the image with the page open and reload: the new page
 loads.
 
+## Settings in the dashboard §spec:dashboard-settings
+
+*Status: in progress*
+The API is built: `GET /api/config` (with `unconfigured`, §spec:collection-removal), `PUT /api/config`, and `POST /api/config/check-paths`; the Settings screens wait on the Design task.
+
+Compatibility, from deployment status "deployed, one install, no
+outside consumers" (§req:constraints, operator-confirmed 2026-11-24):
+config file shape — free; compose layout — free; HTTP API — free; CLI —
+free; dashboard pages and their JSON — free; state database — additive
+migration only; archived media — frozen (an upgrade never forces a
+re-download). This line governs every section of the config-management
+increment: §spec:dashboard-settings, §spec:edit-lock, §spec:schedules,
+§spec:dashboard-credentials, §spec:first-run-setup,
+§spec:dashboard-run-controls, §spec:collection-removal, and
+§spec:run-error-retention.
+
+The dashboard reads and writes `shakedown.yaml`. Every setting the file
+holds — roots, concurrency caps, sources with their request ceiling,
+collections with every option and their schedule, the timezone, and
+failure notifications — can be viewed and changed from a phone or a
+desktop. A save is checked by the same rules the next run applies, and
+the file stays the one source of truth whoever edits it
+(§req:success-criteria #2, #36, #37; §req:quality-attributes: the config
+file stays the truth, a save tells the truth; §req:constraints: the YAML
+file stays the source of truth, config management in the dashboard,
+path checks warn, never block).
+
+Observable behavior:
+
+- **One config resource.** `GET /api/config` answers what the file says
+  now, read at the request (a hand edit appears on the next refresh):
+  - `state`: `missing` (no file; §spec:first-run-setup), `unreadable`
+    (the file is not valid YAML, or cannot be read), `invalid` (it
+    parses but a run would refuse it), or `valid`;
+  - `path`: the config file's path inside the container;
+  - `revision`: an opaque token for the exact file content, or `null`
+    when there is no file;
+  - `edit`: `editable`, `locked`, or `override` (§spec:edit-lock);
+  - `document`: the file's settings as JSON, keyed exactly as the YAML
+    is (`archive_root`, `sources[].collections[].library_layout`, …),
+    including keys the file leaves out at their effective default, or
+    `null` when the file is missing or unreadable;
+  - `errors`: for an `invalid` or `unreadable` file, a list of
+    `{loc, code, message}`, where `loc` is the path to the offending
+    setting as a list of keys and indexes
+    (`["sources", 0, "collections", 1, "query"]`) and `message` is the
+    developer-facing error text the run would log (it never echoes a
+    value from the file, §spec:configuration);
+  - `credentials`: per source, `environment`, `dashboard`, or `none`
+    (§spec:dashboard-credentials) — never a credential value;
+  - `next_syncs`: per collection, `{source, collection, next_at}` with
+    `next_at` the next scheduled sync, formatted like every other time
+    the dashboard receives, or `null` for a manual-only collection
+    (§spec:schedules);
+  - `source_types`: per installed source plugin, its `type`, the layout
+    fields and filters its `library_layout` accepts, and whether it
+    takes credentials — so the editor can explain the options without
+    hard-coding them;
+  - `unconfigured`: collections that still have shows or files but are
+    no longer in the file (§spec:collection-removal);
+  - `generated_at`, like every dashboard answer.
+  Opening it never writes anything (§req:success-criteria #33).
+- **Save is a whole-document replace, checked first.** `PUT /api/config`
+  takes `{revision, document}`. The document is checked by the same
+  validation every run applies at startup — unknown keys, types and
+  ranges, duplicate collection names, an unknown source type, a layout
+  with an unknown field or filter or none at all, plus the schedule and
+  timezone rules of §spec:schedules. Answers:
+  - `200 {revision, warnings}` — written; `warnings` lists, each
+    `{loc, code}`: the path-check results (below) with `path_moved`, and
+    `layout_not_unique` for a layout the run also only warns about
+    (§spec:layout-collision-safety);
+  - `422 {errors}` — refused, same `{loc, code, message}` shape as
+    above, every error found, not only the first; the file is untouched;
+  - `409 {code: "changed"}` — the file's revision is no longer the one
+    the editor loaded (someone edited it since); nothing is written and
+    the editor reloads;
+  - `409 {code: "locked"}` — the edit lock is on (§spec:edit-lock);
+  - `409 {code: "busy"}` — the save points `state_db` at another
+    database while a run holds the writer lock: that run would keep the
+    old database's lock while the next took the new one's, two writers
+    on one archive. Nothing is written; save again once the run ends;
+  - `403 {code: "cross_site"}` — the write gate refused the request
+    (§spec:dashboard-run-controls);
+  - `500 {code: "write_failed", path}` — the file or its folder cannot
+    be written (for example, a read-only mount); the file is untouched;
+  - `409 {code: "missing"}` or `409 {code: "unreadable"}` — there is no
+    file, or it is not valid YAML: no editor exists for either (below),
+    and the override answers the same.
+  A document a save accepts is one the next run accepts, and the reverse
+  (§req:quality-attributes: a save tells the truth): both paths call one
+  validation, never two copies of it.
+  Codes: an error's `code` is pydantic's own error type for a type,
+  range, or unknown-key rule (`extra_forbidden`, `missing`,
+  `greater_than_equal`, …), and for the rules of our own:
+  `schedule_invalid`, `timezone_unknown`, `duplicate_name`,
+  `source_type_unknown`, `layout_unknown_filter`,
+  `layout_unknown_field`, `layout_no_field`, and `exec_file_only`. An
+  unreadable file has one error at `loc: []`: `yaml_invalid`,
+  `root_not_mapping`, or `read_failed`. Path-check warnings are
+  `not_writable` (at the setting whose folder fails) and
+  `hardlink_failed` (at `library_root`).
+- **Paths warn, never block.** When a save changes `archive_root`,
+  `library_root`, or `state_db`, the system runs the path checks of
+  §spec:setup-readiness-validation on the new values — each folder
+  writable, a real test hardlink from archive to library — and returns
+  each failure as a warning with that check's code; the save still goes
+  through. A changed path also returns the warning `path_moved`:
+  Shakedown moves nothing, so a run against a new, empty archive or state
+  database downloads again what the old one held. `POST
+  /api/config/check-paths` with `{archive_root, library_root, state_db}`
+  (`state_db` optional, defaulting beside the archive) runs the same
+  checks without saving and answers `200 {warnings}`, for an editor or
+  setup that wants the answer before Save. Runs still refuse to start on a path that
+  fails (§spec:system-shape).
+- **Hand edits survive.** Writing changes only the settings that
+  changed. Comments, key order, quoting, and blank lines elsewhere in
+  the file are kept, so a hand-written or tool-deployed file stays
+  readable after a dashboard edit. The new content replaces the file
+  atomically — a reader, a run, or a crash never sees a half-written
+  file — and keeps its permissions.
+- **Collection and source names are fixed once created.** The editor
+  sets a name when it adds a source or collection and never renames one:
+  a collection's archived shows live under its source and collection
+  names (§spec:system-shape), so a rename would leave them behind and
+  download them again. To rename, a user removes the collection and adds
+  a new one, and §spec:collection-removal says what happens to the
+  files. A rename by hand in the file behaves as it always has.
+- **Takes effect at the next run.** A save changes nothing in a run
+  already going; every run reads the file when it starts
+  (§spec:api-sync-runs), and schedules apply from the next tick
+  (§spec:schedules). Nothing restarts.
+- **The command handoff stays in the file.** The dashboard shows a
+  collection's `on_complete: exec` command but cannot set, change, or
+  remove it, and a save whose document adds or changes an `exec` value
+  is refused with code `exec_file_only`. While any `exec` command uses
+  `{staging_root}`, `library_root` stays in the file too: a save that
+  changes it is refused with `exec_file_only` on `library_root`, because
+  a command that hands the path to a shell would run whatever the
+  dashboard saved as the path (operator decision, 2026-11-24). Webhook
+  handoffs and the failure-notification webhook are editable (operator
+  decision, 2026-11-24).
+- **A broken file.** An `invalid` file is shown in the editor with its
+  errors against the settings they name, and a save that fixes them
+  succeeds. An `unreadable` file (bad YAML) has no editor: the dashboard
+  shows the error, and the file is fixed by hand.
+
+**Decision and constraint.** The dashboard edits the YAML file itself,
+because §req:constraints keeps the file the source of truth so
+infrastructure-as-code deployments keep working, and every run already
+reads it at start. The API carries the file's own structure as JSON
+(boring edge: the shape an operator already knows from the example
+file), and a save replaces the whole document under a revision token
+— optimistic concurrency, the standard answer to "never silently
+overwrite an edit made since I opened the page"
+(§req:quality-attributes: the config file stays the truth). The save
+runs the run's own validation because §req:success-criteria #36 demands
+that save and run agree, and two validators drift. Comments are kept
+because the file is also edited by hand, and a dashboard save that
+stripped a user's notes would be a silent loss. The command handoff is
+file-only because the dashboard has no login (§req:constraints: no
+login of its own) and a command runs any program on the NAS: with it
+off the page, a proxy mistake can change settings but cannot run
+programs (operator decision, 2026-11-24). Names are fixed because the
+archive is keyed by them and §req:constraints forbids an upgrade or edit
+path that re-downloads the archive.
+
+**Alternatives rejected.** *Keep settings in the state database and
+generate the file* — breaks hand edits and IaC, which §req:constraints
+keeps. *Per-setting endpoints (PATCH a collection)* — more surface and
+more partial-failure cases for no user-visible gain; one validated
+document is how the run sees it anyway. *Rewrite the file cleanly from
+the model* — simpler, but loses every comment in a hand-written file.
+*Block saves whose paths fail the check* — §req:constraints says warn,
+never block: the operator stays in charge of their storage. *Make the
+command handoff editable* — every option in the browser, as
+criterion #37 first read, at the cost of turning a proxy mistake into running any
+program on the NAS; the operator chose webhooks only. *Rename in place
+by moving the archive folder* — a move, a database rewrite, and a
+library restage behind one text field; not needed by any requirement.
+
+**Tradeoffs.** A save conflict makes the user reload and redo their
+change when the file moved under them. Comment preservation adds a
+YAML round-trip dependency. Users who want a command handoff edit the
+file. Renaming a collection costs a remove and an add.
+
+**User-level test path.** Open Settings on a phone; change a
+collection's layout to `Shows/All`, with no source field: Save is
+refused with the layout error naming that setting, and the file is
+unchanged. A layout with no identifier field, such as `{year}/{venue}`,
+saves with the `layout_not_unique` warning, as the run warns. Fix it and save: `shakedown.yaml` holds the new layout, its
+comments are still there, and the next sync stages under it. Edit the
+file by hand with Settings open and save again: the save is refused as
+changed. Point `library_root` at a folder on another filesystem: the
+save goes through with the hardlink warning and the path-moved warning.
+Add `exec:` to a collection's handoff through the API: refused with
+`exec_file_only`.
+
+## Edit lock §spec:edit-lock
+
+*Status: in progress*
+The edit state, `POST /api/config/override`, the locked save, and setup's new `editable` file (`POST /api/setup`) are built; the dashboard's read-only view and override confirmation wait on the Design task.
+
+A `shakedown.yaml` that Shakedown's setup wrote is editable from the
+dashboard from the start. A file that already existed — written by hand
+or deployed from git or an infrastructure-as-code tool — starts locked:
+the dashboard shows every setting but cannot change the file until the
+operator turns on an override (§req:success-criteria #39;
+§req:constraints: edit lock; §req:user-stories: keep my
+infrastructure-as-code honest).
+
+Observable behavior:
+
+- **Three states.** `GET /api/config` reports `edit`:
+  - `editable` — §spec:first-run-setup wrote this file;
+  - `locked` — the file came from outside and no override is on;
+  - `override` — the operator turned the override on.
+- **Locked means read-only for the file.** While `locked`,
+  `PUT /api/config` answers `409 {code: "locked"}` and the dashboard
+  shows the settings without editing controls. What the file does not
+  hold stays available: credentials (§spec:dashboard-credentials),
+  Sync now and Validate (§spec:dashboard-run-controls), and deleting the
+  files of unconfigured collections (§spec:collection-removal).
+- **Turning on the override.** `POST /api/config/override` sets the
+  state to `override` and answers `200 {edit: "override"}`; it is
+  idempotent. The dashboard confirms first, warning that a later edit to
+  the file from its source (a hand edit, a git deploy) replaces changes
+  made in the dashboard. The override stays on; the dashboard offers no
+  way back to `locked`.
+- **Hand edits keep working in every state.** A hand edit to an
+  `editable` or `override` file never locks it, and the next run and the
+  next page refresh use it.
+- **Where the state lives.** The edit state is recorded in the state
+  database the config names, beside the credentials. A file with no
+  record there is `locked`. When a dashboard save points `state_db` at a
+  new database, the edit state and stored credentials move with it,
+  once the file is written; the same database named another way (a
+  link, a relative path) moves nothing. The old database's writer lock
+  is then marked retired: a run that started before the save, and so
+  read the old file, stops as busy rather than writing beside a run on
+  the new database; one started after it may take the lock.
+  Pointing the file at a different database by hand — or rebuilding the
+  database with `reconcile` — starts it `locked` again; the operator
+  turns the override back on.
+
+**Decision and constraint.** Origin decides the lock, recorded by
+Shakedown, because §req:constraints asks exactly that: Shakedown cannot
+know whether a pre-existing file will be maintained from its source or
+from the dashboard from now on, so it starts safe and lets the operator
+say. The record lives in the state database because Shakedown alone
+writes it, it already holds per-install state, and the operator chose
+it for credentials (§spec:dashboard-credentials).
+
+**Alternatives rejected.** *A marker key in the file* — an IaC copy of
+a setup-written file would carry the marker and unlock itself on every
+host, and IaC users would have to manage a key that means nothing to
+the run. *A content hash, locking on any outside change* — locks the
+file after every hand edit, while §req:success-criteria #39 keeps hand
+edits working. *A lock-off action* — not required; the operator chose
+an override that stays on.
+
+**Tradeoffs.** A rebuilt or relocated database relocks the file, which
+costs one more click. An override user whose IaC redeploys the file
+loses dashboard changes, as the warning says.
+
+**User-level test path.** Start `serve` with a hand-written file:
+Settings shows every value with no Save, and `PUT /api/config` answers
+`locked`. Turn on the override: the warning shows, Save appears, and a
+change saves. Restart `serve`: still `override`. On a fresh stack, finish
+setup: Settings is editable without any override.
+
+## Schedules and the scheduler §spec:schedules
+
+*Status: in progress*
+The `schedule` and `timezone` keys, the scheduler with its heartbeat and `--check`, and serve's reporting (health, `/status`, Needs attention, the stale notice) are built; the dashboard schedule editor and preset read-back wait on Design, and `next_syncs` in `GET /api/config` on the config resource.
+
+Each collection's schedule lives in `shakedown.yaml` and is set from the
+dashboard. A long-running Shakedown scheduler, in its own container
+beside `serve`, starts each scheduled sync; the compose stack carries no
+third-party scheduler. A scheduler that stops is never silent: the
+dashboard, `GET /status`, and the failure notification say so
+(§req:success-criteria #1, #6, #38; §req:constraints: one-shot CLI,
+external scheduler — superseded for scheduling, schedule input;
+§req:quality-attributes: sane by default, schedules cost nothing while
+idle, scheduled runs are observable and self-contained). This
+supersedes the "no `schedule:` field" rule of §spec:configuration and
+ofelia's role in §spec:deployment.
+
+Observable behavior:
+
+- **In the file.** A collection's `schedule` is a standard five-field
+  cron expression (minute, hour, day of month, month, day of week). A
+  collection with no `schedule` is manual only: it syncs only when
+  someone starts it. A top-level `timezone` (an IANA name such as
+  `Europe/Berlin`) says which clock schedules follow; without it they
+  follow the container's local time (`TZ`, UTC by default). An
+  expression that does not parse or never fires, or a timezone that
+  does not exist,
+  fails validation like any other bad key (§spec:configuration), so a
+  save refuses it (§spec:dashboard-settings).
+- **Presets and cron.** The dashboard offers Daily at a time, Weekly on
+  a day at a time, Manual only, and a cron field. A preset is written as
+  the cron expression it stands for (`30 3 * * *`, `0 4 * * 0`); Manual
+  only removes the key. An expression of exactly a preset's form reads
+  back as that preset; any other reads back as cron.
+- **Staggered default (provisional).** A collection added from the
+  dashboard or setup defaults to Weekly on Sunday at the first whole
+  hour from 03:00 at which no other collection's schedule starts, so
+  collections do not all start at once. The user may change it before
+  saving. (Provisional default; the operator may change the cadence or
+  start hour.)
+- **Next sync.** `GET /api/config` carries each collection's next
+  scheduled sync (`next_syncs`, §spec:dashboard-settings), computed from
+  the file in the schedule's timezone by the same rules the scheduler
+  uses.
+- **The scheduler.** `shakedown schedule` is a long-running command
+  that does nothing but start scheduled syncs. It listens on no port,
+  reads the config file without writing it, and runs as its own
+  container (`shakedown-scheduler`, §spec:deployment), so a crash, hang,
+  restart, or update of `serve` never stops a tick.
+- **A tick is a scheduled sync.** At each scheduled time, the scheduler
+  starts the collection's sync as a fresh one-shot run that reads the
+  file at start — the same `sync --collection` run a scheduler tick has
+  always launched. When another run holds the writer lock, the tick is
+  rescheduled and caught up exactly as §spec:rescheduled-syncs describes
+  for a scheduler tick, never refused like an API trigger. Collections
+  due in the same minute start in file order; the later ones find the
+  lock held and are rescheduled. When a run the scheduler started dies
+  without closing its run record, the scheduler closes it, as `serve`
+  does for the runs it starts (§spec:api-sync-runs).
+- **Changes apply at the next tick.** The scheduler notices a changed
+  file — saved from the dashboard or edited by hand — within a minute
+  and plans the next ticks from it, with no restart. A run already going
+  is untouched. While the file is invalid, the scheduler keeps the
+  schedules of the last valid file it read; a tick that fires then starts
+  its run, which fails on the config error like any run on a broken
+  file. That run exits before it opens the state database, so it leaves
+  no run record; the failure shows as the config error in health
+  (§spec:dashboard-health), in the scheduler's log, and, ten minutes on,
+  as the collection's `tick_overdue` entry (operator decision,
+  2026-11-24). A scheduler that starts on an invalid
+  file has no schedules until the file is fixed, and reports that in its
+  heartbeat.
+- **Fails loudly, restarts itself.** Any fault in the scheduler's own
+  planning ends the process with a non-zero exit, so the container's
+  restart policy starts it again; it never keeps running with its
+  planning stopped.
+- **Heartbeat.** About once a minute the scheduler records a heartbeat
+  in the state database: the time, its release, whether it holds a
+  valid schedule, and the next tick it plans. The heartbeat is one
+  record, replaced each time, never a history, so it does not grow.
+  Recording never takes the writer lock and never migrates, like a
+  rescheduled-sync entry (§spec:rescheduled-syncs); unlike that entry,
+  the record sits outside schema versioning (§spec:state), so the
+  scheduler can record it into a database a previous release left.
+  `shakedown schedule --check` exits non-zero
+  when the heartbeat is older than three minutes or missing; the compose
+  example uses it as the scheduler container's health check, so Container
+  Station shows the container unhealthy.
+- **Nobody has to watch for it.** `serve`, independently of the
+  scheduler, reads the heartbeat and the run records:
+  - `GET /api/health` and `GET /status` carry `scheduler: {state,
+    last_seen, release}`, `state` one of `running`, `stale` (heartbeat
+    older than three minutes), `no_schedule` (running, but the file it
+    holds has no valid schedule), or `never` (no heartbeat recorded), and
+    `last_seen` formatted like every other time (§spec:dashboard-health);
+  - Needs attention (§spec:needs-attention) gains `scheduler_stale`, one
+    entry while the scheduler is `stale` or `never` and any collection
+    has a schedule, about no collection (`source` and `collection`
+    null, `since` the last heartbeat), and `tick_overdue`, one per
+    collection whose latest scheduled time passed more than ten minutes
+    ago with nothing covering it, `since` that time. A sync or catch-up
+    of the collection covers the tick when it started at or after it or
+    was still running at it, and so does any rescheduled entry for the
+    collection: an entry keeps its oldest skip, so a tick skipped behind
+    a days-long run leaves no newer trace (operator decision,
+    2026-11-24). `scheduler_stale` clears when the scheduler is back;
+    `tick_overdue` clears when the collection's next run starts;
+  - when the scheduler turns `stale`, `serve` sends the configured
+    failure notification (`notifications.on_failure`,
+    §spec:handoff) once for that episode, naming the scheduler and its
+    last heartbeat: the shared envelope with `event: scheduler.stale`,
+    `source`, `collection`, `staging_root`, and `run` null,
+    `scheduler: {last_seen, release}`, and one `errors` line
+    ([docs/handoff.md](docs/handoff.md)). The episode is the heartbeat
+    time the scheduler went stale on; it is recorded, so a restarted
+    `serve` never sends it twice, and an undelivered notice is not
+    retried.
+  - `GET /status` answers `{scheduler, collections}`, `collections`
+    being the `status --json` list, since a list cannot carry the
+    field.
+  An outside monitor (Uptime Kuma, Homepage) can watch the same field in
+  `GET /status`.
+- **Only while the scheduler runs.** With the scheduler stopped, no
+  scheduled sync starts. A tick missed then is not caught up: the
+  collection syncs at its next tick after the scheduler starts, and the
+  miss shows as `tick_overdue` until then (§req:constraints). On a day
+  the clock changes, a time that does not exist fires once at the next
+  valid minute, and a time that occurs twice fires once.
+- **Idle costs nothing.** Between ticks the scheduler waits on a timer,
+  checks the file's modification time, and replaces its heartbeat,
+  about once a minute; it adds no polling of sources and no work on the
+  NAS.
+- **No new history to trim.** What this increment stores is current
+  state, not a log: the heartbeat, the edit state (§spec:edit-lock), and
+  whether the stale-scheduler notification was sent for this episode are
+  one record each; stored credentials are one record per source and go
+  with the source. Scheduled syncs and purges write the run records and
+  activity entries every run already writes, at the rate ofelia's ticks
+  did; activity is kept 30 days and run records are kept, as before
+  (§spec:state), their error lines as §spec:run-error-retention sets.
+- **Manual runs are unchanged.** `shakedown sync` typed by hand or run
+  in a one-off container works exactly as before, with or without the
+  scheduler or `serve`.
+
+**Decision and constraint.** Shakedown schedules because the operator
+moved timing into the dashboard and out of the compose file
+(§req:constraints, operator decision, 2026-11-24): one place to edit, no
+redeploy, and no Docker socket for anything the dashboard writes. The
+scheduler is its own container, not part of `serve`, because
+§req:success-criteria #1 makes "the sync ran on schedule" the product's
+core promise, and the web side is the part most exposed to hangs, leaks,
+restarts, and outside requests; a scheduler with no port and a
+read-only config is unaffected by all of them (operator decision,
+2026-11-24). It is honest about what the split does not buy: a
+compromised `serve` can still change schedules through the file, as the
+dashboard is meant to. Liveness is checked from outside the scheduler —
+by `serve` and by Docker's health check — because a process cannot report
+its own death; the heartbeat is the decidable fact, and an overdue tick
+is decided from the schedule and the run records `serve` already holds.
+The schedule lives in the file because the file stays the source of
+truth, so an IaC deployment sets schedules the same way it sets
+everything else. Cron is the standard schedule format (boring edge), and
+presets are written as cron so the file holds one form and a power user
+can always read it. A tick launches the same one-shot run ofelia
+launched, so runs stay stateless and crash-isolated and pick up the
+current file; and a tick keeps scheduler semantics under the lock
+because §req:success-criteria #27 requires a long run to delay, never
+cancel, other collections' syncs. The timezone is a setting, not only an
+environment variable, so a new user who sets "daily at 03:00" in setup
+gets their own 03:00 without touching compose (§req:constraints: what
+stays outside the dashboard).
+
+**Alternatives rejected.** *Schedule inside `serve`, with the same
+detection* — one container fewer, but a web hang or restart stops ticks,
+and nothing can send an alert when the one process is down; the
+operator chose the separate container. *Keep ofelia and have the
+dashboard rewrite its labels or job file* — rejected in
+§spec:deployment. *Run syncs inside the scheduler's process* — rejected
+before (§spec:api-sync-runs): a crash or leak in a days-long sync would
+take the scheduler down. *A structured schedule format (`every: weekly,
+at: "03:00"`) instead of cron* — readable, but a custom format with its
+own parser and docs; cron with preset read-back gives both. *Catch up
+ticks missed while the scheduler was down* — out of scope
+(§req:constraints); the miss is shown instead. *Fail `serve`'s
+`/healthz` when the scheduler is stale* — Docker would mark the wrong
+container unhealthy, and the dashboard must stay up to say what is
+wrong. *Seconds in the expression, as ofelia used* — no requirement
+needs it, and five fields is the cron people know.
+
+**Tradeoffs.** One more long-running container. Scheduled syncs need the
+scheduler running; dashboard actions need `serve`. Recreating the
+scheduler stops the runs it started (§spec:graceful-stop), which resume
+at their next run. A change takes up to a minute to reach the planner,
+and a stopped scheduler takes up to three minutes to show as stale. Two
+collections given the same minute by hand run one after the other.
+
+**User-level test path.** Add a collection with the default schedule:
+it lands on the first free Sunday hour and its next sync shows. Set it
+to Daily at the next minute: within a minute of saving, at that minute,
+it syncs and appears in the live view, with no restart and no compose
+change. Start a long sync of another collection first: the tick is
+rescheduled and runs when that sync finishes. Edit `schedule:` by hand
+to a cron expression: the dashboard shows it as cron and the next sync
+moves. Set a bad expression by hand: Settings shows the error on that
+schedule, and the other collections keep their ticks. Restart `serve`
+across a tick: the tick still runs. Stop the scheduler: within three
+minutes the dashboard shows it stopped, Needs attention lists it, the
+failure webhook fires once, and Container Station shows the container
+unhealthy; a tick that passes meanwhile shows as overdue. Start it
+again: the entries clear and the next tick runs.
+
+## Credentials in the dashboard §spec:dashboard-credentials
+
+*Status: in progress*
+The API, storage, and run resolution are built; the credential entry form waits on Design.
+
+A user can enter a source's archive.org credentials in the dashboard.
+They never appear in `shakedown.yaml`, on any page, in any API answer,
+or in any log. Credentials set as environment variables still work and
+win (§req:success-criteria #40; §req:quality-attributes: credentials
+stay out of sight; §req:constraints: credentials, dashboard or
+environment; §req:user-stories: credentials without a redeploy).
+
+Observable behavior:
+
+- **Write-only.** `PUT /api/credentials` with `{source, email,
+  password}` stores them for that source and answers
+  `200 {source, credentials, check}`: `credentials` is the source's
+  status after the change, and `check` is the source's verdict on the
+  login — `accepted`, `rejected`, or `unchecked` when the source could
+  not be reached. Rejected credentials are still stored, so a user can
+  retry the check through Validate. `DELETE /api/credentials?source=`
+  forgets them. Unknown source, or a source type that takes no
+  credentials: `404` (`{code: "unknown_source"}` or
+  `{code: "takes_no_credentials"}`). Values travel only in the request
+  body, never in a URL. A body that is not exactly those three non-empty
+  strings answers `422 {code: "invalid_body"}`, never the field-by-field
+  detail, which would quote what was entered. Values are trimmed, as
+  environment values are. Both endpoints pass the write gate
+  (§spec:dashboard-run-controls).
+- **Status, never values.** `GET /api/config` reports, per source,
+  `environment` (its environment variables are set and in effect),
+  `dashboard` (stored credentials are in effect), or `none`. No answer
+  returns a stored value or a hint of one.
+- **Which wins.** A run uses a source's environment variables when both
+  are set: those `auth` names in the file, or the source type's standard
+  names (`IA_EMAIL`, `IA_PASSWORD`) when the file names none; a name the
+  file leaves out falls back to the standard one. Otherwise it uses the
+  source's stored credentials; otherwise none. `auth` stays optional in
+  the file, and setup never writes it. The `ia` source logs in to
+  archive.org once per run with that email and password; a login the
+  source rejects or cannot answer is logged, without values, and the run
+  continues without it. Validate asks the source about the login in
+  effect and fails on a rejected or unchecked one.
+- **Where they live.** Stored credentials are kept in the state database
+  the config names, in plain text, protected as that file is (operator
+  decision, 2026-11-24), one row per source in a table outside schema
+  versioning (§spec:state): `serve` writes it and never holds the writer
+  lock that migrates. A save that moves the state database carries them
+  with the edit state (§spec:edit-lock) and leaves none in the old one.
+  Removing a source from the file forgets its stored credentials at that
+  save, as does any save after a hand edit removed one; a save that
+  fails to write the file forgets nothing.
+- **Never logged.** No log line, error message, validation result,
+  export, or `status` output contains a stored or entered credential.
+- **Not under the edit lock.** Credentials are not in the file, so the
+  edit lock (§spec:edit-lock) does not cover them.
+
+**Decision and constraint.** The state database, because Shakedown alone
+writes it, it sits beside the archive and is backed up with it, and it
+is outside the config folder people back up, share, and commit
+(§req:quality-attributes: credentials stay out of sight). Environment
+variables win so a deployment that already sets them keeps working
+unchanged and an IaC deployment keeps secrets in its own secret store
+(§req:constraints). The login is checked at entry, without blocking,
+because a user entering credentials wants to know they work, and only
+the source can say whether a login is accepted.
+
+**Alternatives rejected.** *A secrets file beside `shakedown.yaml`* —
+deployable by IaC, but it sits in the folder people commit; the
+operator chose the database. *Encrypt them with a key on the same NAS*
+— anyone who can read the database can read the key; protection in name
+only. *Refuse credentials the source rejects* — a source outage would
+block entry; the verdict is shown instead.
+
+**Tradeoffs.** A backup of the state database holds the credentials. A
+rebuilt database forgets them, and the user enters them again.
+
+**User-level test path.** Enter credentials for the `ia` source: the
+dashboard shows them as set from the dashboard, a sync of a
+download-restricted collection downloads its files, and a search of
+`shakedown.yaml`, every `/api/*` answer, and the `serve` and run logs
+finds neither value. Set `IA_EMAIL` and `IA_PASSWORD` on the container:
+the dashboard shows environment in effect. Enter a wrong password: the
+answer says rejected.
+
+## First-run setup §spec:first-run-setup
+
+*Status: in progress*
+The API is built: `serve` starts with no file, `GET /api/setup`, and `POST /api/setup`; the setup flow on screen waits on the Design task.
+
+A homelab user starts the compose example with no `shakedown.yaml`.
+Opening the dashboard leads them through setup in the browser — paths
+with a hardlink check, optional archive.org credentials, a first
+collection, and its schedule — and when they finish, `shakedown.yaml`
+exists and a first sync starts. They never open, write, or upload a YAML
+file (§req:success-criteria #6, #35; §req:user-stories: set up without
+YAML; §req:constraints: what stays outside the dashboard).
+
+Observable behavior:
+
+- **`serve` starts without a config.** With no file at the config path,
+  `serve` starts, the dashboard opens, and `GET /api/config` answers
+  `state: "missing"`. The page leads to setup instead of the no-config
+  state (§spec:ui-kit). The read endpoints that need a config answer as
+  they do today with none.
+- **Defaults that work on the example stack.** `GET /api/setup` answers
+  the defaults setup offers: `archive_root` `/data/archive`,
+  `library_root` `/data/library`, `state_db`
+  `/data/archive/.shakedown/state.db`, the source types available
+  (`source_types`, as in §spec:dashboard-settings), and the default
+  first schedule (§spec:schedules) as `schedule`, with `generated_at`
+  like every dashboard answer. The page fills `timezone` from the
+  browser.
+- **Path check before finishing.** Setup runs the path checks through
+  `POST /api/config/check-paths` (§spec:dashboard-settings); a failure is
+  a warning, and the user may continue. The check creates the archive and
+  library folders when they are missing, as validation does today.
+- **Finishing.** `POST /api/setup` takes `{document, credentials}`:
+  `document` as in `PUT /api/config`, with exactly one source holding
+  exactly one collection; `credentials` optional, `{email, password}` for
+  that source. The system checks the document like any save, creates the
+  config folder if needed, writes the file, records it as `editable`
+  (§spec:edit-lock), stores the credentials, and starts the collection's
+  first sync as Sync now does (§spec:dashboard-run-controls). Answers:
+  - `201 {revision, warnings, started}` — written; `started` is the
+    scope the sync started (`{source, collection}`), or `null` with a
+    `reason` code when it could not start; the file stays written;
+  - `422 {errors}` — refused, nothing written. Besides the save's
+    codes, a document without exactly one source holding exactly one
+    collection is `setup_one_collection`, at `["sources"]` or
+    `["sources", 0, "collections"]`;
+  - `422 {code: "invalid_body"}` — a body of another shape, or
+    credentials that are not two non-empty strings; never the
+    field-by-field detail, which would quote them. Credentials for a
+    source type that takes none answer
+    `404 {code: "takes_no_credentials"}`, as in
+    §spec:dashboard-credentials;
+  - `409 {code: "exists"}` — a file appeared at the path since setup
+    began; nothing is overwritten and the page moves to Settings;
+  - `403` and `500 write_failed` as in `PUT /api/config`. The file is
+    written before the edit state and the credentials, so a file that
+    fails to write leaves no `editable` record to unlock a file written
+    later by hand; a state database that fails after it answers
+    `write_failed` naming the database, and the file stays.
+  `reason` is `busy` (another run holds the writer lock), `failed` (the
+  run could not be launched), or `exited_early` (it exited before it
+  started). Warnings are the path checks' failures and
+  `layout_not_unique`; setup moves nothing, so there is no
+  `path_moved`.
+- **The written file.** It holds only what setup set, plus a header
+  comment saying the file is editable by hand or in the dashboard, and
+  pointing at `shakedown.example.yaml` for the full option list.
+- **More later.** More sources and collections are added in Settings
+  after setup.
+
+**Decision and constraint.** Setup writes the same file Settings edits,
+because §req:constraints keeps the file the truth. It asks for one
+collection and starts its sync, because §req:success-criteria #35 ends
+at "a first sync starts," and more belongs in Settings. Setup is only
+offered while no file exists, so it can never overwrite a file
+(§req:quality-attributes: the config file stays the truth). The file
+lives inside the single data mount (§spec:deployment), so a new user
+creates no folder and mounts nothing extra.
+
+**Alternatives rejected.** *A CLI `init` that writes a starter file* —
+still a YAML step for the user, against #35. *Start with an empty
+config and no first sync* — the user would finish setup and see
+nothing happen. *Sync every collection at bring-up* — §spec:deployment
+rules out unscoped work at `up`; the first sync here is an explicit
+action.
+
+**Tradeoffs.** Setup covers one source and one collection; anything
+more is a second visit to Settings. A stack that never finishes setup
+runs the scheduler with no schedules.
+
+**User-level test path.** On a clean stack from the compose example,
+open the dashboard on a phone: setup appears. Accept the default paths;
+the hardlink check passes. Skip credentials, add `phish` with query
+`collection:Phish`, keep the default schedule, finish: the live view
+shows the first sync of `phish`, `shakedown.yaml` exists with that
+collection and schedule, and Settings is editable. Repeat with the
+library on another filesystem: the warning shows and setup still
+finishes.
+
+## Run controls in the dashboard §spec:dashboard-run-controls
+
+*Status: in progress*
+The write gate is built; the Sync now and Validate buttons wait on Design.
+
+From the dashboard a user can start a sync of one collection and run
+setup validation, and watch the result in the live view. These, and
+every other write the dashboard makes, pass one write gate: no login, a
+refusal for requests from other websites, and the bearer token kept for
+scripts (§req:success-criteria #33, #41; §req:constraints: no login of
+its own, config management in the dashboard; §req:user-stories: sync it
+now).
+
+Observable behavior:
+
+- **Sync now.** The dashboard starts a collection's sync through
+  `POST /sync?source=&collection=` and gets that endpoint's answers
+  unchanged (§spec:api-sync-runs): `202` at once with the scope, `409`
+  with "a run is in progress" when another run holds the writer lock
+  (refused at once, never queued or rescheduled), `404` for an unknown
+  scope, `503` with the config error. The run uses the file as it is at
+  that moment and shows in the live view like any run.
+- **Validate.** The dashboard runs `POST /validate` (non-live handoff
+  checks only) and shows its result; the result is recorded and shows
+  as the last validation in health (§spec:dashboard-health). Live
+  handoff validation stays token-only and is not offered in the
+  dashboard: it can run the file's configured command.
+- **The write gate.** Every endpoint that writes or starts work —
+  `POST /sync`, `POST /verify`, `POST /validate`, `PUT /api/config`,
+  `POST /api/config/override`, `POST /api/config/check-paths`,
+  `POST /api/setup`, `PUT` and `DELETE /api/credentials`,
+  `POST /api/collections/purge`, `POST /api/history/trim` — accepts a
+  request that either:
+  - carries the configured bearer token (`SHAKEDOWN_API_TOKEN`), as
+    scripts and `curl` do today; or
+  - comes from the dashboard's own page: the browser marks it
+    same-origin, and it is a JSON request a cross-site form cannot send.
+  Anything else answers `403 {code: "cross_site"}`. With no token
+  configured, only the dashboard writes; the token stays optional
+  (operator decision, 2026-11-24). Live handoff validation accepts the
+  token only.
+- **Looking still changes nothing.** Every `GET` stays free of writes,
+  runs, and source requests (§spec:dashboard); only these explicit
+  actions change anything.
+
+**Decision and constraint.** The reverse proxy stays the only gate on
+who opens the dashboard (§req:constraints: no login of its own,
+operator decision, 2026-11-24), so dashboard writes carry no token. The
+same-origin rule closes the one hole that posture leaves open in a
+browser: another website the operator visits while signed in to the
+proxy cannot fire writes through the operator's browser (cross-site
+request forgery). The browser's fetch metadata and a JSON body are the
+standard defense, decided from the request itself. DNS-rebinding attacks
+mostly fail on the example layout, because `serve` listens on loopback
+and the proxy routes by host name; the command handoff staying in the
+file (§spec:dashboard-settings) caps what is left. The token stays for
+scripts so `curl` triggers keep working unchanged (operator decision,
+2026-11-24). Sync now reuses `POST /sync` because
+§req:success-criteria #41 asks for the same rules as an API trigger.
+
+**Alternatives rejected.** *Retire the token, same-origin only* —
+breaks `curl` triggers for no gain. *Token everywhere, stored in the
+browser* — a login in all but name, which §req:constraints rules out.
+*No same-origin check* — leaves every write open to any website the
+operator visits. *A Host allowlist against DNS rebinding* — one more
+bootstrap setting for an attack the example layout already blunts.
+
+**Tradeoffs.** Anyone who passes the proxy can change settings, start
+runs, and delete an unconfigured collection's files — the posture the
+operator chose. The same-origin rule stops browsers, not scripts: a
+script that reaches `serve` directly can forge the headers, so the proxy
+and the loopback-only port remain the real gate. Browsers send fetch
+metadata only to HTTPS and localhost origins, so dashboard writes work
+through the HTTPS proxy or at `http://127.0.0.1`, and are refused from a
+page opened over plain HTTP at another address.
+
+**User-level test path.** Tap Sync now on a collection: it starts and
+shows in the live view. Tap it again while that sync runs: the
+dashboard shows that a run is in progress. Tap Validate: the result
+shows, and health shows it as the last validation. From a page on
+another origin, POST to `/sync` and `PUT /api/config` in the browser:
+both refused. `curl -XPOST` `/sync` with the token: `202`; without it
+and without the dashboard's headers: `403`.
+
+## Removing a collection §spec:collection-removal
+
+*Status: in progress*
+The unconfigured list, `POST /api/collections/purge`, and `shakedown purge` are built; the remove and delete confirmations and the unconfigured list on screen wait on Design.
+
+Removing a collection stops syncing it. By default its archived shows
+and library folders stay. The dashboard says what happens before the
+user confirms, and offers to delete the collection's library folders,
+or its library folders and archived shows. A collection removed with
+its files kept stays listed, so its files can be deleted, or the
+collection added back, later (§req:success-criteria #37; operator
+decision, 2026-11-24).
+
+Observable behavior:
+
+- **Remove = leave the file.** Removing a collection in Settings saves
+  the file without it (`PUT /api/config`, §spec:dashboard-settings).
+  From then on it has no schedule and cannot be synced.
+- **Unconfigured collections.** `GET /api/config` lists, in
+  `unconfigured`, every collection the state database still holds shows
+  or library files for that the file no longer names: `{source,
+  collection, shows, archive_bytes, library_bytes}`. A collection
+  dropped from the file by hand or by an IaC deploy appears there too.
+  `shows` and `archive_bytes` count the shows with an archive copy, as
+  `status` does; `library_bytes` counts those of them the library still
+  holds, so it reads 0 after a library delete. The list is empty when the
+  file is not `valid` or no state database exists yet.
+  Adding a collection with the same source and name brings it back: its
+  archived shows are reused and nothing downloads again.
+- **Two deletes.** `POST /api/collections/purge` with `{source,
+  collection, scope}` starts a fresh run that deletes the collection's
+  files:
+  - `scope: "library"` — deletes every library file and folder the
+    placement records say Shakedown put there for this collection
+    (§spec:library-ownership), and those records. Files a user added
+    stay. The archive stays, so adding the collection back restages the
+    library with no download.
+  - `scope: "everything"` — does that and also deletes the collection's
+    archive folder and its shows' records. Adding it back downloads
+    everything again.
+  Answers: `202 {started: "purge", source, collection, scope}`; `409`
+  with "a run is in progress" when another run holds the writer lock;
+  `409 {code: "configured"}` when the file still names the collection;
+  `404` when nothing is held for it. The run shows in the live view and
+  run history as kind `purge` (§spec:run-activity, §spec:run-history)
+  and frees the space it reports. It also drops the collection's
+  rescheduled entry and pending handoffs. The same run is
+  `shakedown purge --source S --collection C [--archive]` on the CLI,
+  which refuses a configured collection, or one with nothing held, as a
+  usage error.
+  - **What a purge deletes.** A file at a placed path that is not the
+    file placed (its inode differs) is someone else's: it stays and is
+    recorded as not placed by Shakedown (§spec:library-ownership).
+    Folders left empty go, up to and including the collection's library
+    folder; a folder holding a user's file stays. The archive goes show
+    by show: a show's records go once its folder is gone, so a show whose
+    folder could not be deleted keeps them, the collection stays listed,
+    and a later purge retries it. A delete that fails is an error line
+    naming the path, and the run ends `completed_with_item_issues`; it
+    never stops at one file.
+  - **The space it reports** (`bytes_freed` on its live-view and
+    run-history entries) counts only files whose last link it removed.
+    Library files are hardlinks into the archive (§spec:library-stats),
+    so a library delete reports about 0 bytes, and an everything delete
+    the archive's size.
+  - **Read again under the lock.** The run reads the config file again
+    once it holds the writer lock and deletes nothing if the file names
+    the collection again, cannot be read, or nothing is held; the run then
+    fails with that reason. A source or collection name that is not one
+    folder name is refused the same way, and so is a source or collection
+    folder that is a link, which would aim the deletes outside the
+    collection. A placed file reached through a linked folder deeper in
+    the library is kept and reported, and stays recorded.
+- **Before confirming.** The remove and delete confirmations state what
+  each choice deletes, that deletion cannot be undone, and the shows
+  and space it covers, from the `unconfigured` figures or the
+  collection's library figures (§spec:library-stats).
+- **Remove and delete in one go.** When the user removes a collection
+  and chooses a delete, the save happens first, then the purge starts.
+  If the purge cannot start (a run is in progress), the collection is
+  removed with its files kept and listed under `unconfigured`, where the
+  user can delete them later.
+
+**Decision and constraint.** Keep by default, because the archive took
+days or weeks to download and §req:constraints treats it as the thing
+an upgrade or edit must never cost; deletes are offered, explicit, and
+labelled irreversible because the operator wants the disk back when
+they choose to (operator decision, 2026-11-24). A removed collection
+leaves the file rather than staying in it switched off, so the file
+lists only what syncs and an IaC file needs no extra flag; the state
+database already knows which collections hold files. A purge is a run
+under the writer lock because it deletes what a running sync may be
+writing, and runs are how Shakedown changes the archive. Library
+deletion follows the placement records because they are the one
+authority for "Shakedown put this file here."
+
+**Alternatives rejected.** *Removed collections stay in the file with a
+switch that stops syncing* — one click to re-enable, but IaC files must
+carry the switch and the file keeps growing; the operator chose the
+list. *Delete the files on remove, always* — irreversible by default.
+*Never offer deletion* — leaves disk recovery to File Station, where a
+user cannot tell which folders are safe to delete.
+
+**Tradeoffs.** An unauthenticated page can delete an archive: the proxy
+is the gate (§spec:dashboard-run-controls), and the confirmation names
+the loss. A removed collection's settings are gone; adding it back
+starts from defaults with the old name.
+
+**User-level test path.** Remove `phish` and keep its files: the file
+no longer names it, no tick runs it, and it is listed as unconfigured
+with its shows and sizes. Delete its library: the purge shows in the
+live view, its library folders are gone, a file you added to one of
+them stays, and the archive is intact. Add `phish` back: the next sync
+restages it with no download. Remove it again and delete everything:
+its archive folder is gone and the list no longer shows it. Start a
+purge while a sync runs: refused as a run in progress.
+
+## Run error retention §spec:run-error-retention
+
+*Status: in progress*
+The setting, the automatic trim, `shakedown trim-history`, and `POST /api/history/trim` are built; the Settings field and the Trim now button wait on Design.
+
+Each run keeps its per-show error lines for 180 days by default, a
+setting the user can change in the dashboard; after that the run keeps
+its result, counts, and dates, and drops the lines. A user can also trim
+now from the dashboard, which takes the space back on disk
+(§req:quality-attributes: bounded history; operator decision,
+2026-11-24).
+
+Observable behavior:
+
+- **The setting.** `keep_run_errors_days` in `shakedown.yaml`, a whole
+  number of days, 180 when absent. It is validated like any key
+  (§spec:configuration): below 30 is refused, because the dashboard's
+  run history shows the last 30 days with their errors
+  (§spec:run-history). It is edited in Settings like every other global
+  setting (§spec:dashboard-settings).
+- **Automatic trim.** When a run that holds the writer lock ends, it
+  clears the error lines of every run that started more than
+  `keep_run_errors_days` ago, together with the error lines of their
+  operation outcomes, as it already trims 30-day history (§spec:state).
+  A trimmed run keeps its kind, collection, start and end, result, item
+  counts, and bytes, and records that its detail was trimmed
+  (`detail_trimmed` in `status` and §spec:run-history); `status` and the
+  dashboard show those as before. A run whose activity entry is gone
+  reads its result from one run-level line — that it crashed, or ended
+  unexpectedly — so the trim keeps that line and drops the per-show
+  lines. Staleness and sync identity never read error lines, so trimming
+  never changes them, the result, or the last good sync.
+- **Trim now.** `POST /api/history/trim` starts a fresh run, kind
+  `trim`, under the writer lock. It applies the same rule at once, then
+  compacts the state database so the freed space returns to the disk.
+  It passes the write gate (§spec:dashboard-run-controls). Answers:
+  `202 {started: "trim"}`; `409` with "a run is in progress" when another
+  run holds the lock. The run shows in the live view and run history
+  (§spec:run-activity, §spec:run-history) with the runs it trimmed and
+  the bytes the database shrank by (`runs_trimmed`, `bytes_freed`). If the disk lacks room
+  to compact (it needs about the database's size free), the trim still
+  happens, the run ends failed with the compaction failure as its error
+  line (the CLI exits 1; operator decision, 2026-11-24), and the database
+  keeps its size until the next attempt; the write-ahead log the failed
+  attempt grew is emptied, so a failed compaction never leaves the disk
+  fuller. A reader that keeps the log from emptying fails the compaction
+  the same way. Compacting holds the database's write lock, so the trim's
+  heartbeat cannot land until it ends: the live view gives a running trim
+  an hour before it reads as stopped reporting, and the next run that
+  holds the writer lock closes a trim left open at once. The same run is
+  `shakedown trim-history` on the CLI.
+
+**Decision and constraint.** Run records are kept because last good
+sync and staleness read them, but their error lines carry no such duty,
+and a source that keeps failing writes one line per failed show every
+run — the one part of the database that can grow by hundreds of
+megabytes a year. The operator chose 180 days, changeable, with an
+on-demand trim (2026-11-24). The automatic trim bounds growth with no
+action; the on-demand trim is the way to take space back, which deleting
+rows alone does not do. It runs under the writer lock because compacting
+needs the database to itself.
+
+**Alternatives rejected.** *Drop error lines after 30 days, fixed* —
+simpler, but the operator wants a longer default and control. *Cap
+lines per run* — bounds one bad run, but a run that fails every night
+still adds up forever. *Trim whole run records* — loses last good sync
+and staleness for quiet collections. *Compact on every automatic trim*
+— rewrites the whole database after every run, for space a later run
+reuses anyway.
+
+**Tradeoffs.** One more setting. A trim now holds the writer lock while
+it compacts, delaying a scheduled tick into a catch-up
+(§spec:rescheduled-syncs). Error detail older than the setting is gone
+for good.
+
+**User-level test path.** Set `keep_run_errors_days` to 30 on a
+database with a failed run from 40 days ago: after the next sync ends,
+that run still shows its result and counts in `status` and run history,
+without its error lines; a run from 20 days ago keeps them. Set it to 10:
+Save is refused. Tap Trim now: a `trim` run appears in the live view and
+reports the space freed, and the database file is smaller. Tap it while a
+sync runs: refused as a run in progress.
+
 ## Deployment §spec:deployment
 
 *Status: complete*
 
 The deployment is a single Docker Compose stack, paste-able into QNAP
-Container Station, operable entirely through web UIs — no SSH at any
-step (§req:success-criteria #6). See
-[`docker-compose.example.yaml`](docker-compose.example.yaml) for the
-canonical example.
+Container Station and operable entirely through web UIs — no SSH at any
+step (§req:success-criteria #6). The canonical example is
+[`docker-compose.example.yaml`](docker-compose.example.yaml).
 
-**The scheduler launches a fresh container per tick.** Because
-Shakedown is a one-shot, stateless-between-runs CLI (§req:constraints),
-no long-lived worker container exists to attach to. Each scheduled
-tick therefore *starts a new container* from the image, runs one
-`sync --collection <name>`, and exits — matching the batch design.
-When a tick fires, the sync runs — or, if another run holds the writer
-lock, it is rescheduled and runs when that run finishes
-(§spec:rescheduled-syncs); "the schedule is configured" and
-"the sync ran" are the same event (§req:success-criteria #1,
-§req:quality-attributes "scheduled runs are observable and
-self-contained").
+**Two long-lived Shakedown containers, one image, one user.**
+`shakedown-serve` serves the dashboard (§spec:dashboard) and the control
+plane (§spec:serve), starts Sync now and API-triggered runs, and watches
+the scheduler. `shakedown-scheduler` runs `shakedown schedule` and
+starts each collection's scheduled syncs (§spec:schedules); it publishes
+no port and its health check is `shakedown schedule --check`. Every run
+is a fresh one-shot `shakedown` process started by one of the two
+(§req:constraints: runs stay one-shot and stateless). A tick that finds
+another run writing is rescheduled (§spec:rescheduled-syncs), so "the
+schedule is configured" and "the sync ran" are the same event while the
+scheduler is up (§req:success-criteria #1); a missed tick shows in the
+dashboard (§spec:schedules).
 
-Long-running services in the stack:
+The compose file holds only what must exist before `serve` can show a
+page (§req:constraints: what stays outside the dashboard):
 
-- **`ofelia`** — the scheduler. Runs fresh per-tick containers from
-  the Shakedown image, one job per collection, on cron schedules
-  defined as Docker labels. Each job carries the same
-  archive/library/config mounts and `IA_*` credentials as a manual
-  run, mounts config read-only, and reaps its finished container.
-  Every Shakedown container — ofelia jobs, `serve`, manual runs — runs
-  as one configured user, so no path creates files another cannot
-  write (ofelia's own default is root).
-- **`shakedown-serve`** — the only long-lived Shakedown process: the
-  read-only web dashboard (§spec:dashboard) and the control plane
-  (§spec:serve) for status/metrics and ad-hoc triggers without SSH. The
-  example stack runs it enabled, since the dashboard needs it
-  (§req:constraints: the dashboard lives in the always-on serve
-  container); its bearer token stays optional and only unlocks the
-  mutating endpoints. The example notes that the operator's reverse
-  proxy guards the dashboard, and it publishes `serve`'s port on the
-  host's loopback only, so the proxy is the one way in (operator
-  decision, 2026-11-12). A stack without `serve` loses only the dashboard
-  and the triggers; syncs work exactly as before.
-- Library tool and streaming server (Beets, Navidrome, …) join the
-  same stack, reading the library tree — the user's choice; Shakedown
-  places no requirements on them.
+- the image (`SHAKEDOWN_IMAGE`) and container user (`SHAKEDOWN_USER`,
+  the owner of the data share), the same for both containers;
+- one volume, the data share mounted once as `/data`. Archive, library,
+  and the config folder (`/data/shakedown-config/`, the path every
+  command reads by default) live under it, so archive and library share
+  a filesystem *and* a mount — Linux refuses hardlinks across separate
+  mounts (§spec:system-shape) — and `serve` can write the config
+  (§spec:dashboard-settings). The scheduler mounts the config folder
+  again, read-only, over it, so no scheduled run can rewrite the config;
+- serve's port, published on host loopback only, so the operator's
+  reverse proxy is the one way in (operator decision, 2026-11-12);
+- optionally `SHAKEDOWN_API_TOKEN` (§spec:dashboard-run-controls),
+  archive.org credentials as environment variables
+  (§spec:dashboard-credentials), and `TZ`, given to both containers.
 
-There is **no idle standalone `shakedown` service**. A one-shot
-container that exits at bring-up and then sits `Exited` does no work,
-cannot be a scheduler target, and reads as the worker while doing
-nothing — so it is omitted. The Shakedown image is still present in
-the stack, referenced by ofelia's per-tick jobs and (optionally) by
-`serve`.
+Everything else is set in the dashboard (§spec:first-run-setup,
+§spec:dashboard-settings). No third-party scheduler runs, and no
+Shakedown container mounts the Docker socket. Library tools and
+streaming servers (Navidrome, Beets, …) join the stack and read the
+library tree; Shakedown places no requirements on them.
 
-All data paths live under a single share
-(`/share/data/{archive,library,music,shakedown-config}`), and every
-Shakedown container mounts that share once as `/data`, so archive and
-library share a filesystem *and* a mount — Linux refuses hardlinks
-across separate mounts (§spec:system-shape).
+**First bring-up does no unscoped work.** A new stack syncs nothing on
+`up`; setup's last step starts one sync of the collection it adds
+(§spec:first-run-setup), and after that each collection syncs on its own
+schedule. There is deliberately no "sync everything at startup"
+(§req:quality-attributes).
 
-**First bring-up does no unscoped work.** A freshly deployed stack
-does not sync anything on `up`; each collection syncs on its own
-schedule. There is deliberately no implicit "sync everything at
-startup" — with many configured collections that would be surprising
-and expensive (§req:quality-attributes). A user who wants an
-immediate first run triggers one explicitly (see manual triggers).
+**Manual triggers, no SSH needed.** Sync now in the dashboard or
+`POST /sync` with the bearer token (§spec:dashboard-run-controls); as a
+fallback, a one-off container from the same image with
+`sync --collection <name>`, via Container Station's UI or `docker run`.
+SSH stays supported as guidance, never required.
 
-**Manual triggers (no-SSH-first, SSH supported).** To run a sync
-without waiting for the next tick:
+**Updates (operator decision, 2026-11-24).** Watchtower pulls a newer
+`SHAKEDOWN_IMAGE` and recreates both Shakedown containers from it, so
+`latest` keeps Shakedown updated as ofelia's per-tick pull did:
 
-- **Primary, no SSH:** `POST /sync` on the `serve` control plane
-  (bearer-token authed, §spec:serve).
-- **Fallback:** start a one-off container from the same image with
-  `sync --collection <name>` — via Container Station's *Create
-  Container* UI (no SSH) or `docker run` over SSH. This is the manual
-  equivalent of a tick; ofelia itself has no "run now" command, so a
-  one-off is simply launching the image by hand.
+- **Shakedown only:** it updates only labelled containers, and only the
+  two Shakedown containers are labelled.
+- **At a fixed time:** once a day (provisional default: 12:00 in the
+  container's timezone), so an update never lands at a random moment.
+  A recreate stops the runs a container started and waits for them
+  (§spec:graceful-stop), with the same 120 s as `stop_grace_period`; an
+  interrupted sync resumes at its next run.
+- **Through a socket proxy:** Watchtower reaches Docker only through a
+  proxy that allows its container, image, and write calls — what a
+  recreate and a pull need — and refuses the rest (exec, volumes,
+  secrets, swarm, system). The proxy alone mounts the socket, read-only,
+  on an internal network with no published port. linuxserver's proxy is
+  used because, with exec off, it refuses creating an exec as well as
+  starting one. Watchtower is the maintained fork; the original is
+  archived.
+- **Optional:** a user who pins a release tag or updates by hand deletes
+  both services; nothing else depends on them.
 
-SSH remains fully supported and is documented as guidance, not
-designed out; the web-UI paths exist so it is never *required*
-(§req:success-criteria #6).
+**Moving an existing install over** (§req:constraints: deployment
+status). The archive, library, and state database stay where they are,
+so nothing downloads again. Replace the compose file (drop ofelia; add
+the scheduler, Watchtower, and the proxy; give `serve` the single
+`/data` mount). The existing `shakedown.yaml` already sits in
+`/share/data/shakedown-config/`, which is `/data/shakedown-config/`
+inside the containers; Shakedown did not write it, so dashboard edits
+start locked (§spec:edit-lock). Schedules are re-entered by hand from
+the old ofelia labels, dropping their leading seconds field; until then
+each collection is manual only (operator decision, 2026-11-24: no
+import). The README's Upgrading notes carry the steps.
 
-**Why ofelia, launching fresh containers, rather than host cron, a
-built-in scheduler, or exec-into-a-running-container.** Ofelia is
-itself a container, so the entire deployment — including timing — is
-one compose YAML editable in Container Station: no host cron, no SSH,
-no scheduler code in Shakedown. Launching a fresh container per tick
-(rather than `exec`-ing into a persistent one) is what keeps Shakedown
-one-shot: there is no daemon to keep alive, and a tick can never
-silently no-op because a prior run has exited. Schedule changes are
-compose-file label edits; "did the Sunday sync run?" is answerable
-from the ofelia container's log, which records each tick's start, stop,
-output, and failure (the per-tick containers are deleted when they
-finish). A tick missed because the host was down is harmless because
-sync is idempotent at any cadence (§spec:sync-workflow). A tick
-skipped because another run holds the writer lock is not: a days-long
-sync would cost every other collection its week, so it is recorded and
-caught up when that run finishes (§spec:rescheduled-syncs).
-Accepted tradeoffs: per-tick job definitions repeat the mount/env
-wiring and live on the scheduler rather than on a worker service (more
-verbose than a `schedule:` key in shakedown.yaml would be) — accepted
-for exactly one source of timing truth (§spec:configuration); and
-ofelia requires access to the host Docker socket to start containers
-(mounted read-only), whose blast radius is host-root-equivalent — an
-unavoidable property of any in-stack container scheduler, called out
-so operators place the stack accordingly.
+**Why a Shakedown scheduler, rather than ofelia.** ofelia launched a
+fresh container per tick from Docker labels, keeping timing in the
+compose file with no scheduler code in Shakedown. Adding a collection
+then meant two edits and a stack redeploy, and a schedule could not be
+shown or set from the dashboard, so the operator moved timing into
+Shakedown (§req:constraints, operator decision, 2026-11-24). Launching
+a fresh one-shot process per tick keeps what ofelia gave: no run state
+lives in the scheduler, and a tick never silently no-ops because a prior
+run exited. Nothing the dashboard writes reaches a container that holds
+the Docker socket: the only socket user is Watchtower, behind the proxy,
+configured only in the compose file.
 
-Setup flow (web-UI-only): create the share folders in File Station,
-upload an initial `shakedown.yaml`, paste the compose YAML into
-Container Station with credentials as environment variables. Day 2:
-collection changes via File Station (YAML edit), schedule changes via
-Container Station (compose edit), logs via Container Station.
+**Alternatives rejected.** *Keep ofelia and let the dashboard rewrite
+its labels* — still needs the Docker socket and a redeploy per change.
+*Generate an ofelia job file from the dashboard's schedules* (the
+netresearch fork reloads its INI file) — switches to a fork, keeps two
+scheduling layers in step, and lets an unauthenticated page write job
+definitions for the container holding the Docker socket, where an
+injected volume or command is root on the host (operator decision,
+2026-11-24). *No automatic updates* — simplest, but the operator wants
+`latest` to keep updating Shakedown. *Host cron* — needs SSH
+(§req:success-criteria #6). *Keep the config mounted read-only and store
+dashboard edits elsewhere* — breaks the file as the source of truth
+(§req:constraints).
+
+**Tradeoffs.** The scheduler is required for scheduled syncs, and a tick
+missed while it is stopped is shown, not caught up (§spec:schedules). It
+also shows unhealthy until a config exists, since its heartbeat lives in
+the state database the config names. An update recreates both
+containers and stops a running sync until its next run. The proxy
+narrows what Watchtower can ask Docker for, not the privilege: creating
+containers is still host-root-equivalent, so operators place the stack
+accordingly. The stack runs three containers (scheduler, Watchtower,
+proxy) where ofelia was one. Runs `serve` starts can write the config
+folder, which the old read-only mount prevented; no run writes it, and
+the command handoff that could is set only in the file
+(§spec:dashboard-settings). Scheduled runs still cannot. Scheduled run
+output goes to the scheduler container's log.
 
 ## Setup readiness validation §spec:setup-readiness-validation
 
@@ -3635,9 +4673,8 @@ Observable behavior:
   deployment is ready to attempt a real sync," not "the whole collection
   has been mirrored."
 - The optional control plane exposes the same validation surface for
-  no-SSH deployments. Mutating live handoff tests remain protected by
-  the same bearer-token posture as ad-hoc sync and verify
-  (§spec:serve).
+  no-SSH deployments. Live handoff tests accept the bearer token only
+  (§spec:dashboard-run-controls).
 
 **Decision and constraint.** Readiness is a dedicated validation flow,
 not an expanded `sync --dry-run` and not an always-on deep startup gate.

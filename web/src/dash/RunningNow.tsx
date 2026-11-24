@@ -16,10 +16,13 @@ function RunRow({ run, now }: { run: ActivityRun; now: string }) {
   const end = outcome(run.result, run.end_reason)
   const pct = run.items_to_fetch ? (100 * (run.items_done ?? 0)) / run.items_to_fetch : null
   const discovering = run.phase === "discovering" || run.phase === "listing"
+  // A trim or a purge has no shows, phases, or progress to report: its row is the
+  // header and when it started (operator, 2026-11-24).
+  const noProgress = run.kind === "trim" || run.kind === "purge"
   return (
     <li className="flex flex-col gap-2 py-4 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="min-w-0 font-medium wrap-anywhere">{run.collection}</span>
+        <span className="min-w-0 font-medium wrap-anywhere">{run.collection ?? "—"}</span>
         <span className="text-muted-foreground">· {KIND[run.kind]}</span>
         <span className="ml-auto flex flex-wrap gap-1">
           {ended && end ? (
@@ -27,13 +30,13 @@ function RunRow({ run, now }: { run: ActivityRun; now: string }) {
           ) : (
             <>
               {run.phase && <ToneBadge tone={null}>{PHASE[run.phase]}</ToneBadge>}
-              {stalledFor > STALL_S && <ToneBadge tone="warning">No progress for {duration(stalledFor)}</ToneBadge>}
+              {stalledFor > STALL_S && !noProgress && <ToneBadge tone="warning">No progress for {duration(stalledFor)}</ToneBadge>}
             </>
           )}
         </span>
       </div>
       {!ended && pct !== null && !discovering && <Progress value={pct} aria-label={`${count(run.items_done ?? 0)} of ${count(run.items_to_fetch!)} shows`} />}
-      <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:flex sm:flex-wrap">
+      {!noProgress && <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:flex sm:flex-wrap">
         {run.phase === "listing" && run.items_listed !== null ? (
           <Fact label="Listed" value={count(run.items_listed)} />
         ) : run.phase === "discovering" ? (
@@ -48,7 +51,7 @@ function RunRow({ run, now }: { run: ActivityRun; now: string }) {
         {!ended && <Fact label="Time left" value={run.eta_seconds === null ? "Estimating" : duration(run.eta_seconds)} />}
         {(run.items_failed ?? 0) > 0 && <Fact label="Failed" value={count(run.items_failed!)} tone="danger" />}
         {ended && <Fact label="Started" value={`${clock(run.started_at, now)}`} />}
-      </div>
+      </div>}
       {!ended && run.current_items.length > 0 && (
         <div className="flex gap-1 text-xs">
           <span className="shrink-0 text-muted-foreground">Now:</span>

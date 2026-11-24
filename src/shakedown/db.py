@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # The schema version that added `rescheduled_syncs`: a skipped sync records its entry
 # only into a database already at this version or later (§spec:rescheduled-syncs).
@@ -73,7 +73,8 @@ _SCHEMA = [
         errors             TEXT NOT NULL DEFAULT '[]',
         stale              INTEGER NOT NULL DEFAULT 0,
         failure_notice_error TEXT,
-        kind               TEXT NOT NULL DEFAULT 'sync'
+        kind               TEXT NOT NULL DEFAULT 'sync',
+        detail_trimmed_at  TEXT
     )
     """,
     """
@@ -274,7 +275,9 @@ _ACTIVITY_SCHEMA = [
         bytes_to_fetch          INTEGER,
         speed_bytes_per_second  REAL,
         eta_seconds             INTEGER,
-        requests_in_flight      INTEGER
+        requests_in_flight      INTEGER,
+        runs_trimmed            INTEGER,
+        bytes_freed             INTEGER
     )
     """,
     """
@@ -372,6 +375,52 @@ _FORMAT_SCHEMA = [
 ]
 _SCHEMA += _FORMAT_SCHEMA
 
+# The scheduler's current state (§spec:schedules): its heartbeat, and whether serve has
+# sent the stale-scheduler notice for the current episode. One row each, replaced,
+# never a history. They sit outside schema versioning and never migrate: their writer
+# (the scheduler, serve) is never the writer-lock holder that migrates, so each
+# creates its own table when an older database lacks it — a table a run of an older
+# release never reads — and leaves `schema_version` alone (shakedown.heartbeat).
+SCHEDULER_HEARTBEAT_TABLE = """
+    CREATE TABLE IF NOT EXISTS scheduler_heartbeat (
+        id              INTEGER PRIMARY KEY CHECK (id = 1),
+        at              TEXT NOT NULL,
+        release         TEXT NOT NULL,
+        schedule_valid  INTEGER NOT NULL,
+        next_tick_at    TEXT
+    )
+    """
+SCHEDULER_NOTICE_TABLE = """
+    CREATE TABLE IF NOT EXISTS scheduler_notice (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        episode_last_seen  TEXT NOT NULL,
+        sent_at            TEXT NOT NULL,
+        error              TEXT
+    )
+    """
+# The config file's edit state (§spec:edit-lock): one row, written by `serve` (an
+# override, a save that moves the database) and by setup. No row is `locked`.
+CONFIG_EDIT_TABLE = """
+    CREATE TABLE IF NOT EXISTS config_edit (
+        id     INTEGER PRIMARY KEY CHECK (id = 1),
+        state  TEXT NOT NULL CHECK (state IN ('editable', 'override')),
+        at     TEXT NOT NULL
+    )
+    """
+# Credentials entered in the dashboard (§spec:dashboard-credentials): one row per
+# source, in plain text, protected as this file is. Written by `serve` (and setup).
+CREDENTIALS_TABLE = """
+    CREATE TABLE IF NOT EXISTS source_credentials (
+        source    TEXT PRIMARY KEY,
+        email     TEXT NOT NULL,
+        password  TEXT NOT NULL,
+        at        TEXT NOT NULL
+    )
+    """
+_SCHEMA += [
+    SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE, CONFIG_EDIT_TABLE, CREDENTIALS_TABLE
+]
+
 
 # Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer
 # reads its index alone, never the rows, whose manifests and source metadata fill
@@ -413,6 +462,49 @@ def open_unmigrated(db_path: Path) -> sqlite3.Connection:
     release may still be writing (§spec:rescheduled-syncs)."""
     conn = sqlite3.connect(
         db_path.resolve().as_uri() + "?mode=rw", uri=True, isolation_level=None
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    return conn
+
+
+def replace_row(
+    db_path: Path, table_sql: str, insert: str, values: tuple[object, ...], *, create: bool
+) -> bool:
+    """Replace one record in a table outside schema versioning (`write_unversioned`
+    with one statement)."""
+    return write_unversioned(db_path, table_sql, [(insert, values)], create=create)
+
+
+def write_unversioned(
+    db_path: Path,
+    table_sql: str,
+    statements: list[tuple[str, tuple[object, ...]]],
+    *,
+    create: bool,
+) -> bool:
+    """Run ``statements`` as one transaction on a table outside schema versioning,
+    without the writer lock and without migrating: create the table when an older
+    database lacks it and leave `schema_version` alone. ``create`` makes a missing
+    database, at the current schema (nothing exists to migrate). Returns False when
+    the database is missing and ``create`` is off; raises sqlite3.Error when it
+    cannot be written."""
+    if not db_path.exists():
+        if not create:
+            return False
+        connect(db_path).close()
+    with closing(open_unmigrated(db_path)) as conn, transaction(conn):
+        conn.execute(table_sql)
+        for sql, values in statements:
+            conn.execute(sql, values)
+    return True
+
+
+def open_read_only(db_path: Path) -> sqlite3.Connection:
+    """Open an existing state DB strictly for reading: never created, never
+    migrated, never written (raises sqlite3.OperationalError when missing)."""
+    conn = sqlite3.connect(
+        db_path.resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None
     )
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
@@ -673,6 +765,19 @@ def _migrate_to_13(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_14(conn: sqlite3.Connection) -> None:
+    """v13 → v14, run error retention (§spec:state, §spec:run-error-retention): each
+    run records when its error detail was trimmed, and a `trim` run's activity entry
+    records the runs it trimmed and the bytes the database shrank by. Additive: the
+    columns start empty and nothing else changes. A database migrated from before v10
+    created its activity table with the columns already."""
+    if not _has_column(conn, "runs", "detail_trimmed_at"):
+        conn.execute("ALTER TABLE runs ADD COLUMN detail_trimmed_at TEXT")
+    for column in ("runs_trimmed", "bytes_freed"):
+        if not _has_column(conn, "run_activity", column):
+            conn.execute(f"ALTER TABLE run_activity ADD COLUMN {column} INTEGER")
+
+
 # Version-gated, forward-only upgrade steps keyed by the version they produce.
 _MIGRATIONS = {
     2: _migrate_to_2,
@@ -687,6 +792,7 @@ _MIGRATIONS = {
     11: _migrate_to_11,
     12: _migrate_to_12,
     13: _migrate_to_13,
+    14: _migrate_to_14,
 }
 
 

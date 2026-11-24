@@ -187,8 +187,18 @@ contents. Byte-level hashing is `verify --deep`'s job and is owned by the core.
 ## The four methods
 
 Your class subclasses `SourcePlugin`. The base `__init__` stores the source's
-config as `self.source_config` (a `SourceConfig`); override it only if you need
-to build a client/session, and call `super().__init__(source_config)`.
+config as `self.source_config` (a `SourceConfig`) and the login a run resolved
+for it as `self.login` (a `Login` with `email` and `password`, or `None`);
+override it only if you need to build a client/session, and call
+`super().__init__(source_config, login)`.
+
+A source that needs a login sets `takes_credentials = True`, names its standard
+environment variables in `credential_env = ("EMAIL_VAR", "PASSWORD_VAR")`, and
+overrides `check_login()` to return the source's own verdict on `self.login`:
+`"accepted"`, `"rejected"`, or `"unchecked"` when the source cannot be asked.
+The core resolves the login (environment first, then the credentials stored
+from the dashboard); a source without `takes_credentials` always gets `None`.
+Never put a login's values in a log line or an error.
 
 ### `list_items(collection)`
 
@@ -492,6 +502,7 @@ from pathlib import Path
 import requests
 
 from shakedown.config import CollectionConfig, SourceConfig
+from shakedown.credentials import Login
 from shakedown.models import ManifestFile
 from shakedown.plugins.base import (
     FetchResult,
@@ -525,8 +536,8 @@ class ExamplePlugin(SourcePlugin):
     template_fields = ("identifier", "title", "date", "venue", "year")
     per_item_unique_fields = ("identifier",)
 
-    def __init__(self, source_config: SourceConfig) -> None:
-        super().__init__(source_config)
+    def __init__(self, source_config: SourceConfig, login: Login | None = None) -> None:
+        super().__init__(source_config, login)
         self._http = requests.Session()
 
     def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:

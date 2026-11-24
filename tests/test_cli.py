@@ -34,6 +34,13 @@ def test_help_exits_zero() -> None:
     assert "release-validate" not in result.output
 
 
+def test_config_defaults_to_the_data_mount() -> None:
+    """The config file lives in the one data mount (§spec:configuration)."""
+    result = CliRunner().invoke(main, ["status"])
+    assert result.exit_code == 2
+    assert "config file not found: /data/shakedown-config/shakedown.yaml" in result.output
+
+
 def test_missing_config_exits_two(tmp_path: Path) -> None:
     result = CliRunner().invoke(main, ["--config", str(tmp_path / "missing.yaml"), "status"])
     assert result.exit_code == 2
@@ -304,3 +311,22 @@ def test_serve_starts_with_a_broken_config(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(main, ["--config", str(cfg), "serve", "--port", "9999"])
     assert result.exit_code == 0, result.output
     assert started == [(cfg, "0.0.0.0", 9999)]
+
+
+def test_serve_starts_with_no_config_file(tmp_path: Path, monkeypatch, caplog) -> None:
+    """With no file at the config path, serve starts and says setup comes next
+    (§spec:first-run-setup)."""
+    pytest.importorskip("fastapi")
+    import shakedown.server as server_module
+
+    cfg = tmp_path / "shakedown-config" / "shakedown.yaml"
+    started: list[Path] = []
+    monkeypatch.setattr(
+        server_module, "serve", lambda path, *, host, port: started.append(path)
+    )
+    with caplog.at_level("WARNING"):
+        result = CliRunner().invoke(main, ["--config", str(cfg), "serve"])
+    assert result.exit_code == 0, result.output
+    assert started == [cfg]
+    assert f"no config file at {cfg} yet; finish setup in the dashboard" in caplog.text
+    assert not cfg.parent.exists()  # starting writes nothing

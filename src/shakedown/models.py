@@ -30,6 +30,8 @@ class OperationType(StrEnum):
     VALIDATE = "validate"
     REFETCH = "refetch"
     RECONFORM = "reconform"
+    TRIM = "trim"
+    PURGE = "purge"
 
 
 # The command that reruns each operation, for an outcome's next safe action.
@@ -40,6 +42,8 @@ RERUN_COMMAND = {
     OperationType.VALIDATE: "validate",
     OperationType.REFETCH: "item refetch",
     OperationType.RECONFORM: "verify --deep --reconform",
+    OperationType.TRIM: "trim-history",
+    OperationType.PURGE: "purge",
 }
 
 
@@ -184,6 +188,8 @@ class Run:
     # Why this run's failure alert was not delivered; not resent (§spec:durable-handoff).
     failure_notice_error: str | None = None
     kind: RunKind = RunKind.SYNC
+    # When its per-show error lines were dropped (§spec:run-error-retention).
+    detail_trimmed_at: datetime | None = None
 
 
 @dataclass

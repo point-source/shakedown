@@ -31,7 +31,7 @@ export function RunsList({ runs, now }: { runs: HistoryRun[]; now: string }) {
         {runs.map((r) => (
           <li key={`${r.run_id}:${r.activity_id}`} className="flex flex-col gap-1 py-3 first:pt-0 last:pb-0">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span className="min-w-0 font-medium wrap-anywhere">{r.collection}</span>
+              <span className="min-w-0 font-medium wrap-anywhere">{r.collection ?? "—"}</span>
               <span className="text-muted-foreground">· {KIND[r.kind]}</span>
               <span className="ml-auto"><Result r={r} /></span>
             </div>
@@ -64,7 +64,7 @@ export function RunsList({ runs, now }: { runs: HistoryRun[]; now: string }) {
           {runs.map((r) => (
             <TableRow key={`${r.run_id}:${r.activity_id}`} className="align-top">
               <TableCell className="tabular-nums">{clock(r.started_at, now)}</TableCell>
-              <TableCell className="max-w-48 font-medium whitespace-normal wrap-anywhere">{r.collection}</TableCell>
+              <TableCell className="max-w-48 font-medium whitespace-normal wrap-anywhere">{r.collection ?? "—"}</TableCell>
               <TableCell>{KIND[r.kind]}</TableCell>
               <TableCell className="text-right tabular-nums">{r.duration_seconds === null ? "—" : duration(r.duration_seconds)}</TableCell>
               <TableCell className="text-right tabular-nums">{n(r.items_new)}</TableCell>

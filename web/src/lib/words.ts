@@ -10,6 +10,8 @@ export type Tone = "success" | "warning" | "danger"
 export const KIND: Record<RunKind, string> = {
   sync: "Sync", catch_up: "Catch-up sync", refetch: "Refetch", reconform: "Reconform",
   restage: "Restage", verify: "Verify", reconcile: "Reconcile",
+  trim: "Trim history", // provisional: Design task 325c24ff confirms the glossary term
+  purge: "Delete files", // provisional: Design task 325c24ff confirms the glossary term
 }
 const kindLower = (k: RunKind) => KIND[k].toLowerCase()
 
@@ -86,7 +88,7 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
         const r = runs[0]
         return {
           title: `Lost contact with ${kindLower(r.kind)}${r.finished_at ? ` at ${clock(r.finished_at, now)}` : ""}`,
-          next: ["restage", "verify", "reconcile"].includes(r.kind)
+          next: ["restage", "verify", "reconcile", "purge"].includes(r.kind)
             ? `Run ${kindLower(r.kind)} again.`
             : `The next ${kindLower(r.kind === "catch_up" ? "sync" : r.kind)} picks up where it left off.`,
         }
@@ -120,5 +122,11 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
         title: `${plural(e.count, "file", "files")} Shakedown can't identify`,
         next: "Shakedown keeps them as they are and does nothing more with them.",
       }
+    // provisional: Design task 325c24ff confirms the glossary term
+    case "scheduler_stale":
+      return { title: "Scheduled syncs are not starting", next: "Start the shakedown-scheduler container." }
+    // provisional: Design task 325c24ff confirms the glossary term
+    case "tick_overdue":
+      return { title: "Scheduled sync did not start", next: "It runs at its next scheduled time." }
   }
 }

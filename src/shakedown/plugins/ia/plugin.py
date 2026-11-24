@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -10,12 +11,16 @@ from typing import Any, Self
 from urllib.parse import quote
 
 import internetarchive as ia
+import requests
 from internetarchive.auth import S3Auth
+from internetarchive.config import get_auth_config
+from internetarchive.exceptions import AuthenticationError
 from urllib3 import Retry
 from urllib3.exceptions import MaxRetryError
 
 from shakedown import stopping
 from shakedown.config import CollectionConfig, SourceConfig
+from shakedown.credentials import Login, LoginCheck
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
@@ -122,32 +127,29 @@ def _search_retry(report: Callable[..., None] | None = None) -> Retry:
     return retry
 
 
-def _get_ia_session(source_config: SourceConfig) -> ia.ArchiveSession:
-    """Build an ArchiveSession honoring optional auth from env vars (PRD §11), with the
-    urllib3 retries on its archive.org adapter turned off."""
-    config: dict[str, Any] = {}
-    if source_config.auth:
-        # Trimmed: a line ending left by an env file would break the auth header,
-        # and the resulting error quotes the header, secret included.
-        email = (
-            os.environ.get(source_config.auth.email_env, "").strip()
-            if source_config.auth.email_env
-            else None
-        )
-        password = (
-            os.environ.get(source_config.auth.password_env, "").strip()
-            if source_config.auth.password_env
-            else None
-        )
-        if email and password:
-            config["s3"] = {"access": email, "secret": password}
-            config["cookies"] = {"logged-in-user": email}
+def _get_ia_session(auth_config: dict[str, Any] | None = None) -> ia.ArchiveSession:
+    """Build an ArchiveSession — logged in with ``auth_config`` (the S3 keys and
+    cookies archive.org's login returns) when given — with the urllib3 retries on its
+    archive.org adapter turned off."""
     http_adapter_kwargs = {"max_retries": 0}
     return (
-        ia.get_session(config=config, http_adapter_kwargs=http_adapter_kwargs)
-        if config
+        ia.get_session(config=auth_config, http_adapter_kwargs=http_adapter_kwargs)
+        if auth_config
         else ia.get_session(http_adapter_kwargs=http_adapter_kwargs)
     )
+
+
+def _log_in(login: Login) -> tuple[LoginCheck, dict[str, Any] | None]:
+    """archive.org's verdict on ``login``, and on `accepted` the S3 keys and cookies
+    its login service returns (§spec:dashboard-credentials). `rejected` is the
+    service's own refusal; anything else that stops the answer — no connection, a
+    timeout, a reply that is not its JSON — is `unchecked`."""
+    try:
+        return "accepted", get_auth_config(login.email, login.password)
+    except AuthenticationError:
+        return "rejected", None
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        return "unchecked", None
 
 
 def _restriction_reason(item_meta: dict[str, Any]) -> str | None:
@@ -188,15 +190,55 @@ class IAPlugin(SourcePlugin):
     # `identifier` is the item's IA identifier — globally unique, the composite key
     # (§spec:layout-collision-safety); no other surfaced field is guaranteed distinct.
     per_item_unique_fields = ("identifier",)
+    # Download-restricted items need an archive.org login (`auth`).
+    takes_credentials = True
 
-    def __init__(self, source_config: SourceConfig) -> None:
-        super().__init__(source_config)
-        # Exactly one retry layer per request (SPEC §spec:failure-behavior). The
-        # library remounts its own retries on the session every search, so searches
-        # get a session of their own. Metadata lookups and downloads go through
-        # `_session` as plain requests, retried only by shakedown.
-        self._session = _get_ia_session(source_config)
-        self._search_session = _get_ia_session(source_config)
+    # Read when the file's `auth` names none (§spec:dashboard-credentials).
+    credential_env = ("IA_EMAIL", "IA_PASSWORD")
+
+    def __init__(self, source_config: SourceConfig, login: Login | None = None) -> None:
+        super().__init__(source_config, login)
+        # Opened on first use, logged in with `login` when there is one: a plugin
+        # that never asks archive.org (`verify`) never logs in, and one that does
+        # logs in once, whichever collection's thread gets there first.
+        self._opening = threading.Lock()
+        self._opened: tuple[ia.ArchiveSession, ia.ArchiveSession] | None = None
+        self._verdict: LoginCheck = "unchecked"
+
+    def _sessions(self) -> tuple[ia.ArchiveSession, ia.ArchiveSession]:
+        with self._opening:
+            if self._opened is None:
+                auth_config = None
+                if self.login is not None:
+                    self._verdict, auth_config = _log_in(self.login)
+                    if auth_config is None:
+                        log.warning(
+                            "archive.org %s the login for source %r; continuing without it",
+                            "rejected" if self._verdict == "rejected" else "could not check",
+                            self.source_config.name,
+                        )
+                # Exactly one retry layer per request (SPEC §spec:failure-behavior).
+                # The library remounts its own retries on the session every search,
+                # so searches get a session of their own. Metadata lookups and
+                # downloads go through `_session` as plain requests, retried only by
+                # shakedown.
+                self._opened = (_get_ia_session(auth_config), _get_ia_session(auth_config))
+            return self._opened
+
+    @property
+    def _session(self) -> ia.ArchiveSession:
+        return self._sessions()[0]
+
+    @property
+    def _search_session(self) -> ia.ArchiveSession:
+        return self._sessions()[1]
+
+    def check_login(self) -> LoginCheck:
+        """archive.org's verdict on the login this plugin holds, asked once."""
+        if self.login is None:
+            return "unchecked"
+        self._sessions()
+        return self._verdict
 
     def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:
         log.info("IA listing: query=%r", collection.query)

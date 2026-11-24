@@ -42,6 +42,12 @@ class ActivityKind(StrEnum):
     RESTAGE = "restage"
     VERIFY = "verify"
     RECONCILE = "reconcile"
+    # Trims run error detail and compacts the database; it belongs to no collection
+    # (§spec:run-error-retention).
+    TRIM = "trim"
+    # Deletes a collection the config file no longer names: its library files, or
+    # its library and archive (§spec:collection-removal).
+    PURGE = "purge"
 
 
 class Phase(StrEnum):
@@ -133,11 +139,16 @@ def _parse(value: str | None) -> datetime | None:
 
 
 def _live_entry(row: sqlite3.Row) -> dict[str, Any]:
+    # A trim belongs to no source or collection; its row stores them empty.
+    scoped = row["kind"] != ActivityKind.TRIM
+    # Absent before schema v14, which readers open unmigrated (§spec:state). A Row's
+    # `in` tests its values, so its keys are asked for by name.
+    has_trim = "runs_trimmed" in row.keys()  # noqa: SIM118
     return {
         "activity_id": row["id"],
         "run_id": row["run_id"],
-        "source": row["source_name"],
-        "collection": row["collection_name"],
+        "source": row["source_name"] if scoped else None,
+        "collection": row["collection_name"] if scoped else None,
         "kind": row["kind"],
         "started_by_serve": bool(row["started_by_serve"]),
         "started_at": _parse(row["started_at"]),
@@ -154,6 +165,9 @@ def _live_entry(row: sqlite3.Row) -> dict[str, Any]:
         "bytes_to_fetch": row["bytes_to_fetch"],
         "speed_bytes_per_second": row["speed_bytes_per_second"],
         "eta_seconds": row["eta_seconds"],
+        # What a trim did (§spec:run-error-retention); null for every other kind.
+        "runs_trimmed": row["runs_trimmed"] if has_trim else None,
+        "bytes_freed": row["bytes_freed"] if has_trim else None,
     }
 
 
@@ -161,7 +175,9 @@ def _as_seen(entry: dict[str, Any], now: datetime) -> dict[str, Any]:
     """A running entry that stopped reporting reads as ended at its last heartbeat,
     with ``failed_before_completion`` and ``stopped_reporting`` — before any closer
     has written that end (§spec:run-activity "Ends are never missed")."""
-    if entry["state"] == RUNNING and stopped_reporting(entry["last_heartbeat_at"], now):
+    if entry["state"] == RUNNING and stopped_reporting(
+        entry["last_heartbeat_at"], now, entry["kind"]
+    ):
         entry.update(
             state=ENDED,
             result=OperationStatus.FAILED_BEFORE_COMPLETION.value,
@@ -336,6 +352,19 @@ class ActivityRepo:
             (ENDED, result, _iso(finished_at), _iso(finished_at), activity_id, RUNNING),
         )
 
+    def record_trim(self, activity_id: int, runs_trimmed: int, bytes_freed: int) -> None:
+        """A trim's figures: the runs it trimmed and the bytes the database shrank by."""
+        self.conn.execute(
+            "UPDATE run_activity SET runs_trimmed=?, bytes_freed=? WHERE id=?",
+            (runs_trimmed, bytes_freed, activity_id),
+        )
+
+    def record_freed(self, activity_id: int, bytes_freed: int) -> None:
+        """A purge's figure: the disk its deletes gave back."""
+        self.conn.execute(
+            "UPDATE run_activity SET bytes_freed=? WHERE id=?", (bytes_freed, activity_id)
+        )
+
     def last_heartbeat_for_run(self, run_id: int) -> datetime | None:
         row = self.conn.execute(
             "SELECT MAX(last_heartbeat_at) AS hb FROM run_activity WHERE run_id=?",
@@ -345,7 +374,9 @@ class ActivityRepo:
 
     def close_stale(self, now: datetime) -> None:
         """End every running entry that stopped reporting, at its last heartbeat, and
-        delete every waiting entry of a run that stopped reporting: it never started."""
+        delete every waiting entry of a run that stopped reporting: it never started.
+        A running trim ends whatever its heartbeat: it held the writer lock this run
+        now holds."""
         cutoff = now - timedelta(seconds=STALE_AFTER_S)
         self.conn.execute(
             "DELETE FROM run_activity WHERE state=? AND last_heartbeat_at < ?",
@@ -356,10 +387,10 @@ class ActivityRepo:
             UPDATE run_activity SET state=?, result=?, end_reason=?,
                 finished_at=last_heartbeat_at, current_items='[]',
                 speed_bytes_per_second=NULL, eta_seconds=NULL, requests_in_flight=NULL
-            WHERE state=? AND last_heartbeat_at < ?
+            WHERE state=? AND (last_heartbeat_at < ? OR kind=?)
             """,
             (ENDED, OperationStatus.FAILED_BEFORE_COMPLETION.value, STOPPED_REPORTING,
-             RUNNING, _iso(cutoff)),
+             RUNNING, _iso(cutoff), ActivityKind.TRIM.value),
         )
 
     def live(self, now: datetime) -> list[dict[str, Any]]:
@@ -427,6 +458,12 @@ class ActivityRepo:
 # seconds"). An entry whose heartbeat is older than STALE_AFTER_S stopped reporting.
 TICK_S = 3.0
 STALE_AFTER_S = 20.0
+# A trim's compaction holds the database's write lock, so its heartbeat cannot land
+# until it ends: minutes on a NAS for a database of hundreds of megabytes
+# (§spec:run-error-retention). A trim left open is closed at once by the next run
+# that holds the writer lock (`close_stale`), so this only bounds what the live view
+# shows when no run follows.
+TRIM_STALE_AFTER_S = 3600.0
 # A progress write waits this long for another writer before it is skipped: the next
 # one carries cumulative totals, so nothing drifts.
 _TICK_BUSY_TIMEOUT_MS = 250
@@ -449,6 +486,8 @@ _KIND_COUNTERS: dict[ActivityKind, tuple[str, ...]] = {
     ActivityKind.RESTAGE: _FETCHING,
     ActivityKind.VERIFY: _FETCHING,
     ActivityKind.RECONCILE: _LISTING,
+    ActivityKind.TRIM: (),
+    ActivityKind.PURGE: (),
 }
 _DOWNLOADING_KINDS = frozenset(
     {ActivityKind.SYNC, ActivityKind.CATCH_UP, ActivityKind.REFETCH, ActivityKind.RECONFORM}
@@ -553,9 +592,10 @@ class Progress:
 
     # -- hooks the run calls --------------------------------------------------------
 
-    def phase(self, phase: Phase) -> None:
+    def phase(self, phase: Phase | None) -> None:
+        """The run's phase now; None for a run with no phases (a trim)."""
         with self._lock:
-            self._phase = phase.value
+            self._phase = phase.value if phase is not None else None
 
     def _bump(self, counter: str, by: int) -> None:
         if counter in self._counts and by:
@@ -1111,10 +1151,14 @@ class ActivityRecorder:
             self.tick()
 
 
-def stopped_reporting(last_heartbeat_at: datetime, now: datetime) -> bool:
+def stopped_reporting(
+    last_heartbeat_at: datetime, now: datetime, kind: str | None = None
+) -> bool:
     """Whether a running entry last heard from at ``last_heartbeat_at`` stopped
-    reporting: more than about 20 seconds without a heartbeat."""
-    return now - last_heartbeat_at > timedelta(seconds=STALE_AFTER_S)
+    reporting: more than about 20 seconds without a heartbeat, or an hour for a trim,
+    whose compaction keeps its heartbeat from landing."""
+    allowance = TRIM_STALE_AFTER_S if kind == ActivityKind.TRIM else STALE_AFTER_S
+    return now - last_heartbeat_at > timedelta(seconds=allowance)
 
 
 def close_abandoned(conn: sqlite3.Connection, now: datetime) -> None:

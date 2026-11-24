@@ -13,6 +13,7 @@ const CASES: { scenario: string; tab: string }[] = [
   { scenario: "loading", tab: "runs" },
   { scenario: "loading", tab: "sources" },
   { scenario: "never_reached", tab: "overview" },
+  { scenario: "scheduler_stopped", tab: "overview" },
 ]
 
 for (const { scenario, tab } of CASES) {

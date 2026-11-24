@@ -12,7 +12,7 @@ from shakedown.activity import note_started_by_serve
 from shakedown.filesystem import FilesystemError, ensure_hardlinkable
 from shakedown.trigger import announce_failed, launched_by_serve
 
-DEFAULT_CONFIG_PATH = Path("/config/shakedown.yaml")
+DEFAULT_CONFIG_PATH = Path("/data/shakedown-config/shakedown.yaml")
 
 log = logging.getLogger("shakedown")
 
@@ -226,6 +226,35 @@ def reconcile(ctx: click.Context) -> None:
     ctx.exit(exit_code)
 
 
+@main.command("trim-history")
+@click.pass_context
+def trim_history(ctx: click.Context) -> None:
+    """Drop old run error lines now and compact the state database."""
+    cfg = _load_config(ctx)
+    from shakedown.retention import run_trim_history
+
+    ctx.exit(run_trim_history(cfg))
+
+
+@main.command()
+@click.option("--source", "source_name", required=True)
+@click.option("--collection", "collection_name", required=True)
+@click.option("--archive", is_flag=True,
+              help="Also delete the collection's archive folder and its shows' records.")
+@click.pass_context
+def purge(ctx: click.Context, source_name: str, collection_name: str, archive: bool) -> None:
+    """Delete the library files of a collection no longer in the config file."""
+    cfg = _load_config(ctx)
+    from shakedown.purge import PurgeRefused, check_purgeable, run_purge
+
+    try:
+        check_purgeable(cfg, source_name, collection_name)
+    except PurgeRefused as e:
+        raise click.UsageError(str(e)) from e
+    ctx.exit(run_purge(cfg, ctx.obj["config_path"], source_name, collection_name,
+                       everything=archive))
+
+
 @main.group()
 def item() -> None:
     """Single-item operations."""
@@ -263,11 +292,15 @@ def serve(ctx: click.Context, host: str, port: int) -> None:
     """Start the optional HTTP control plane (PRD §10)."""
     config_path: Path = ctx.obj["config_path"]
     # serve reads the config at each request, so a broken file is an answer from
-    # each endpoint, not a reason to refuse to start (§spec:api-sync-runs).
-    try:
-        config_module.load(config_path)
-    except config_module.ConfigError as e:
-        log.warning("config is not valid yet; endpoints answer 503 until it is: %s", e)
+    # each endpoint, not a reason to refuse to start (§spec:api-sync-runs). With no
+    # file at all, setup in the dashboard writes it (§spec:first-run-setup).
+    if not config_path.exists():
+        log.warning("no config file at %s yet; finish setup in the dashboard", config_path)
+    else:
+        try:
+            config_module.load(config_path)
+        except config_module.ConfigError as e:
+            log.warning("config is not valid yet; endpoints answer 503 until it is: %s", e)
     try:
         from shakedown.server import serve as run_server
     except ImportError as e:
@@ -275,6 +308,29 @@ def serve(ctx: click.Context, host: str, port: int) -> None:
         click.echo("install with: pip install 'shakedown[serve]'", err=True)
         ctx.exit(2)
     run_server(config_path, host=host, port=port)
+
+
+@main.command()
+@click.option("--check", "check_only", is_flag=True,
+              help="Exit non-zero when the scheduler's heartbeat is missing or older "
+                   "than three minutes (a container health check).")
+@click.pass_context
+def schedule(ctx: click.Context, check_only: bool) -> None:
+    """Start each collection's scheduled syncs, until stopped (§spec:schedules)."""
+    import signal
+    from datetime import UTC, datetime
+
+    from shakedown.scheduler import Scheduler, check
+
+    config_path: Path = ctx.obj["config_path"]
+    if check_only:
+        healthy, why = check(config_path, datetime.now(UTC))
+        click.echo(why, err=not healthy)
+        ctx.exit(0 if healthy else 1)
+    scheduler = Scheduler(config_path)
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, lambda *_: scheduler.request_stop())
+    ctx.exit(scheduler.run_forever())
 
 
 if __name__ == "__main__":  # pragma: no cover

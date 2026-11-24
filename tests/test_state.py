@@ -805,7 +805,7 @@ def test_v8_db_gains_empty_rescheduled_syncs(tmp_path: Path) -> None:
 
     conn = connect(db_path)
     assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
     assert "rescheduled_syncs" in _tables(conn)
     assert conn.execute("SELECT COUNT(*) AS n FROM rescheduled_syncs").fetchone()["n"] == 0
     item = ItemRepo(conn).get("s", "c", "x")
@@ -950,7 +950,7 @@ def test_v12_db_gains_an_empty_format_record(tmp_path: Path) -> None:
     conn.close()
 
     conn = connect(db_path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 13
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     assert "audio_formats" in _tables(conn)
     assert conn.execute("SELECT COUNT(*) AS n FROM audio_formats").fetchone()["n"] == 0
     assert ItemRepo(conn).get("s", "c", "x") is not None
@@ -983,7 +983,7 @@ def test_v12_db_reopens_tagged_shows_with_m4a_files_once(tmp_path: Path) -> None
     conn.close()
 
     conn = connect(db_path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 13
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     repo = TagRepo(conn)
     assert repo.fingerprints("s", "c") == {"lossless": "fp"}
     for identifier in manifests:

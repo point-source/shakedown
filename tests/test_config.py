@@ -130,7 +130,11 @@ sources:
 """)
     with pytest.raises(ConfigError) as exc_info:
         load(p)
-    assert "filename" in str(exc_info.value)
+    # Named by its setting, never quoted: a layout can hold pasted text.
+    message = str(exc_info.value)
+    assert "sources.0.collections.0.library_layout" in message
+    assert "uses a field this source does not provide" in message
+    assert "filename" not in message
 
 
 def test_layout_with_unknown_filter_rejected(tmp_path: Path) -> None:
@@ -149,7 +153,8 @@ sources:
     with pytest.raises(ConfigError) as exc_info:
         load(p)
     message = str(exc_info.value)
-    assert "sanitise" in message
+    assert "sources.0.collections.0.library_layout" in message
+    assert "sanitise" not in message
     assert "lower, sanitize, short, upper" in message
 
 
@@ -417,3 +422,124 @@ sources:
     message = str(exc_info.value)
     assert "library_layout references no source field" in message
     assert SECRET not in message
+
+
+# Run error retention (§spec:run-error-retention): how long runs keep their error lines.
+
+def _with_keep(tmp_path: Path, keep: str | None) -> Path:
+    line = f"keep_run_errors_days: {keep}\n" if keep is not None else ""
+    return _write(tmp_path, f"""
+archive_root: /a
+library_root: /l
+{line}sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'q'
+""")
+
+
+def test_keep_run_errors_days_defaults_to_180(tmp_path: Path) -> None:
+    assert load(_with_keep(tmp_path, None)).keep_run_errors_days == 180
+
+
+def test_keep_run_errors_days_accepts_30(tmp_path: Path) -> None:
+    assert load(_with_keep(tmp_path, "30")).keep_run_errors_days == 30
+
+
+def test_keep_run_errors_days_below_30_is_refused_naming_the_key(tmp_path: Path) -> None:
+    # Run history shows 30 days with their errors (§spec:run-history).
+    with pytest.raises(ConfigError, match="keep_run_errors_days"):
+        load(_with_keep(tmp_path, "10"))
+
+
+def test_keep_run_errors_days_must_be_whole(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="keep_run_errors_days"):
+        load(_with_keep(tmp_path, "30.5"))
+
+
+def test_example_config_sets_keep_run_errors_days() -> None:
+    example = Path(__file__).resolve().parents[1] / "shakedown.example.yaml"
+    assert "keep_run_errors_days:" in example.read_text()
+
+
+# --- schedule and timezone (§spec:schedules, §spec:configuration) ----------------
+
+def _scheduled(tmp_path: Path, *, schedule: str | None = None,
+               timezone: str | None = None) -> Path:
+    top = f"timezone: {timezone!r}\n" if timezone is not None else ""
+    line = f"        schedule: {schedule!r}\n" if schedule is not None else ""
+    return _write(tmp_path, f"""{top}archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: q
+{line}""")
+
+
+def test_schedule_and_timezone_absent_by_default(tmp_path: Path) -> None:
+    """No `schedule` is manual only; no `timezone` follows the container's clock."""
+    cfg = load(_scheduled(tmp_path))
+    assert cfg.sources[0].collections[0].schedule is None
+    assert cfg.timezone is None
+
+
+def test_schedule_and_timezone_load(tmp_path: Path) -> None:
+    cfg = load(_scheduled(tmp_path, schedule="30 3 * * *", timezone="Europe/Berlin"))
+    assert cfg.sources[0].collections[0].schedule == "30 3 * * *"
+    assert cfg.timezone == "Europe/Berlin"
+
+
+@pytest.mark.parametrize("schedule", [
+    "0 0 3 * * *",  # a seconds field: five fields only
+    "@daily",  # a macro is not a five-field expression
+    "61 3 * * *",  # minute out of range
+    "every night",
+    "* * * *",
+])
+def test_a_bad_schedule_is_refused_naming_the_key_not_the_value(
+    tmp_path: Path, schedule: str
+) -> None:
+    with pytest.raises(ConfigError) as exc_info:
+        load(_scheduled(tmp_path, schedule=schedule))
+    message = str(exc_info.value)
+    assert "sources.0.collections.0.schedule" in message
+    assert schedule not in message
+
+
+def test_an_unknown_timezone_is_refused_naming_the_key_not_the_value(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigError) as exc_info:
+        load(_scheduled(tmp_path, timezone="Mars/Olympus_Mons"))
+    message = str(exc_info.value)
+    assert "timezone" in message
+    assert "Olympus" not in message
+
+
+def test_a_misspelled_schedule_key_is_refused(tmp_path: Path) -> None:
+    p = _write(tmp_path, """
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: q
+        shedule: '0 3 * * *'
+""")
+    with pytest.raises(ConfigError, match="shedule"):
+        load(p)
+
+
+def test_example_config_documents_schedule_and_timezone() -> None:
+    example = Path(__file__).resolve().parent.parent / "shakedown.example.yaml"
+    text = example.read_text()
+    cfg = load(example)
+    assert "timezone:" in text and "schedule:" in text
+    assert any(c.schedule for s in cfg.sources for c in s.collections)

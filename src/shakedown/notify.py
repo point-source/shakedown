@@ -7,6 +7,9 @@ Two versioned, once-per-(collection, run) payloads over the same envelope:
   shows are ready.
 - ``sync.failed`` fires the global ``notifications.on_failure`` webhook when a
   run fails, carrying the run's ``errors`` array.
+- ``scheduler.stale`` fires the same webhook once when `serve` finds the scheduler
+  stopped (§spec:schedules), naming its last heartbeat; it is about no collection or
+  run, so those fields are null.
 
 A handoff is a trigger with a bounded wait: a webhook answered 2xx, or a command
 that exits 0, within five minutes delivers the notice. Anything else leaves it
@@ -112,6 +115,26 @@ class SyncFailedPayload:
         )
 
 
+@dataclass
+class SchedulerStalePayload:
+    """``scheduler.stale`` body: the shared envelope with no collection or run, the
+    scheduler's last heartbeat and release, and one ``errors`` line saying so."""
+    last_seen: str
+    release: str
+
+    def to_body(self) -> dict[str, Any]:
+        return {
+            "payload_version": PAYLOAD_VERSION,
+            "event": "scheduler.stale",
+            "source": None,
+            "collection": None,
+            "staging_root": None,
+            "run": None,
+            "scheduler": {"last_seen": self.last_seen, "release": self.release},
+            "errors": [f"the scheduler has not reported since {self.last_seen}"],
+        }
+
+
 def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) -> str | None:
     """Fire a collection's ``on_complete`` handoff. Returns why the notice was not
     delivered, or ``None`` when it was (or there is no handoff).
@@ -131,7 +154,8 @@ def fire_complete(collection: CollectionConfig, payload: SyncCompletePayload) ->
 
 
 def fire_failure(
-    notifications: NotificationsConfig | None, payload: SyncFailedPayload
+    notifications: NotificationsConfig | None,
+    payload: SyncFailedPayload | SchedulerStalePayload,
 ) -> str | None:
     """Fire the global ``notifications.on_failure`` webhook. Returns why it was not
     delivered, or ``None`` when it was (or none is configured). Not queued: a late
@@ -193,12 +217,11 @@ def inspect_handoff(
         return (True, None, None)
 
     if isinstance(handoff, ExecHandoff):
-        cmd = _expand(
-            handoff.exec,
-            {"source": source, "collection": collection, "staging_root": "<validation>"},
-        )
         try:
-            argv = shlex.split(cmd)
+            argv = _argv(
+                handoff.exec,
+                {"source": source, "collection": collection, "staging_root": "<validation>"},
+            )
         except ValueError as e:
             return (
                 False,
@@ -231,8 +254,8 @@ def send_handoff_test(
     Sends the marked validation webhook or runs the configured command with the marked
     test payload on stdin, and returns a delivery-error string or ``None`` on success.
     This is the explicit, auditable opt-in: it exercises the real handoff path, so it
-    is protected by the same bearer-token posture as ad-hoc sync when reached over the
-    control plane (§spec:serve)."""
+    takes the bearer token only when reached over the control plane
+    (§spec:dashboard-run-controls)."""
     body = _validation_body(source, collection, "<validation>")
     try:
         return _dispatch(handoff, body)
@@ -245,7 +268,11 @@ def send_handoff_test(
 def _dispatch(handoff: Handoff, body: dict[str, Any]) -> str | None:
     if isinstance(handoff, WebhookHandoff):
         return _post(_expand(handoff.webhook, body), body)
-    return _run(_expand(handoff.exec, body), body)
+    try:
+        argv = _argv(handoff.exec, body)
+    except ValueError as e:
+        return f"command could not start: {e}"
+    return _run(argv, body)
 
 
 def _post(url: str, body: dict[str, Any]) -> str | None:
@@ -262,16 +289,12 @@ def _post(url: str, body: dict[str, Any]) -> str | None:
     return None
 
 
-def _run(cmd: str, body: dict[str, Any]) -> str | None:
+def _run(argv: list[str], body: dict[str, Any]) -> str | None:
     """Run the command with the body on stdin; delivered only when it exits 0 within
     the wait. Work it starts in the background keeps running. Past the wait the
     command and everything it started are stopped."""
-    try:
-        argv = shlex.split(cmd)
-        if not argv:
-            return "command could not start: the command is empty"
-    except ValueError as e:
-        return f"command could not start: {e}"
+    if not argv:
+        return "command could not start: the command is empty"
     # Error output goes to a file, not a pipe: a background child that inherits a
     # pipe holds it open, and reading to its end would wait on that child instead of
     # on the command's own exit.
@@ -309,13 +332,21 @@ def _error_tail(stderr: bytes) -> str:
     return " / ".join(lines[-_ERROR_TAIL_LINES:])[:_ERROR_TAIL_CHARS]
 
 
+def _argv(template: str, body: dict[str, Any]) -> list[str]:
+    """The command's arguments, split as the file writes them, then each one's
+    placeholders filled in: a value (a library path the dashboard saved, with a
+    space or a quote in it) stays inside the argument that names it and never adds or
+    splits one. Raises ValueError for quoting that cannot be split."""
+    return [_expand(arg, body) for arg in shlex.split(template)]
+
+
 def _expand(template: str, body: dict[str, Any]) -> str:
     """Substitute ``{source}``/``{collection}``/``{staging_root}`` placeholders in
     the URL or command from the payload's top-level fields."""
     fields = {
-        "source": body.get("source", ""),
-        "collection": body.get("collection", ""),
-        "staging_root": body.get("staging_root", ""),
+        "source": body.get("source") or "",
+        "collection": body.get("collection") or "",
+        "staging_root": body.get("staging_root") or "",
     }
     try:
         return template.format(**fields)

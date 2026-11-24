@@ -24,6 +24,7 @@ from shakedown import realformat, stopping
 from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress, RunCounts, Waiting
 from shakedown.config import CollectionConfig, Config, ConfigError, SourceConfig
 from shakedown.config import load as load_config
+from shakedown.credentials import login_for
 from shakedown.db import connect, connect_reader, transaction
 from shakedown.discovery import (
     ItemDescriptor,
@@ -374,7 +375,9 @@ def _run_sync(
     work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
     for source, collection in scope:
         if id(source) not in plugins:
-            plugins[id(source)] = registry.for_source(source)
+            plugins[id(source)] = registry.for_source(
+                source, login_for(source, config.state_db)
+            )
         work.append((source, collection, plugins[id(source)]))
 
     if not work:
@@ -2588,7 +2591,12 @@ def run_single_shows(
     download draws from the shared source budget (§spec:source-budget). The caller
     holds the writer lock. Returns 0 when every show was fetched, else 1."""
     work = [
-        (source, collection, registry.for_source(source), targets[key])
+        (
+            source,
+            collection,
+            registry.for_source(source, login_for(source, config.state_db)),
+            targets[key],
+        )
         for source in config.sources
         for collection in source.collections
         if (key := (source.name, collection.name)) in targets and targets[key]

@@ -18,6 +18,7 @@ from pathlib import Path
 from shakedown import stopping
 from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress
 from shakedown.config import CollectionConfig, Config, SourceConfig
+from shakedown.credentials import login_for
 from shakedown.db import connect, transaction
 from shakedown.discovery import (
     ItemDescriptor,
@@ -58,7 +59,7 @@ def _run_reconcile(config: Config) -> int:
 
     with ActivityRecorder(config.state_db) as recorder:  # type: ignore[arg-type]
         for source in config.sources:
-            plugin = registry.for_source(source)
+            plugin = registry.for_source(source, login_for(source, config.state_db))
             budget = source_budgets(config, [(source, plugin)])[source.name]
             for collection in source.collections:
                 if stopping.requested():

@@ -102,3 +102,30 @@ It receives the same envelope with `"event": "sync.failed"` and an `errors`
 array instead of `staged`. A failure alert that is not delivered shows in
 `status` under that run as `failure notice not delivered: <reason>`. It is not
 sent again: it describes that run, and `status` already shows that run's state.
+
+### Scheduler stopped
+
+The same webhook fires once when `shakedown serve` finds that the scheduler
+(`shakedown schedule`) has not reported for more than three minutes. It fires
+once per stop: a second check, or a restarted `serve`, does not send it again,
+and a later stop sends a new one. It is not sent again if it is not delivered.
+The envelope is the same, with `"event": "scheduler.stale"`. `source`,
+`collection`, `staging_root`, and `run` are `null`, because it is about no
+collection or run. The body adds the scheduler's last heartbeat and release, and
+one `errors` line:
+
+```json
+{
+  "payload_version": 2,
+  "event": "scheduler.stale",
+  "source": null,
+  "collection": null,
+  "staging_root": null,
+  "run": null,
+  "scheduler": {"last_seen": "2026-11-24T03:00:00+01:00", "release": "2.4.0"},
+  "errors": ["the scheduler has not reported since 2026-11-24T03:00:00+01:00"]
+}
+```
+
+`{source}` and `{collection}` in the webhook URL expand to nothing for this
+event.

@@ -76,6 +76,32 @@ web dashboard, usable from a phone or a desktop, that answers all of
 these questions in one place. Managing config from the dashboard is a
 later step, not this one.
 
+**Managing shakedown from the browser (config-management increment,
+operator decisions, 2026-11-24).** With the dashboard in place, setup
+and change are now the hard part. Every change is a hand edit of
+`shakedown.yaml` on the NAS. In the operator's order of pain:
+
+1. Editing YAML through File Station or a text editor is clumsy, and
+   one typo or bad indent breaks the file.
+2. The options are hidden: the operator reads `shakedown.example.yaml`
+   to learn what a collection can do.
+3. A new collection needs two edits in two places — the YAML, and a
+   new ofelia job in the compose file, followed by a stack redeploy —
+   and forgetting one is easy.
+4. A mistake surfaces only when the next scheduled run fails, often at
+   3am with nobody watching.
+
+A new install has no guided path at all: create folders, hand-write a
+config file, paste a compose file with one scheduler job per
+collection, and set environment variables. The operator wants to
+manage collections, their options, their schedules, and the rest of
+the config from the dashboard, and wants a new install to reach its
+first sync through a guided setup in the browser. The operator's own
+install is the bar, but the operator plans to share Shakedown, so a
+homelab user who has never seen the YAML must be able to get started
+too. The YAML file stays, so a deployment managed from git or an
+infrastructure-as-code tool keeps working.
+
 ## Success criteria §req:success-criteria
 
 Observable outcomes that define the product as done. Each is
@@ -89,23 +115,32 @@ ownership increment); criteria 19–26 defined the ownership, handoff,
 and discovery increment (shipped); criterion 27 (operator decisions,
 2026-11-11) makes a long run delay, rather than cancel, other
 collections' scheduled syncs (shipped); criteria 28–33 (operator
-decisions, 2026-11-12) define the current read-only web dashboard
-increment. The dashboard criteria are demonstrable from the dashboard
-page in a browser, compared against `shakedown status` and the run
-logs.
+decisions, 2026-11-12) defined the read-only web dashboard increment
+(shipped); criterion 34 defined mislabelled-audio handling (shipped);
+criteria 35–41 (operator decisions, 2026-11-24) define the current
+config-management increment, which also revises criteria 1, 2, 6, and
+33. The dashboard criteria are demonstrable from the dashboard page in
+a browser, compared against `shakedown status`, `shakedown.yaml`, and
+the run logs.
 
 1. **Unattended weekly mirror that actually fires.** A weekly sync of
    the IA Grateful Dead collection runs unattended for a month with no
    manual intervention and no duplicate downloads. Every scheduled tick
-   actually executes its sync: the schedule does not depend on a
-   long-lived container being up, and a prior run having completed and
-   exited never causes a tick to be silently skipped. "The schedule is
-   configured" and "the sync ran on schedule" are the same thing,
-   verifiable from run logs / `status`. A tick that cannot start
-   because another run holds the writer lock is not silently lost: it
-   is rescheduled and caught up (criterion 27).
+   actually executes its sync while Shakedown's scheduler container is
+   up, and a prior run having completed and exited never causes a tick
+   to be silently skipped. "The schedule is configured" and "the sync
+   ran on schedule" are the same thing, verifiable from run logs /
+   `status`. A tick that cannot start because another run holds the
+   writer lock is not silently lost: it is rescheduled and caught up
+   (criterion 27). While the scheduler is stopped, no scheduled sync
+   starts; a tick missed then is not caught up, and the collection syncs
+   at its next tick. A stopped scheduler or a missed tick is never
+   silent: the dashboard shows it and the failure notification fires
+   (revised 2026-11-24: schedules move into Shakedown, criterion 38).
 2. **New collections need no code.** Adding a second collection requires
-   only YAML edits — no code changes.
+   only a settings change in the dashboard or a YAML edit — no code
+   changes, no compose edit, and no stack redeploy (revised
+   2026-11-24).
 3. **Fast restage.** Wiping `/data/library/` and running
    `shakedown restage` rebuilds the library tree in under five minutes
    for a ~14k-item collection, without re-downloading anything.
@@ -121,9 +156,11 @@ logs.
    missing tags — criterion 25; users who want strict byte-fidelity
    leave tag filling off.)
 6. **Web-UI-only setup on QNAP.** After creating the shared folders,
-   initial setup is achievable through Container Station and File
-   Station alone — no SSH. Schedule changes are made by editing the
-   compose YAML in Container Station, not host cron.
+   initial setup is achievable through Container Station and
+   Shakedown's own setup in the browser alone — no SSH and no
+   hand-written YAML (criterion 35). Schedule changes are made in the
+   dashboard, not in the compose file or host cron (revised
+   2026-11-24).
 7. **Restricted items are visible.** Stream-only / download-restricted
    items appear in `shakedown status` with a human-readable restriction
    reason, so the user can see what is not being mirrored and why.
@@ -413,10 +450,13 @@ logs.
     the running shakedown release, whether `shakedown.yaml` is valid
     right now (and, if not, the config error naming the key), and the
     result and time of the last readiness validation.
-33. **The dashboard only looks.** The dashboard changes nothing: it has
-    no buttons or forms that start runs, edit config, or alter state,
-    and visiting it never causes a sync, a network request to a source,
-    or a write to the archive or library. Watching it — even left open
+33. **Looking changes nothing.** Opening and watching the dashboard
+    changes nothing: visiting a page never causes a sync, a network
+    request to a source, a config write, or a write to the archive or
+    library. Only an explicit action — saving settings, finishing
+    setup, or pressing a run button (criteria 35–41) — changes
+    anything (revised 2026-11-24; the dashboard was view-only before
+    the config-management increment). Watching it — even left open
     for hours on several devices — does not make a running sync or the
     NAS noticeably slower. When it cannot get fresh data, it says so
     and shows how old the data on screen is, instead of presenting old
@@ -447,6 +487,68 @@ logs.
     of 2022-06-18 (Folsom Field, an MP3 upload) as `.mp3`, with album
     artist and venue filled, playing in Navidrome with the right
     format, with no re-download.
+35. **From a fresh stack to a first sync without YAML.** A homelab
+    user starts the compose example with no `shakedown.yaml`. Opening
+    the dashboard leads them through setup in the browser: confirm the
+    archive, library, and state paths and see whether hardlinks work
+    between archive and library; optionally enter archive.org
+    credentials; add a first collection; choose its schedule. When
+    they finish, `shakedown.yaml` exists and a first sync starts. They
+    never open, write, or upload a YAML file. Verifiable on a clean
+    stack by completing setup on a phone and seeing the first run in
+    the live view.
+36. **A bad setting is refused when I save it.** Saving settings or
+    finishing setup with a value the next run would reject — an
+    unknown source type, a malformed query or layout, a layout that
+    cannot tell items apart, a cron expression that does not parse, a
+    duplicate collection name — is refused with the reason on screen,
+    naming the setting, and the file is left as it was. A save that
+    succeeds never produces config the next run rejects. Paths are the
+    one exception: a path that fails the setup check (archive and
+    library not on one filesystem, hardlinks failing, a folder not
+    writable) shows the same warning setup shows, and the save still
+    goes through.
+37. **Every collection setting is in the browser.** From the
+    dashboard, on a phone or a desktop, a user can add, change, and
+    remove a source and its collections and set every option a
+    collection has (query, library layout, pruning, incremental
+    discovery, source metadata, tag filling, handoff on completion),
+    plus the global settings (paths, concurrency caps, per-source
+    request ceiling, failure notifications). Each option explains on
+    screen what it does. The change takes effect at the next run with
+    no compose edit, no stack redeploy, and no restart. Before a
+    collection is removed, the dashboard says what happens to its
+    archived shows and library folders.
+38. **Schedules live in the dashboard.** Each collection's schedule
+    is set in the dashboard: daily or weekly at a time of day, manual
+    only, or a cron expression. A newly added collection gets a
+    default schedule offset from the existing collections', so
+    collections do not all start at once. The dashboard shows each
+    collection's next scheduled sync. Shakedown's own scheduler, a
+    long-running container separate from `serve`, starts the scheduled
+    syncs, and the compose example no longer carries ofelia.
+39. **A file I manage elsewhere is never silently overwritten.** When
+    `shakedown.yaml` was written by something other than Shakedown's
+    setup (by hand, or deployed from git or an infrastructure-as-code
+    tool), the dashboard shows every setting but cannot change them
+    until the user turns on an override. Turning it on warns that a
+    later edit to the file replaces changes made in the dashboard; the
+    override stays on once set. A file written by Shakedown's setup is
+    editable from the start. Either way, hand edits to the file keep
+    working and the next run uses them.
+40. **Credentials go in once and never come back out.** A user can
+    enter archive.org credentials in the dashboard. They never appear
+    in `shakedown.yaml`, on any page, in any API response, or in any
+    log, and the dashboard shows only whether they are set.
+    Credentials set as environment variables still work and take
+    priority, and the dashboard says which ones are in effect.
+41. **Sync now and validate from the dashboard.** A user can start a
+    sync of one collection and run setup validation from the
+    dashboard, and watch the result in the live view. A sync started
+    this way follows the same rules as one started through the API:
+    it uses the config as it is at that moment, and it is refused at
+    once, with a clear "a run is in progress" message, when another
+    run holds the collection.
 
 ## User stories §req:user-stories
 
@@ -458,9 +560,9 @@ criterion and implies a testable path through the product's surface.
   my library tool picks up new shows automatically without me re-running
   anything. *(→ criteria 1, 6)*
 - **Add another collection.** As a homelab operator, I want to add a
-  second collection (e.g. Phish) by dropping config into
-  `shakedown.yaml`, so that I grow my mirror without touching code.
-  *(→ criterion 2)*
+  second collection (e.g. Phish) from the dashboard, or by dropping
+  config into `shakedown.yaml`, so that I grow my mirror without
+  touching code or the compose file. *(→ criteria 2, 37)*
 - **Reorganize the library, then change my mind.** As a homelab
   operator, I want to wipe the library tree and regenerate it from the
   archive, so that I can experiment with layouts without re-downloading
@@ -641,10 +743,10 @@ criterion and implies a testable path through the product's surface.
   I know the state of my mirror and a full disk never surprises me.
   *(→ criteria 30, 31)*
 - **Look without fear.** As a homelab operator, I want the dashboard to
-  be safe to leave open on any device in the house — it never starts or
-  changes anything, never slows the sync, and never shows stale numbers
-  as if they were live — so that I can trust what it tells me.
-  *(→ criteria 32, 33)*
+  be safe to leave open on any device in the house — looking never
+  starts or changes anything, never slows the sync, and never shows
+  stale numbers as if they were live — so that I can trust what it
+  tells me. *(→ criteria 32, 33)*
 - **A mislabelled show still plays right.** As a homelab operator
   whose Dead & Company shows arrived as AAC and MP3 files named
   `.flac`, I want them in my library as `.m4a` and `.mp3` with their
@@ -664,6 +766,47 @@ criterion and implies a testable path through the product's surface.
   any file whose content shakedown cannot recognise listed in `status`
   and on the dashboard, so that a corrupt or exotic file never hides in
   a log line. *(→ criteria 31, 34)*
+- **Set up without YAML.** As a homelab user installing Shakedown for
+  the first time, I want the dashboard to walk me through paths,
+  credentials, a first collection, and its schedule, and to tell me
+  right away if hardlinks will not work, so that I reach a first sync
+  without learning the config file. *(→ criteria 6, 35)*
+- **Add a collection from my phone.** As a homelab operator, I want to
+  add a collection, set its query and options, and save it from my
+  phone, with each option explained, so that it syncs on its own
+  schedule without a trip to File Station or Container Station.
+  *(→ criteria 2, 37, 38)*
+- **Find my mistake before 3am does.** As a homelab operator, I want a
+  bad query, layout, or schedule refused when I save it, naming what is
+  wrong, so that a typo never costs me a night's sync. *(→ criterion
+  36)*
+- **Move a path and hear about trouble.** As a homelab operator, I
+  want a changed archive or library path checked the way setup checks
+  it, and warned about — not blocked — when hardlinks would fail, so
+  that I stay in charge of my own storage. *(→ criterion 36)*
+- **Spread the load without thinking.** As a homelab operator, I want
+  each new collection to land on a schedule that does not collide with
+  the others, with presets for the usual cases and a cron field when I
+  need it, so that the default setup is sane and I can still be exact.
+  *(→ criterion 38)*
+- **Keep my infrastructure-as-code honest.** As an operator who deploys
+  `shakedown.yaml` from git, I want the dashboard to show my settings
+  but not change them unless I deliberately turn that on — and to warn
+  me that my next deploy will replace dashboard changes — so that the
+  file in my repository stays the truth. *(→ criterion 39)*
+- **Credentials without a redeploy.** As a homelab operator, I want to
+  enter my archive.org login in the dashboard and never see it again,
+  while credentials I already set as environment variables keep
+  winning, so that I can add a restricted collection without editing
+  the stack. *(→ criterion 40)*
+- **Sync it now.** As a homelab operator who just added a collection,
+  I want a "sync now" button and a "validate" button on the dashboard,
+  so that I can start and check the work without waiting for its tick
+  or reaching for `curl`. *(→ criterion 41)*
+- **Move my install over.** As the operator of the existing install,
+  I want my current collections and their ofelia schedules carried onto
+  the new setup without re-downloading my archive, so that upgrading
+  costs me nothing I already have. *(→ criteria 37, 38)*
 
 ## Quality attributes §req:quality-attributes
 
@@ -779,8 +922,10 @@ constraints that drive architecture.
   auth-protected. The read-only dashboard, like the read endpoints,
   shows only operational data — never credentials or tokens.
 - **Config edits take effect without restarts.** Every run — scheduled,
-  manual, or API-triggered — uses the config as it is when the run
-  starts.
+  manual, API-triggered, or started from the dashboard — uses the
+  config as it is when the run starts. A schedule change, whether made
+  in the dashboard or in the file, applies from the next tick without
+  restarting `serve`.
 - **The dashboard tells the same truth as everything else.** Every
   figure the dashboard shows agrees with `shakedown status`, the
   `serve` JSON, and the run logs. A disagreement is a defect, not a
@@ -806,7 +951,29 @@ constraints that drive architecture.
   plugin author.
 - **Bounded history.** The dashboard keeps about 30 days of run and
   network history. Older detail may be dropped; the data that drives
-  sync identity is never affected by that.
+  sync identity is never affected by that. Each run's per-show error
+  detail is kept 180 days by default, changeable in the dashboard, and
+  can be trimmed on demand; a run's result, counts, and dates are kept
+  (operator decision, 2026-11-24).
+- **The config file stays the truth.** `shakedown.yaml` remains the one
+  source of truth for settings, whoever edits it. The dashboard never
+  silently overwrites a file it did not write, never leaves a
+  half-written file behind, and shows what the file says now — a hand
+  edit appears on the next refresh.
+- **A save tells the truth.** What the dashboard accepts at save is
+  exactly what the next run accepts. A save never reports success for
+  settings a run would refuse, and never refuses settings a run would
+  accept, except for path warnings, which never block.
+- **Credentials stay out of sight.** Credentials entered in the
+  dashboard are kept out of the config file, every page, every API
+  response, every log, and every export, so the config file stays safe
+  to back up, share, and commit.
+- **Sane by default, exact when needed.** The defaults the dashboard
+  offers — schedules spread across collections, every opt-in off —
+  give a working, polite setup with no tuning; a user who wants exact
+  control can still have it.
+- **Schedules cost nothing while idle.** Keeping schedules in `serve`
+  adds no noticeable load to the NAS between ticks.
 
 ## Constraints §req:constraints
 
@@ -834,7 +1001,17 @@ Technical, operational, and scope bounds on the solution space.
   Shakedown container running between ticks. An optional `serve` command
   may expose a small auth-protected control plane (health, status,
   metrics, trigger), but never schedules. A triggered sync is an ordinary
-  run under the same one-writer-at-a-time rule as scheduled runs. One
+  run under the same one-writer-at-a-time rule as scheduled runs.
+  **Superseded for scheduling by the config-management increment
+  (operator decision, 2026-11-24):** schedules move into the dashboard
+  and a long-running Shakedown scheduler starts scheduled syncs; ofelia
+  leaves the compose stack. The scheduler runs as its own container,
+  separate from `serve`, so a dashboard crash, hang, or restart never
+  stops a tick (operator decision, 2026-11-24). It becomes required for
+  scheduled syncs, and while it is stopped no scheduled sync runs; a
+  tick missed then is not caught up, but it is shown. Runs stay one-shot and stateless, and the
+  one-writer-at-a-time rule and the reschedule-on-lock catch-up below
+  are unchanged. One
   bounded exception (operator decision, 2026-11-11): shakedown
   remembers single-collection syncs that were skipped because the
   writer lock was held, and a finishing sync catches them up (criterion
@@ -907,11 +1084,19 @@ Technical, operational, and scope bounds on the solution space.
   data: an upgrade must never force re-downloading the bulk of media
   already in the archive. Relocating or renaming archive and library
   files is acceptable, and re-downloading a small share is tolerable.
-  The dashboard is new in this increment; nothing depends on it yet,
-  so its pages and any data it reads are free to change.
+  The dashboard's pages and the data they read are free to change.
+  Re-confirmed for the config-management increment (operator,
+  2026-11-24): still one install, no outside consumers. The operator's
+  existing install — its `shakedown.yaml` and its per-collection ofelia
+  schedules — needs a path onto the new setup without re-downloading
+  the archive; the config file's shape, the compose layout, and the
+  HTTP API may change.
 - **Governance: symphony-native.** REQUIREMENTS.md and SPEC.md are the
   repo's durable governance artifacts and ship in the PR as-is; the repo
   has no ADR/RFC/design-doc tree to convert into.
+- **Governance setup: none for the config-management increment
+  (2026-11-24)** — the repo is already governed and
+  `tools/governance-lint.sh` passes with no drift.
 - **Governance setup: lint script, CI workflow, markdown lint, agent
   guidance section (operator decision, 2026-11-23).** Done:
   `tools/governance-lint.sh` checks the slugs, references and SPEC.md
@@ -928,31 +1113,77 @@ Technical, operational, and scope bounds on the solution space.
   the operator runs — is a design decision, bounded by "no audio
   download" and the restage-speed bar.
 - **UI: web, track A (conventional), design state: kit and screens
-  locked (2026-11-12).** One read-only web dashboard, fully usable on
-  phone and desktop browsers, with a familiar admin-dashboard look from
-  a standard component kit. The kit, glossary, design authority, and
-  approved screens are in §spec:ui-kit. Every other surface stays as it
-  is: CLI, `status`, the library tree, and the `serve` HTTP API.
-- **Read-only dashboard, no config management yet (operator decision,
-  2026-11-12).** This reverses the earlier "No web UI in v1" decision
-  for viewing only. The dashboard starts no runs, edits no config, and
-  changes no state; there is no "sync now" or "validate" button even
-  though the API offers both. Managing config from the dashboard is a
-  later increment. Showing each collection's next scheduled sync is
-  out of this pass: the schedule stays in the compose file's ofelia
-  labels. The operator may later move scheduling into the long-running
-  container when config management arrives; that is a future decision,
-  not part of this increment. `GET /status` stays available for
+  locked (2026-11-12); new screens needed (2026-11-24).** One web
+  dashboard, fully usable on phone and desktop browsers, with a
+  familiar admin-dashboard look from a standard component kit. The
+  kit, glossary, design authority, and approved screens are in
+  §spec:ui-kit. The config-management increment adds screens with no
+  approved design yet — setup, settings, the collection and schedule
+  editors, the edit lock and its override, and the run buttons — and
+  they need Design approval under §spec:ui-kit before they are built.
+  CLI, `status`, and the library tree stay as they are.
+- **Config management in the dashboard (operator decisions,
+  2026-11-24).** This reverses the 2026-11-12 "read-only dashboard, no
+  config management yet" decision. The dashboard gains settings for
+  everything `shakedown.yaml` holds today (paths, concurrency caps,
+  sources with their request ceiling and credentials, collections with
+  every option, failure notifications), per-collection schedules, a
+  first-run setup, and "sync now" and "validate" buttons. Viewing still
+  changes nothing (criterion 33). `GET /status` stays available for
   Homepage/Homarr-style tiles.
+- **The YAML file stays the source of truth.** The dashboard reads and
+  writes `shakedown.yaml`; hand edits and files deployed from git or
+  an infrastructure-as-code tool keep working, so infrastructure-as-code
+  deployments stay supported.
+- **Edit lock.** A `shakedown.yaml` written by Shakedown's setup starts
+  editable in the dashboard. A file that already existed — written by
+  hand or deployed by a tool — starts locked: the dashboard shows it
+  but cannot change it until the operator turns on an override, which
+  stays on and warns that a later edit to the file replaces dashboard
+  changes. Shakedown cannot know whether a bootstrapped file will be
+  edited from the dashboard or from its source from then on, hence the
+  lock plus override.
+- **Path checks warn, never block.** Archive, library, and
+  state-database paths are editable in setup and in settings at any
+  time. Every change runs the same check setup runs (one filesystem,
+  hardlinks work, folders writable) and warns on failure, but the save
+  goes through. Runs still refuse to start on a path that fails, as
+  §req:constraints "Same-filesystem archive and library" requires.
+- **Credentials: dashboard or environment.** Archive.org credentials
+  may be entered in the dashboard and are stored by Shakedown — never
+  in `shakedown.yaml` in plain text. Credentials in environment
+  variables still work and take priority when set.
+- **What stays outside the dashboard.** Only what must exist before
+  `serve` can show a page: the compose file with its single data
+  volume mount, the image, the container user, the port, and (if used)
+  the API token and environment-variable credentials. Everything
+  currently in `shakedown.yaml` is managed from the dashboard.
+- **Schedule input.** Presets (daily or weekly at a time of day,
+  manual only) by default, plus a cron expression for power users.
+  Each newly added collection defaults to a preset offset from the
+  existing collections'.
 - **The dashboard lives in the always-on serve container.** Running the
   dashboard means running the `serve` container all the time; the
-  operator accepts that. It still never schedules and never starts a
-  run on its own. Syncs keep running in fresh one-shot containers, and
-  they work exactly as before when `serve` is not running.
+  operator accepts that. From the config-management increment, a
+  separate scheduler container starts scheduled syncs; `serve` never
+  schedules and never starts a run on its own initiative. Syncs keep
+  running as fresh one-shot runs, and a sync started by hand works
+  exactly as before when `serve` is not running.
 - **No login of its own.** The operator's reverse proxy (for example
   Authelia) handles who may open the dashboard. Shakedown serves the
   dashboard unauthenticated, like `GET /status`, and must work correctly
   behind such a proxy. It exposes no credentials, tokens, or secrets.
+  This holds for config management too (operator decision,
+  2026-11-24): anyone who can open the dashboard can change settings
+  and start runs, unless the edit lock is on. Whether direct API calls
+  keep needing the bearer token is a design decision.
+- **Config management: out of scope (operator decisions,
+  2026-11-24).** A built-in login, users, or roles; managing more than
+  one install; pushing dashboard changes back to git or an
+  infrastructure-as-code tool; catching up scheduled ticks missed while
+  `serve` was stopped; changing sync behavior beyond who starts a run
+  and when. Lost sync logs when ofelia is recreated (issue #31) are a
+  separate topic.
 
 ## Priorities §req:priorities
 
@@ -961,9 +1192,9 @@ in to prove the plugin seam. The discovery-performance increment (items
 13–15), the mirror-integrity & metadata preservation increment (items
 16–18), and the setup, recovery, and validation-confidence increment
 (items 19–21), and the ownership, handoff, and discovery increment
-(items 22–30) have shipped; the current increment is the read-only web
-dashboard (items 32–36), followed by mislabelled-audio handling
-(item 37).
+(items 22–30), the read-only web dashboard (items 32–36), and
+mislabelled-audio handling (item 37) have shipped; the current
+increment is config management in the dashboard (items 38–43).
 
 **Must have (v1 core):**
 
@@ -1125,12 +1356,41 @@ track.
     unidentifiable files in `status` and the dashboard (gated on the
     §spec:ui-kit glossary and screen state for it).
 
+**Current — config management in the dashboard (operator decisions,
+2026-11-24).** The operator ranks success as: first, a new user
+reaches a first sync without YAML (criterion 35); second, bad settings
+are refused at save (criterion 36).
+
+38. Collection and global settings in the dashboard, with save-time
+    validation and the edit lock (→ criteria 36, 37, 39). Highest
+    impact: it removes the operator's top two pains (editing YAML, and
+    options hidden in the example file). High confidence: the run
+    already validates the whole config, so save-time checks reuse
+    rules that exist. Everything else in this increment builds on it.
+39. Schedules in the dashboard, started by `serve` (→ criteria 1, 38).
+    High impact: it removes the second place to edit and the stack
+    redeploy. Medium confidence: it reverses a founding constraint,
+    makes `serve` required, and must cooperate with the writer lock
+    and the reschedule-on-lock catch-up.
+40. First-run setup (→ criteria 6, 35). The operator's first-ranked
+    success measure, and the gate to sharing Shakedown. Depends on 38
+    and 39; the path and hardlink check reuses setup readiness
+    validation.
+41. "Sync now" and "validate" buttons (→ criterion 41). Small: the
+    API already offers both; the work is the buttons and their gate.
+42. Credentials entered in the dashboard (→ criterion 40). Small in
+    surface, but it needs a storage decision that keeps secrets out of
+    the config file.
+43. Moving the operator's install onto the new setup (→ criteria 37,
+    38; §req:constraints deployment status). Must land with 39: the
+    existing ofelia schedules must not be lost, and nothing already
+    archived is re-downloaded.
+
 **Nice to have / out of scope (candidates for later):**
 
-31. Managing config from the web UI; showing next scheduled syncs and
-    possibly moving scheduling from ofelia into the long-running
-    container; push notifications beyond webhooks (Pushover, Discord);
+31. Push notifications beyond webhooks (Pushover, Discord);
     direct library-tool integrations; multiple archive roots / tiered
     storage; BitTorrent as a source; cross-host sync. These are
     explicitly deferred. (A read-only status dashboard moved out of
-    this list into items 32–36.)
+    this list into items 32–36, and config management with schedules
+    into items 38–43.)

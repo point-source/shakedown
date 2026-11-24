@@ -25,6 +25,7 @@ import httpx
 
 from shakedown import stopping
 from shakedown.config import CollectionConfig, SourceConfig
+from shakedown.credentials import Login
 from shakedown.models import ManifestFile
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
@@ -122,8 +123,8 @@ class EtreePlugin(SourcePlugin):
     # the multiple recordings of a single show.
     per_item_unique_fields = ("identifier",)
 
-    def __init__(self, source_config: SourceConfig) -> None:
-        super().__init__(source_config)
+    def __init__(self, source_config: SourceConfig, login: Login | None = None) -> None:
+        super().__init__(source_config, login)
         # Plain instance attribute so a test can swap in an httpx.MockTransport
         # client. The core constructs one plugin instance per source.
         self._client = httpx.Client(

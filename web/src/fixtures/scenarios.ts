@@ -128,6 +128,7 @@ function longContent(): Answers {
     items_failed: i % 5 === 0 ? 2 : 0, bytes_downloaded: i * 1_200_000_000,
     errors: i % 5 === 0 ? ["source enumeration failed: HTTPSConnectionPool(host='archive.org', port=443): Read timed out. (read timeout=30)", "gd1977-05-08: checksum mismatch after 3 attempts", "gd1978-01-22: checksum mismatch after 3 attempts"] : [],
     failure_notice_error: i === 5 ? "apprise: no service accepted the notification" : null,
+    detail_trimmed: false, runs_trimmed: null, bytes_freed: null,
   }))
   a["runs?days=30"].runs.push(...extra)
   a.library.collections[0].collection = long
@@ -146,6 +147,80 @@ function verifyRunning(): Answers {
     phase: "verifying", current_items: [], bytes_downloaded: null, bytes_to_fetch: null,
     speed_bytes_per_second: null, eta_seconds: null,
   })
+  return a
+}
+
+// Trim runs (§spec:run-error-retention), shaped as serve answers them: a trim
+// running now, one that ended without room to compact, one that freed space, and
+// a sync whose per-show error lines were dropped. A trim belongs to no collection.
+// Purge runs (§spec:collection-removal), shaped as serve answers them: a purge of
+// a removed collection running now, one that could not delete a file, and one that
+// freed its archive's disk. A purge names its collection but has no phases or
+// show counts.
+function purges(): Answers {
+  const a = defaultAnswers()
+  const purge = (activity_id: number, collection: string, started: number, finished: number | null) => ({
+    activity_id, run_id: null, source: "internetarchive", collection, kind: "purge" as const,
+    started_by_serve: true, started_at: at(started), finished_at: finished === null ? null : at(finished),
+    last_heartbeat_at: at(finished ?? 0.05), last_progress_at: at(started), current_items: [], phase: null,
+    items_listed: null, items_to_look_up: null, items_looked_up: null, items_to_fetch: null,
+    items_done: null, items_failed: null, bytes_downloaded: null, bytes_to_fetch: null,
+    speed_bytes_per_second: null, eta_seconds: null, end_reason: null, runs_trimmed: null,
+  })
+  const ran = (activity_id: number, collection: string, started: number, finished: number | null,
+    result: HistoryRun["result"], errors: string[] | null, bytes_freed: number | null): HistoryRun => ({
+    run_id: null, activity_id, kind: "purge", source: "internetarchive", collection, started_at: at(started),
+    finished_at: finished === null ? null : at(finished), duration_seconds: finished === null ? null : (started - finished) * 60,
+    result, end_reason: null, items_discovered: null, items_new: null, items_updated: null, items_failed: null,
+    bytes_downloaded: null, errors, failure_notice_error: null, detail_trimmed: false, runs_trimmed: null, bytes_freed,
+  })
+  // Only one run holds the writer lock: the purge runs alone.
+  a.activity.runs = [
+    { ...purge(941, "phish", 6, null), state: "running", result: null, bytes_freed: null },
+    { ...purge(940, "moe", 12, 9), state: "ended", result: "completed_with_item_issues", bytes_freed: 0 },
+  ]
+  a.activity.network = []
+  a["runs?days=30"].runs = a["runs?days=30"].runs.filter((r) => r.finished_at)
+  a["runs?days=30"].runs.push(
+    ran(941, "phish", 6, null, null, null, null),
+    ran(940, "moe", 12, 9, "completed_with_item_issues",
+      ["/data/library/internetarchive/moe/moe2001-07-14/notes.txt: could not delete: Permission denied"], 0),
+    ran(939, "dmb", 3000, 2990, "completed", [], 912_400_000_000),
+  )
+  return a
+}
+
+function trims(): Answers {
+  const a = defaultAnswers()
+  const trim = (activity_id: number, started: number, finished: number | null) => ({
+    activity_id, run_id: null, source: null, collection: null, kind: "trim" as const,
+    started_by_serve: true, started_at: at(started), finished_at: finished === null ? null : at(finished),
+    last_heartbeat_at: at(finished ?? 0.05), last_progress_at: at(started), current_items: [], phase: null,
+    items_listed: null, items_to_look_up: null, items_looked_up: null, items_to_fetch: null,
+    items_done: null, items_failed: null, bytes_downloaded: null, bytes_to_fetch: null,
+    speed_bytes_per_second: null, eta_seconds: null, end_reason: null,
+  })
+  const ran = (activity_id: number, started: number, finished: number | null,
+    result: HistoryRun["result"], errors: string[] | null, runs_trimmed: number | null, bytes_freed: number | null): HistoryRun => ({
+    run_id: null, activity_id, kind: "trim", source: null, collection: null, started_at: at(started),
+    finished_at: finished === null ? null : at(finished), duration_seconds: finished === null ? null : (started - finished) * 60,
+    result, end_reason: null, items_discovered: null, items_new: null, items_updated: null, items_failed: null,
+    bytes_downloaded: null, errors, failure_notice_error: null, detail_trimmed: false, runs_trimmed, bytes_freed,
+  })
+  // Only one run holds the writer lock: the trim runs alone.
+  a.activity.runs = [
+    { ...trim(931, 8, null), state: "running", result: null, runs_trimmed: null, bytes_freed: null },
+    { ...trim(930, 9, 8.5), state: "ended", result: "failed_before_completion", runs_trimmed: 214, bytes_freed: 0 },
+  ]
+  a.activity.network = []
+  a["runs?days=30"].runs = a["runs?days=30"].runs.filter((r) => r.finished_at)
+  a["runs?days=30"].runs.push(
+    ran(931, 8, null, null, null, null, null),
+    ran(930, 9, 8.5, "failed_before_completion", ["compaction failed: database or disk is full"], 214, 0),
+    ran(929, 3000, 2998, "completed", [], 1890, 412_000_000),
+  )
+  const synced = a["runs?days=30"].runs.find((r) => r.run_id === 485)!
+  Object.assign(synced, { errors: [], detail_trimmed: true })
   return a
 }
 
@@ -190,6 +265,21 @@ function quietFinishOrder(): Answers {
   return a
 }
 
+// The scheduler stopped 45 minutes ago and nothing has run since, so a tick that
+// passed meanwhile is overdue (§spec:schedules). The server puts scheduler_stale
+// first, then each collection's entries in kind order.
+function schedulerStopped(): Answers {
+  const a = quiet()
+  a.attention.entries = [
+    { kind: "scheduler_stale", source: null, collection: null, since: at(45),
+      identifiers: [], count: 0, detail: {} },
+    { kind: "tick_overdue", source: "internetarchive", collection: "grateful-dead", since: at(40),
+      identifiers: [], count: 0, detail: {} },
+  ]
+  a.health.scheduler = { state: "stale", last_seen: at(45), release: "1.9.0" }
+  return a
+}
+
 // The server lists runs newest first (§spec:run-history).
 function sorted(a: Answers): Answers {
   a["runs?days=30"].runs.sort((x, y) => Date.parse(y.started_at) - Date.parse(x.started_at))
@@ -207,10 +297,13 @@ export const SCENARIOS: Record<string, Scenario> = {
   never_reached: { now: NOW, mode: { kind: "refused" }, answers: sorted(defaultAnswers()) },
   long_content: { now: NOW, mode: { kind: "ok" }, answers: sorted(longContent()) },
   waiting: { now: NOW, mode: { kind: "ok" }, answers: sorted(waitingRound()) },
+  scheduler_stopped: { now: NOW, mode: { kind: "ok" }, answers: sorted(schedulerStopped()) },
   // Behaviour scenarios (tests/behaviour.spec.ts, tests/freshness.spec.ts); no screenshots.
   // The browser's clock runs a minute ahead of the server's; the server answers normally.
   server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },
   verify_running: { now: NOW, mode: { kind: "ok" }, answers: sorted(verifyRunning()) },
+  trims: { now: NOW, mode: { kind: "ok" }, answers: sorted(trims()) },
+  purges: { now: NOW, mode: { kind: "ok" }, answers: sorted(purges()) },
   restarts_broken: { now: NOW, mode: { kind: "restarts_broken", detail: CONFIG_ERROR, minutes: 1 }, answers: sorted(defaultAnswers()) },
   library_fails: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()), fail: { library: 500 } },
   removed_undated: { now: NOW, mode: { kind: "ok" }, answers: sorted(removedUndated()) },

@@ -20,6 +20,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import click
@@ -27,6 +28,7 @@ import click
 from shakedown import config as config_module
 from shakedown import notify
 from shakedown.config import Config
+from shakedown.credentials import login_for
 from shakedown.db import connect_reader, transaction
 from shakedown.filesystem import FilesystemError, check_writable, ensure_hardlinkable
 from shakedown.models import OperationStatus, OperationType
@@ -41,12 +43,16 @@ log = logging.getLogger(__name__)
 @dataclass
 class Check:
     """One readiness check. On failure, ``consequence`` and ``action`` are the
-    plain-language "what breaks" / "what to do" surfaced verbatim in the output."""
+    plain-language "what breaks" / "what to do" surfaced verbatim in the output.
+    ``code`` names the check for machines, and ``key`` the config setting it checks,
+    so a dashboard save can return a failure as a warning `{loc, code}`."""
     name: str
     ok: bool
     target: str | None = None
     consequence: str | None = None
     action: str | None = None
+    code: str | None = None
+    key: str | None = None
 
     @classmethod
     def from_probe(cls, name: str, target: str, probe: ProbeResult) -> Check:
@@ -112,17 +118,29 @@ class Report:
 
 def _config_group(config: Config) -> Group:
     """Deployment-level checks: archive/library/state writability + archive→library hardlink."""
-    checks: list[Check] = []
-    state_dir = config.state_db.parent if config.state_db else config.archive_root
+    assert config.state_db is not None  # filled in by Config validation
+    checks = path_checks(config.archive_root, config.library_root, config.state_db)
+    return Group(source=None, collection=None, checks=checks)
 
-    for name, path in (
-        ("archive path writable", config.archive_root),
-        ("library path writable", config.library_root),
-        ("state path writable", state_dir),
+
+NOT_WRITABLE = "not_writable"
+HARDLINK_FAILED = "hardlink_failed"
+
+
+def path_checks(archive_root: Path, library_root: Path, state_db: Path) -> list[Check]:
+    """Each folder writable, and a real test hardlink from archive to library. The
+    readiness validation and a dashboard save that changes a path both run these
+    (§spec:dashboard-settings "Paths warn, never block"). Missing folders are
+    created, since first use would anyway."""
+    checks: list[Check] = []
+    for name, key, path in (
+        ("archive path writable", "archive_root", archive_root),
+        ("library path writable", "library_root", library_root),
+        ("state path writable", "state_db", state_db.parent),
     ):
         try:
             check_writable(path)
-            checks.append(Check(name=name, ok=True, target=str(path)))
+            checks.append(Check(name=name, ok=True, target=str(path), code=NOT_WRITABLE, key=key))
         except FilesystemError as e:
             checks.append(
                 Check(
@@ -131,26 +149,33 @@ def _config_group(config: Config) -> Group:
                     target=str(path),
                     consequence=f"{e}; syncing will fail before writing anything",
                     action="fix the volume mount / permissions before syncing",
+                    code=NOT_WRITABLE,
+                    key=key,
                 )
             )
 
+    name = "archive and library can be hardlinked"
     try:
-        ensure_hardlinkable(config.archive_root, config.library_root)
-        checks.append(
-            Check(name="archive and library can be hardlinked", ok=True)
-        )
+        ensure_hardlinkable(archive_root, library_root)
+        checks.append(Check(name=name, ok=True, code=HARDLINK_FAILED, key="library_root"))
     except (FilesystemError, OSError) as e:
         checks.append(
             Check(
-                name="archive and library can be hardlinked",
+                name=name,
                 ok=False,
-                target=f"{config.archive_root} / {config.library_root}",
+                target=f"{archive_root} / {library_root}",
                 consequence=f"{e}",
                 action="mount archive_root and library_root through one volume on one filesystem",
+                code=HARDLINK_FAILED,
+                key="library_root",
             )
         )
+    return checks
 
-    return Group(source=None, collection=None, checks=checks)
+
+def path_warnings(checks: list[Check]) -> list[dict[str, Any]]:
+    """The failed path checks as save warnings, `{loc, code}`."""
+    return [{"loc": [c.key], "code": c.code} for c in checks if not c.ok]
 
 
 def _layout_check(source_type: str, collection: config_module.CollectionConfig) -> Check:
@@ -237,7 +262,7 @@ def validate_config(
         src_checks: list[Check] = []
         plugin = None
         try:
-            plugin = registry.for_source(source)
+            plugin = registry.for_source(source, login_for(source, config.state_db))
         except Exception as e:  # a broken plugin is a readiness failure, not a crash
             src_checks.append(
                 Check(
