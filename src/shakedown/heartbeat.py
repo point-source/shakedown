@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -67,14 +66,7 @@ def _write(state_db: Path, table_sql: str, insert: str, values: tuple[Any, ...],
     """Replace one record without the writer lock and without migrating. Returns
     whether it was written; never raises."""
     try:
-        if not state_db.exists():
-            if not create:
-                return False
-            # A fresh database at the current schema: nothing exists to migrate.
-            db.connect(state_db).close()
-        with closing(db.open_unmigrated(state_db)) as conn, db.transaction(conn):
-            conn.execute(table_sql)
-            conn.execute(insert, values)
+        return db.replace_row(state_db, table_sql, insert, values, create=create)
     except sqlite3.Error as e:
         if e.sqlite_errorcode == sqlite3.SQLITE_BUSY:
             why = f"the state database stayed busy for more than {db.BUSY_TIMEOUT_MS / 1000:g}s"
@@ -82,7 +74,6 @@ def _write(state_db: Path, table_sql: str, insert: str, values: tuple[Any, ...],
             why = f"the state database could not be written ({e})"
         log.warning("%s not recorded: %s", what, why)
         return False
-    return True
 
 
 def record_heartbeat(state_db: Path, beat: Heartbeat, *, create: bool) -> bool:

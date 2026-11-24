@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -398,7 +398,16 @@ SCHEDULER_NOTICE_TABLE = """
         error              TEXT
     )
     """
-_SCHEMA += [SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE]
+# The config file's edit state (§spec:edit-lock): one row, written by `serve` (an
+# override, a save that moves the database) and by setup. No row is `locked`.
+CONFIG_EDIT_TABLE = """
+    CREATE TABLE IF NOT EXISTS config_edit (
+        id     INTEGER PRIMARY KEY CHECK (id = 1),
+        state  TEXT NOT NULL CHECK (state IN ('editable', 'override')),
+        at     TEXT NOT NULL
+    )
+    """
+_SCHEMA += [SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE, CONFIG_EDIT_TABLE]
 
 
 # Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer
@@ -441,6 +450,35 @@ def open_unmigrated(db_path: Path) -> sqlite3.Connection:
     release may still be writing (§spec:rescheduled-syncs)."""
     conn = sqlite3.connect(
         db_path.resolve().as_uri() + "?mode=rw", uri=True, isolation_level=None
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    return conn
+
+
+def replace_row(
+    db_path: Path, table_sql: str, insert: str, values: tuple[object, ...], *, create: bool
+) -> bool:
+    """Replace one record in a table outside schema versioning, without the writer
+    lock and without migrating: create the table when an older database lacks it and
+    leave `schema_version` alone. ``create`` makes a missing database, at the current
+    schema (nothing exists to migrate). Returns False when the database is missing
+    and ``create`` is off; raises sqlite3.Error when it cannot be written."""
+    if not db_path.exists():
+        if not create:
+            return False
+        connect(db_path).close()
+    with closing(open_unmigrated(db_path)) as conn, transaction(conn):
+        conn.execute(table_sql)
+        conn.execute(insert, values)
+    return True
+
+
+def open_read_only(db_path: Path) -> sqlite3.Connection:
+    """Open an existing state DB strictly for reading: never created, never
+    migrated, never written (raises sqlite3.OperationalError when missing)."""
+    conn = sqlite3.connect(
+        db_path.resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None
     )
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
