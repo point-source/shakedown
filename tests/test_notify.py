@@ -161,6 +161,25 @@ def test_complete_exec_runs_command_with_payload_on_stdin(tmp_path: Path) -> Non
     assert seen["body"]["staged"][0]["identifier"] == "gd-x"
 
 
+def test_a_template_field_fills_one_argument_whatever_it_holds(tmp_path: Path) -> None:
+    """The library path can be saved from the dashboard, but the command is the
+    file's: a space or a quote in the path never splits an argument or adds one."""
+    script = tmp_path / "receiver.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))\n"
+    )
+    out = tmp_path / "seen.json"
+    coll = _make_collection(
+        ExecHandoff(exec=f"{sys.executable} {script} {out} --into={{staging_root}} --last")
+    )
+    staging_root = "/data/my library/x' --extra 'y"
+
+    assert fire_complete(coll, _complete(staging_root=staging_root)) is None
+
+    assert json.loads(out.read_text()) == [f"--into={staging_root}", "--last"]
+
+
 def test_complete_exec_nonzero_exit_reports_status_and_last_error_lines() -> None:
     """§spec:durable-handoff: for exec, the reason carries the exit status and the
     last lines of the command's error output."""

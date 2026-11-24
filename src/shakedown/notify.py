@@ -217,12 +217,11 @@ def inspect_handoff(
         return (True, None, None)
 
     if isinstance(handoff, ExecHandoff):
-        cmd = _expand(
-            handoff.exec,
-            {"source": source, "collection": collection, "staging_root": "<validation>"},
-        )
         try:
-            argv = shlex.split(cmd)
+            argv = _argv(
+                handoff.exec,
+                {"source": source, "collection": collection, "staging_root": "<validation>"},
+            )
         except ValueError as e:
             return (
                 False,
@@ -269,7 +268,11 @@ def send_handoff_test(
 def _dispatch(handoff: Handoff, body: dict[str, Any]) -> str | None:
     if isinstance(handoff, WebhookHandoff):
         return _post(_expand(handoff.webhook, body), body)
-    return _run(_expand(handoff.exec, body), body)
+    try:
+        argv = _argv(handoff.exec, body)
+    except ValueError as e:
+        return f"command could not start: {e}"
+    return _run(argv, body)
 
 
 def _post(url: str, body: dict[str, Any]) -> str | None:
@@ -286,16 +289,12 @@ def _post(url: str, body: dict[str, Any]) -> str | None:
     return None
 
 
-def _run(cmd: str, body: dict[str, Any]) -> str | None:
+def _run(argv: list[str], body: dict[str, Any]) -> str | None:
     """Run the command with the body on stdin; delivered only when it exits 0 within
     the wait. Work it starts in the background keeps running. Past the wait the
     command and everything it started are stopped."""
-    try:
-        argv = shlex.split(cmd)
-        if not argv:
-            return "command could not start: the command is empty"
-    except ValueError as e:
-        return f"command could not start: {e}"
+    if not argv:
+        return "command could not start: the command is empty"
     # Error output goes to a file, not a pipe: a background child that inherits a
     # pipe holds it open, and reading to its end would wait on that child instead of
     # on the command's own exit.
@@ -331,6 +330,14 @@ def _error_tail(stderr: bytes) -> str:
         if line.strip()
     ]
     return " / ".join(lines[-_ERROR_TAIL_LINES:])[:_ERROR_TAIL_CHARS]
+
+
+def _argv(template: str, body: dict[str, Any]) -> list[str]:
+    """The command's arguments, split as the file writes them, then each one's
+    placeholders filled in: a value (a library path the dashboard saved, with a
+    space or a quote in it) stays inside the argument that names it and never adds or
+    splits one. Raises ValueError for quoting that cannot be split."""
+    return [_expand(arg, body) for arg in shlex.split(template)]
 
 
 def _expand(template: str, body: dict[str, Any]) -> str:
