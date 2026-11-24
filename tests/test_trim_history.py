@@ -16,7 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from shakedown import retention
-from shakedown.activity import ActivityRepo
+from shakedown.activity import ActivityKind, ActivityRepo, close_abandoned
 from shakedown.cli import main
 from shakedown.config import Config
 from shakedown.db import connect
@@ -208,3 +208,104 @@ async def test_post_trim_passes_the_write_gate_before_reading_the_config(
         assert (r.status_code, r.json()) == (403, CROSS_SITE)
         r = await client.post("/api/history/trim", headers=DASHBOARD)
         assert r.status_code == 503
+
+
+# --- compaction holds the write lock -------------------------------------------------
+
+GROWTH = 2_000_000
+
+
+class _Conn:
+    """A state-database connection whose VACUUM fails, or whose checkpoint reports
+    that a reader kept it from emptying the write-ahead log."""
+
+    def __init__(self, conn: sqlite3.Connection, *, vacuum_fails: bool, busy: bool) -> None:
+        self._conn, self._vacuum_fails, self._busy = conn, vacuum_fails, busy
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if sql == "VACUUM" and self._vacuum_fails:
+            # As a VACUUM that runs out of room does: it writes into the log, then
+            # rolls back, leaving the log grown.
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute("CREATE TABLE scratch (b BLOB)")
+            self._conn.execute("INSERT INTO scratch VALUES (zeroblob(?))", (GROWTH,))
+            self._conn.execute("ROLLBACK")
+            raise sqlite3.OperationalError("database or disk is full")
+        cursor = self._conn.execute(sql, *args)
+        if sql.startswith("PRAGMA wal_checkpoint") and self._busy:
+            return _Row((1, -1, -1))
+        return cursor
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+class _Row:
+    def __init__(self, row: tuple[int, int, int]) -> None:
+        self._row = row
+
+    def fetchone(self) -> tuple[int, int, int]:
+        return self._row
+
+
+def _connecting(monkeypatch: pytest.MonkeyPatch, **behaviour: bool) -> None:
+    real = retention.connect
+    monkeypatch.setattr(retention, "connect", lambda db: _Conn(real(db), **behaviour))
+
+
+def test_a_failed_compaction_still_empties_the_write_ahead_log(
+    config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A VACUUM that runs out of room leaves the log grown; the run empties it, so a
+    failed compaction never leaves the shared disk fuller than before."""
+    _seed(config, runs=50)
+    assert config.state_db is not None
+    wal = config.state_db.with_name(config.state_db.name + "-wal")
+    _connecting(monkeypatch, vacuum_fails=True, busy=False)
+    # An idle reader (serve) keeps the log from being removed when the run closes.
+    with closing(sqlite3.connect(config.state_db)) as reader:
+        reader.execute("SELECT COUNT(*) FROM runs").fetchone()
+        assert retention.run_trim_history(config) == 1
+        # Only the run's last few records remain in the log.
+        assert wal.stat().st_size < GROWTH // 10
+    assert _trim_entry(config)["result"] == "failed_before_completion"
+
+
+def test_a_checkpoint_a_reader_kept_from_finishing_is_a_failed_compaction(
+    config: Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed(config, runs=3)
+    _connecting(monkeypatch, vacuum_fails=False, busy=True)
+    assert retention.run_trim_history(config) == 1
+    entry = _trim_entry(config)
+    assert (entry["result"], entry["runs_trimmed"], entry["bytes_freed"]) == (
+        "failed_before_completion", 3, 0)
+
+
+def test_a_compacting_trim_keeps_reading_as_running_past_the_heartbeat_window(
+    config: Config,
+) -> None:
+    """Compacting holds the database's write lock, so the trim's heartbeat cannot land
+    until it ends; a sync silent that long has stopped reporting."""
+    assert config.state_db is not None
+    started = datetime.now() - timedelta(minutes=2)
+    with closing(connect(config.state_db)) as conn:
+        repo = ActivityRepo(conn)
+        for kind in (ActivityKind.TRIM, ActivityKind.SYNC):
+            repo.create("" if kind == ActivityKind.TRIM else S,
+                        "" if kind == ActivityKind.TRIM else C, kind,
+                        run_id=None, started_by_serve=False, at=started)
+        states = {e["kind"]: (e["state"], e["end_reason"]) for e in repo.live(datetime.now())}
+    assert states == {"trim": ("running", None), "sync": ("ended", "stopped_reporting")}
+
+
+def test_the_next_locked_run_closes_a_trim_left_running(config: Config) -> None:
+    """Only a run holding the writer lock closes abandoned entries; a trim also holds
+    it, so one still open then has ended, however recent its heartbeat."""
+    assert config.state_db is not None
+    with closing(connect(config.state_db)) as conn:
+        ActivityRepo(conn).create("", "", ActivityKind.TRIM, run_id=None,
+                                  started_by_serve=False, at=datetime.now())
+        close_abandoned(conn, datetime.now())
+        [entry] = ActivityRepo(conn).live(datetime.now())
+    assert (entry["state"], entry["end_reason"]) == ("ended", "stopped_reporting")

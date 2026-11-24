@@ -113,7 +113,17 @@ def _db_bytes(db: Path) -> int:
 def _vacuum(db: Path) -> None:
     """Rewrite the database into the least space, then fold the write-ahead log back
     into the file and empty it, so the file itself shrinks. Needs about the
-    database's size free; SQLite raises SQLITE_FULL when it lacks the room."""
+    database's size free; SQLite raises SQLITE_FULL when it lacks the room. A failed
+    VACUUM leaves the log grown by what it wrote, so the log is emptied then too: a
+    failed compaction never leaves the disk fuller. A reader that keeps the log from
+    being emptied fails the compaction: the space did not come back."""
     with contextlib.closing(connect(db)) as conn:
-        conn.execute("VACUUM")
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        try:
+            conn.execute("VACUUM")
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            raise
+        busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        if busy:
+            raise sqlite3.OperationalError("a reader kept the write-ahead log from emptying")

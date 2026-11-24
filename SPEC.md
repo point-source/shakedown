@@ -4317,7 +4317,13 @@ Observable behavior:
   the bytes the database shrank by (`runs_trimmed`, `bytes_freed`). If the disk lacks room
   to compact (it needs about the database's size free), the trim still
   happens, the run reports the compaction failure, and the database
-  keeps its size until the next attempt. The same run is
+  keeps its size until the next attempt; the write-ahead log the failed
+  attempt grew is emptied, so a failed compaction never leaves the disk
+  fuller. A reader that keeps the log from emptying fails the compaction
+  the same way. Compacting holds the database's write lock, so the trim's
+  heartbeat cannot land until it ends: the live view gives a running trim
+  an hour before it reads as stopped reporting, and the next run that
+  holds the writer lock closes a trim left open at once. The same run is
   `shakedown trim-history` on the CLI.
 
 **Decision and constraint.** Run records are kept because last good

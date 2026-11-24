@@ -172,7 +172,9 @@ def _as_seen(entry: dict[str, Any], now: datetime) -> dict[str, Any]:
     """A running entry that stopped reporting reads as ended at its last heartbeat,
     with ``failed_before_completion`` and ``stopped_reporting`` — before any closer
     has written that end (§spec:run-activity "Ends are never missed")."""
-    if entry["state"] == RUNNING and stopped_reporting(entry["last_heartbeat_at"], now):
+    if entry["state"] == RUNNING and stopped_reporting(
+        entry["last_heartbeat_at"], now, entry["kind"]
+    ):
         entry.update(
             state=ENDED,
             result=OperationStatus.FAILED_BEFORE_COMPLETION.value,
@@ -363,7 +365,9 @@ class ActivityRepo:
 
     def close_stale(self, now: datetime) -> None:
         """End every running entry that stopped reporting, at its last heartbeat, and
-        delete every waiting entry of a run that stopped reporting: it never started."""
+        delete every waiting entry of a run that stopped reporting: it never started.
+        A running trim ends whatever its heartbeat: it held the writer lock this run
+        now holds."""
         cutoff = now - timedelta(seconds=STALE_AFTER_S)
         self.conn.execute(
             "DELETE FROM run_activity WHERE state=? AND last_heartbeat_at < ?",
@@ -374,10 +378,10 @@ class ActivityRepo:
             UPDATE run_activity SET state=?, result=?, end_reason=?,
                 finished_at=last_heartbeat_at, current_items='[]',
                 speed_bytes_per_second=NULL, eta_seconds=NULL, requests_in_flight=NULL
-            WHERE state=? AND last_heartbeat_at < ?
+            WHERE state=? AND (last_heartbeat_at < ? OR kind=?)
             """,
             (ENDED, OperationStatus.FAILED_BEFORE_COMPLETION.value, STOPPED_REPORTING,
-             RUNNING, _iso(cutoff)),
+             RUNNING, _iso(cutoff), ActivityKind.TRIM.value),
         )
 
     def live(self, now: datetime) -> list[dict[str, Any]]:
@@ -445,6 +449,12 @@ class ActivityRepo:
 # seconds"). An entry whose heartbeat is older than STALE_AFTER_S stopped reporting.
 TICK_S = 3.0
 STALE_AFTER_S = 20.0
+# A trim's compaction holds the database's write lock, so its heartbeat cannot land
+# until it ends: minutes on a NAS for a database of hundreds of megabytes
+# (§spec:run-error-retention). A trim left open is closed at once by the next run
+# that holds the writer lock (`close_stale`), so this only bounds what the live view
+# shows when no run follows.
+TRIM_STALE_AFTER_S = 3600.0
 # A progress write waits this long for another writer before it is skipped: the next
 # one carries cumulative totals, so nothing drifts.
 _TICK_BUSY_TIMEOUT_MS = 250
@@ -1131,10 +1141,14 @@ class ActivityRecorder:
             self.tick()
 
 
-def stopped_reporting(last_heartbeat_at: datetime, now: datetime) -> bool:
+def stopped_reporting(
+    last_heartbeat_at: datetime, now: datetime, kind: str | None = None
+) -> bool:
     """Whether a running entry last heard from at ``last_heartbeat_at`` stopped
-    reporting: more than about 20 seconds without a heartbeat."""
-    return now - last_heartbeat_at > timedelta(seconds=STALE_AFTER_S)
+    reporting: more than about 20 seconds without a heartbeat, or an hour for a trim,
+    whose compaction keeps its heartbeat from landing."""
+    allowance = TRIM_STALE_AFTER_S if kind == ActivityKind.TRIM else STALE_AFTER_S
+    return now - last_heartbeat_at > timedelta(seconds=allowance)
 
 
 def close_abandoned(conn: sqlite3.Connection, now: datetime) -> None:
