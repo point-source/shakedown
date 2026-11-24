@@ -26,7 +26,6 @@ from shakedown.config import (
     ConfigRejected,
     check_document,
     default_state_db,
-    read_config_file,
 )
 from shakedown.config_file import ConfigExists, WriteFailed, create_config
 from shakedown.credentials import Login
@@ -74,7 +73,7 @@ def finish(path: Path, body: Any) -> Finished:
     either, except a `write_failed` naming the state database, which keeps the file."""
     document, login = _read_body(body)
     with config_save.writing:
-        if read_config_file(path).state != "missing":
+        if path.exists():
             raise Refusal(409, "exists")
         checked = check_document(document)
         errors = (

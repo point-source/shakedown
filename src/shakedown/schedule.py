@@ -112,7 +112,7 @@ def staggered_default(config: Config | None) -> str:
     fire on a Sunday in it (a day-of-month limit is not read as ruling Sunday out).
     When every hour from 03:00 is taken, 03:00."""
     taken: set[int] = set()
-    for _source, _collection, expr in scheduled(config) if config else []:
+    for _source, _collection, expr in scheduled(config) if config is not None else []:
         sim = CronSim(expr, datetime(2000, 1, 1))
         # cronsim keeps `SUN#1` and `0L` as (weekday, which) pairs.
         days = {d[0] if isinstance(d, tuple) else d for d in sim.weekdays}
