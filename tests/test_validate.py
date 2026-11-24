@@ -330,3 +330,43 @@ def test_shipped_example_config_layouts_are_collision_safe() -> None:
     for source_type, collection in layouts:
         check = _layout_check(source_type, collection)
         assert check.ok, f"{collection.name}: {check.consequence}"
+
+
+# -- path checks, reused by a dashboard save (§spec:dashboard-settings) ----------
+
+
+def test_path_checks_pass_on_writable_linkable_folders(tmp_path: Path) -> None:
+    from shakedown.validate import path_checks, path_warnings
+
+    checks = path_checks(tmp_path / "a", tmp_path / "l", tmp_path / "a" / "state.db")
+    assert all(c.ok for c in checks)
+    assert path_warnings(checks) == []
+
+
+def test_path_checks_name_each_failing_setting(tmp_path: Path) -> None:
+    from shakedown.validate import path_checks, path_warnings
+
+    blocked = tmp_path / "a-file"
+    blocked.write_text("not a folder")
+    checks = path_checks(tmp_path / "a", blocked / "library", blocked / "db" / "state.db")
+    assert path_warnings(checks) == [
+        {"loc": ["library_root"], "code": "not_writable"},
+        {"loc": ["state_db"], "code": "not_writable"},
+        {"loc": ["library_root"], "code": "hardlink_failed"},
+    ]
+
+
+def test_path_checks_report_a_cross_filesystem_library(tmp_path: Path) -> None:
+    import errno
+    import os
+    from unittest.mock import patch
+
+    from shakedown.validate import path_checks, path_warnings
+
+    def exdev(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+        raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), str(src), None, str(dst))
+
+    with patch("shakedown.filesystem.os.link", side_effect=exdev):
+        checks = path_checks(tmp_path / "a", tmp_path / "l", tmp_path / "a" / "state.db")
+    assert path_warnings(checks) == [{"loc": ["library_root"], "code": "hardlink_failed"}]
+
