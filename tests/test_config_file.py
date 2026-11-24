@@ -243,3 +243,35 @@ def test_create_refuses_an_invalid_document(tmp_path: Path) -> None:
         create_config(path, doc)
     assert [e.code for e in exc_info.value.errors] == ["layout_no_field"]
     assert not path.exists()
+
+
+ALIASED = """\
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
+    auth: &login
+      email_env: IA_EMAIL
+      password_env: IA_PASSWORD
+    collections:
+      - name: gd
+        query: 'collection:GratefulDead'
+  - name: ia2
+    type: ia
+    auth: *login
+    collections:
+      - name: phish
+        query: 'collection:Phish'
+"""
+
+
+@pytest.mark.parametrize("edited", [0, 1])
+def test_editing_one_use_of_a_shared_anchor_leaves_the_other_as_it_was(edited: int) -> None:
+    def edit(doc: dict[str, Any]) -> None:
+        doc["sources"][edited]["auth"]["email_env"] = "OTHER_EMAIL"
+
+    merged = _save(ALIASED, edit)
+    sources = _effective(merged)["sources"]
+    assert sources[edited]["auth"]["email_env"] == "OTHER_EMAIL"
+    assert sources[1 - edited]["auth"]["email_env"] == "IA_EMAIL"

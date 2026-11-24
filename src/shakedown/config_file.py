@@ -96,7 +96,7 @@ def merge(text: str, old: dict[str, Any], new: dict[str, Any]) -> str:
     document) and ``new`` (the submitted one) changed, everything else as it was.
     Both are `Config.model_dump(mode="json")`."""
     y, data = _round_trip(text)
-    _merge_map(data, old, new, Config)
+    _merge_map(data, old, new, Config, _shared(data))
     merged = _dump(y, data)
     effective = _effective(merged)
     if effective is not None and effective["state_db"] != new["state_db"]:
@@ -115,8 +115,30 @@ def _effective(text: str) -> dict[str, Any] | None:
     return checked.config.model_dump(mode="json") if checked.config else None
 
 
+def _shared(data: Any) -> set[int]:
+    """The nodes the file uses more than once, through a YAML anchor and its aliases.
+    Changing one in place would change every use, so an edited use gets a node of
+    its own."""
+    seen: set[int] = set()
+    shared: set[int] = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, (CommentedMap, CommentedSeq)):
+            return
+        if id(node) in seen:
+            shared.add(id(node))
+            return
+        seen.add(id(node))
+        for child in node.values() if isinstance(node, CommentedMap) else node:
+            walk(child)
+
+    walk(data)
+    return shared
+
+
 def _merge_map(
-    node: CommentedMap, old: dict[str, Any], new: dict[str, Any], model: type[BaseModel] | None
+    node: CommentedMap, old: dict[str, Any], new: dict[str, Any],
+    model: type[BaseModel] | None, shared: set[int],
 ) -> None:
     for key in [k for k in node if k not in new]:
         del node[key]  # e.g. a handoff switched from one kind to the other
@@ -127,17 +149,20 @@ def _merge_map(
             if value is None:
                 del node[key]
             elif value != before:
-                node[key] = _merge_value(node[key], before, value, key)
+                node[key] = _merge_value(node[key], before, value, key, shared)
         elif value != before and value is not None:
             node[key] = _fresh(value, NAMED_LISTS.get(key))
 
 
-def _merge_value(node: Any, old: Any, new: Any, key: str) -> Any:
+def _merge_value(node: Any, old: Any, new: Any, key: str, shared: set[int]) -> Any:
+    if id(node) in shared:
+        return _fresh(new, NAMED_LISTS.get(key))
     if isinstance(node, CommentedMap) and isinstance(old, dict) and isinstance(new, dict):
-        _merge_map(node, old, new, None)
+        _merge_map(node, old, new, None, shared)
         return node
     if key in NAMED_LISTS and isinstance(node, CommentedSeq) and isinstance(new, list):
-        _merge_named(node, old if isinstance(old, list) else [], new, NAMED_LISTS[key])
+        _merge_named(node, old if isinstance(old, list) else [], new, NAMED_LISTS[key],
+                     shared)
         return node
     if isinstance(node, ScalarString) and isinstance(new, str):
         return type(node)(new)  # keep the value's quoting
@@ -146,7 +171,7 @@ def _merge_value(node: Any, old: Any, new: Any, key: str) -> Any:
 
 def _merge_named(
     seq: CommentedSeq, old: list[dict[str, Any]], new: list[dict[str, Any]],
-    model: type[BaseModel],
+    model: type[BaseModel], shared: set[int],
 ) -> None:
     """Entries matched by name: changed in place, removed, added, then put in the
     document's order. A name the list repeats (one source split over two entries)
@@ -156,10 +181,11 @@ def _merge_named(
     items = []
     for key, entry in zip(_keys(new), new, strict=True):
         node = node_by_key.get(key)
-        if node is None:
+        before = old_by_key.get(key, {})
+        if node is None or (id(node) in shared and entry != before):
             node = _fresh(entry, model)
         else:
-            _merge_map(node, old_by_key.get(key, {}), entry, model)
+            _merge_map(node, before, entry, model, shared)
         items.append(node)
     kept = {id(node) for node in items}
     for i in reversed(range(len(seq))):
