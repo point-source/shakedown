@@ -3790,7 +3790,10 @@ Observable behavior:
   record there is `locked`. When a dashboard save points `state_db` at a
   new database, the edit state and stored credentials move with it,
   once the file is written; the same database named another way (a
-  link, a relative path) moves nothing.
+  link, a relative path) moves nothing. The old database's writer lock
+  is then marked retired: a run that started before the save, and so
+  read the old file, stops as busy rather than writing beside a run on
+  the new database; one started after it may take the lock.
   Pointing the file at a different database by hand — or rebuilding the
   database with `reconcile` — starts it `locked` again; the operator
   turns the override back on.

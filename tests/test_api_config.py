@@ -856,6 +856,42 @@ async def test_a_failed_move_puts_back_the_file(
     assert paths["config"].read_bytes() == before
 
 
+@pytest.mark.asyncio
+async def test_a_run_that_read_the_config_before_a_move_cannot_take_the_old_lock(
+    paths: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It would write beside the run that took the new database's lock. A run
+    started after the save read the file as it is now, and may take it."""
+    import time
+
+    from shakedown import lock
+    from shakedown.lock import LockHeld, writer_lock_at
+
+    loaded = await _unlocked(paths)
+    old_db, new_db = paths["state_db"], tmp_path / "state" / "state.db"
+    doc = loaded["document"]
+    doc["state_db"] = str(new_db)
+    async with _client(paths) as client:
+        response = await _put(client, loaded["revision"], doc)
+        assert response.status_code == 200
+        retired = pytest.raises(LockHeld, match="names another state database")
+        with retired, writer_lock_at(old_db):
+            pass
+        with writer_lock_at(new_db):
+            pass
+
+        # Moving back clears the old mark and retires the other.
+        doc["state_db"] = str(old_db)
+        assert (await _put(client, response.json()["revision"], doc)).status_code == 200
+    with writer_lock_at(old_db):
+        pass
+    with pytest.raises(LockHeld), writer_lock_at(new_db):
+        pass
+    monkeypatch.setattr(lock, "_STARTED", time.time())
+    with writer_lock_at(new_db):
+        pass
+
+
 def test_two_spellings_of_one_database_share_one_writer_lock(tmp_path: Path) -> None:
     from shakedown.lock import LockHeld, writer_lock_at
 

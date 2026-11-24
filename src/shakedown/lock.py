@@ -14,6 +14,7 @@ import contextlib
 import fcntl
 import logging
 import os
+import time
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
@@ -53,8 +54,9 @@ def writer_lock(config: Config) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def writer_lock_at(state_db: Path) -> Iterator[None]:
-    """`writer_lock` for the state database at ``state_db``."""
+def writer_lock_at(state_db: Path, *, retired_ok: bool = False) -> Iterator[None]:
+    """`writer_lock` for the state database at ``state_db``. A lock retired after
+    this process started raises LockHeld too, unless ``retired_ok``."""
     path = lock_path_of(state_db)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
@@ -66,9 +68,44 @@ def writer_lock_at(state_db: Path) -> Iterator[None]:
                 f"another shakedown run is still writing (lock held on {path}); "
                 f"wait for it to finish, then rerun"
             ) from None
+        if not retired_ok and _retired_since_start(os.pread(fd, 64, 0)):
+            raise LockHeld(
+                "the config file now names another state database; run again"
+            )
         yield
     finally:
         os.close(fd)
+
+
+# Written, with the time, into a database's lock file when a save points the config
+# at another database (§spec:edit-lock "Where the state lives"). A run reads the
+# config as it starts: one started before the save that takes this lock after it
+# read the old config, and stops instead of writing beside the run that took the
+# new database's lock. One started after it read the file as it is now, which a
+# hand edit may have pointed back here.
+RETIRED = b"retired "
+_STARTED = time.time()
+
+
+def _retired_since_start(content: bytes) -> bool:
+    if not content.startswith(RETIRED):
+        return False
+    try:
+        return float(content[len(RETIRED):]) >= _STARTED
+    except ValueError:
+        return False
+
+
+def retire(state_db: Path) -> None:
+    """Mark ``state_db``'s lock retired now; the caller holds it."""
+    lock_path_of(state_db).write_bytes(RETIRED + f"{time.time()}".encode())
+
+
+def unretire(state_db: Path) -> None:
+    """Clear a retired mark on ``state_db``'s lock (a save moving back to it); the
+    caller holds it."""
+    with open(lock_path_of(state_db), "r+b") as f:
+        f.truncate(0)
 
 
 def run_exclusive(

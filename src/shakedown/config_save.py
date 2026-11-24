@@ -30,7 +30,7 @@ from shakedown.config import (
 from shakedown.config_file import WriteFailed, atomic_replace, merge
 from shakedown.dashboard_config import document_of
 from shakedown.edit_lock import move_install_state, read_edit, record_edit, state_db_for
-from shakedown.lock import LockHeld, writer_lock_at
+from shakedown.lock import LockHeld, retire, unretire, writer_lock_at
 from shakedown.validate import path_checks, path_warnings
 from shakedown.write_gate import Refusal
 
@@ -101,12 +101,16 @@ def _move(path: Path, before: bytes, merged: bytes, old_db: Path, new_db: Path) 
     lives"). No run may write meanwhile: one holding the old database's lock would
     keep writing while the next took the new one's, two writers on one archive. The
     install state is copied only once the file is written, so a refused write leaves
-    the new database as it was; a failed copy puts the file back."""
+    the new database as it was; a failed copy puts the file back. Then the old lock
+    is retired, so a run that read the old config just before cannot take it."""
     try:
-        with writer_lock_at(old_db), writer_lock_at(new_db):
+        with (writer_lock_at(old_db, retired_ok=True),
+              writer_lock_at(new_db, retired_ok=True)):
             _replace(path, merged)
             try:
                 move_install_state(old_db, new_db)
+                unretire(new_db)
+                retire(old_db)
             except (sqlite3.Error, OSError) as e:
                 # Put back only this save's own bytes: a hand edit made meanwhile
                 # stays.
