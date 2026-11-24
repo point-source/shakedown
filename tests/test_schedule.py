@@ -74,6 +74,15 @@ def test_a_time_the_clock_repeats_fires_once(expr: str, per_day: int) -> None:
     assert all(t.utcoffset() == fired[0].utcoffset() for t in fired)
 
 
+@pytest.mark.parametrize("expr", ["30 2 * * *", "*/30 2 * * *"])
+def test_a_scheduler_started_in_the_repeated_hour_never_gets_a_past_tick(expr: str) -> None:
+    # 02:10 the second time (01:10 UTC): the first 02:30 (00:30 UTC) is already past.
+    started = datetime(2026, 10, 25, 1, 10, tzinfo=UTC)
+    tick = schedule.next_tick(expr, BERLIN, started)
+    assert tick > started
+    assert (tick.day, tick.hour, tick.minute) == (26, 2, 0 if expr.startswith("*") else 30)
+
+
 def test_schedule_zone_prefers_the_config_then_tz(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TZ", "America/New_York")
     assert schedule.schedule_zone(_config(timezone="Europe/Berlin")) == BERLIN

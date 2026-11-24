@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -58,9 +58,14 @@ def _repeated(dt: datetime) -> bool:
 
 
 def _ticks(expr: str, zone: ZoneInfo, start: datetime, *, reverse: bool) -> Iterator[datetime]:
+    # cronsim steps in wall time, so from the repeated hour's second pass it can
+    # return a time of its first pass, already gone: compared as instants, in UTC.
+    begin = start.astimezone(UTC)
     for dt in CronSim(expr, start.astimezone(zone), reverse=reverse):
-        if not _repeated(dt):
-            yield dt
+        instant = dt.astimezone(UTC)
+        if _repeated(dt) or (instant > begin if reverse else instant <= begin):
+            continue
+        yield dt
 
 
 def next_tick(expr: str, zone: ZoneInfo, after: datetime) -> datetime:
