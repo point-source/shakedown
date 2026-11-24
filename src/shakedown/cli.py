@@ -236,6 +236,25 @@ def trim_history(ctx: click.Context) -> None:
     ctx.exit(run_trim_history(cfg))
 
 
+@main.command()
+@click.option("--source", "source_name", required=True)
+@click.option("--collection", "collection_name", required=True)
+@click.option("--archive", is_flag=True,
+              help="Also delete the collection's archive folder and its shows' records.")
+@click.pass_context
+def purge(ctx: click.Context, source_name: str, collection_name: str, archive: bool) -> None:
+    """Delete the library files of a collection no longer in the config file."""
+    cfg = _load_config(ctx)
+    from shakedown.purge import PurgeRefused, check_purgeable, run_purge
+
+    try:
+        check_purgeable(cfg, source_name, collection_name)
+    except PurgeRefused as e:
+        raise click.UsageError(str(e)) from e
+    ctx.exit(run_purge(cfg, ctx.obj["config_path"], source_name, collection_name,
+                       everything=archive))
+
+
 @main.group()
 def item() -> None:
     """Single-item operations."""

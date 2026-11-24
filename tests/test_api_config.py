@@ -125,7 +125,7 @@ async def test_a_valid_file_with_every_default_filled_in(
     assert "identifier" in types["ia"]["layout_fields"]
     assert types["ia"]["layout_filters"] == ["lower", "sanitize", "short", "upper"]
     assert datetime.fromisoformat(answer["generated_at"]).tzinfo is not None
-    assert "unconfigured" not in answer
+    assert answer["unconfigured"] == []  # no state database yet
 
 
 @pytest.mark.asyncio
@@ -613,3 +613,86 @@ async def test_a_refused_save_leaves_the_new_state_database_alone(
         response = await _put(client, loaded["revision"], doc)
     assert (response.status_code, response.json()) == (409, {"code": "changed"})
     assert not new_db.exists()
+
+
+# --- Unconfigured collections (§spec:collection-removal) ---------------------------
+
+
+def _hold(
+    state_db: Path, source: str, collection: str, shows: dict[str, bool], *,
+    placed: dict[str, list[str]] | None = None,
+) -> None:
+    """Seed the state database: ``shows`` maps each identifier to whether it has an
+    archive copy (a 100-byte library file beside a 300-byte archive-only one);
+    ``placed`` maps an identifier to the library paths recorded as placed for it."""
+    from contextlib import closing
+
+    from shakedown.db import connect
+    from shakedown.models import Item, ItemStatus, Manifest, ManifestFile
+    from shakedown.state import ItemRepo, PlacementRepo
+
+    with closing(connect(state_db)) as conn:
+        items, placements = ItemRepo(conn), PlacementRepo(conn)
+        for identifier, archived in shows.items():
+            items.upsert(Item(
+                source_name=source, collection_name=collection, identifier=identifier,
+                status=ItemStatus.COMPLETE if archived else ItemStatus.FAILED,
+                archive_path=Path(f"/a/{identifier}") if archived else None,
+                discovered_at=datetime(2026, 10, 1),
+                recorded_manifest=Manifest(files=(
+                    ManifestFile("t.flac", 100, "m"),
+                    ManifestFile("t.shn", 300, "n", library=False),
+                )),
+            ))
+        for identifier, rels in (placed or {}).items():
+            for n, rel in enumerate(rels):
+                placements.add_placement(source, collection, identifier, rel, 1000 + n)
+
+
+@pytest.mark.asyncio
+async def test_a_collection_the_file_no_longer_names_is_unconfigured(
+    paths: dict[str, Path],
+) -> None:
+    _write(paths)
+    # Still configured: never listed.
+    _hold(paths["state_db"], "ia", "gd", {"gd1": True}, placed={"gd1": ["gd1/t.flac"]})
+    # Dropped from the file: two archived shows, one placed in the library, and a
+    # show that never downloaded.
+    _hold(paths["state_db"], "ia", "old", {"o1": True, "o2": True, "o3": False},
+          placed={"o1": ["o1/t.flac"]})
+    # Only library records left.
+    _hold(paths["state_db"], "lma", "gone", {}, placed={"x": ["x/t.flac"]})
+
+    answer = await _get(paths)
+    assert answer["unconfigured"] == [
+        # Shows and archive bytes count the archive copies; library bytes count the
+        # shows the library still holds.
+        {"source": "ia", "collection": "old", "shows": 2,
+         "archive_bytes": 800, "library_bytes": 100},
+        {"source": "lma", "collection": "gone", "shows": 0,
+         "archive_bytes": 0, "library_bytes": 0},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adding_a_collection_back_takes_it_off_the_list(paths: dict[str, Path]) -> None:
+    _write(paths, HAND_WRITTEN.replace("      - name: phish\n        query: 'collection:Phish'\n", ""))
+    _hold(paths["state_db"], "ia", "phish", {"ph1": True})
+    assert [u["collection"] for u in (await _get(paths))["unconfigured"]] == ["phish"]
+
+    _write(paths)
+    assert (await _get(paths))["unconfigured"] == []
+
+
+@pytest.mark.asyncio
+async def test_no_unconfigured_list_without_a_valid_file_or_a_database(
+    paths: dict[str, Path],
+) -> None:
+    _write(paths)
+    assert (await _get(paths))["unconfigured"] == []
+    assert not paths["state_db"].exists()  # looking never creates it
+
+    _hold(paths["state_db"], "ia", "old", {"o1": True})
+    _write(paths, HAND_WRITTEN + "max_concurrent_downloads: 0\n")
+    answer = await _get(paths)
+    assert answer["state"] == "invalid" and answer["unconfigured"] == []

@@ -31,6 +31,7 @@ class OperationType(StrEnum):
     REFETCH = "refetch"
     RECONFORM = "reconform"
     TRIM = "trim"
+    PURGE = "purge"
 
 
 # The command that reruns each operation, for an outcome's next safe action.
@@ -42,6 +43,7 @@ RERUN_COMMAND = {
     OperationType.REFETCH: "item refetch",
     OperationType.RECONFORM: "verify --deep --reconform",
     OperationType.TRIM: "trim-history",
+    OperationType.PURGE: "purge",
 }
 
 

@@ -7,6 +7,7 @@ export type Iso = string
 
 export type RunKind =
   | "sync" | "catch_up" | "refetch" | "reconform" | "restage" | "verify" | "reconcile" | "trim"
+  | "purge"
 export type Phase =
   | "starting" | "listing" | "discovering" | "downloading" | "tagging" | "staging"
   | "notifying" | "verifying" | "finishing"
@@ -43,7 +44,8 @@ export interface ActivityRun {
   bytes_to_fetch: number | null
   speed_bytes_per_second: number | null
   eta_seconds: number | null
-  /** A trim's runs trimmed and bytes the database shrank by; null for other kinds. */
+  /** A trim's runs trimmed and bytes the database shrank by, or the disk a purge
+   * gave back; null for other kinds. */
   runs_trimmed: number | null
   bytes_freed: number | null
 }

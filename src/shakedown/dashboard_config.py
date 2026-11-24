@@ -8,6 +8,8 @@ created.
 from __future__ import annotations
 
 import os
+import sqlite3
+from contextlib import closing
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -23,8 +25,10 @@ from shakedown.config import (
     read_config_file,
 )
 from shakedown.dashboard import iso
+from shakedown.db import open_read_only
 from shakedown.edit_lock import read_edit, state_db_for
 from shakedown.plugins import registry
+from shakedown.purge import configured_pairs, unconfigured
 from shakedown.schedule import next_syncs
 from shakedown.utils.templates import FILTER_NAMES
 
@@ -51,7 +55,22 @@ def config_answer(path: Path, now: datetime | None = None) -> dict[str, Any]:
             else []
         ),
         "source_types": source_types(),
+        "unconfigured": unconfigured_of(config) if config else [],
     }
+
+
+def unconfigured_of(config: Config) -> list[dict[str, Any]]:
+    """The collections the state database holds files for that the file no longer
+    names (§spec:collection-removal). Read-only: a missing database is never
+    created, and one this release cannot read yet lists nothing."""
+    state_db = config.state_db
+    if state_db is None or not state_db.exists():
+        return []
+    try:
+        with closing(open_read_only(state_db)) as conn:
+            return unconfigured(conn, configured_pairs(config))
+    except sqlite3.Error:
+        return []
 
 
 def document_of(file: ConfigFile) -> dict[str, Any] | None:

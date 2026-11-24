@@ -16,7 +16,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, closing, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
@@ -58,6 +58,7 @@ from shakedown.dashboard_network import network_answer
 from shakedown.dashboard_page import PAGE_DIR, register_page
 from shakedown.dashboard_runs import runs_answer
 from shakedown.db import connect_reader
+from shakedown.purge import PurgeRefused, check_purgeable
 from shakedown.scheduler_watch import start_watching
 from shakedown.state import ItemRepo
 from shakedown.status import collection_summaries, status_answer
@@ -70,7 +71,7 @@ from shakedown.trigger import (
     stop_runs,
 )
 from shakedown.validate import validate_config
-from shakedown.write_gate import install_refusals, require_token, write_gate
+from shakedown.write_gate import Refusal, install_refusals, require_token, write_gate
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +92,14 @@ class PathsBody(BaseModel):
     archive_root: Path
     library_root: Path
     state_db: Path | None = None
+
+
+class PurgeBody(BaseModel):
+    """`POST /api/collections/purge`: the collection, and whether to delete its
+    library files or everything, archive included."""
+    source: str
+    collection: str
+    scope: Literal["library", "everything"]
 
 
 def build_app(
@@ -336,6 +345,23 @@ def build_app(
         """A fresh `trim` run (§spec:run-error-retention)."""
         start_run(current_config(), "trim", None, None, ["trim-history"])
         return {"started": "trim"}
+
+    # Deleting a removed collection's files (§spec:collection-removal). What the file
+    # does not hold stays open while the file is locked, so no edit-lock check.
+    @app.post("/api/collections/purge", status_code=202, dependencies=[Depends(write_gate)])
+    def purge_collection(body: PurgeBody) -> dict[str, Any]:
+        config = current_config()
+        try:
+            check_purgeable(config, body.source, body.collection)
+        except PurgeRefused as e:
+            if e.code == "configured":
+                raise Refusal(409, "configured") from e
+            raise HTTPException(404, str(e)) from e
+        args = ["purge", "--source", body.source, "--collection", body.collection]
+        if body.scope == "everything":
+            args.append("--archive")
+        started = start_run(config, "purge", body.source, body.collection, args)
+        return {**started, "scope": body.scope}
 
     @app.post("/validate", dependencies=[Depends(write_gate)])
     def validate(

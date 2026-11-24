@@ -11,6 +11,7 @@ export const KIND: Record<RunKind, string> = {
   sync: "Sync", catch_up: "Catch-up sync", refetch: "Refetch", reconform: "Reconform",
   restage: "Restage", verify: "Verify", reconcile: "Reconcile",
   trim: "Trim history", // provisional: Design task 325c24ff confirms the glossary term
+  purge: "Delete files", // provisional: Design task 325c24ff confirms the glossary term
 }
 const kindLower = (k: RunKind) => KIND[k].toLowerCase()
 
@@ -87,7 +88,7 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
         const r = runs[0]
         return {
           title: `Lost contact with ${kindLower(r.kind)}${r.finished_at ? ` at ${clock(r.finished_at, now)}` : ""}`,
-          next: ["restage", "verify", "reconcile"].includes(r.kind)
+          next: ["restage", "verify", "reconcile", "purge"].includes(r.kind)
             ? `Run ${kindLower(r.kind)} again.`
             : `The next ${kindLower(r.kind === "catch_up" ? "sync" : r.kind)} picks up where it left off.`,
         }
