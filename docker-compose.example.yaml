@@ -39,8 +39,8 @@
 services:
   # shakedown-serve: the web dashboard and its GET /api/* data, plus the
   # control plane (GET /status, GET /metrics for Prometheus, ad-hoc triggers).
-  # It runs all the time because the dashboard needs it, and it writes
-  # shakedown.yaml when you save settings in the dashboard.
+  # It runs all the time because the dashboard needs it, and it is the one
+  # container that writes shakedown.yaml (a settings save, PUT /api/config).
   #
   # The dashboard and its GET /api/* data have no login of their own, like
   # GET /status: put serve behind your reverse proxy (e.g. Authelia) and let
