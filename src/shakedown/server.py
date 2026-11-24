@@ -28,8 +28,9 @@ from prometheus_client import (
     Gauge,
     generate_latest,
 )
+from pydantic import BaseModel
 
-from shakedown import __version__
+from shakedown import __version__, config_save
 from shakedown.activity import HISTORY_DAYS
 from shakedown.config import Config, ConfigError, UnknownScopeError, check_scope
 from shakedown.dashboard import (
@@ -70,6 +71,20 @@ log = logging.getLogger(__name__)
 BUSY_MESSAGE = "a run is in progress; try again when it finishes"
 # A run stopped on request exits 128 + SIGTERM or SIGINT (§spec:graceful-stop).
 STOPPED_EXIT_CODES = (143, 130)
+
+
+class SaveBody(BaseModel):
+    """`PUT /api/config`: the revision the editor loaded and the whole document."""
+    revision: str | None
+    document: Any
+
+
+class PathsBody(BaseModel):
+    """`POST /api/config/check-paths`: the paths to check; no `state_db` is the
+    default beside the archive."""
+    archive_root: Path
+    library_root: Path
+    state_db: Path | None = None
 
 
 def build_app(
@@ -217,6 +232,29 @@ def build_app(
     @app.get("/api/config")
     def config_resource() -> dict[str, Any]:
         return config_answer(config_path)
+
+    # Saving it (§spec:dashboard-settings) and the edit lock's override
+    # (§spec:edit-lock), behind the write gate like every write.
+    @app.put("/api/config", dependencies=[Depends(write_gate)])
+    def save_config(body: SaveBody) -> JSONResponse:
+        try:
+            saved = config_save.save(config_path, body.revision, body.document)
+        except config_save.Rejected as e:
+            return JSONResponse({"errors": [p.to_dict() for p in e.errors]}, status_code=422)
+        return JSONResponse({"revision": saved.revision, "warnings": saved.warnings})
+
+    @app.post("/api/config/check-paths", dependencies=[Depends(write_gate)])
+    def check_paths(body: PathsBody) -> dict[str, Any]:
+        return {
+            "warnings": config_save.check_paths(
+                body.archive_root, body.library_root, body.state_db
+            )
+        }
+
+    @app.post("/api/config/override", dependencies=[Depends(write_gate)])
+    def override() -> dict[str, str]:
+        config_save.override(config_path)
+        return {"edit": "override"}
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
