@@ -18,13 +18,13 @@ from shakedown.credentials import Login, forget, resolve, store
 from shakedown.plugins import registry
 from shakedown.write_gate import Refusal
 
-FIELDS = {"source", "email", "password"}
+LOGIN_FIELDS = {"email", "password"}
 
 
 def put_credentials(config: Config, body: Any) -> dict[str, Any]:
     """Store the body's login for its source, then ask the source about it."""
     name, login = _login_of(body)
-    source = _credential_source(config, name)
+    source = credential_source(config, name)
     state_db = _state_db(config)
     with config_save.writing:
         config_save.write_state(state_db, lambda: store(state_db, name, login))
@@ -36,7 +36,7 @@ def put_credentials(config: Config, body: Any) -> dict[str, Any]:
 
 def delete_credentials(config: Config, name: str) -> dict[str, Any]:
     """Forget what is stored for the source."""
-    source = _credential_source(config, name)
+    source = credential_source(config, name)
     state_db = _state_db(config)
     with config_save.writing:
         config_save.write_state(state_db, lambda: forget(state_db, name))
@@ -44,16 +44,28 @@ def delete_credentials(config: Config, name: str) -> dict[str, Any]:
 
 
 def _login_of(body: Any) -> tuple[str, Login]:
-    if not isinstance(body, dict) or set(body) != FIELDS:
+    if not isinstance(body, dict) or set(body) != {"source", *LOGIN_FIELDS}:
         raise Refusal(422, "invalid_body")
-    values = {key: body[key] for key in FIELDS}
+    source = body["source"]
+    if not (isinstance(source, str) and source.strip()):
+        raise Refusal(422, "invalid_body")
+    return source, login_of({key: body[key] for key in LOGIN_FIELDS})
+
+
+def login_of(values: Any) -> Login:
+    """Exactly `{email, password}`, both non-empty text; else 422 `invalid_body`,
+    never the field-by-field detail, which would quote what was entered. Setup takes
+    the same pair (§spec:first-run-setup)."""
+    if not isinstance(values, dict) or set(values) != LOGIN_FIELDS:
+        raise Refusal(422, "invalid_body")
     if not all(isinstance(v, str) and v.strip() for v in values.values()):
         raise Refusal(422, "invalid_body")
     # Trimmed: a line ending pasted with a value would break the login.
-    return values["source"], Login(values["email"].strip(), values["password"].strip())
+    return Login(values["email"].strip(), values["password"].strip())
 
 
-def _credential_source(config: Config, name: str) -> SourceConfig:
+def credential_source(config: Config, name: str) -> SourceConfig:
+    """The configured source ``name``, when its type takes credentials."""
     source = next((s for s in config.sources if s.name == name), None)
     if source is None:
         raise Refusal(404, "unknown_source")

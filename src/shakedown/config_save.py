@@ -56,7 +56,7 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
             raise Refusal(409, "changed")
 
         checked = check_document(document)
-        errors = checked.errors + _exec_problems(current.raw, document)
+        errors = checked.errors + exec_problems(current.raw, document)
         if errors:
             raise ConfigRejected(errors)
         assert checked.config is not None
@@ -64,7 +64,7 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
         assert old is not None
         new = checked.config.model_dump(mode="json")
 
-        warnings = _path_warnings(old, new) + [_warning(w) for w in checked.warnings]
+        warnings = _path_warnings(old, new) + [warning_of(w) for w in checked.warnings]
         assert current.data is not None
         merged = merge(current.data.decode(), old, new).encode()
         if merged != current.data:
@@ -132,11 +132,11 @@ def _path_warnings(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, A
     return [{"loc": [key], "code": "path_moved"} for key in moved] + path_warnings(checks)
 
 
-def _warning(problem: ConfigProblem) -> dict[str, Any]:
+def warning_of(problem: ConfigProblem) -> dict[str, Any]:
     return {"loc": list(problem.loc), "code": problem.code}
 
 
-def _exec_problems(old_raw: Any, new_raw: Any) -> list[ConfigProblem]:
+def exec_problems(old_raw: Any, new_raw: Any) -> list[ConfigProblem]:
     """The command handoff stays in the file (§spec:dashboard-settings): a
     collection's `exec` comes back exactly as the file has it, and a new one is never
     set. Removing a whole collection takes its handoff with it."""
