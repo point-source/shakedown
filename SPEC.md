@@ -4277,7 +4277,8 @@ purge while a sync runs: refused as a run in progress.
 
 ## Run error retention §spec:run-error-retention
 
-*Status: not started*
+*Status: in progress*
+The setting, the automatic trim, `shakedown trim-history`, and `POST /api/history/trim` are built; the Settings field and the Trim now button wait on Design.
 
 Each run keeps its per-show error lines for 180 days by default, a
 setting the user can change in the dashboard; after that the run keeps
