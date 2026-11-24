@@ -9,6 +9,7 @@ replace is caught by re-reading the file just before it is replaced.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from shakedown.config import (
 from shakedown.config_file import WriteFailed, atomic_replace, merge
 from shakedown.dashboard_config import document_of
 from shakedown.edit_lock import move_install_state, read_edit, record_edit, state_db_for
+from shakedown.lock import LockHeld, writer_lock_at
 from shakedown.validate import path_checks, path_warnings
 from shakedown.write_gate import Refusal
 
@@ -70,26 +72,60 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
         if merged != current.data:
             if _bytes_now(path) != current.data:
                 raise Refusal(409, "changed")
-            # The edit state and stored credentials move only with a save that is
-            # going through.
             old_db, new_db = state_db_for(current), Path(new["state_db"])
-            moved = old["state_db"] != new["state_db"] and old_db is not None
-            if moved:
-                assert old_db is not None
-                write_state(new_db, lambda: move_install_state(old_db, new_db))
-            try:
-                atomic_replace(path, merged)
-            except WriteFailed as e:
-                raise Refusal(500, "write_failed", path=str(e.path)) from e
+            if old_db is not None and not _same_db(old_db, new_db):
+                _move(path, current.data, merged, old_db, new_db)
+            else:
+                old_db = None
+                _replace(path, merged)
             # Only once the file is saved: forget the credentials of a removed source
             # (§spec:dashboard-credentials), or of one a hand edit removed before, and
             # leave none behind in a database the config no longer names.
             names = {source["name"] for source in new["sources"]}
             _forget(new_db, lambda: credentials.forget_others(new_db, names))
-            if moved:
-                assert old_db is not None
+            if old_db is not None:
                 _forget(old_db, lambda: credentials.forget_others(old_db, set()))
         return Saved(revision_of(merged), warnings)
+
+
+def _replace(path: Path, data: bytes) -> None:
+    try:
+        atomic_replace(path, data)
+    except WriteFailed as e:
+        raise Refusal(500, "write_failed", path=str(e.path)) from e
+
+
+def _move(path: Path, before: bytes, merged: bytes, old_db: Path, new_db: Path) -> None:
+    """Save a file that points the config at another state database, and carry the
+    edit state and stored credentials there (§spec:edit-lock "Where the state
+    lives"). No run may write meanwhile: one holding the old database's lock would
+    keep writing while the next took the new one's, two writers on one archive. The
+    install state is copied only once the file is written, so a refused write leaves
+    the new database as it was; a failed copy puts the file back."""
+    try:
+        with writer_lock_at(old_db), writer_lock_at(new_db):
+            _replace(path, merged)
+            try:
+                move_install_state(old_db, new_db)
+            except (sqlite3.Error, OSError) as e:
+                try:
+                    atomic_replace(path, before)
+                except WriteFailed:
+                    log.error("could not put back %s after a failed save", path)
+                raise Refusal(500, "write_failed", path=str(new_db)) from e
+    except LockHeld:
+        raise Refusal(409, "busy") from None
+    except OSError as e:  # the lock file beside the new database cannot be made
+        raise Refusal(500, "write_failed", path=str(new_db)) from e
+
+
+def _same_db(a: Path, b: Path) -> bool:
+    """Whether two spellings name one database file (a symlink, `..`, a relative
+    path): such a save moves nothing."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return a.resolve() == b.resolve()
 
 
 def override(path: Path) -> None:

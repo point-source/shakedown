@@ -744,6 +744,72 @@ async def test_moving_the_state_database_moves_the_stored_credentials(
 
 
 @pytest.mark.asyncio
+async def test_naming_the_same_database_another_way_keeps_the_stored_credentials(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    from shakedown.credentials import Login, store, stored
+    from shakedown.edit_lock import read_edit
+
+    loaded = await _unlocked(paths)
+    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
+    alias = tmp_path / "alias"
+    alias.symlink_to(paths["state_db"].parent)
+    doc = loaded["document"]
+    doc["state_db"] = str(alias / "state.db")
+    async with _client(paths) as client:
+        assert (await _put(client, loaded["revision"], doc)).status_code == 200
+    assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")
+    assert read_edit(paths["state_db"]) == "override"
+
+
+@pytest.mark.asyncio
+async def test_moving_the_state_database_while_a_run_writes_is_refused(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    """The run keeps the old database's lock; the next one would take the new one's,
+    and two writers would share the archive."""
+    from shakedown.lock import writer_lock_at
+
+    loaded = await _unlocked(paths)
+    before = paths["config"].read_bytes()
+    doc = loaded["document"]
+    new_db = tmp_path / "state" / "state.db"
+    doc["state_db"] = str(new_db)
+    async with _client(paths) as client:
+        with writer_lock_at(paths["state_db"]):
+            response = await _put(client, loaded["revision"], doc)
+        assert (response.status_code, response.json()) == (409, {"code": "busy"})
+        assert paths["config"].read_bytes() == before
+        assert (await _put(client, loaded["revision"], doc)).status_code == 200
+
+
+@pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root writes anywhere")
+@pytest.mark.asyncio
+async def test_a_move_whose_file_cannot_be_written_copies_no_credentials(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    from shakedown.credentials import Login, store, stored
+
+    loaded = await _unlocked(paths)
+    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
+    new_db = tmp_path / "state" / "state.db"
+    store(new_db, "lma", Login("other@example.org", "pw2"))
+    doc = loaded["document"]
+    doc["state_db"] = str(new_db)
+    folder = paths["config"].parent
+    folder.chmod(0o555)
+    try:
+        async with _client(paths) as client:
+            response = await _put(client, loaded["revision"], doc)
+    finally:
+        folder.chmod(0o755)
+    assert response.status_code == 500
+    assert stored(new_db, "ia") is None
+    assert stored(new_db, "lma") == Login("other@example.org", "pw2")
+    assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")
+
+
+@pytest.mark.asyncio
 async def test_a_save_that_removes_a_source_forgets_its_credentials(
     paths: dict[str, Path],
 ) -> None:

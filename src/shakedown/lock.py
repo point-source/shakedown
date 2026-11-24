@@ -33,14 +33,26 @@ class LockHeld(Exception):
 
 def lock_path(config: Config) -> Path:
     assert config.state_db is not None  # filled in by Config validation
-    return config.state_db.with_name(config.state_db.name + ".lock")
+    return lock_path_of(config.state_db)
+
+
+def lock_path_of(state_db: Path) -> Path:
+    return state_db.with_name(state_db.name + ".lock")
 
 
 @contextlib.contextmanager
 def writer_lock(config: Config) -> Iterator[None]:
     """Hold the exclusive writer lock for the duration of the block, or raise
     LockHeld at once if another command holds it."""
-    path = lock_path(config)
+    assert config.state_db is not None  # filled in by Config validation
+    with writer_lock_at(config.state_db):
+        yield
+
+
+@contextlib.contextmanager
+def writer_lock_at(state_db: Path) -> Iterator[None]:
+    """`writer_lock` for the state database at ``state_db``."""
+    path = lock_path_of(state_db)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
