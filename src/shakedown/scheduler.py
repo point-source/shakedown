@@ -96,9 +96,11 @@ class Scheduler:
     def step(self, now: datetime) -> None:
         """One check: replan from a changed file, start the due ticks, beat. ``now`` is
         an aware datetime."""
+        started = time.monotonic()
         self._reload_if_changed(now)
         self._fire_due(now)
-        self._beat(now)
+        # The beat's own time: waiting on silent children can take a while.
+        self._beat(now + timedelta(seconds=time.monotonic() - started))
 
     def _reload_if_changed(self, now: datetime) -> None:
         try:

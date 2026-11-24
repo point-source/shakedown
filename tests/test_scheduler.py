@@ -112,8 +112,11 @@ def test_the_heartbeat_holds_the_time_release_validity_and_next_tick(
 
     config = _write(root / "cfg.yaml", root, "0 3 * * *", "30 4 * * *")
     Scheduler(config, argv_prefix=recorder[0]).step(T0)
-    assert _beat(root) == Heartbeat(
-        at=T0, release=__version__, schedule_valid=True,
+    beat = _beat(root)
+    assert beat is not None
+    assert T0 <= beat.at < T0 + timedelta(seconds=5)  # when it beat, within the step
+    assert beat == Heartbeat(
+        at=beat.at, release=__version__, schedule_valid=True,
         next_tick_at=T0.replace(hour=3, minute=0),
     )
 
@@ -288,3 +291,16 @@ def test_check_finds_the_database_while_the_file_is_invalid(root: Path) -> None:
     )
     config.write_text(config.read_text() + "unknown_key: 1\n")
     assert _check(config) == 0
+
+
+def test_the_heartbeat_is_the_time_of_the_beat_not_of_the_step(root: Path) -> None:
+    """Silent children (a hung mount) hold the step up to their bound each; the
+    heartbeat must not read older than the scheduler really is."""
+    config = _write(root / "cfg.yaml", root, "0 3 * * *")
+    silent = (sys.executable, "-c", "import time; time.sleep(3)")
+    scheduler = Scheduler(config, argv_prefix=silent, first_line_timeout=0.5)
+    at = T0 + timedelta(minutes=1)
+    scheduler.step(at)
+    beat = _beat(root)
+    assert beat is not None and beat.at >= at + timedelta(seconds=0.5)
+    scheduler.stop()
