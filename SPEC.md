@@ -2161,7 +2161,7 @@ appears in Navidrome with no handoff configured.
 ## Serve control plane §spec:serve
 
 *Status: in progress*
-The config-management increment adds the settings, setup, credentials, and purge endpoints, scheduler health, and the write gate; none is built yet.
+The write gate is built and guards `POST /sync`, `/verify`, and `/validate`; the config-management increment's settings, setup, credentials, purge, and trim endpoints and scheduler health are not built yet.
 
 `shakedown serve` exposes a small HTTP API for ad-hoc triggers and
 monitoring without `docker exec` (§req:priorities #10), serves the web
@@ -2176,9 +2176,9 @@ config-management increment ofelia did (§req:constraints, superseded
 | `GET /healthz` | Liveness |
 | `GET /status` | JSON equivalent of `shakedown status` |
 | `GET /metrics` | Prometheus metrics |
-| `POST /sync?source=&collection=` | Start an ad-hoc sync and answer at once (auth required; §spec:api-sync-runs) |
-| `POST /verify` | Start a verify run and answer at once (auth required; §spec:api-sync-runs) |
-| `POST /validate` | Run setup readiness validation; live handoff validation is auth required |
+| `POST /sync?source=&collection=` | Start an ad-hoc sync and answer at once (write gate; §spec:api-sync-runs) |
+| `POST /verify` | Start a verify run and answer at once (write gate; §spec:api-sync-runs) |
+| `POST /validate` | Run setup readiness validation (write gate; live handoff validation takes the token only) |
 | `GET /` | The read-only web dashboard (§spec:dashboard) |
 | `GET /api/activity` | Live runs and network now (§spec:run-activity, §spec:network-activity) |
 | `GET /api/network` | Per-source network history (§spec:network-activity) |
@@ -2264,7 +2264,7 @@ Observable behavior:
   invalid, each endpoint that needs it answers `503` with the config
   error naming the offending key (§spec:configuration; operator
   decision, 2026-11-10); `serve` keeps running
-  so the operator can fix the file and retry. Auth (bearer token) and
+  so the operator can fix the file and retry. The write gate and
   unknown-scope `404` behave as before (§spec:serve).
 - **The run counter keeps its meaning.** `serve` watches each sync it
   started and counts it in `shakedown_sync_runs_total` as `ok`,
@@ -4093,7 +4093,8 @@ finishes.
 
 ## Run controls in the dashboard §spec:dashboard-run-controls
 
-*Status: not started*
+*Status: in progress*
+The write gate is built; the Sync now and Validate buttons wait on Design.
 
 From the dashboard a user can start a sync of one collection and run
 setup validation, and watch the result in the live view. These, and
@@ -4526,9 +4527,8 @@ Observable behavior:
   deployment is ready to attempt a real sync," not "the whole collection
   has been mirrored."
 - The optional control plane exposes the same validation surface for
-  no-SSH deployments. Mutating live handoff tests remain protected by
-  the same bearer-token posture as ad-hoc sync and verify
-  (§spec:serve).
+  no-SSH deployments. Live handoff tests accept the bearer token only
+  (§spec:dashboard-run-controls).
 
 **Decision and constraint.** Readiness is a dedicated validation flow,
 not an expanded `sync --dry-run` and not an always-on deep startup gate.
