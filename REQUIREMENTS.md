@@ -951,7 +951,10 @@ constraints that drive architecture.
   plugin author.
 - **Bounded history.** The dashboard keeps about 30 days of run and
   network history. Older detail may be dropped; the data that drives
-  sync identity is never affected by that.
+  sync identity is never affected by that. Each run's per-show error
+  detail is kept 180 days by default, changeable in the dashboard, and
+  can be trimmed on demand; a run's result, counts, and dates are kept
+  (operator decision, 2026-11-24).
 - **The config file stays the truth.** `shakedown.yaml` remains the one
   source of truth for settings, whoever edits it. The dashboard never
   silently overwrites a file it did not write, never leaves a

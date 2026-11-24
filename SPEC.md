@@ -2193,6 +2193,7 @@ config-management increment ofelia did (§req:constraints, superseded
 | `GET /api/setup`, `POST /api/setup` | First-run setup (write gate on `POST`; §spec:first-run-setup) |
 | `PUT /api/credentials`, `DELETE /api/credentials` | Store or forget a source's credentials (write gate; §spec:dashboard-credentials) |
 | `POST /api/collections/purge` | Delete an unconfigured collection's files (write gate; §spec:collection-removal) |
+| `POST /api/history/trim` | Trim old run error detail now and compact the database (write gate; §spec:run-error-retention) |
 
 `POST /sync`, `/verify`, and `/validate` answer `404`, naming the
 configured sources or collections, when `source` or `collection` names
@@ -3527,7 +3528,8 @@ migration only; archived media — frozen (an upgrade never forces a
 re-download). This line governs every section of the config-management
 increment: §spec:dashboard-settings, §spec:edit-lock, §spec:schedules,
 §spec:dashboard-credentials, §spec:first-run-setup,
-§spec:dashboard-run-controls, and §spec:collection-removal.
+§spec:dashboard-run-controls, §spec:collection-removal, and
+§spec:run-error-retention.
 
 The dashboard reads and writes `shakedown.yaml`. Every setting the file
 holds — roots, concurrency caps, sources with their request ceiling,
@@ -3869,7 +3871,7 @@ Observable behavior:
   with the source. Scheduled syncs and purges write the run records and
   activity entries every run already writes, at the rate ofelia's ticks
   did; activity is kept 30 days and run records are kept, as before
-  (§spec:state).
+  (§spec:state), their error lines as §spec:run-error-retention sets.
 - **Manual runs are unchanged.** `shakedown sync` typed by hand or run
   in a one-off container works exactly as before, with or without the
   scheduler or `serve`.
@@ -4119,7 +4121,8 @@ Observable behavior:
   `POST /sync`, `POST /verify`, `POST /validate`, `PUT /api/config`,
   `POST /api/config/override`, `POST /api/config/check-paths`,
   `POST /api/setup`, `PUT` and `DELETE /api/credentials`,
-  `POST /api/collections/purge` — accepts a request that either:
+  `POST /api/collections/purge`, `POST /api/history/trim` — accepts a
+  request that either:
   - carries the configured bearer token (`SHAKEDOWN_API_TOKEN`), as
     scripts and `curl` do today; or
   - comes from the dashboard's own page: the browser marks it
@@ -4254,6 +4257,76 @@ them stays, and the archive is intact. Add `phish` back: the next sync
 restages it with no download. Remove it again and delete everything:
 its archive folder is gone and the list no longer shows it. Start a
 purge while a sync runs: refused as a run in progress.
+
+## Run error retention §spec:run-error-retention
+
+*Status: not started*
+
+Each run keeps its per-show error lines for 180 days by default, a
+setting the user can change in the dashboard; after that the run keeps
+its result, counts, and dates, and drops the lines. A user can also trim
+now from the dashboard, which takes the space back on disk
+(§req:quality-attributes: bounded history; operator decision,
+2026-11-24).
+
+Observable behavior:
+
+- **The setting.** `keep_run_errors_days` in `shakedown.yaml`, a whole
+  number of days, 180 when absent. It is validated like any key
+  (§spec:configuration): below 30 is refused, because the dashboard's
+  run history shows the last 30 days with their errors
+  (§spec:run-history). It is edited in Settings like every other global
+  setting (§spec:dashboard-settings).
+- **Automatic trim.** When a run that holds the writer lock ends, it
+  clears the error lines of every run that started more than
+  `keep_run_errors_days` ago, together with the error lines of their
+  operation outcomes, as it already trims 30-day history (§spec:state).
+  A trimmed run keeps its kind, collection, start and end, result, item
+  counts, and bytes, and records that its detail was trimmed; `status`
+  and the dashboard show those as before. Last good sync, staleness, and
+  sync identity never read error lines, so trimming never changes them.
+- **Trim now.** `POST /api/history/trim` starts a fresh run, kind
+  `trim`, under the writer lock. It applies the same rule at once, then
+  compacts the state database so the freed space returns to the disk.
+  Answers: `202 {started: "trim"}`; `409` with "a run is in progress"
+  when another run holds the lock. The run shows in the live view and
+  run history (§spec:run-activity, §spec:run-history) with the runs it
+  trimmed and the bytes the database shrank by. If the disk lacks room
+  to compact (it needs about the database's size free), the trim still
+  happens, the run reports the compaction failure, and the database
+  keeps its size until the next attempt. The same run is
+  `shakedown trim-history` on the CLI.
+
+**Decision and constraint.** Run records are kept because last good
+sync and staleness read them, but their error lines carry no such duty,
+and a source that keeps failing writes one line per failed show every
+run — the one part of the database that can grow by hundreds of
+megabytes a year. The operator chose 180 days, changeable, with an
+on-demand trim (2026-11-24). The automatic trim bounds growth with no
+action; the on-demand trim is the way to take space back, which deleting
+rows alone does not do. It runs under the writer lock because compacting
+needs the database to itself.
+
+**Alternatives rejected.** *Drop error lines after 30 days, fixed* —
+simpler, but the operator wants a longer default and control. *Cap
+lines per run* — bounds one bad run, but a run that fails every night
+still adds up forever. *Trim whole run records* — loses last good sync
+and staleness for quiet collections. *Compact on every automatic trim*
+— rewrites the whole database after every run, for space a later run
+reuses anyway.
+
+**Tradeoffs.** One more setting. A trim now holds the writer lock while
+it compacts, delaying a scheduled tick into a catch-up
+(§spec:rescheduled-syncs). Error detail older than the setting is gone
+for good.
+
+**User-level test path.** Set `keep_run_errors_days` to 30 on a
+database with a failed run from 40 days ago: after the next sync ends,
+that run still shows its result and counts in `status` and run history,
+without its error lines; a run from 20 days ago keeps them. Set it to 10:
+Save is refused. Tap Trim now: a `trim` run appears in the live view and
+reports the space freed, and the database file is smaller. Tap it while a
+sync runs: refused as a run in progress.
 
 ## Deployment §spec:deployment
 
