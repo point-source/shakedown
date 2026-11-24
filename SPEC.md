@@ -1763,7 +1763,8 @@ exits (§req:constraints). The command surface:
   `reconcile`, `item refetch`, `verify --reconform`, `trim-history`, and
   `purge`,
   whether run from the CLI, the scheduler, or `serve` — hold one exclusive writer lock
-  (a kernel `flock` on `<state_db>.lock`). A second writer exits non-zero
+  (a kernel `flock` on `<state_db>.lock`, beside the database file
+  itself, so every spelling of one database shares it). A second writer exits non-zero
   at once, naming the lock, instead of racing the first over shared temp
   folders. The kernel releases the lock when the holder exits, even on a
   crash, so a stale lock file never blocks the next run. A
@@ -3845,7 +3846,8 @@ Observable behavior:
   someone starts it. A top-level `timezone` (an IANA name such as
   `Europe/Berlin`) says which clock schedules follow; without it they
   follow the container's local time (`TZ`, UTC by default). An
-  expression that does not parse, or a timezone that does not exist,
+  expression that does not parse or never fires, or a timezone that
+  does not exist,
   fails validation like any other bad key (§spec:configuration), so a
   save refuses it (§spec:dashboard-settings).
 - **Presets and cron.** The dashboard offers Daily at a time, Weekly on
@@ -4369,7 +4371,8 @@ Observable behavior:
     fails with that reason. A source or collection name that is not one
     folder name is refused the same way, and so is a source or collection
     folder that is a link, which would aim the deletes outside the
-    collection.
+    collection. A placed file reached through a linked folder deeper in
+    the library is kept and reported, and stays recorded.
 - **Before confirming.** The remove and delete confirmations state what
   each choice deletes, that deletion cannot be undone, and the shows
   and space it covers, from the `unconfigured` figures or the
