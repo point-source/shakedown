@@ -17,9 +17,9 @@ from typing import Any
 from shakedown.config import (
     ConfigFile,
     ConfigProblem,
-    _entries,
     check_document,
     default_state_db,
+    entries,
     read_config_file,
     revision_of,
 )
@@ -150,8 +150,8 @@ def _exec_values(raw: Any) -> list[tuple[tuple[Any, Any], Any, tuple[str | int, 
     """Per collection: its (source, collection) names, its `exec` command or None,
     and the loc of its `on_complete`."""
     values = []
-    for i, source in _entries(raw, "sources"):
-        for j, collection in _entries(source, "collections"):
+    for i, source in entries(raw, "sources"):
+        for j, collection in entries(source, "collections"):
             handoff = collection.get("on_complete")
             command = handoff.get("exec") if isinstance(handoff, dict) else None
             key = (source.get("name"), collection.get("name"))

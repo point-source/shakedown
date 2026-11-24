@@ -325,7 +325,7 @@ def check_document(raw: Any) -> Checked:
     return Checked(None if errors else config, errors, warnings)
 
 
-def _entries(node: Any, key: str) -> list[tuple[int, dict[str, Any]]]:
+def entries(node: Any, key: str) -> list[tuple[int, dict[str, Any]]]:
     """The mappings in the list ``node[key]``, with their indexes; anything not shaped
     that way is the model's to report."""
     items = node.get(key) if isinstance(node, dict) else None
@@ -380,9 +380,9 @@ def _yaml_problem(e: yaml.YAMLError) -> str:
 
 def _check_names(raw: dict[str, Any], errors: list[ConfigProblem]) -> None:
     """Collection names are unique within their source: the archive is keyed by them."""
-    for i, source in _entries(raw, "sources"):
+    for i, source in entries(raw, "sources"):
         seen: set[str] = set()
-        for j, collection in _entries(source, "collections"):
+        for j, collection in entries(source, "collections"):
             name = collection.get("name")
             if not isinstance(name, str):
                 continue
@@ -421,7 +421,7 @@ def _check_layouts(
     from shakedown.plugins import registry
     from shakedown.utils.templates import FILTER_NAMES, fields_in, unknown_filters
 
-    for i, source in _entries(raw, "sources"):
+    for i, source in entries(raw, "sources"):
         source_type = source.get("type")
         if not isinstance(source_type, str):
             continue
@@ -438,7 +438,7 @@ def _check_layouts(
             continue
         allowed = set(plugin_cls.template_fields)
         unique = set(plugin_cls.per_item_unique_fields)
-        for j, collection in _entries(source, "collections"):
+        for j, collection in entries(source, "collections"):
             layout = collection.get("library_layout", "passthrough")
             if not isinstance(layout, str) or layout == "passthrough":
                 continue
