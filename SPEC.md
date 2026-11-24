@@ -4415,168 +4415,131 @@ sync runs: refused as a run in progress.
 *Status: complete*
 
 The deployment is a single Docker Compose stack, paste-able into QNAP
-Container Station, operable entirely through web UIs — no SSH at any
-step (§req:success-criteria #6). See
-[`docker-compose.example.yaml`](docker-compose.example.yaml) for the
-canonical example.
+Container Station and operable entirely through web UIs — no SSH at any
+step (§req:success-criteria #6). The canonical example is
+[`docker-compose.example.yaml`](docker-compose.example.yaml).
 
-**Two long-lived Shakedown containers, one image.**
+**Two long-lived Shakedown containers, one image, one user.**
+`shakedown-serve` serves the dashboard (§spec:dashboard) and the control
+plane (§spec:serve), starts Sync now and API-triggered runs, and watches
+the scheduler. `shakedown-scheduler` runs `shakedown schedule` and
+starts each collection's scheduled syncs (§spec:schedules); it publishes
+no port and its health check is `shakedown schedule --check`. Every run
+is a fresh one-shot `shakedown` process started by one of the two
+(§req:constraints: runs stay one-shot and stateless). A tick that finds
+another run writing is rescheduled (§spec:rescheduled-syncs), so "the
+schedule is configured" and "the sync ran" are the same event while the
+scheduler is up (§req:success-criteria #1); a missed tick shows in the
+dashboard (§spec:schedules).
 
-- **`shakedown-serve`** serves the web dashboard (§spec:dashboard) and
-  the control plane (§spec:serve), starts Sync now and API-triggered
-  runs, and watches the scheduler.
-- **`shakedown-scheduler`** runs `shakedown schedule` and starts each
-  collection's scheduled syncs (§spec:schedules). It publishes no port,
-  mounts the config folder read-only, and has a health check
-  (`shakedown schedule --check`).
+The compose file holds only what must exist before `serve` can show a
+page (§req:constraints: what stays outside the dashboard):
 
-Every run is a fresh one-shot `shakedown` process started by one of the
-two, which reads the config at start and exits (§req:constraints: runs
-stay one-shot and stateless). When a tick fires, the sync runs — or, if
-another run holds the writer lock, it is rescheduled and runs when that
-run finishes (§spec:rescheduled-syncs); "the schedule is configured" and
-"the sync ran" are the same event while the scheduler is up
-(§req:success-criteria #1), and a missed tick shows in the dashboard
-(§spec:schedules).
-
-What stays in the compose file — only what must exist before `serve`
-can show a page (§req:constraints: what stays outside the dashboard):
-
-- the image (`SHAKEDOWN_IMAGE`) and the container user
-  (`SHAKEDOWN_USER`, the owner of the data share), the same for both
-  containers;
-- one volume: the data share mounted once as `/data`. Archive, library,
-  and the config folder (`/data/shakedown-config/`) all live under it,
-  so archive and library share a filesystem *and* a mount — Linux
-  refuses hardlinks across separate mounts (§spec:system-shape) — and
-  `serve` can write the config file (§spec:dashboard-settings). The
-  scheduler adds a read-only mount of the config folder over it, so no
-  scheduled run can rewrite the config;
-- the port, published on the host's loopback only, so the operator's
+- the image (`SHAKEDOWN_IMAGE`) and container user (`SHAKEDOWN_USER`,
+  the owner of the data share), the same for both containers;
+- one volume, the data share mounted once as `/data`. Archive, library,
+  and the config folder (`/data/shakedown-config/`, the path every
+  command reads by default) live under it, so archive and library share
+  a filesystem *and* a mount — Linux refuses hardlinks across separate
+  mounts (§spec:system-shape) — and `serve` can write the config
+  (§spec:dashboard-settings). The scheduler mounts the config folder
+  again, read-only, over it, so no scheduled run can rewrite the config;
+- serve's port, published on host loopback only, so the operator's
   reverse proxy is the one way in (operator decision, 2026-11-12);
-- optionally `SHAKEDOWN_API_TOKEN` for scripts
-  (§spec:dashboard-run-controls), and archive.org credentials as
-  environment variables (§spec:dashboard-credentials) and `TZ`, given to
-  both containers.
+- optionally `SHAKEDOWN_API_TOKEN` (§spec:dashboard-run-controls),
+  archive.org credentials as environment variables
+  (§spec:dashboard-credentials), and `TZ`, given to both containers.
 
-Everything else — paths, collections, schedules, the timezone,
-credentials, notifications — is set in the dashboard
-(§spec:first-run-setup, §spec:dashboard-settings). The stack carries no
-third-party scheduler, and no Shakedown container mounts the Docker
-socket. Library tool and
-streaming server (Beets, Navidrome, …) join the same stack, reading the
-library tree — the user's choice; Shakedown places no requirements on
-them.
+Everything else is set in the dashboard (§spec:first-run-setup,
+§spec:dashboard-settings). No third-party scheduler runs, and no
+Shakedown container mounts the Docker socket. Library tools and
+streaming servers (Navidrome, Beets, …) join the stack and read the
+library tree; Shakedown places no requirements on them.
 
-**First bring-up does no unscoped work.** A freshly deployed stack
-syncs nothing on `up`. A new stack opens setup in the dashboard, whose
-last step starts one sync of the collection it adds — an explicit
-action (§spec:first-run-setup). After that, each collection syncs on its
-own schedule; there is deliberately no implicit "sync everything at
-startup" (§req:quality-attributes).
+**First bring-up does no unscoped work.** A new stack syncs nothing on
+`up`; setup's last step starts one sync of the collection it adds
+(§spec:first-run-setup), and after that each collection syncs on its own
+schedule. There is deliberately no "sync everything at startup"
+(§req:quality-attributes).
 
-**Manual triggers (no-SSH-first, SSH supported).** To run a sync
-without waiting for the next tick:
+**Manual triggers, no SSH needed.** Sync now in the dashboard or
+`POST /sync` with the bearer token (§spec:dashboard-run-controls); as a
+fallback, a one-off container from the same image with
+`sync --collection <name>`, via Container Station's UI or `docker run`.
+SSH stays supported as guidance, never required.
 
-- **Primary, no SSH:** Sync now in the dashboard, or `POST /sync` on
-  the control plane with the bearer token (§spec:dashboard-run-controls).
-- **Fallback:** start a one-off container from the same image with
-  `sync --collection <name>` — via Container Station's *Create
-  Container* UI (no SSH) or `docker run` over SSH.
+**Updates (operator decision, 2026-11-24).** Watchtower pulls a newer
+`SHAKEDOWN_IMAGE` and recreates both Shakedown containers from it, so
+`latest` keeps Shakedown updated as ofelia's per-tick pull did:
 
-SSH remains fully supported and is documented as guidance, not
-designed out; the web-UI paths exist so it is never *required*
-(§req:success-criteria #6).
-
-**Updates (operator decision, 2026-11-24).** The compose example runs
-Watchtower, which pulls a newer `SHAKEDOWN_IMAGE` and recreates
-`shakedown-serve` and `shakedown-scheduler` from it, so a tag such as `latest` keeps updating
-Shakedown with no action, as ofelia's per-tick pull did:
-
-- **Shakedown only.** Watchtower updates only containers labelled for
-  it, and the example labels only the two Shakedown containers; Navidrome and other
-  services are never touched.
-- **At a fixed time.** It checks once a day at a set time (provisional
-  default: 12:00 in the container's timezone), so an update never lands
-  at a random moment. Recreating a container stops the runs it started and
-  waits for them (§spec:graceful-stop): Watchtower gives each the same
-  120 s as `stop_grace_period`. An interrupted sync resumes at its next
-  run.
-- **Through a socket proxy.** Watchtower reaches Docker only through a
-  socket proxy that allows only the calls it needs to pull images and
-  recreate a labelled container, and refuses the rest of the Docker API
-  (exec, volumes, secrets, swarm, system). The proxy alone mounts the socket, read-only,
-  and listens only on an internal network with no published port. The
-  example uses linuxserver's socket proxy, which with exec off refuses
-  creating an exec as well as starting one, and allows only its
-  container, image, and write sections — what a real recreate through it
-  needed, including for a container on two networks. Watchtower is the
-  maintained fork (`nickfedor/watchtower`); the original was archived.
-- **Optional.** A user who pins a release tag, or updates by hand,
-  deletes both services from the example; nothing else depends on them.
+- **Shakedown only:** it updates only labelled containers, and only the
+  two Shakedown containers are labelled.
+- **At a fixed time:** once a day (provisional default: 12:00 in the
+  container's timezone), so an update never lands at a random moment.
+  A recreate stops the runs a container started and waits for them
+  (§spec:graceful-stop), with the same 120 s as `stop_grace_period`; an
+  interrupted sync resumes at its next run.
+- **Through a socket proxy:** Watchtower reaches Docker only through a
+  proxy that allows its container, image, and write calls — what a
+  recreate and a pull need — and refuses the rest (exec, volumes,
+  secrets, swarm, system). The proxy alone mounts the socket, read-only,
+  on an internal network with no published port. linuxserver's proxy is
+  used because, with exec off, it refuses creating an exec as well as
+  starting one. Watchtower is the maintained fork; the original is
+  archived.
+- **Optional:** a user who pins a release tag or updates by hand deletes
+  both services; nothing else depends on them.
 
 **Moving an existing install over** (§req:constraints: deployment
-status). Nothing downloads again, because the archive, library, and
-state database stay where they are:
+status). The archive, library, and state database stay where they are,
+so nothing downloads again. Replace the compose file (drop ofelia; add
+the scheduler, Watchtower, and the proxy; give `serve` the single
+`/data` mount). The existing `shakedown.yaml` already sits in
+`/share/data/shakedown-config/`, which is `/data/shakedown-config/`
+inside the containers; Shakedown did not write it, so dashboard edits
+start locked (§spec:edit-lock). Schedules are re-entered by hand from
+the old ofelia labels, dropping their leading seconds field; until then
+each collection is manual only (operator decision, 2026-11-24: no
+import). The README's Upgrading notes carry the steps.
 
-1. Replace the compose file with the new example: drop the ofelia
-   service; add `shakedown-scheduler`, Watchtower, and the socket proxy;
-   give `serve` the single `/data` mount and no `/config` mount.
-2. The existing `shakedown.yaml` already sits at
-   `/share/data/shakedown-config/`, which is
-   `/data/shakedown-config/` inside the container. Shakedown did not
-   write it, so it opens locked (§spec:edit-lock); turn on the override
-   to edit it from the dashboard.
-3. Set each collection's schedule in the dashboard, copying the times
-   from the old ofelia labels (their first field is seconds; drop it).
-   Until then each collection shows as manual only and does not sync on
-   its own (operator decision, 2026-11-24: re-entered by hand, no
-   import command).
-
-The release notes (README, Upgrading) carry these steps.
-
-**Why a Shakedown scheduler, rather than ofelia.** Until the
-config-management increment, ofelia — itself a container — launched a
-fresh container per tick from Docker labels, keeping all timing in one
+**Why a Shakedown scheduler, rather than ofelia.** ofelia launched a
+fresh container per tick from Docker labels, keeping timing in the
 compose file with no scheduler code in Shakedown. Adding a collection
-then meant two edits in two places and a stack redeploy, and a schedule
-could not be shown or set from the dashboard; the operator moved timing
-into Shakedown (§req:constraints, operator decision, 2026-11-24).
-Launching a fresh one-shot process per tick keeps the property ofelia
-gave: no run state lives in the scheduler, and a tick can never silently no-op
-because a prior run exited. Nothing the dashboard writes ever reaches a
-container that holds the Docker socket: the only socket user is
-Watchtower, behind the proxy, and its configuration is fixed in the
-compose file.
+then meant two edits and a stack redeploy, and a schedule could not be
+shown or set from the dashboard, so the operator moved timing into
+Shakedown (§req:constraints, operator decision, 2026-11-24). Launching
+a fresh one-shot process per tick keeps what ofelia gave: no run state
+lives in the scheduler, and a tick never silently no-ops because a prior
+run exited. Nothing the dashboard writes reaches a container that holds
+the Docker socket: the only socket user is Watchtower, behind the proxy,
+configured only in the compose file.
 
 **Alternatives rejected.** *Keep ofelia and let the dashboard rewrite
 its labels* — still needs the Docker socket and a redeploy per change.
 *Generate an ofelia job file from the dashboard's schedules* (the
-netresearch fork reloads its INI file) — keeps per-tick image pulls and
-syncs that outlive a `serve` restart, but switches to a fork, keeps two
+netresearch fork reloads its INI file) — switches to a fork, keeps two
 scheduling layers in step, and lets an unauthenticated page write job
 definitions for the container holding the Docker socket, where an
 injected volume or command is root on the host (operator decision,
 2026-11-24). *No automatic updates* — simplest, but the operator wants
-`latest` to keep updating Shakedown.
-*Host cron* — needs SSH (§req:success-criteria #6). *Keep the config
-mounted read-only and store dashboard edits elsewhere* — breaks the file
-as the source of truth (§req:constraints).
+`latest` to keep updating Shakedown. *Host cron* — needs SSH
+(§req:success-criteria #6). *Keep the config mounted read-only and store
+dashboard edits elsewhere* — breaks the file as the source of truth
+(§req:constraints).
 
-**Tradeoffs.** The scheduler is now required for scheduled syncs, and a
-tick missed while it is stopped is not caught up, only shown
-(§req:constraints, §spec:schedules). An update recreates both
-containers, which stops a running sync until its next run. The
-socket proxy shrinks what Watchtower can ask Docker for, but creating
-containers is still host-root-equivalent in principle: the proxy narrows
-the attack surface, not the privilege, so operators still place the
-stack accordingly. Three more containers run in the stack (the
-scheduler, Watchtower, the proxy) where ofelia was one. Runs `serve`
-starts can write the config folder, which the read-only mount used to
-prevent; no run writes it, and the command handoff that could is set
-only in the file (§spec:dashboard-settings). Scheduled runs still cannot.
-Scheduled run output goes to the scheduler container's log, beside the
-run records, instead of ofelia's.
+**Tradeoffs.** The scheduler is required for scheduled syncs, and a tick
+missed while it is stopped is shown, not caught up (§spec:schedules). It
+also shows unhealthy until a config exists, since its heartbeat lives in
+the state database the config names. An update recreates both
+containers and stops a running sync until its next run. The proxy
+narrows what Watchtower can ask Docker for, not the privilege: creating
+containers is still host-root-equivalent, so operators place the stack
+accordingly. The stack runs three containers (scheduler, Watchtower,
+proxy) where ofelia was one. Runs `serve` starts can write the config
+folder, which the old read-only mount prevented; no run writes it, and
+the command handoff that could is set only in the file
+(§spec:dashboard-settings). Scheduled runs still cannot. Scheduled run
+output goes to the scheduler container's log.
 
 ## Setup readiness validation §spec:setup-readiness-validation
 
