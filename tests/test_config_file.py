@@ -216,6 +216,16 @@ def test_create_writes_a_new_file_recorded_editable(tmp_path: Path) -> None:
     assert read_edit(tmp_path / "archive" / ".shakedown" / "state.db") == "editable"
 
 
+def test_create_heads_the_file_with_where_to_edit_it(tmp_path: Path) -> None:
+    """§spec:first-run-setup "The written file": a header saying it is editable by
+    hand or in the dashboard, pointing at the example file."""
+    path = tmp_path / "shakedown.yaml"
+    create_config(path, _new_document(tmp_path))
+    header = path.read_text().split("archive_root:")[0]
+    assert header.startswith("# ") and "dashboard" in header
+    assert "shakedown.example.yaml" in header
+
+
 def test_create_never_replaces_a_file(tmp_path: Path) -> None:
     path = tmp_path / "shakedown.yaml"
     path.write_text("hand written\n")

@@ -38,6 +38,13 @@ from shakedown.edit_lock import record_edit
 # (2, 4, 2) is the example file's: mappings by 2, list items by 4 with the dash at 2.
 _INDENTS = ((2, 4, 2), (2, 2, 0), (4, 4, 2), (4, 6, 4), (4, 4, 0))
 _NEW_FILE_INDENT = (2, 4, 2)
+# Heads a file setup writes (§spec:first-run-setup "The written file").
+NEW_FILE_HEADER = (
+    "# Shakedown configuration, written by setup in the dashboard.\n"
+    "# Edit it here by hand or in the dashboard. Every option is described in\n"
+    "# shakedown.example.yaml in the Shakedown repository.\n"
+    "\n"
+)
 
 
 class WriteFailed(Exception):
@@ -240,14 +247,14 @@ def _sync_folder(folder: Path) -> None:
 
 def create_config(path: Path, document: dict[str, Any]) -> str:
     """Write a brand-new config file from ``document`` and record it `editable`
-    (§spec:edit-lock: a file Shakedown's setup wrote is editable from the start).
-    Never replaces a file: raises ConfigExists. Raises ConfigRejected for a document
+    (§spec:edit-lock: a file Shakedown's setup wrote is editable from the start),
+    under the header saying where to edit it. Never replaces a file: raises ConfigExists. Raises ConfigRejected for a document
     the validation refuses, WriteFailed when the file cannot be written, and
     sqlite3.Error when the edit state cannot be recorded. Returns the revision."""
     checked = check_document(document)
     if checked.config is None:
         raise ConfigRejected(checked.errors)
-    data = _dump(_yaml(_NEW_FILE_INDENT), _fresh(document, None)).encode()
+    data = (NEW_FILE_HEADER + _dump(_yaml(_NEW_FILE_INDENT), _fresh(document, None))).encode()
     tmp: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
