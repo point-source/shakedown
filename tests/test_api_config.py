@@ -139,6 +139,32 @@ async def test_credentials_need_every_named_variable(
 
 
 @pytest.mark.asyncio
+async def test_stored_credentials_show_as_dashboard_and_environment_wins(
+    paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shakedown.credentials import Login, store
+
+    monkeypatch.delenv("TEST_IA_EMAIL", raising=False)
+    monkeypatch.delenv("TEST_IA_PASSWORD", raising=False)
+    _write(paths)
+    store(paths["state_db"], "ia", Login("stored-email@example.org", "stored-pw"))
+    store(paths["state_db"], "lma", Login("stored-email@example.org", "stored-pw"))
+    async with _client(paths) as client:
+        response = await client.get("/api/config")
+    assert response.json()["credentials"] == [
+        {"source": "ia", "credentials": "dashboard"},
+        {"source": "lma", "credentials": "none"},  # etree takes no credentials
+    ]
+    assert "stored-email" not in response.text and "stored-pw" not in response.text
+
+    monkeypatch.setenv("TEST_IA_EMAIL", "a@b.c")
+    monkeypatch.setenv("TEST_IA_PASSWORD", "pw")
+    assert (await _get(paths))["credentials"][0] == {
+        "source": "ia", "credentials": "environment"
+    }
+
+
+@pytest.mark.asyncio
 async def test_a_missing_file(paths: dict[str, Path]) -> None:
     answer = await _get(paths)
     assert answer["state"] == "missing"

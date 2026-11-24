@@ -11,13 +11,23 @@ from `repr` and `str`, so a log line or error that formats one shows nothing.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from shakedown import db
+
+if TYPE_CHECKING:
+    from shakedown.config import SourceConfig
+
+# Where a source's login comes from (§spec:dashboard-credentials "Status, never
+# values"), and the source's verdict on a login ("Write-only").
+Status = Literal["environment", "dashboard", "none"]
+LoginCheck = Literal["accepted", "rejected", "unchecked"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +39,37 @@ class Login:
         return "Login(<hidden>)"
 
     __str__ = __repr__
+
+
+def resolve(source: SourceConfig, state_db: Path | None) -> tuple[Status, Login | None]:
+    """The login a run of ``source`` uses, and where it comes from
+    (§spec:dashboard-credentials "Which wins"): the environment variables when both
+    are set — the names its `auth` gives, each falling back to the type's standard
+    name — otherwise its stored credentials, otherwise none. Values are trimmed: a
+    line ending left by an env file would break the auth header. A type that takes
+    no credentials has none."""
+    from shakedown.plugins import registry
+
+    plugin = registry.plugin_class(source.type)
+    if not plugin.takes_credentials:
+        return "none", None
+    email_name, password_name = plugin.credential_env or (None, None)
+    if source.auth is not None:
+        email_name = source.auth.email_env or email_name
+        password_name = source.auth.password_env or password_name
+    email = os.environ.get(email_name, "").strip() if email_name else ""
+    password = os.environ.get(password_name, "").strip() if password_name else ""
+    if email and password:
+        return "environment", Login(email, password)
+    login = stored(state_db, source.name)
+    if login is not None:
+        return "dashboard", login
+    return "none", None
+
+
+def login_for(source: SourceConfig, state_db: Path | None) -> Login | None:
+    """The login a run of ``source`` uses, or None (`resolve` without the status)."""
+    return resolve(source, state_db)[1]
 
 
 def stored(state_db: Path | None, source: str) -> Login | None:

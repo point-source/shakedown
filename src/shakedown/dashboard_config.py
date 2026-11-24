@@ -7,7 +7,6 @@ created.
 """
 from __future__ import annotations
 
-import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +21,7 @@ from shakedown.config import (
     raw_state_db,
     read_config_file,
 )
+from shakedown.credentials import resolve
 from shakedown.dashboard import iso
 from shakedown.edit_lock import read_edit, state_db_for
 from shakedown.plugins import registry
@@ -97,17 +97,11 @@ def _plain(value: Any) -> Any:
 
 def credentials_of(config: Config) -> list[dict[str, str]]:
     """Per source, where its login comes from (§spec:dashboard-credentials):
-    `environment` when the variables its `auth` names are all set, else `none`.
-    Never a value."""
-    answer = []
-    for source in config.sources:
-        auth = source.auth
-        names = [n for n in (auth.email_env, auth.password_env) if n] if auth else []
-        in_env = bool(names) and all(os.environ.get(n, "").strip() for n in names)
-        answer.append(
-            {"source": source.name, "credentials": "environment" if in_env else "none"}
-        )
-    return answer
+    `environment`, `dashboard`, or `none`. Never a value. Reads only."""
+    return [
+        {"source": source.name, "credentials": resolve(source, config.state_db)[0]}
+        for source in config.sources
+    ]
 
 
 def source_types() -> list[dict[str, Any]]:
