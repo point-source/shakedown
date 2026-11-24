@@ -292,11 +292,15 @@ def serve(ctx: click.Context, host: str, port: int) -> None:
     """Start the optional HTTP control plane (PRD §10)."""
     config_path: Path = ctx.obj["config_path"]
     # serve reads the config at each request, so a broken file is an answer from
-    # each endpoint, not a reason to refuse to start (§spec:api-sync-runs).
-    try:
-        config_module.load(config_path)
-    except config_module.ConfigError as e:
-        log.warning("config is not valid yet; endpoints answer 503 until it is: %s", e)
+    # each endpoint, not a reason to refuse to start (§spec:api-sync-runs). With no
+    # file at all, setup in the dashboard writes it (§spec:first-run-setup).
+    if not config_path.exists():
+        log.warning("no config file at %s yet; finish setup in the dashboard", config_path)
+    else:
+        try:
+            config_module.load(config_path)
+        except config_module.ConfigError as e:
+            log.warning("config is not valid yet; endpoints answer 503 until it is: %s", e)
     try:
         from shakedown.server import serve as run_server
     except ImportError as e:
