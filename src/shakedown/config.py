@@ -91,6 +91,9 @@ class Config(BaseModel):
 
     max_concurrent_downloads: int = Field(default=4, ge=1)
     max_concurrent_collections: int = Field(default=2, ge=1)
+    # Days a run keeps its per-show error lines (§spec:run-error-retention). At least
+    # 30: run history shows the last 30 days with their errors (§spec:run-history).
+    keep_run_errors_days: int = Field(default=180, ge=30)
 
     sources: list[SourceConfig]
     notifications: NotificationsConfig | None = None

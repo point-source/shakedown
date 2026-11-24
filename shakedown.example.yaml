@@ -11,6 +11,13 @@ state_db: /data/archive/.shakedown/state.db
 max_concurrent_downloads: 4
 max_concurrent_collections: 2
 
+# Days each run keeps its per-show error lines (SPEC.md §spec:run-error-retention).
+# After that the run keeps its result, counts, and dates, and drops the lines.
+# Whole days; 180 when unset; at least 30, because run history shows the last 30
+# days with their errors. `shakedown trim-history` applies it at once and takes
+# the space back on disk.
+keep_run_errors_days: 180
+
 sources:
   - name: internetarchive
     type: ia

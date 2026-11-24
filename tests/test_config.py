@@ -417,3 +417,43 @@ sources:
     message = str(exc_info.value)
     assert "library_layout references no source field" in message
     assert SECRET not in message
+
+
+# Run error retention (§spec:run-error-retention): how long runs keep their error lines.
+
+def _with_keep(tmp_path: Path, keep: str | None) -> Path:
+    line = f"keep_run_errors_days: {keep}\n" if keep is not None else ""
+    return _write(tmp_path, f"""
+archive_root: /a
+library_root: /l
+{line}sources:
+  - name: ia
+    type: ia
+    collections:
+      - name: gd
+        query: 'q'
+""")
+
+
+def test_keep_run_errors_days_defaults_to_180(tmp_path: Path) -> None:
+    assert load(_with_keep(tmp_path, None)).keep_run_errors_days == 180
+
+
+def test_keep_run_errors_days_accepts_30(tmp_path: Path) -> None:
+    assert load(_with_keep(tmp_path, "30")).keep_run_errors_days == 30
+
+
+def test_keep_run_errors_days_below_30_is_refused_naming_the_key(tmp_path: Path) -> None:
+    # Run history shows 30 days with their errors (§spec:run-history).
+    with pytest.raises(ConfigError, match="keep_run_errors_days"):
+        load(_with_keep(tmp_path, "10"))
+
+
+def test_keep_run_errors_days_must_be_whole(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="keep_run_errors_days"):
+        load(_with_keep(tmp_path, "30.5"))
+
+
+def test_example_config_sets_keep_run_errors_days() -> None:
+    example = Path(__file__).resolve().parents[1] / "shakedown.example.yaml"
+    assert "keep_run_errors_days:" in example.read_text()

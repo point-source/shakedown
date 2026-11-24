@@ -1862,8 +1862,9 @@ Structure: top-level roots (`archive_root`, `library_root`,
 `type`, optional auth) each containing `collections` (name, `query`,
 `library_layout`, `prune_disappeared`, `incremental_discovery`,
 `preserve_source_metadata`, `fill_tags`, `on_complete`, `schedule`);
-global `notifications`; and an optional `timezone` for schedules
-(§spec:schedules). The ownership, handoff, and discovery increment adds
+global `notifications`; an optional `timezone` for schedules
+(§spec:schedules); and `keep_run_errors_days`, how long runs keep their
+error lines (§spec:run-error-retention). The ownership, handoff, and discovery increment adds
 the per-collection `fill_tags` opt-in (§spec:tag-filling) and removes
 `format_filters`, `exclude_filters`, and `fallback_format_filters`:
 which files to mirror follows the product rule (§spec:quality-selection).
