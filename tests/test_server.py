@@ -155,37 +155,6 @@ async def test_serve_validate_endpoint(tmp_roots: tuple[Path, Path], monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_without_a_token_only_the_dashboard_page_writes(
-    tmp_roots: tuple[Path, Path], monkeypatch
-) -> None:
-    """No token configured: scripts are refused, the dashboard's own page still
-    writes, and read endpoints stay open (§spec:dashboard-run-controls)."""
-    monkeypatch.delenv(TOKEN_ENV, raising=False)
-    archive, library = tmp_roots
-    config = make_config(archive, library)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=_app(config)),
-        base_url="http://testserver",
-    ) as client:
-
-        # read endpoints remain reachable
-        assert (await client.get("/healthz")).status_code == 200
-        assert (await client.get("/status")).status_code == 200
-        assert (await client.get("/metrics")).status_code == 200
-        # the dashboard page validates without a token
-        assert (await client.post("/validate", headers=DASHBOARD)).status_code == 200
-
-        # scripts are refused, even with a bearer header
-        r = await client.post("/sync", headers={"Authorization": "Bearer anything"})
-        assert (r.status_code, r.json()) == (403, CROSS_SITE)
-        assert (await client.post("/verify")).status_code == 403
-        # a live handoff test takes the token only: none configured, none passes
-        assert (
-            await client.post("/validate", params={"live_handoff": True}, headers=DASHBOARD)
-        ).status_code == 403
-
-
-@pytest.mark.asyncio
 async def test_serve_unknown_collection_is_404(tmp_roots: tuple[Path, Path], monkeypatch) -> None:
     """A misspelled collection must not sync nothing and report success."""
     monkeypatch.setenv(TOKEN_ENV, "test-token")

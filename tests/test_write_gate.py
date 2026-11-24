@@ -12,14 +12,9 @@ pytest.importorskip("fastapi")
 
 from shakedown.write_gate import TOKEN_ENV
 from tests.conftest import make_config
-from tests.test_server import _app, _child_app, _finish
+from tests.test_server import AUTH, CROSS_SITE, DASHBOARD, _app, _child_app, _finish
 
-TOKEN = "test-token"
-AUTH = {"Authorization": f"Bearer {TOKEN}"}
-# What the dashboard page's fetch carries: the browser sets Sec-Fetch-Site, and the
-# page sends JSON, which no cross-site form can.
-DASHBOARD = {"Sec-Fetch-Site": "same-origin", "Content-Type": "application/json"}
-CROSS_SITE = {"code": "cross_site"}
+TOKEN = "test-token"  # the token tests.test_server.AUTH carries
 MUTATING = ("/sync", "/verify", "/validate")
 
 
@@ -68,19 +63,19 @@ REFUSED = [
 ]
 
 
+# One route carries the header matrix: every mutating route runs the same gate, and
+# test_the_gate_answers_before_the_scope_and_config_checks shows each one is gated.
 @pytest.mark.asyncio
-@pytest.mark.parametrize("route", MUTATING)
 @pytest.mark.parametrize(("token", "headers"), REFUSED)
 async def test_a_request_neither_tokened_nor_from_the_dashboard_is_refused(
     tmp_roots: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
-    route: str,
     token: str | None,
     headers: dict[str, str],
 ) -> None:
     _token(monkeypatch, token)
     async with _client(_app(make_config(*tmp_roots))) as client:
-        r = await client.post(route, headers=headers)
+        r = await client.post("/sync", headers=headers)
     assert r.status_code == 403
     assert r.json() == CROSS_SITE
 
