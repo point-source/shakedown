@@ -87,3 +87,51 @@ def test_no_shakedown_container_mounts_the_docker_socket() -> None:
     services = _compose()["services"]
     for name in ("shakedown-serve", "shakedown-scheduler"):
         assert not any(SOCKET in v for v in services[name].get("volumes", []))
+
+
+def _env(service: dict) -> dict[str, str]:
+    return dict(e.split("=", 1) for e in service.get("environment", []))
+
+
+WATCHTOWER_LABEL = "com.centurylinklabs.watchtower.enable"
+
+
+def test_only_the_socket_proxy_mounts_the_docker_socket_read_only_on_an_internal_network() -> None:
+    """The proxy alone holds the socket, read-only, on a network with no way out
+    and no published port; it refuses exec, volumes, secrets, swarm, and system."""
+    compose = _compose()
+    services = compose["services"]
+    holders = [n for n, s in services.items()
+               if any(SOCKET in v for v in s.get("volumes", []))]
+    assert holders == ["socket-proxy"]
+    proxy = services["socket-proxy"]
+    assert proxy["image"].startswith("lscr.io/linuxserver/socket-proxy:")
+    assert "@sha256:" in proxy["image"]
+    assert proxy["volumes"] == [f"{SOCKET}:{SOCKET}:ro"]
+    assert "ports" not in proxy
+    assert proxy["networks"] == ["docker-proxy"]
+    assert compose["networks"]["docker-proxy"]["internal"] is True
+    assert proxy["read_only"] is True
+    env = _env(proxy)
+    for refused in ("EXEC", "VOLUMES", "SECRETS", "SWARM", "SYSTEM"):
+        assert env[refused] == "0", refused
+
+
+def test_watchtower_updates_only_the_shakedown_containers_daily_through_the_proxy() -> None:
+    """Watchtower reaches Docker only through the proxy, updates only containers
+    labelled for it — exactly the two Shakedown ones — once a day at 12:00, and
+    gives each run the same 120 s to stop as `stop_grace_period`."""
+    services = _compose()["services"]
+    watchtower = services["watchtower"]
+    assert "@sha256:" in watchtower["image"]
+    assert not any(SOCKET in v for v in watchtower.get("volumes", []))
+    assert "docker-proxy" in watchtower["networks"]
+    env = _env(watchtower)
+    assert env["DOCKER_HOST"] == "tcp://shakedown-socket-proxy:2375"
+    assert env["WATCHTOWER_LABEL_ENABLE"] == "true"
+    assert env["WATCHTOWER_SCHEDULE"] == "0 0 12 * * *"
+    assert env["WATCHTOWER_TIMEOUT"] == "120s"
+    assert "TZ" in env
+    labelled = sorted(n for n, s in services.items()
+                      if str(s.get("labels", {}).get(WATCHTOWER_LABEL, "")).lower() == "true")
+    assert labelled == ["shakedown-scheduler", "shakedown-serve"]

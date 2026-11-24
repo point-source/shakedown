@@ -82,6 +82,8 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
 
   # shakedown-scheduler: starts each collection's scheduled syncs. It listens
   # on no port and never writes the config: the config folder is mounted again,
@@ -114,6 +116,68 @@ services:
       timeout: 10s
       retries: 1
       start_period: 3m
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+  # Updates (optional): Watchtower pulls a newer SHAKEDOWN_IMAGE and recreates
+  # shakedown-serve and shakedown-scheduler from it, so a tag such as `latest`
+  # keeps Shakedown updated. It touches only containers labelled
+  # com.centurylinklabs.watchtower.enable: "true" — the two above — never
+  # Navidrome or anything else. It checks once a day at 12:00 in TZ (a
+  # provisional default; the cron has a leading seconds field). Recreating a
+  # container stops the runs it started and waits up to WATCHTOWER_TIMEOUT for
+  # them; an interrupted sync resumes at its next run.
+  #
+  # If you pin a release tag or update by hand, delete this service AND
+  # socket-proxy below; nothing else depends on them.
+  watchtower:
+    image: nickfedor/watchtower:1.24.1@sha256:617a7d5523280cb73adac4d7977604afbe66b7ea86211f2ae0cbfa2043041d61
+    container_name: shakedown-watchtower
+    restart: unless-stopped
+    depends_on:
+      - socket-proxy
+    environment:
+      - DOCKER_HOST=tcp://shakedown-socket-proxy:2375
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_SCHEDULE=0 0 12 * * *
+      - WATCHTOWER_TIMEOUT=120s
+      - TZ=${TZ:-UTC}
+    # docker-proxy reaches the socket proxy; default reaches the image
+    # registry, which Watchtower asks whether a newer image exists.
+    networks:
+      - docker-proxy
+      - default
+
+  # Socket proxy (optional, goes with watchtower): the only container that
+  # mounts the Docker socket. It answers only on the internal docker-proxy
+  # network, publishes no port, and passes on only the calls Watchtower needs
+  # to pull an image and recreate a container; it refuses the rest of the
+  # Docker API, including exec, volumes, secrets, swarm, and system. This
+  # narrows what Watchtower can ask for, not the privilege: creating
+  # containers is still host-root-equivalent, so place the stack accordingly.
+  socket-proxy:
+    image: lscr.io/linuxserver/socket-proxy:3.4.8-r0-ls107@sha256:6beb1743581ec3b2ed1a2bafd617e8c7a1d7ae2fe835293e333327618fc2b925
+    container_name: shakedown-socket-proxy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /run
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Allowed: list and inspect containers and images, pull an image, and
+      # stop, remove, create, rename, and start a container — a recreate.
+      - CONTAINERS=1
+      - IMAGES=1
+      - POST=1
+      # Refused (also the proxy's defaults; written out so the file shows it).
+      - EXEC=0
+      - VOLUMES=0
+      - SECRETS=0
+      - SWARM=0
+      - SYSTEM=0
+    networks:
+      - docker-proxy
 
   # Listening: Navidrome reads Shakedown's library tree directly. Its folder
   # watcher (on by default) picks up each newly synced show on its own, so no
@@ -128,3 +192,8 @@ services:
     volumes:
       - /share/data/library:/music:ro
       - /share/data/navidrome:/data
+
+networks:
+  # Internal: no route off the host. Only watchtower and socket-proxy join it.
+  docker-proxy:
+    internal: true
