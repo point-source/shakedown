@@ -1748,6 +1748,7 @@ exits (§req:constraints). The command surface:
 | `validate [--source S] [--collection C] [--live-handoff] [--json]` | Preflight a configured deployment before a large mirror begins, optionally exercising handoff targets with an explicit test payload (§spec:setup-readiness-validation). |
 | `item show \| refetch <identifier>` | Single-item inspection and refetch; `refetch` is a single-show run (§spec:single-show-runs). |
 | `serve [--host] [--port]` | Optional HTTP control plane (§spec:serve). |
+| `schedule [--check]` | Long-running scheduler that starts each collection's scheduled sync; `--check` exits non-zero when its heartbeat is missing or older than three minutes (§spec:schedules). |
 
 - Commands shall exit non-zero on failure so failures surface at the
   scheduler/container layer (§req:quality-attributes: operability).
@@ -1844,7 +1845,7 @@ notice sent, both shows' bytes restored.
 ## Configuration §spec:configuration
 
 *Status: in progress*
-The config-management increment (§spec:dashboard-settings, §spec:schedules) adds the `schedule` and `timezone` keys and moves the file into the data mount; neither is built yet.
+The config-management increment (§spec:dashboard-settings, §spec:schedules) adds the `schedule` and `timezone` keys, which are built, and moves the file into the data mount, which is not built yet.
 
 All configuration lives in a single YAML file at
 `/data/shakedown-config/shakedown.yaml`, inside the one data mount
@@ -1905,6 +1906,12 @@ the run rather than being ignored).
 *Status: complete*
 
 Complete through schema v14.
+
+The scheduler's heartbeat and the stale-scheduler notice record
+(§spec:schedules) are one row each in tables outside schema versioning:
+each writer (the scheduler, `serve`) creates its own table when the
+database lacks it and leaves `schema_version` alone, so neither ever
+migrates and a previous release ignores them.
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -2180,7 +2187,7 @@ config-management increment ofelia did (§req:constraints, superseded
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /healthz` | Liveness |
-| `GET /status` | JSON equivalent of `shakedown status` |
+| `GET /status` | JSON equivalent of `shakedown status`, under `collections`, beside `scheduler` (§spec:schedules) |
 | `GET /metrics` | Prometheus metrics |
 | `POST /sync?source=&collection=` | Start an ad-hoc sync and answer at once (write gate; §spec:api-sync-runs) |
 | `POST /verify` | Start a verify run and answer at once (write gate; §spec:api-sync-runs) |
@@ -3068,6 +3075,8 @@ Observable behavior:
   | `separations` | `status`'s `separations` | identifiers and folders |
   | `unplaced_files` | `status`'s `unplaced_files` | paths |
   | `unidentified_files` | `status`'s `unidentified_files` (§spec:unidentified-audio) | identifiers, `{identifier, file}` pairs |
+  | `scheduler_stale` | the scheduler's heartbeat (§spec:schedules); one entry, about no collection | `since`: the last heartbeat |
+  | `tick_overdue` | the collection's schedule and its run records (§spec:schedules) | `since`: the missed scheduled time |
 
   A good run is one whose result is `completed` or
   `completed_with_item_issues`, the same as a good sync in
@@ -3117,7 +3126,8 @@ removed_on}], removed_upstream_count, drift_files, not_playable:
 [{identifier, reason}], not_playable_count, playable_copies:
 [identifier], playable_copies_count}]}`. `detail` holds the kind's
 extra facts under `status`'s own field names; `identifiers` is empty
-for collection-wide kinds. Counts are complete; every list carries its
+for collection-wide kinds; `source` and `collection` are null for
+`scheduler_stale`, which comes first. Counts are complete; every list carries its
 first 10 shows or files, in order: `identifiers`, `detail.separations`,
 `detail.unplaced_files`, `detail.unidentified_files`, and the health lists. An entry's `count` is
 how many shows it affects (files, for `unplaced_files` and
@@ -3180,8 +3190,9 @@ Observable behavior:
 
 API: `GET /api/health` (unauthenticated) answers `{generated_at,
 release, config: {valid, error, last_loaded_at}, validation: [{source,
-collection, status, at}]}` where `status` is an outcome code and absent
-values are null.
+collection, status, at}], scheduler: {state, last_seen, release}}` where
+`status` is an outcome code and absent values are null; `scheduler` is
+§spec:schedules's, not drawn until Design draws it.
 
 **Decision and constraint.** Report the validation already recorded
 rather than run one, because visiting the dashboard must not touch
@@ -3770,7 +3781,8 @@ setup: Settings is editable without any override.
 
 ## Schedules and the scheduler §spec:schedules
 
-*Status: not started*
+*Status: in progress*
+The `schedule` and `timezone` keys, the scheduler with its heartbeat and `--check`, and serve's reporting (health, `/status`, Needs attention, the stale notice) are built; the dashboard schedule editor and preset read-back wait on Design, and `next_syncs` in `GET /api/config` on the config resource.
 
 Each collection's schedule lives in `shakedown.yaml` and is set from the
 dashboard. A long-running Shakedown scheduler, in its own container
@@ -3831,7 +3843,11 @@ Observable behavior:
   is untouched. While the file is invalid, the scheduler keeps the
   schedules of the last valid file it read; a tick that fires then starts
   its run, which fails on the config error like any run on a broken
-  file, visibly in run history. A scheduler that starts on an invalid
+  file. That run exits before it opens the state database, so it leaves
+  no run record; the failure shows as the config error in health
+  (§spec:dashboard-health), in the scheduler's log, and, ten minutes on,
+  as the collection's `tick_overdue` entry (operator decision,
+  2026-11-24). A scheduler that starts on an invalid
   file has no schedules until the file is fixed, and reports that in its
   heartbeat.
 - **Fails loudly, restarts itself.** Any fault in the scheduler's own
@@ -3843,7 +3859,10 @@ Observable behavior:
   valid schedule, and the next tick it plans. The heartbeat is one
   record, replaced each time, never a history, so it does not grow.
   Recording never takes the writer lock and never migrates, like a
-  rescheduled-sync entry (§spec:rescheduled-syncs). `shakedown schedule --check` exits non-zero
+  rescheduled-sync entry (§spec:rescheduled-syncs); unlike that entry,
+  the record sits outside schema versioning (§spec:state), so the
+  scheduler can record it into a database a previous release left.
+  `shakedown schedule --check` exits non-zero
   when the heartbeat is older than three minutes or missing; the compose
   example uses it as the scheduler container's health check, so Container
   Station shows the container unhealthy.
@@ -3856,15 +3875,29 @@ Observable behavior:
     `last_seen` formatted like every other time (§spec:dashboard-health);
   - Needs attention (§spec:needs-attention) gains `scheduler_stale`, one
     entry while the scheduler is `stale` or `never` and any collection
-    has a schedule, and `tick_overdue`, one per collection whose
-    scheduled time passed more than ten minutes ago with no sync of it
-    started at or after that time and no rescheduled entry recorded for
-    it since. Each clears on its own when the scheduler is back or a
-    run starts;
+    has a schedule, about no collection (`source` and `collection`
+    null, `since` the last heartbeat), and `tick_overdue`, one per
+    collection whose latest scheduled time passed more than ten minutes
+    ago with nothing covering it, `since` that time. A sync or catch-up
+    of the collection covers the tick when it started at or after it or
+    was still running at it, and so does any rescheduled entry for the
+    collection: an entry keeps its oldest skip, so a tick skipped behind
+    a days-long run leaves no newer trace (operator decision,
+    2026-11-24). `scheduler_stale` clears when the scheduler is back;
+    `tick_overdue` clears when the collection's next run starts;
   - when the scheduler turns `stale`, `serve` sends the configured
     failure notification (`notifications.on_failure`,
     §spec:handoff) once for that episode, naming the scheduler and its
-    last heartbeat.
+    last heartbeat: the shared envelope with `event: scheduler.stale`,
+    `source`, `collection`, `staging_root`, and `run` null,
+    `scheduler: {last_seen, release}`, and one `errors` line
+    ([docs/handoff.md](docs/handoff.md)). The episode is the heartbeat
+    time the scheduler went stale on; it is recorded, so a restarted
+    `serve` never sends it twice, and an undelivered notice is not
+    retried.
+  - `GET /status` answers `{scheduler, collections}`, `collections`
+    being the `status --json` list, since a list cannot carry the
+    field.
   An outside monitor (Uptime Kuma, Homepage) can watch the same field in
   `GET /status`.
 - **Only while the scheduler runs.** With the scheduler stopped, no
