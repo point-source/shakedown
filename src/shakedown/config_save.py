@@ -8,12 +8,14 @@ replace is caught by re-reading the file just before it is replaced.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from shakedown import credentials
 from shakedown.config import (
     ConfigFile,
     ConfigProblem,
@@ -30,10 +32,14 @@ from shakedown.edit_lock import move_install_state, read_edit, record_edit, stat
 from shakedown.validate import path_checks, path_warnings
 from shakedown.write_gate import Refusal
 
+log = logging.getLogger(__name__)
+
 PATH_KEYS = ("archive_root", "library_root", "state_db")
 EXEC_FILE_ONLY = "exec_file_only"
 
-_writing = threading.Lock()
+# Serializes every write serve makes to the config file and the install state
+# beside it (the edit state, stored credentials).
+writing = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -44,7 +50,7 @@ class Saved:
 
 def save(path: Path, revision: str | None, document: Any) -> Saved:
     """Check ``document`` and write it over the file loaded at ``revision``."""
-    with _writing:
+    with writing:
         current = _editable_file(path)
         if revision != current.revision:
             raise Refusal(409, "changed")
@@ -64,27 +70,38 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
         if merged != current.data:
             if _bytes_now(path) != current.data:
                 raise Refusal(409, "changed")
-            # The edit state moves only with a save that is going through.
+            # The edit state and stored credentials move only with a save that is
+            # going through.
             old_db, new_db = state_db_for(current), Path(new["state_db"])
-            if old["state_db"] != new["state_db"] and old_db is not None:
-                _write_state(new_db, lambda: move_install_state(old_db, new_db))
+            moved = old["state_db"] != new["state_db"] and old_db is not None
+            if moved:
+                assert old_db is not None
+                write_state(new_db, lambda: move_install_state(old_db, new_db))
             try:
                 atomic_replace(path, merged)
             except WriteFailed as e:
                 raise Refusal(500, "write_failed", path=str(e.path)) from e
+            # Only once the file is saved: forget the credentials of a removed source
+            # (§spec:dashboard-credentials), or of one a hand edit removed before, and
+            # leave none behind in a database the config no longer names.
+            names = {source["name"] for source in new["sources"]}
+            _forget(new_db, lambda: credentials.forget_others(new_db, names))
+            if moved:
+                assert old_db is not None
+                _forget(old_db, lambda: credentials.forget_others(old_db, set()))
         return Saved(revision_of(merged), warnings)
 
 
 def override(path: Path) -> None:
     """Turn the override on (§spec:edit-lock); idempotent."""
-    with _writing:
+    with writing:
         file = read_config_file(path)
         if file.state in ("missing", "unreadable"):
             raise Refusal(409, file.state)
         state_db = state_db_for(file)
         if state_db is None:
             raise Refusal(409, file.state)
-        _write_state(state_db, lambda: record_edit(state_db, "override"))
+        write_state(state_db, lambda: record_edit(state_db, "override"))
 
 
 def check_paths(archive_root: Path, library_root: Path, state_db: Path | None) -> list[Any]:
@@ -153,7 +170,18 @@ def _exec_values(raw: Any) -> list[tuple[tuple[Any, Any], Any, tuple[str | int, 
     return values
 
 
-def _write_state(state_db: Path, write: Any) -> None:
+def _forget(state_db: Path, write: Any) -> None:
+    """Forget credentials after a save went through: the file is written, so a
+    failure here is logged, not answered. The next save forgets them again."""
+    try:
+        write()
+    except (sqlite3.Error, OSError) as e:
+        log.warning("could not forget stored credentials in %s: %s", state_db, e)
+
+
+def write_state(state_db: Path, write: Any) -> None:
+    """Write install state beside the config, answering 500 `write_failed` naming
+    the database when it cannot be written."""
     try:
         write()
     except (sqlite3.Error, OSError) as e:

@@ -4,7 +4,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import math
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
@@ -19,6 +18,7 @@ import requests
 import urllib3.exceptions
 
 from shakedown.config import CollectionConfig, SourceConfig
+from shakedown.credentials import Login, LoginCheck, env_names, env_value
 from shakedown.models import ManifestFile
 
 _HASH_CHUNK = 1024 * 1024
@@ -265,8 +265,11 @@ class SourcePlugin(ABC):
     #: source gets a budget of its own.
     upstream_host: str | None = None
 
-    def __init__(self, source_config: SourceConfig) -> None:
+    def __init__(self, source_config: SourceConfig, login: Login | None = None) -> None:
         self.source_config = source_config
+        # The login a run resolved for this source (§spec:dashboard-credentials
+        # "Which wins"), or None. Only a plugin that takes credentials uses it.
+        self.login = login
 
     @abstractmethod
     def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:
@@ -341,22 +344,39 @@ class SourcePlugin(ABC):
     # validate` calls them once per configured source/collection before a real mirror.
 
     def check_credentials(self) -> ProbeResult:
-        """Readiness probe for required credential environment variables.
+        """Readiness probe for the source's login.
 
-        Default: a source with no ``auth`` block needs no credentials (pass); otherwise
-        every configured credential env var must be present and non-empty. Acceptance —
-        whether the source *honors* the credentials — is exercised by
-        :meth:`check_reachable`, whose listing runs under the authenticated session,
-        so a rejected key surfaces there with the source's own error text. Plugins that
-        can cheaply confirm acceptance out-of-band may override.
+        With a resolved login, the source's own verdict (:meth:`check_login`): a
+        rejected login, or one the source could not be asked about, fails — so a
+        user retries a stored login's check here (§spec:dashboard-credentials).
+        Without one: a source with no ``auth`` block needs no credentials (pass);
+        otherwise the environment variables it names are missing.
         """
+        if self.login is not None:
+            verdict = self.check_login()
+            if verdict == "accepted":
+                return ProbeResult(ok=True)
+            name = self.source_config.name
+            if verdict == "rejected":
+                return ProbeResult(
+                    ok=False,
+                    consequence=f"source {name!r} rejected the login",
+                    action="enter the correct email and password for this source",
+                )
+            return ProbeResult(
+                ok=False,
+                consequence=f"source {name!r} could not be reached to check the login",
+                action="check source connectivity, then rerun",
+            )
         auth = self.source_config.auth
         if auth is None:
             return ProbeResult(ok=True)
+        # The names the run reads (`credentials.resolve`): a name `auth` leaves out
+        # falls back to the type's standard one, and a blank value counts as unset.
         missing = [
             name
-            for name in (auth.email_env, auth.password_env)
-            if name and not os.environ.get(name)
+            for name in env_names(auth, self.credential_env)
+            if name and not env_value(name)
         ]
         if missing:
             return ProbeResult(
@@ -365,9 +385,18 @@ class SourcePlugin(ABC):
                     f"required credential environment variable(s) {missing} are not set, "
                     f"so authenticated access to source {self.source_config.name!r} will fail"
                 ),
-                action="set the credential environment variables before syncing",
+                action=(
+                    "set the credential environment variables, or enter the credentials "
+                    "in the dashboard, before syncing"
+                ),
             )
         return ProbeResult(ok=True)
+
+    def check_login(self) -> LoginCheck:
+        """The source's verdict on :attr:`login`: `accepted`, `rejected`, or
+        `unchecked` when the source could not be asked. A plugin that takes
+        credentials overrides it; the default can ask no one."""
+        return "unchecked"
 
     def check_reachable(self, collection: CollectionConfig) -> ProbeResult:
         """Readiness probe that the source (and this collection's query) can be reached.
@@ -407,3 +436,7 @@ class SourcePlugin(ABC):
     # Whether the source uses login credentials, so the dashboard offers them
     # (§spec:dashboard-settings `source_types`).
     takes_credentials: bool = False
+
+    # The environment variables (email, password) a source of this type reads when
+    # its `auth` names none (§spec:dashboard-credentials "Which wins").
+    credential_env: tuple[str, str] | None = None

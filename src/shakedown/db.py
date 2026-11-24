@@ -407,7 +407,19 @@ CONFIG_EDIT_TABLE = """
         at     TEXT NOT NULL
     )
     """
-_SCHEMA += [SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE, CONFIG_EDIT_TABLE]
+# Credentials entered in the dashboard (§spec:dashboard-credentials): one row per
+# source, in plain text, protected as this file is. Written by `serve` (and setup).
+CREDENTIALS_TABLE = """
+    CREATE TABLE IF NOT EXISTS source_credentials (
+        source    TEXT PRIMARY KEY,
+        email     TEXT NOT NULL,
+        password  TEXT NOT NULL,
+        at        TEXT NOT NULL
+    )
+    """
+_SCHEMA += [
+    SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE, CONFIG_EDIT_TABLE, CREDENTIALS_TABLE
+]
 
 
 # Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer
@@ -459,18 +471,32 @@ def open_unmigrated(db_path: Path) -> sqlite3.Connection:
 def replace_row(
     db_path: Path, table_sql: str, insert: str, values: tuple[object, ...], *, create: bool
 ) -> bool:
-    """Replace one record in a table outside schema versioning, without the writer
-    lock and without migrating: create the table when an older database lacks it and
-    leave `schema_version` alone. ``create`` makes a missing database, at the current
-    schema (nothing exists to migrate). Returns False when the database is missing
-    and ``create`` is off; raises sqlite3.Error when it cannot be written."""
+    """Replace one record in a table outside schema versioning (`write_unversioned`
+    with one statement)."""
+    return write_unversioned(db_path, table_sql, [(insert, values)], create=create)
+
+
+def write_unversioned(
+    db_path: Path,
+    table_sql: str,
+    statements: list[tuple[str, tuple[object, ...]]],
+    *,
+    create: bool,
+) -> bool:
+    """Run ``statements`` as one transaction on a table outside schema versioning,
+    without the writer lock and without migrating: create the table when an older
+    database lacks it and leave `schema_version` alone. ``create`` makes a missing
+    database, at the current schema (nothing exists to migrate). Returns False when
+    the database is missing and ``create`` is off; raises sqlite3.Error when it
+    cannot be written."""
     if not db_path.exists():
         if not create:
             return False
         connect(db_path).close()
     with closing(open_unmigrated(db_path)) as conn, transaction(conn):
         conn.execute(table_sql)
-        conn.execute(insert, values)
+        for sql, values in statements:
+            conn.execute(sql, values)
     return True
 
 

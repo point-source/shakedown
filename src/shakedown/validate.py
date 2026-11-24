@@ -28,6 +28,7 @@ import click
 from shakedown import config as config_module
 from shakedown import notify
 from shakedown.config import Config
+from shakedown.credentials import login_for
 from shakedown.db import connect_reader, transaction
 from shakedown.filesystem import FilesystemError, check_writable, ensure_hardlinkable
 from shakedown.models import OperationStatus, OperationType
@@ -261,7 +262,7 @@ def validate_config(
         src_checks: list[Check] = []
         plugin = None
         try:
-            plugin = registry.for_source(source)
+            plugin = registry.for_source(source, login_for(source, config.state_db))
         except Exception as e:  # a broken plugin is a readiness failure, not a crash
             src_checks.append(
                 Check(

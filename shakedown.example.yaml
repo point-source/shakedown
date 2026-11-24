@@ -34,7 +34,10 @@ sources:
     # smallest either sets. Falls back to max_concurrent_downloads when unset.
     max_concurrent_requests: 4
     auth:
-      # Only needed for download-restricted items. Leave unset to skip auth.
+      # Only needed for download-restricted items: the environment variables that
+      # hold your archive.org email and password. Leave `auth` out to read IA_EMAIL
+      # and IA_PASSWORD, or to use credentials entered in the dashboard; environment
+      # variables, when set, win over those.
       email_env: IA_EMAIL
       password_env: IA_PASSWORD
     collections:

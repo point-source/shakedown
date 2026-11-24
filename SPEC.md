@@ -627,8 +627,10 @@ Plugins shipped in v1:
   files already on disk before a download, never the bytes it just
   wrote, so the plugin checks each downloaded file's size and md5
   against the manifest before reporting success. Optional credentials
-  (for download-restricted items) are read from environment variables
-  only.
+  (for download-restricted items) come from environment variables or
+  from the dashboard (§spec:dashboard-credentials); the plugin logs in
+  to archive.org with the email and password and signs its requests
+  with the keys and cookies the login returns.
 - **etree (`etree`).** A second, independently written plugin that
   proves the seam is real (§req:success-criteria #8): it drives
   archive.org's public HTTP/JSON API directly — a different integration
@@ -1910,8 +1912,10 @@ the run rather than being ignored).
 Complete through schema v14.
 
 The scheduler's heartbeat, the stale-scheduler notice record
-(§spec:schedules), and the config file's edit state (`config_edit`,
-§spec:edit-lock) are one row each in tables outside schema versioning:
+(§spec:schedules), the config file's edit state (`config_edit`,
+§spec:edit-lock), and the credentials entered in the dashboard
+(`source_credentials`, one row per source, §spec:dashboard-credentials)
+are rows in tables outside schema versioning:
 each writer (the scheduler, `serve`, setup) creates its own table when
 the database lacks it and leaves `schema_version` alone, so none ever
 migrates and a previous release ignores them.
@@ -2177,7 +2181,7 @@ appears in Navidrome with no handoff configured.
 ## Serve control plane §spec:serve
 
 *Status: in progress*
-The write gate guards every mutating endpoint built so far; the config resource, trim, purge, and scheduler health are built, and the setup and credentials endpoints are not built yet.
+The write gate guards every mutating endpoint built so far; the config resource, credentials, trim, purge, and scheduler health are built, and the setup endpoints are not built yet.
 
 `shakedown serve` exposes a small HTTP API for ad-hoc triggers and
 monitoring without `docker exec` (§req:priorities #10), serves the web
@@ -4017,7 +4021,8 @@ again: the entries clear and the next tick runs.
 
 ## Credentials in the dashboard §spec:dashboard-credentials
 
-*Status: not started*
+*Status: in progress*
+The API, storage, and run resolution are built; the credential entry form waits on Design.
 
 A user can enter a source's archive.org credentials in the dashboard.
 They never appear in `shakedown.yaml`, on any page, in any API answer,
@@ -4036,21 +4041,36 @@ Observable behavior:
   not be reached. Rejected credentials are still stored, so a user can
   retry the check through Validate. `DELETE /api/credentials?source=`
   forgets them. Unknown source, or a source type that takes no
-  credentials: `404`. Values travel only in the request body, never in a
-  URL.
+  credentials: `404` (`{code: "unknown_source"}` or
+  `{code: "takes_no_credentials"}`). Values travel only in the request
+  body, never in a URL. A body that is not exactly those three non-empty
+  strings answers `422 {code: "invalid_body"}`, never the field-by-field
+  detail, which would quote what was entered. Values are trimmed, as
+  environment values are. Both endpoints pass the write gate
+  (§spec:dashboard-run-controls).
 - **Status, never values.** `GET /api/config` reports, per source,
   `environment` (its environment variables are set and in effect),
   `dashboard` (stored credentials are in effect), or `none`. No answer
   returns a stored value or a hint of one.
 - **Which wins.** A run uses a source's environment variables when both
   are set: those `auth` names in the file, or the source type's standard
-  names (`IA_EMAIL`, `IA_PASSWORD`) when the file names none. Otherwise
-  it uses the source's stored credentials; otherwise none. `auth` stays
-  optional in the file, and setup never writes it.
+  names (`IA_EMAIL`, `IA_PASSWORD`) when the file names none; a name the
+  file leaves out falls back to the standard one. Otherwise it uses the
+  source's stored credentials; otherwise none. `auth` stays optional in
+  the file, and setup never writes it. The `ia` source logs in to
+  archive.org once per run with that email and password; a login the
+  source rejects or cannot answer is logged, without values, and the run
+  continues without it. Validate asks the source about the login in
+  effect and fails on a rejected or unchecked one.
 - **Where they live.** Stored credentials are kept in the state database
   the config names, in plain text, protected as that file is (operator
-  decision, 2026-11-24). Removing a source from the file forgets its
-  stored credentials at that save.
+  decision, 2026-11-24), one row per source in a table outside schema
+  versioning (§spec:state): `serve` writes it and never holds the writer
+  lock that migrates. A save that moves the state database carries them
+  with the edit state (§spec:edit-lock) and leaves none in the old one.
+  Removing a source from the file forgets its stored credentials at that
+  save, as does any save after a hand edit removed one; a save that
+  fails to write the file forgets nothing.
 - **Never logged.** No log line, error message, validation result,
   export, or `status` output contains a stored or entered credential.
 - **Not under the edit lock.** Credentials are not in the file, so the
