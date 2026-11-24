@@ -16,8 +16,9 @@ test("a running verify with no download facts still draws", async ({ page, baseU
 test("trim runs draw on the existing rows, and a trimmed run shows no error lines", async ({ page, baseURL }) => {
   await openScenario(page, baseURL!, "trims")
   const running = page.locator('[data-slot="card"]').filter({ has: page.getByText("Running now", { exact: true }) })
-  await expect(running.getByText("· Trim history")).toHaveCount(1)
-  await expect(running.getByText("—", { exact: true })).toHaveCount(1)
+  // A run with no collection leads with its kind (Design round S1, Q-S2).
+  await expect(running.getByText("Trim history", { exact: true })).toHaveCount(1)
+  await expect(running.getByText("—", { exact: true })).toHaveCount(0)
   await expect(running.getByText("Started 21:32 · 8 min ago")).toBeVisible()
   for (const fact of ["Shows", "Time left", "Downloaded"]) await expect(running.getByText(fact, { exact: true })).toHaveCount(0)
   await page.getByRole("tab", { name: "Runs" }).click()
@@ -74,4 +75,27 @@ test("Back returns to the previous tab", async ({ page, baseURL }) => {
 test("a run's progress bar tells assistive tech its value", async ({ page, baseURL }) => {
   await openScenario(page, baseURL!, "default")
   await expect(page.getByRole("progressbar").first()).toHaveAttribute("aria-valuenow", /\d/)
+})
+
+// Run controls on Overview's Shakedown card (Design round S1, Q-S3).
+const shakedownCard = (page: import("playwright/test").Page) =>
+  page.locator('[data-slot="card"]').filter({ has: page.getByRole("heading", { name: "Shakedown", exact: true }) })
+
+test("Sync now starts a sync and says so", async ({ page, baseURL }) => {
+  await openScenario(page, baseURL!, "sync_started")
+  await shakedownCard(page).locator("li", { hasText: "phish" }).getByRole("button", { name: "Sync now" }).click()
+  await expect(page.getByText("Sync started", { exact: true })).toBeVisible()
+})
+
+test("Sync now while a run holds the lock says a run is in progress", async ({ page, baseURL }) => {
+  await openScenario(page, baseURL!, "sync_busy")
+  await shakedownCard(page).locator("li", { hasText: "phish" }).getByRole("button", { name: "Sync now" }).click()
+  await expect(page.getByText("A run is in progress", { exact: true })).toBeVisible()
+  await expect(page.getByText("Try again when it ends.", { exact: true })).toBeVisible()
+})
+
+test("Validate reports what it found", async ({ page, baseURL }) => {
+  await openScenario(page, baseURL!, "sync_busy")
+  await shakedownCard(page).getByRole("button", { name: "Validate" }).click()
+  await expect(page.getByText("Validation found problems", { exact: true })).toBeVisible()
 })

@@ -14,6 +14,7 @@ const CASES: { scenario: string; tab: string }[] = [
   { scenario: "loading", tab: "sources" },
   { scenario: "never_reached", tab: "overview" },
   { scenario: "scheduler_stopped", tab: "overview" },
+  ...["trims", "purges"].flatMap((scenario) => ["overview", "runs"].map((tab) => ({ scenario, tab }))),
 ]
 
 for (const { scenario, tab } of CASES) {
