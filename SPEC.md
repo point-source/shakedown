@@ -2047,7 +2047,10 @@ shows flow into the library tool with nobody watching
 (§req:user-stories). Two mechanisms, webhook as default and exec as
 fallback (§req:constraints), both fired once per (collection, run) with
 the `{source}`/`{collection}`/`{staging_root}` template fields available
-in the URL or command:
+in the URL or command. A command is split into its arguments as the file
+writes it before the fields are filled in, so a value with a space or a
+quote in it (a library path saved from the dashboard) stays inside its
+one argument:
 
 - **Webhook** (`on_complete.webhook: <url>`): HTTP POST of a versioned
   JSON body listing the staged shows with their archive and library
@@ -3631,6 +3634,10 @@ Observable behavior:
     the editor loaded (someone edited it since); nothing is written and
     the editor reloads;
   - `409 {code: "locked"}` — the edit lock is on (§spec:edit-lock);
+  - `409 {code: "busy"}` — the save points `state_db` at another
+    database while a run holds the writer lock: that run would keep the
+    old database's lock while the next took the new one's, two writers
+    on one archive. Nothing is written; save again once the run ends;
   - `403 {code: "cross_site"}` — the write gate refused the request
     (§spec:dashboard-run-controls);
   - `500 {code: "write_failed", path}` — the file or its folder cannot
@@ -3780,7 +3787,9 @@ Observable behavior:
 - **Where the state lives.** The edit state is recorded in the state
   database the config names, beside the credentials. A file with no
   record there is `locked`. When a dashboard save points `state_db` at a
-  new database, the edit state and stored credentials move with it.
+  new database, the edit state and stored credentials move with it,
+  once the file is written; the same database named another way (a
+  link, a relative path) moves nothing.
   Pointing the file at a different database by hand — or rebuilding the
   database with `reconcile` — starts it `locked` again; the operator
   turns the override back on.
@@ -4358,7 +4367,9 @@ Observable behavior:
     once it holds the writer lock and deletes nothing if the file names
     the collection again, cannot be read, or nothing is held; the run then
     fails with that reason. A source or collection name that is not one
-    folder name is refused the same way.
+    folder name is refused the same way, and so is a source or collection
+    folder that is a link, which would aim the deletes outside the
+    collection.
 - **Before confirming.** The remove and delete confirmations state what
   each choice deletes, that deletion cannot be undone, and the shows
   and space it covers, from the `unconfigured` figures or the
