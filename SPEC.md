@@ -1845,7 +1845,7 @@ notice sent, both shows' bytes restored.
 ## Configuration §spec:configuration
 
 *Status: in progress*
-The config-management increment (§spec:dashboard-settings, §spec:schedules) adds the `schedule` and `timezone` keys, which are built, and moves the file into the data mount: the CLI default is `/data/shakedown-config/shakedown.yaml`, and the image and compose example still pass `/config/shakedown.yaml` until §spec:deployment's change lands.
+The config-management increment's `schedule` and `timezone` keys (§spec:schedules) and the move of the file into the data mount (§spec:deployment) are built; credentials entered in the dashboard wait on §spec:dashboard-credentials.
 
 All configuration lives in a single YAML file at
 `/data/shakedown-config/shakedown.yaml`, inside the one data mount
@@ -4412,8 +4412,7 @@ sync runs: refused as a run in progress.
 
 ## Deployment §spec:deployment
 
-*Status: in progress*
-The config-management increment removes ofelia and the read-only config mounts; the compose example and image are not changed yet.
+*Status: complete*
 
 The deployment is a single Docker Compose stack, paste-able into QNAP
 Container Station, operable entirely through web UIs — no SSH at any
@@ -4463,7 +4462,7 @@ can show a page (§req:constraints: what stays outside the dashboard):
 Everything else — paths, collections, schedules, the timezone,
 credentials, notifications — is set in the dashboard
 (§spec:first-run-setup, §spec:dashboard-settings). The stack carries no
-scheduler container, and no Shakedown container mounts the Docker
+third-party scheduler, and no Shakedown container mounts the Docker
 socket. Library tool and
 streaming server (Beets, Navidrome, …) join the same stack, reading the
 library tree — the user's choice; Shakedown places no requirements on
@@ -4500,13 +4499,19 @@ Shakedown with no action, as ofelia's per-tick pull did:
 - **At a fixed time.** It checks once a day at a set time (provisional
   default: 12:00 in the container's timezone), so an update never lands
   at a random moment. Recreating a container stops the runs it started and
-  waits for them (§spec:graceful-stop); an interrupted sync resumes at
-  its next run.
+  waits for them (§spec:graceful-stop): Watchtower gives each the same
+  120 s as `stop_grace_period`. An interrupted sync resumes at its next
+  run.
 - **Through a socket proxy.** Watchtower reaches Docker only through a
   socket proxy that allows only the calls it needs to pull images and
   recreate a labelled container, and refuses the rest of the Docker API
   (exec, volumes, secrets, swarm, system). The proxy alone mounts the socket, read-only,
-  and listens only on an internal network with no published port.
+  and listens only on an internal network with no published port. The
+  example uses linuxserver's socket proxy, which with exec off refuses
+  creating an exec as well as starting one, and allows only its
+  container, image, and write sections — what a real recreate through it
+  needed, including for a container on two networks. Watchtower is the
+  maintained fork (`nickfedor/watchtower`); the original was archived.
 - **Optional.** A user who pins a release tag, or updates by hand,
   deletes both services from the example; nothing else depends on them.
 
@@ -4528,7 +4533,7 @@ state database stay where they are:
    its own (operator decision, 2026-11-24: re-entered by hand, no
    import command).
 
-The release notes carry these steps.
+The release notes (README, Upgrading) carry these steps.
 
 **Why a Shakedown scheduler, rather than ofelia.** Until the
 config-management increment, ofelia — itself a container — launched a
