@@ -56,3 +56,23 @@ async def test_serve_with_no_file_opens_the_page_and_answers_missing(
         assert response.status_code == 503, path
         assert str(config_path) in response.json()["detail"], path
     assert not config_path.parent.exists()  # nothing was written
+
+
+# -- the defaults setup offers -------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_setup_defaults_work_on_the_example_stack(config_path: Path) -> None:
+    async with _client(build_app(config_path)) as client:
+        response = await client.get("/api/setup")
+        config = (await client.get("/api/config")).json()
+    assert response.status_code == 200
+    answer = response.json()
+    assert {k: answer[k] for k in ("archive_root", "library_root", "state_db", "schedule")} == {
+        "archive_root": "/data/archive",
+        "library_root": "/data/library",
+        "state_db": "/data/archive/.shakedown/state.db",
+        "schedule": "0 3 * * 0",
+    }
+    assert answer["source_types"] == config["source_types"]
+    assert answer["generated_at"]
+    assert not config_path.parent.exists()  # nothing was written

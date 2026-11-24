@@ -30,7 +30,7 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
-from shakedown import __version__, config_save, dashboard_credentials
+from shakedown import __version__, config_save, dashboard_credentials, first_run
 from shakedown.activity import HISTORY_DAYS
 from shakedown.config import (
     Config,
@@ -247,6 +247,11 @@ def build_app(
     @app.get("/api/config")
     def config_resource() -> dict[str, Any]:
         return config_answer(config_path)
+
+    # First-run setup (§spec:first-run-setup): the defaults it offers, read-only.
+    @app.get("/api/setup")
+    def setup_defaults() -> dict[str, Any]:
+        return first_run.setup_defaults()
 
     # Saving it (§spec:dashboard-settings) and the edit lock's override
     # (§spec:edit-lock), behind the write gate like every write.

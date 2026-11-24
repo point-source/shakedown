@@ -112,3 +112,8 @@ def test_next_syncs_is_none_for_manual_collections() -> None:
 ])
 def test_staggered_default(existing: tuple[str | None, ...], expected: str) -> None:
     assert schedule.staggered_default(_config(*existing)) == expected
+
+
+def test_staggered_default_with_no_config_yet() -> None:
+    """Setup offers it before any file exists (§spec:first-run-setup)."""
+    assert schedule.staggered_default(None) == "0 3 * * 0"

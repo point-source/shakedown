@@ -105,14 +105,14 @@ STAGGER_FIRST_HOUR = 3
 SUNDAY = {0, 7}
 
 
-def staggered_default(config: Config) -> str:
+def staggered_default(config: Config | None) -> str:
     """The schedule a newly added collection starts with: weekly on Sunday at the
     first whole hour from 03:00 at which no other collection's schedule starts, so
-    collections do not all start at once. An hour is taken when another schedule can
+    collections do not all start at once. With no config yet (setup), 03:00. An hour is taken when another schedule can
     fire on a Sunday in it (a day-of-month limit is not read as ruling Sunday out).
     When every hour from 03:00 is taken, 03:00."""
     taken: set[int] = set()
-    for _source, _collection, expr in scheduled(config):
+    for _source, _collection, expr in scheduled(config) if config else []:
         sim = CronSim(expr, datetime(2000, 1, 1))
         # cronsim keeps `SUN#1` and `0L` as (weekday, which) pairs.
         days = {d[0] if isinstance(d, tuple) else d for d in sim.weekdays}
