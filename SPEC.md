@@ -3819,7 +3819,7 @@ Observable behavior:
 **Decision and constraint.** `serve` schedules because the operator
 moved timing into the dashboard and out of the compose file
 (§req:constraints, operator decision, 2026-11-24): one place to edit, no
-redeploy, and no host Docker socket. The schedule lives in the file
+redeploy, and no Docker socket for anything the dashboard writes. The schedule lives in the file
 because the file stays the source of truth, so an IaC deployment sets
 schedules the same way it sets everything else. Cron is the standard
 schedule format (boring edge), and presets are written as cron so the
@@ -4217,7 +4217,8 @@ can show a page (§req:constraints: what stays outside the dashboard):
 Everything else — paths, collections, schedules, the timezone,
 credentials, notifications — is set in the dashboard
 (§spec:first-run-setup, §spec:dashboard-settings). The stack carries no
-scheduler container and mounts no Docker socket. Library tool and
+scheduler container, and no Shakedown container mounts the Docker
+socket. Library tool and
 streaming server (Beets, Navidrome, …) join the same stack, reading the
 library tree — the user's choice; Shakedown places no requirements on
 them.
@@ -4242,18 +4243,34 @@ SSH remains fully supported and is documented as guidance, not
 designed out; the web-UI paths exist so it is never *required*
 (§req:success-criteria #6).
 
-**Updates.** The image updates when the `serve` container is recreated
-from a newer image — by hand in Container Station or by a tool such as
-Watchtower. Recreating `serve` stops the runs it started and waits for
-them (§spec:graceful-stop); an interrupted sync resumes at its next run.
+**Updates (operator decision, 2026-11-24).** The compose example runs
+Watchtower, which pulls a newer `SHAKEDOWN_IMAGE` and recreates
+`shakedown-serve` from it, so a tag such as `latest` keeps updating
+Shakedown with no action, as ofelia's per-tick pull did:
+
+- **Shakedown only.** Watchtower updates only containers labelled for
+  it, and the example labels only `shakedown-serve`; Navidrome and other
+  services are never touched.
+- **At a fixed time.** It checks once a day at a set time (provisional
+  default: 12:00 in the container's timezone), so an update never lands
+  at a random moment. Recreating `serve` stops the runs it started and
+  waits for them (§spec:graceful-stop); an interrupted sync resumes at
+  its next run.
+- **Through a socket proxy.** Watchtower reaches Docker only through a
+  socket proxy that allows only the calls it needs to pull images and
+  recreate a labelled container, and refuses the rest of the Docker API
+  (exec, volumes, secrets, swarm, system). The proxy alone mounts the socket, read-only,
+  and listens only on an internal network with no published port.
+- **Optional.** A user who pins a release tag, or updates by hand,
+  deletes both services from the example; nothing else depends on them.
 
 **Moving an existing install over** (§req:constraints: deployment
 status). Nothing downloads again, because the archive, library, and
 state database stay where they are:
 
 1. Replace the compose file with the new example: drop the ofelia
-   service and its Docker socket; give `serve` the single `/data` mount
-   and no `/config` mount.
+   service; add Watchtower and the socket proxy; give `serve` the single
+   `/data` mount and no `/config` mount.
 2. The existing `shakedown.yaml` already sits at
    `/share/data/shakedown-config/`, which is
    `/data/shakedown-config/` inside the container. Shakedown did not
@@ -4276,19 +4293,32 @@ could not be shown or set from the dashboard; the operator moved timing
 into Shakedown (§req:constraints, operator decision, 2026-11-24).
 Launching a fresh one-shot process per tick keeps the property ofelia
 gave: no run state lives in `serve`, and a tick can never silently no-op
-because a prior run exited. Removing ofelia also removes its read-only
-Docker socket, whose blast radius was host-root-equivalent.
+because a prior run exited. Nothing the dashboard writes ever reaches a
+container that holds the Docker socket: the only socket user is
+Watchtower, behind the proxy, and its configuration is fixed in the
+compose file.
 
 **Alternatives rejected.** *Keep ofelia and let the dashboard rewrite
 its labels* — still needs the Docker socket and a redeploy per change.
+*Generate an ofelia job file from the dashboard's schedules* (the
+netresearch fork reloads its INI file) — keeps per-tick image pulls and
+syncs that outlive a `serve` restart, but switches to a fork, keeps two
+scheduling layers in step, and lets an unauthenticated page write job
+definitions for the container holding the Docker socket, where an
+injected volume or command is root on the host (operator decision,
+2026-11-24). *No automatic updates* — simplest, but the operator wants
+`latest` to keep updating Shakedown.
 *Host cron* — needs SSH (§req:success-criteria #6). *Keep the config
 mounted read-only and store dashboard edits elsewhere* — breaks the file
 as the source of truth (§req:constraints).
 
 **Tradeoffs.** `serve` is now required for scheduled syncs, and a tick
-missed while it is stopped is not caught up (§req:constraints). The image
-no longer updates itself at each tick, as ofelia's pull of `latest` did;
-an update is a recreate of `serve`, which stops a running sync. Runs can
+missed while it is stopped is not caught up (§req:constraints). An update
+recreates `serve`, which stops a running sync until its next run. The
+socket proxy shrinks what Watchtower can ask Docker for, but creating
+containers is still host-root-equivalent in principle: the proxy narrows
+the attack surface, not the privilege, so operators still place the
+stack accordingly. Two more containers run in the stack. Runs can
 now write the config folder, which the read-only mount used to prevent;
 no run writes it, and the command handoff that could is set only in the
 file (§spec:dashboard-settings). Scheduled run output goes to the
