@@ -114,12 +114,16 @@ async def test_no_answer_log_or_output_shows_a_credential(
         response = await client.post("/validate", headers=SAME_ORIGIN)
         answers.append(response.text)
 
+        # The parameters a read needs to answer at all.
+        params = {
+            "/api/source-link": {"type": "ia", "url": "https://archive.org/details/GratefulDead"},
+        }
         for route in app.routes:
             path = getattr(route, "path", "")
             if (path.startswith("/api/") or path in ("/status", "/metrics")) and (
                 "GET" in getattr(route, "methods", set())
             ):
-                response = await client.get(path)
+                response = await client.get(path, params=params.get(path))
                 assert response.status_code == 200, path
                 answers.append(response.text)
 

@@ -51,7 +51,7 @@ from shakedown.dashboard import (
 )
 from shakedown.dashboard_activity import activity_answer
 from shakedown.dashboard_attention import attention_answer
-from shakedown.dashboard_config import config_answer
+from shakedown.dashboard_config import config_answer, source_link_answer
 from shakedown.dashboard_health import health_answer
 from shakedown.dashboard_library import library_answer
 from shakedown.dashboard_network import network_answer
@@ -265,6 +265,15 @@ def build_app(
     @app.get("/api/config")
     def config_resource() -> dict[str, Any]:
         return config_answer(config_path)
+
+    # A pasted link read as its source's search (§spec:dashboard-settings "Pasted
+    # links"). Reads nothing and writes nothing: no write gate, and no config needed.
+    @app.get("/api/source-link")
+    def source_link(type: str = Query(), url: str = Query()) -> dict[str, str | None]:
+        answer = source_link_answer(type, url)
+        if answer is None:
+            raise Refusal(404, "source_type_unknown")
+        return answer
 
     # First-run setup (§spec:first-run-setup): the defaults it offers, read-only.
     @app.get("/api/setup")
