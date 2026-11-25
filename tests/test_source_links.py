@@ -43,6 +43,7 @@ MORE_LINKS: list[tuple[str, str | None]] = [
     ("https://archive.org/", None),
     ("https://example.net/details/GratefulDead", None),
     ("collection:GratefulDead", None),
+    ("https://[::1/details/GratefulDead", None),  # not a URL urlsplit can parse
 ]
 
 

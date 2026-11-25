@@ -41,8 +41,12 @@ def query_from_link(url: str) -> str | None:
     `collection:<id>`, or `collection:<id> AND (<q>)` with `?query=<q>`;
     `/search?query=<q>` and `/advancedsearch.php?q=<q>` are `<q>`. Other parameters
     are ignored; any other link is None."""
-    parts = urlsplit(url.strip())
-    if parts.scheme not in ("http", "https") or (parts.hostname or "") not in HOSTS:
+    try:
+        parts = urlsplit(url.strip())
+        host = parts.hostname or ""
+    except ValueError:  # not a URL at all, e.g. an unclosed IPv6 bracket
+        return None
+    if parts.scheme not in ("http", "https") or host not in HOSTS:
         return None
     params = parse_qs(parts.query)
 
