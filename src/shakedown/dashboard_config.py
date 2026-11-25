@@ -125,7 +125,8 @@ def credentials_of(config: Config) -> list[dict[str, str]]:
 
 def source_types() -> list[dict[str, Any]]:
     """Per installed source plugin: the layout fields and filters its
-    `library_layout` accepts, and whether it takes credentials."""
+    `library_layout` accepts, whether it takes credentials, and whether it reads
+    pasted links (`GET /api/source-link`)."""
     answer = []
     for type_name in registry.known_types():
         plugin = registry.plugin_class(type_name)
@@ -135,6 +136,7 @@ def source_types() -> list[dict[str, Any]]:
                 "layout_fields": list(plugin.template_fields),
                 "layout_filters": list(FILTER_NAMES),
                 "takes_credentials": plugin.takes_credentials,
+                "reads_links": plugin.reads_links(),
             }
         )
     return answer
