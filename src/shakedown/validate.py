@@ -3,8 +3,8 @@
 A dedicated preflight an operator runs *before* the first large mirror. It reuses the
 same startup configuration contract as every command, then continues into setup-specific
 probes — path writability, archive→library hardlink probe, source/collection
-reachability, layout collision-risk, and handoff readiness — and reports one grouped pass/fail result per source and collection. Each
-failing check names the affected setting/source/collection, the plain-language
+reachability, layout collision-risk, and handoff readiness — and reports one grouped
+pass/fail result per source and collection. Each failing check names the affected setting/source/collection, the plain-language
 consequence, and the user action needed to continue.
 
 Crucially it never downloads a full collection and never leaves archive or library items

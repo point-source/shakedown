@@ -104,7 +104,7 @@ def test_unknown_source_plugin_reports_failure_without_crashing(
 # -- combined acceptance scenario (matches the batch verify criteria) ------------
 
 
-def test_combined_failures_named_and_no_items(tmp_path: Path, monkeypatch) -> None:
+def test_combined_failures_named_and_no_items(tmp_path: Path) -> None:
     library = tmp_path / "library"
     library.mkdir()
     blocker = tmp_path / "blocker"
