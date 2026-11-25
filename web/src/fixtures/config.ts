@@ -1,5 +1,7 @@
 // GET /api/config, captured from shakedown.dashboard_config.config_answer on the
-// example config (2026-11-24) and given the fixture paths, timezone, and clock.
+// example config (2026-11-24) and given the fixture paths, timezone, and clock,
+// less the login fields §spec:dashboard-credentials withdraws and plus
+// `reads_links` (§spec:dashboard-settings, round S3).
 import type { ConfigAnswer } from "@/api/types"
 
 export const config: ConfigAnswer = {
@@ -19,10 +21,6 @@ export const config: ConfigAnswer = {
       {
         "name": "internetarchive",
         "type": "ia",
-        "auth": {
-          "email_env": "IA_EMAIL",
-          "password_env": "IA_PASSWORD"
-        },
         "collections": [
           {
             "name": "grateful-dead",
@@ -54,7 +52,6 @@ export const config: ConfigAnswer = {
       {
         "name": "etree-lma",
         "type": "etree",
-        "auth": null,
         "collections": [
           {
             "name": "etree-lma",
@@ -79,16 +76,6 @@ export const config: ConfigAnswer = {
     "timezone": "Europe/London"
   },
   "errors": [],
-  "credentials": [
-    {
-      "source": "internetarchive",
-      "credentials": "dashboard"
-    },
-    {
-      "source": "etree-lma",
-      "credentials": "none"
-    }
-  ],
   "next_syncs": [
     {
       "source": "internetarchive",
@@ -124,7 +111,7 @@ export const config: ConfigAnswer = {
         "short",
         "upper"
       ],
-      "takes_credentials": false
+      "reads_links": true
     },
     {
       "type": "ia",
@@ -143,7 +130,7 @@ export const config: ConfigAnswer = {
         "short",
         "upper"
       ],
-      "takes_credentials": true
+      "reads_links": true
     }
   ],
   // Removed from the file with its files kept (§spec:collection-removal).

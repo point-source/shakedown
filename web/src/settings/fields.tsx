@@ -4,6 +4,7 @@
 import type { ReactNode } from "react"
 import { Field, FieldContent, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 import type { Loc } from "@/api/types"
 import { getIn, locKey, useDraft } from "@/settings/draft"
@@ -34,8 +35,10 @@ function describedBy(path: Loc, help: boolean, d: ReturnType<typeof useDraft>) {
 }
 
 /** A text or whole-number setting. `blank` is what an empty field saves (null for an optional key). */
-export function TextSetting({ path, label, help, number, blank = "", placeholder, readOnlyNote, get, put }: {
+export function TextSetting({ path, label, help, number, multiline, blank = "", placeholder, readOnlyNote, get, put }: {
   path: Loc; label: string; help?: ReactNode; number?: boolean; blank?: string | null; placeholder?: string
+  /** A long value (a search): wraps instead of scrolling sideways. */
+  multiline?: boolean
   /** Read and write somewhere other than `path` (a value whose parent may be absent); `path` still names its problems. */
   get?: () => string | number | null
   put?: (v: unknown) => void
@@ -59,20 +62,32 @@ export function TextSetting({ path, label, help, number, blank = "", placeholder
   return (
     <Field data-invalid={d.problem(path) ? true : undefined}>
       <FieldLabel htmlFor={id}>{label}</FieldLabel>
-      <Input
-        id={id}
-        inputMode={number ? "numeric" : undefined}
-        value={shown ?? ""}
-        placeholder={placeholder}
-        aria-invalid={d.problem(path) ? true : undefined}
-        aria-describedby={describedBy(path, !!help, d)}
-        onChange={(e) => {
-          const v = e.target.value
-          // A whole number saves as a number; anything else is sent as typed so the
-          // save's own check names the problem (§spec:dashboard-settings).
-          write(v === "" ? blank : number && /^\d+$/.test(v) ? Number(v) : v)
-        }}
-      />
+      {multiline ? (
+        <Textarea
+          id={id}
+          rows={2}
+          value={shown ?? ""}
+          placeholder={placeholder}
+          aria-invalid={d.problem(path) ? true : undefined}
+          aria-describedby={describedBy(path, !!help, d)}
+          onChange={(e) => write(e.target.value === "" ? blank : e.target.value)}
+        />
+      ) : (
+        <Input
+          id={id}
+          inputMode={number ? "numeric" : undefined}
+          value={shown ?? ""}
+          placeholder={placeholder}
+          aria-invalid={d.problem(path) ? true : undefined}
+          aria-describedby={describedBy(path, !!help, d)}
+          onChange={(e) => {
+            const v = e.target.value
+            // A whole number saves as a number; anything else is sent as typed so the
+            // save's own check names the problem (§spec:dashboard-settings).
+            write(v === "" ? blank : number && /^\d+$/.test(v) ? Number(v) : v)
+          }}
+        />
+      )}
       <Notes path={path} help={help} />
     </Field>
   )

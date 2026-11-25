@@ -150,7 +150,7 @@ export function attentionWords(e: AttentionEntry, now: string): AttentionWords {
   }
 }
 
-// ---- Settings (§spec:dashboard-settings, §spec:edit-lock, §spec:dashboard-credentials) ----
+// ---- Settings (§spec:dashboard-settings, §spec:edit-lock) ----
 
 /** A config error's words, against the setting its `loc` names. `message` is
  *  developer text and never shown; the code is enough. */
@@ -184,10 +184,4 @@ export const WARNING: Record<string, string> = {
   hardlink_failed: "Library files can't link to the archive here. Put both folders on the same drive.",
   path_moved: "Shakedown moves nothing: the next sync downloads again what the old location held.",
   layout_not_unique: "Two shows could land in one folder. Add {identifier} to keep them apart.",
-}
-
-export const CREDENTIALS: Record<"environment" | "dashboard" | "none", string> = {
-  environment: "From environment variables",
-  dashboard: "Saved in the dashboard",
-  none: "No login",
 }

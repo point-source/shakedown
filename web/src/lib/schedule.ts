@@ -36,7 +36,7 @@ export function writeSchedule(s: Schedule): string | null {
   }
 }
 
-const hhmm = (h: number, m: number) => `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
+export const hhmm = (h: number, m: number) => `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
 
 /** One line for a collection row: "Daily at 03:30", "Weekly, Sunday at 03:00". */
 export function scheduleLine(expr: string | null): string {
@@ -47,4 +47,18 @@ export function scheduleLine(expr: string | null): string {
     case "manual": return "Manual only"
     case "cron": return `Custom: ${s.expr}`
   }
+}
+
+/** A new collection's schedule (§spec:schedules "Staggered default"): Weekly on
+ * Sunday at the first whole hour from 03:00 at which no other collection starts. */
+export function staggeredDefault(existing: (string | null)[]): string {
+  const taken = new Set<number>()
+  for (const e of existing) {
+    const s = readSchedule(e)
+    if (s.kind === "daily" && s.minute === 0) taken.add(s.hour)
+    if (s.kind === "weekly" && s.day === 0 && s.minute === 0) taken.add(s.hour)
+  }
+  let hour = 3
+  while (taken.has(hour) && hour < 23) hour++
+  return writeSchedule({ kind: "weekly", day: 0, hour, minute: 0 })!
 }

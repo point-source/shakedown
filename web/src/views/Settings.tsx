@@ -9,10 +9,14 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter,
   AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import type { ConfigAnswer, ConfigDocument, ConfigProblem, ConfigWarning, Loc } from "@/api/types"
+import type { CollectionConfig, ConfigAnswer, ConfigDocument, ConfigProblem, ConfigWarning, LibraryAnswer, Loc } from "@/api/types"
 import { RowsSkeleton } from "@/dash/bits"
 import { refusal, send, useNote } from "@/dash/actions"
 import { problemWords, WARNING } from "@/lib/words"
+import { staggeredDefault } from "@/lib/schedule"
+import { CollectionEditor, type RemoveScope } from "@/settings/Collection"
+import { AddSource } from "@/settings/AddSource"
+import { collectionHref, useSettingsRoute } from "@/settings/route"
 import { DraftCtx, locKey, setIn, type Draft } from "@/settings/draft"
 import { FailureNoticeCard, FoldersCard, RunsCard } from "@/settings/General"
 import { RemovedCard } from "@/settings/Removed"
@@ -64,6 +68,10 @@ function Override({ onDone }: { onDone: () => void }) {
 }
 
 function SaveBar({ problems, saving, onDiscard, onSave }: { problems: number; saving: boolean; onDiscard: () => void; onSave: () => void }) {
+  useEffect(() => {
+    document.body.dataset.saveBar = ""
+    return () => { delete document.body.dataset.saveBar }
+  }, [])
   return (
     <div className="fixed inset-x-0 bottom-0 z-10 border-t bg-background">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-6">
@@ -79,8 +87,20 @@ function SaveBar({ problems, saving, onDiscard, onSave }: { problems: number; sa
   )
 }
 
-export function SettingsView({ config, now, onChanged }: { config: ConfigAnswer | null; now: string; onChanged: () => void }) {
+const newCollection = (name: string, schedule: string): CollectionConfig => ({
+  name, query: "", library_layout: "passthrough", prune_disappeared: false, incremental_discovery: false,
+  preserve_source_metadata: false, fill_tags: false, on_complete: null, schedule,
+})
+
+type Fresh = { source: string; j: number }
+
+export function SettingsView({ config, library, now, onChanged }: {
+  config: ConfigAnswer | null; library: LibraryAnswer | null; now: string; onChanged: () => void
+}) {
   const note = useNote()
+  const route = useSettingsRoute()
+  // The collection being added (route "?add"), held in the draft until it saves.
+  const [fresh, setFresh] = useState<Fresh | null>(null)
   const [doc, setDoc] = useState<ConfigDocument | null>(config?.document ?? null)
   const [revision, setRevision] = useState<string | null>(config?.revision ?? null)
   const [dirty, setDirty] = useState(false)
@@ -101,6 +121,24 @@ export function SettingsView({ config, now, onChanged }: { config: ConfigAnswer 
     setRevision(config.revision)
     setErrors(null)
   }, [config, dirty])
+
+  // Opening "add" puts a new collection with the staggered schedule into the draft.
+  useEffect(() => {
+    if (route.page !== "new" || !doc || config?.edit === "locked") return
+    if (fresh && fresh.source === route.source) return
+    const i = doc.sources.findIndex((s) => s.name === route.source)
+    if (i < 0) return
+    const all = doc.sources.flatMap((s) => s.collections.map((c) => c.schedule))
+    const c = newCollection(route.name, staggeredDefault(all))
+    let d = doc
+    if (fresh) { // one new collection at a time: one left on another source goes
+      const k = d.sources.findIndex((s) => s.name === fresh.source)
+      if (k >= 0) d = setIn(d, ["sources", k, "collections"], d.sources[k].collections.filter((_, n) => n !== fresh.j))
+    }
+    setDoc(setIn(d, ["sources", i, "collections"], [...d.sources[i].collections, c]))
+    setFresh({ source: route.source, j: d.sources[i].collections.length })
+    setDirty(true)
+  }, [route, doc, fresh, config?.edit])
 
   const shownErrors = errors ?? config?.errors ?? []
   const byLoc = useMemo(() => {
@@ -127,23 +165,29 @@ export function SettingsView({ config, now, onChanged }: { config: ConfigAnswer 
   const elsewhere = shownErrors.filter((e) => !shownHere(e.loc, doc))
   const execUsesStaging = doc.sources.some((s) => s.collections.some((c) => c.on_complete && "exec" in c.on_complete && c.on_complete.exec.includes("{staging_root}")))
 
-  const discard = () => { applied.current = config.revision; setDoc(config.document); setRevision(config.revision); setDirty(false); setErrors(null); setWarnings([]) }
-  const save = async () => {
+  const discard = () => {
+    applied.current = config.revision; setDoc(config.document); setRevision(config.revision); setDirty(false); setErrors(null); setWarnings([])
+    setFresh(null)
+    if (route.page === "new") location.hash = "settings"
+  }
+  /** Writes a document: its warnings when it saved, null when refused. Every refusal is told here. */
+  const put = async (next: ConfigDocument): Promise<ConfigWarning[] | null> => {
     setSaving(true)
     const a = await send<{ revision?: string; warnings?: ConfigWarning[]; errors?: ConfigProblem[]; code?: string; path?: string }>(
-      "PUT", "api/config", { revision, document: doc })
+      "PUT", "api/config", { revision, document: next })
     setSaving(false)
     const b = a.body ?? {}
     if (a.status === 200) {
+      setDoc(next)
       setRevision(b.revision ?? null)
       setDirty(false)
       setErrors([])
       setWarnings(b.warnings ?? [])
-      note((b.warnings?.length ?? 0) > 0
-        ? { tone: "warning", title: "Saved, with warnings", text: "Each one is under its setting." }
-        : { tone: "success", title: "Settings saved", text: "Runs use them from their next start." })
+      setFresh(null)
       onChanged()
-    } else if (a.status === 422 && b.errors) {
+      return b.warnings ?? []
+    }
+    if (a.status === 422 && b.errors) {
       setErrors(b.errors)
       note({ tone: "danger", title: "Nothing saved", text: "Fix the settings marked in red, then save again." })
     } else if (a.status === 409 && b.code === "changed") setConflict(true)
@@ -153,11 +197,73 @@ export function SettingsView({ config, now, onChanged }: { config: ConfigAnswer 
     else if (a.status === 500 && b.code === "write_failed")
       note({ tone: "danger", title: "Shakedown couldn't write the file", text: `Check that ${b.path ?? config.path} isn't read-only. Nothing changed.` })
     else note(refusal(a))
+    return null
   }
+  const save = async () => {
+    const added = fresh && route.page === "new" ? doc.sources.find((s) => s.name === fresh.source)?.collections[fresh.j] : undefined
+    const w = await put(doc)
+    if (w === null) return
+    note(w.length > 0
+      ? { tone: "warning", title: "Saved, with warnings", text: "Each one is under its setting." }
+      : { tone: "success", title: "Settings saved", text: "Runs use them from their next start." })
+    if (added && fresh) location.replace(collectionHref(fresh.source, added.name))
+  }
+  // Remove = save the file without it, then start the delete chosen
+  // (§spec:collection-removal "Remove and delete in one go").
+  const remove = async (source: string, name: string, scope: RemoveScope) => {
+    const i = doc.sources.findIndex((s) => s.name === source)
+    const w = await put(setIn(doc, ["sources", i, "collections"], doc.sources[i].collections.filter((c) => c.name !== name)))
+    if (w === null) return
+    location.hash = "settings"
+    if (scope === "keep") {
+      note({ tone: "success", title: `Removed ${name}`, text: "Its files stay, listed under Removed collections." })
+      return
+    }
+    const a = await send<{ code?: string; detail?: string }>("POST", "api/collections/purge", { source, collection: name, scope })
+    if (a.status === 202) note({ tone: "success", title: `Removed ${name}`, text: "Deleting its files. It shows under Running now." })
+    else if (a.status === 409 && !a.body?.code)
+      note({ tone: "warning", title: `Removed ${name}, files kept`, text: "A run is in progress, so nothing was deleted. Delete them under Removed collections when it ends." })
+    else note({ tone: "warning", title: `Removed ${name}, files kept`, text: `${refusal(a).title}. Delete them under Removed collections.` })
+    onChanged()
+  }
+
+  const at = route.page === "list" ? null : (() => {
+    const i = doc.sources.findIndex((s) => s.name === route.source)
+    if (i < 0) return null
+    const j = route.page === "new"
+      ? (fresh?.source === route.source ? fresh.j : -1)
+      : doc.sources[i].collections.findIndex((c, n) => c.name === route.collection && !(fresh?.source === route.source && fresh.j === n))
+    return j < 0 ? null : { i, j }
+  })()
+
+  const page = route.page === "list" ? null : at ? (
+    <CollectionEditor
+      key={`${at.i}.${at.j}`}
+      config={config}
+      library={library}
+      now={now}
+      i={at.i}
+      j={at.j}
+      fresh={route.page === "new"}
+      otherChanges={dirty}
+      problems={shownErrors}
+      onRemove={(scope) => remove(doc.sources[at.i].name, doc.sources[at.i].collections[at.j].name, scope)}
+    />
+  ) : (
+    <Card>
+      <CardContent className="flex flex-col items-start gap-2">
+        <p>{route.page === "new" && !editable
+          ? "Settings are read-only, so collections can't be added here."
+          : route.page === "new" ? `There's no source called ${route.source}.` : `There's no collection called ${route.collection} in ${route.source}.`}</p>
+        <a href="#settings" className="text-sm text-primary underline-offset-4 hover:underline">Back to Settings</a>
+      </CardContent>
+    </Card>
+  )
 
   return (
     <DraftCtx.Provider value={draft}>
       <div className={`flex flex-col gap-4 ${dirty ? "pb-20" : ""}`}>
+        {page ?? <>
         <p className="text-sm text-muted-foreground wrap-anywhere">
           Saved to {config.path}. Runs use changes from their next start.
         </p>
@@ -166,7 +272,7 @@ export function SettingsView({ config, now, onChanged }: { config: ConfigAnswer 
             <Lock />
             <AlertTitle>Settings are read-only</AlertTitle>
             <AlertDescription>
-              <p>shakedown.yaml was written outside Shakedown, so the dashboard doesn't change it. Logins, Sync now, Validate, Trim history now, and deleting removed collections' files still work.</p>
+              <p>shakedown.yaml was written outside Shakedown, so the dashboard doesn't change it. Sync now, Validate, Trim history now, and deleting removed collections' files still work.</p>
               <Override onDone={onChanged} />
             </AlertDescription>
           </Alert>
@@ -191,11 +297,15 @@ export function SettingsView({ config, now, onChanged }: { config: ConfigAnswer 
           </div>
           <RunsCard />
         </div>
-        <h2 className="mt-2 text-base font-semibold">Sources</h2>
+        <div className="mt-2 flex items-center gap-4">
+          <h2 className="text-base font-semibold">Sources</h2>
+          {editable && <AddSource types={config.source_types.map((t) => t.type)} />}
+        </div>
         {doc.sources.map((s, i) => (
-          <SourceCard key={s.name} index={i} source={s} config={config} now={now} onChanged={onChanged} />
+          <SourceCard key={i} index={i} source={s} config={config} now={now} fresh={fresh?.source === s.name ? fresh.j : null} />
         ))}
         <RemovedCard removed={config.unconfigured} onDone={onChanged} />
+        </>}
       </div>
       {dirty && editable && <SaveBar problems={errors?.length ?? 0} saving={saving} onDiscard={discard} onSave={save} />}
       <AlertDialog open={conflict} onOpenChange={setConflict}>

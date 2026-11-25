@@ -40,7 +40,8 @@ export function Notes({ children }: { children: ReactNode }) {
             </div>
           </Toast>
         ))}
-        <ToastViewport />
+        {/* Above the Settings save bar while it shows, so a toast never covers Save. */}
+        <ToastViewport className="sm:in-data-[save-bar]:bottom-16" />
       </ToastProvider>
     </Ctx.Provider>
   )

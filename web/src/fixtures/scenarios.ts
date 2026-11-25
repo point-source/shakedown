@@ -2,6 +2,7 @@
 // shapes of src/api/types.ts, with a fixed clock. Served to the real page by
 // intercepting its requests (scripts/render.mjs, tests/screens.spec.ts).
 import type {
+  SourceLinkAnswer,
   ActivityAnswer, AttentionAnswer, AttentionEntry, ConfigAnswer, HealthAnswer, HistoryRun, LibraryAnswer, NetworkAnswer,
   RunsAnswer,
 } from "@/api/types"
@@ -16,7 +17,7 @@ export type Answers = {
   attention: AttentionAnswer
   health: HealthAnswer
   config: ConfigAnswer
-}
+} & { [link: `source-link?${string}`]: SourceLinkAnswer }
 
 /** An answer to a write (POST/PUT/DELETE), keyed "<METHOD> <path after the page>",
  *  e.g. "POST sync?source=internetarchive&collection=phish" or "PUT api/config". */
@@ -40,7 +41,23 @@ const at = (minutesAgo: number) =>
   new Date(Date.parse(NOW) - minutesAgo * 60_000).toISOString().replace(".000Z", "+00:00")
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v))
 
+// What the ia plugin answers for the links the editor's tests and renders paste
+// (§spec:dashboard-settings "Pasted links"); any other link reads as unreadable.
+const LINKS: [string, string | null][] = [
+  ["https://archive.org/details/GratefulDead", "collection:GratefulDead"],
+  ["https://archive.org/details/BobWeir", "collection:BobWeir"],
+  ["https://archive.org/details/etree?query=phish&tab=collection", "collection:etree AND (phish)"],
+  ["https://archive.org/search?query=collection%3APhish+AND+year%3A1997", "collection:Phish AND year:1997"],
+  ["https://archive.org/advancedsearch.php?q=creator%3A%22Grateful+Dead%22&fl%5B%5D=identifier", 'creator:"Grateful Dead"'],
+  ["https://example.net/bob-weir", null],
+  ["https://example.net/shows", null],
+]
+const linkAnswers = () => Object.fromEntries(
+  LINKS.map(([url, query]) => [`source-link?${new URLSearchParams({ type: "ia", url })}`, { query }]),
+) as Record<`source-link?${string}`, SourceLinkAnswer>
+
 const defaultAnswers = (): Answers => clone({
+  ...linkAnswers(),
   activity: base.activity,
   "network?days=30": base.network,
   "runs?days=30": base.runs,
@@ -306,7 +323,22 @@ const VALIDATION_PROBLEMS = {
 function settingsLocked(): Answers {
   const a = defaultAnswers()
   a.config.edit = "locked"
-  a.config.credentials[0].credentials = "environment"
+  return a
+}
+
+// Every way a collection's schedule and handoff read back: phish is manual only
+// and hands off with a command that uses {staging_root} (so the library folder is
+// file-only too); etree-lma runs on a custom cron.
+function settingsVariety(): Answers {
+  const a = defaultAnswers()
+  const [ia, etree] = a.config.document!.sources
+  ia.collections[1].schedule = null
+  ia.collections[1].on_complete = { exec: "/scripts/beets-import.sh {staging_root}" }
+  etree.collections[0].schedule = "0 2 1,15 * *"
+  a.config.next_syncs = [
+    a.config.next_syncs[0],
+    { source: "etree-lma", collection: "etree-lma", next_at: "2026-11-15T02:00:00+00:00" },
+  ]
   return a
 }
 
@@ -358,19 +390,26 @@ export const SCENARIOS: Record<string, Scenario> = {
     writes: { [PHISH_SYNC]: { status: 409, body: { detail: "a run is in progress; try again when it finishes" } },
       "POST validate": { status: 200, body: VALIDATION_PROBLEMS } } },
   // Settings: editable (the default answers), locked, and a file with errors; then
-  // each answer a save, a login, a delete, and the override can get.
+  // each answer a save, a delete, and the override can get.
   settings_locked: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsLocked()),
     writes: { "POST api/config/override": { status: 200, body: { edit: "override" } } } },
   settings_invalid: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsInvalid()) },
   settings_saved: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
     writes: { "PUT api/config": { status: 200, body: SAVED_WITH_WARNINGS },
-      "PUT api/credentials": { status: 200, body: { source: "internetarchive", credentials: "dashboard", check: "rejected" } },
       "POST api/collections/purge": { status: 202, body: { started: "purge", source: "internetarchive", collection: "dmb", scope: "everything" } },
       "POST api/history/trim": { status: 202, body: { started: "trim" } } } },
   settings_refused: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
     writes: { "PUT api/config": { status: 422, body: { errors: [
       { loc: ["keep_run_errors_days"], code: "greater_than_equal", message: "Input should be greater than or equal to 30" },
     ] } } } },
+  settings_variety: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsVariety()) },
+  // Saves that go through clean, then the delete after a remove starts or finds a run.
+  settings_clean: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 200, body: { revision: "sha256:2", warnings: [] } },
+      "POST api/collections/purge": { status: 202, body: { started: "purge", source: "internetarchive", collection: "phish", scope: "library" } } } },
+  settings_remove_busy: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 200, body: { revision: "sha256:2", warnings: [] } },
+      "POST api/collections/purge": { status: 409, body: { detail: "a run is in progress; try again when it finishes" } } } },
   settings_conflict: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
     writes: { "PUT api/config": { status: 409, body: { code: "changed" } } } },
   settings_write_failed: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),

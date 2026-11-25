@@ -3502,6 +3502,22 @@ Spec and code names in the last column never appear on screen.
 | Saved, with warnings | The file was saved, and some settings need a look. | partial save | `200 {warnings}` |
 | Nothing saved | A save the file refused; the settings marked in red say why. | invalid, rejected, failed | `422 {errors}` |
 | shakedown.yaml changed | A save refused because the file changed since it was loaded. | conflict, stale revision | `409 changed` |
+| Add source | Add a site to mirror from, by name and type; its first collection opens next. | new source, connect | `sources[]` |
+| Add collection | Open a new collection in a source. | new collection, create | `collections[]` |
+| New collection / Not saved yet | A collection being added that is not in the file yet. | draft, pending | — |
+| Search | The source's own search for the shows a collection mirrors; a pasted link is read into one. | query, filter | `query`, `GET /api/source-link` |
+| Read from the link you pasted | The source turned a pasted link into its search. | parsed, converted | `GET /api/source-link` |
+| Folder layout | How each show's library folder is named, from the source's fields and filters. | template, pattern, path format | `library_layout` |
+| Fill in missing tags | Write tags a file lacks from the source's notes. | autotag, tag filling | `fill_tags` |
+| Keep the source's notes | Keep the source's description beside each show. | metadata sidecar, preserve metadata | `preserve_source_metadata` |
+| Repeat | How often a collection syncs: Daily, Weekly, Manual only, or Custom. | frequency, interval | `schedule` |
+| Manual only | A collection with no schedule; it syncs when someone presses Sync now. | disabled, off, none | `schedule: null` |
+| Custom / Cron expression | A schedule written as five cron fields. | crontab, advanced | `schedule` |
+| Quick change check | Skip looking a show up again when the source says it hasn't changed. | incremental discovery | `incremental_discovery` |
+| Delete shows the source removes | When the source stops listing a show, delete its files too. | prune, sync deletions | `prune_disappeared` |
+| Handoff notice | What tells your music tools that new shows arrived: a webhook, or a command set in the file. | on complete, hook, trigger | `on_complete` |
+| Remove collection… | Take a collection out of shakedown.yaml, keeping or deleting its files. | delete, unsubscribe | `PUT /api/config`, then `POST /api/collections/purge` |
+| Removed X, files kept | The collection left the file, but a run stopped its files being deleted. | partial, failed delete | `409` from purge |
 
 "Updated" carries two meanings, kept on purpose (operator decision,
 2026-11-12): as a count of shows on Runs and Overview, and as the data
@@ -3521,7 +3537,8 @@ is one route (`GET /`) with five tabs.
 | Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content, trims, purges; loading | round 1, 2026-11-12; loading 2026-11-13; trim and delete runs and the Action column, round S1 2026-11-24 |
 | Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
-| Settings tab | `docs/ui/handoff/settings.md` | default, settings-locked, settings-invalid; settings-dirty, -saved-warnings, -refused, -conflict, -delete, -override (`web/tests/settings.spec.ts`) | round S2, 2026-11-24 |
+| Settings tab | `docs/ui/handoff/settings.md` | default, settings-locked, settings-invalid; settings-dirty, -saved-warnings, -refused, -conflict, -delete, -override (`web/tests/settings.spec.ts`) | round S2, 2026-11-24; login removed, Add source and raised toasts, round S3, 2026-11-25 |
+| Collection editor | `docs/ui/handoff/collection.md` | collection-editor, -new, -add-back, -manual-command, -custom, -variety-list, -invalid, -locked; collection-daily, -remove, -remove-busy, -add-source, -link-read, -link-unreadable (`web/tests/collection.spec.ts`) | round S3, 2026-11-25 |
 
 ### Harness
 
@@ -3624,7 +3641,7 @@ loads.
 ## Settings in the dashboard §spec:dashboard-settings
 
 *Status: in progress*
-The API is built, and the Settings tab is designed and built (§spec:ui-kit Screens, round S2); the collection editor and the path checks on screen wait on the Design task.
+The API is built, and the Settings tab and the collection editor are designed and built (§spec:ui-kit Screens, rounds S2 and S3); `GET /api/source-link` and `reads_links` wait on §road:source-links, and the path checks on screen wait on the Design task.
 
 Compatibility, from deployment status "deployed, one install, no
 outside consumers" (§req:constraints, operator-confirmed 2026-11-24):
@@ -3674,9 +3691,9 @@ Observable behavior:
     the dashboard receives, or `null` for a manual-only collection
     (§spec:schedules);
   - `source_types`: per installed source plugin, its `type`, the layout
-    fields and filters its `library_layout` accepts — so the editor
-    can explain the options without
-    hard-coding them;
+    fields and filters its `library_layout` accepts, and whether it
+    reads pasted links (`reads_links`) — so the editor can explain the
+    options without hard-coding them;
   - `unconfigured`: collections that still have shows or files but are
     no longer in the file (§spec:collection-removal);
   - `generated_at`, like every dashboard answer.
@@ -3765,6 +3782,23 @@ Observable behavior:
   errors against the settings they name, and a save that fixes them
   succeeds. An `unreadable` file (bad YAML) has no editor: the dashboard
   shows the error, and the file is fixed by hand.
+- **Pasted links.** A user may paste a link from the source's site
+  into a collection's Search instead of typing the search (operator
+  request, round S3). The source plugin reads it: a plugin may offer
+  `query_from_link(url) -> str | None`, which turns a link into its own
+  search, or `None` for a link it can't read, from the link's text
+  alone, with no request to the source. `GET /api/source-link?type=&url=`
+  answers `200 {query}`, `query` null when unreadable or when the type
+  offers no reading; an unknown type answers
+  `404 {code: "source_type_unknown"}`. It reads nothing and writes
+  nothing, so it is not behind the write gate. The page sends only
+  text that is a web link, replaces it with the answer's search if the
+  field still holds that link, and says so under the field; an
+  unreadable link stays as typed with a warning, and a failed request
+  says to paste it again. The `ia` and `etree` plugins read
+  archive.org links: `/details/<id>` is `collection:<id>`, or
+  `collection:<id> AND (<q>)` when it carries `?query=<q>`; `/search?query=<q>` and
+  `/advancedsearch.php?q=<q>` are `<q>`.
 
 **Decision and constraint.** The dashboard edits the YAML file itself,
 because §req:constraints keeps the file the source of truth so
@@ -3785,6 +3819,11 @@ off the page, a proxy mistake can change settings but cannot run
 programs (operator decision, 2026-11-24). Names are fixed because the
 archive is keyed by them and §req:constraints forbids an upgrade or edit
 path that re-downloads the archive.
+
+Link rules live in the source plugin (operator decision, 2026-11-25):
+each source's site has its own links, and the plugin already owns
+everything else about its source, so a new plugin brings its links
+without a dashboard change.
 
 **Alternatives rejected.** *Keep settings in the state database and
 generate the file* — breaks hand edits and IaC, which §req:constraints
@@ -3820,7 +3859,7 @@ Add `exec:` to a collection's handoff through the API: refused with
 ## Edit lock §spec:edit-lock
 
 *Status: in progress*
-The edit state, `POST /api/config/override`, the locked save, and setup's new `editable` file (`POST /api/setup`) are built; the Settings tab's read-only view and the Allow dashboard edits confirmation are built (round S2); the collection editor's read-only view waits on the Design task.
+The edit state, `POST /api/config/override`, the locked save, and setup's new `editable` file (`POST /api/setup`) are built; the Settings tab's read-only view and the Allow dashboard edits confirmation are built (round S2), and so is the collection editor's read-only view (round S3); what is left is confirming them end to end against the real API.
 
 A `shakedown.yaml` that Shakedown's setup wrote is editable from the
 dashboard from the start. A file that already existed — written by hand
@@ -3892,7 +3931,7 @@ setup: Settings is editable without any override.
 ## Schedules and the scheduler §spec:schedules
 
 *Status: in progress*
-The `schedule` and `timezone` keys, the scheduler with its heartbeat and `--check`, and serve's reporting (health, `/status`, Needs attention, the stale notice) are built; the dashboard schedule editor and preset read-back wait on Design, and `next_syncs` in `GET /api/config` on the config resource.
+The `schedule` and `timezone` keys, the scheduler with its heartbeat and `--check`, and serve's reporting (health, `/status`, Needs attention, the stale notice) are built; the collection editor's schedule presets, custom cron, staggered default for a new collection, and preset read-back are built (round S3); `next_syncs` in `GET /api/config` waits on the config resource.
 
 Each collection's schedule lives in `shakedown.yaml` and is set from the
 dashboard. A long-running Shakedown scheduler, in its own container
@@ -4338,7 +4377,7 @@ and without the dashboard's headers: `403`.
 ## Removing a collection §spec:collection-removal
 
 *Status: in progress*
-The unconfigured list, `POST /api/collections/purge`, and `shakedown purge` are built; the Removed collections list and its Delete files confirmation are built (round S2); the collection editor's remove confirmation waits on Design.
+The unconfigured list, `POST /api/collections/purge`, and `shakedown purge` are built; the Removed collections list and its Delete files confirmation are built (round S2), and so is the collection editor's remove confirmation (round S3); what is left is confirming it end to end against the real API.
 
 Removing a collection stops syncing it. By default its archived shows
 and library folders stay. The dashboard says what happens before the

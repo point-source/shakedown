@@ -243,7 +243,6 @@ export interface HealthAnswer {
 
 export type ConfigState = "missing" | "unreadable" | "invalid" | "valid"
 export type EditState = "editable" | "locked" | "override"
-export type CredentialStatus = "environment" | "dashboard" | "none"
 /** Keys and list indexes to the setting a problem names, e.g. ["sources", 0, "collections", 1, "query"]. */
 export type Loc = (string | number)[]
 
@@ -266,7 +265,6 @@ export interface CollectionConfig {
 export interface SourceConfig {
   name: string
   type: string
-  auth: { email_env: string | null; password_env: string | null } | null
   collections: CollectionConfig[]
   max_concurrent_requests: number | null
 }
@@ -287,8 +285,13 @@ export interface SourceType {
   type: string
   layout_fields: string[]
   layout_filters: string[]
-  takes_credentials: boolean
+  /** The plugin reads pasted links as searches (`GET /api/source-link`). */
+  reads_links: boolean
 }
+
+/** `GET /api/source-link?type=&url=`: the search a pasted link stands for, or
+ *  null when the type's plugin can't read it (§spec:dashboard-settings). */
+export interface SourceLinkAnswer { query: string | null }
 
 export interface UnconfiguredCollection {
   source: string
@@ -306,7 +309,6 @@ export interface ConfigAnswer {
   edit: EditState
   document: ConfigDocument | null
   errors: ConfigProblem[]
-  credentials: { source: string; credentials: CredentialStatus }[]
   next_syncs: { source: string; collection: string; next_at: Iso | null }[]
   source_types: SourceType[]
   unconfigured: UnconfiguredCollection[]

@@ -1,7 +1,7 @@
 # Handoff: Settings tab
 
-*Approved: round S2, 2026-11-24 · Kit: §spec:ui-kit · Endpoints: `GET /api/config`, `PUT /api/config`, `POST /api/config/override`, `PUT /api/credentials`, `DELETE /api/credentials`, `POST /api/collections/purge`, `POST /api/history/trim` (§spec:dashboard-settings, §spec:edit-lock, §spec:dashboard-credentials, §spec:collection-removal, §spec:run-error-retention)*
-*Code: `web/src/views/Settings.tsx`, `web/src/settings/` (`draft.ts`, `fields.tsx`, `General.tsx`, `Sources.tsx`, `Removed.tsx`), `web/src/lib/schedule.ts`, `problemWords`/`WARNING`/`CREDENTIALS` in `web/src/lib/words.ts`*
+*Approved: round S2, 2026-11-24 · Kit: §spec:ui-kit · Endpoints: `GET /api/config`, `PUT /api/config`, `POST /api/config/override`, `POST /api/collections/purge`, `POST /api/history/trim` (§spec:dashboard-settings, §spec:edit-lock, §spec:collection-removal, §spec:run-error-retention)*
+*Code: `web/src/views/Settings.tsx`, `web/src/settings/` (`draft.ts`, `fields.tsx`, `General.tsx`, `Sources.tsx`, `Removed.tsx`, `AddSource.tsx`, `route.ts`), `web/src/lib/schedule.ts`, `problemWords`/`WARNING` in `web/src/lib/words.ts`*
 
 ## Purpose
 
@@ -20,7 +20,6 @@ hand; see why a file Shakedown didn't write can't be changed here.
 | Keep run errors for (days) | `keep_run_errors_days` | whole number | — |
 | Webhook URL (Failure notice) | `notifications.on_failure.webhook` | as typed | placeholder "None"; empty saves `notifications: null` |
 | Source card title, "Type x" | `sources[].name`, `.type` | as is | — |
-| Login | `credentials[].credentials` | `CREDENTIALS`: "From environment variables", "Saved in the dashboard", "No login" | "No login"; shown only when `source_types[].takes_credentials` |
 | Requests at once | `sources[].max_concurrent_requests` | whole number | placeholder "Same as downloads at once"; empty saves `null` |
 | Collection row | `collections[].name`, `.schedule`, `next_syncs[].next_at` | `scheduleLine()`: "Daily at 03:30", "Weekly, Sunday at 03:00", "Manual only", "Custom: <expr>"; "Next sync " + `clock()` | Next sync omitted when absent |
 | "N settings have errors" on a row | `errors[]` whose `loc` is under that collection | count | omitted at 0 |
@@ -34,20 +33,23 @@ hand; see why a file Shakedown didn't write can't be changed here.
 One column of cards under the page text "Saved to <path>. Runs use
 changes from their next start." From 1024 px a two-column grid: Folders
 and Failure notice on the left, Runs on the right; below that an `h2`
-"Sources", then one Card per source, then Removed collections. Below
-1024 px every card stacks in that order.
+"Sources" with an outline "Add source" button beside it (editable
+only; its dialog is in the collection editor handoff), then one Card per
+source, then Removed collections. Below 1024 px every card stacks in
+that order.
 
 - **Runs**: Collections at once and Downloads at once side by side from
   640 px; then Time zone, Keep run errors for (days), and the Trim
   history now button with its line.
-- **Source card**: CardAction "Add collection" (editable only). Login
-  and Requests at once side by side from 1024 px. "Collections" then a
+- **Source card**: CardAction "Add collection" (editable only). Requests
+  at once, half the card's width from 1024 px. "Collections" then a
   bordered list, one link row per collection (name, schedule, Next sync,
   error count, ChevronRight); from 1024 px the row's facts sit in fixed
   columns, below they stack.
 - **Save bar**: fixed to the bottom edge, full width, `border-t
   bg-background`, appears on the first edit; the page gains bottom
-  padding so the last card clears it.
+  padding so the last card clears it. From 640 px, toasts sit above it
+  while it shows, so a toast never covers Save.
 - Components: Card, Field (FieldLabel, FieldDescription, FieldError),
   Input, Button, Alert, AlertDialog, Dialog, RadioGroup, Label, toast.
 
@@ -55,14 +57,13 @@ and Failure notice on the left, Runs on the right; below that an `h2`
 
 | State | Scenario | What changes | Golden |
 | --- | --- | --- | --- |
-| default (editable) | `default` | Every setting as an Input; Add collection, Change login and Forget, Add back | `default-settings` |
-| read-only | `settings_locked` | Alert "Settings are read-only" with Allow dashboard edits; settings as label plus text ("Not set" or the placeholder when empty); no Add collection or Add back; login "From environment variables" with its note; Trim history now and Delete files… stay | `settings-locked-settings` |
+| default (editable) | `default` | Every setting as an Input; Add source, Add collection, Add back | `default-settings` |
+| read-only | `settings_locked` | Alert "Settings are read-only" with Allow dashboard edits; settings as label plus text ("Not set" or the placeholder when empty); no Add collection or Add back; Trim history now and Delete files… stay | `settings-locked-settings` |
 | file with errors | `settings_invalid` | Errors under Time zone and Keep run errors for; "1 setting has an error" on phish; destructive Alert at the top for `max_concurrent_collectons` | `settings-invalid-settings` |
 | unsaved | `settings_saved`, after an edit | Save bar "Unsaved changes", Discard, Save | `settings-dirty` |
 | saved with warnings | `settings_saved`, after Save | Both warnings under Library folder; toast "Saved, with warnings" | `settings-saved-warnings` |
 | refused (422) | `settings_refused`, after Save | Field red with "Enter 30 or more."; bar "1 setting needs fixing before it saves"; toast "Nothing saved"; the edit stays | `settings-refused` |
 | file changed (409 changed) | `settings_conflict`, after Save | AlertDialog "shakedown.yaml changed": Not now, Reload settings | `settings-conflict` |
-| login dialog | `settings_saved`, Change login | Dialog "Login for internetarchive": Email, Password, Cancel, Save login | `settings-login` |
 | delete dialog | `settings_saved`, Delete files… then the second choice | AlertDialog "Delete files for dmb?", destructive "Delete everything" | `settings-delete` |
 | override confirm | `settings_locked`, Allow dashboard edits | AlertDialog "Allow dashboard edits?" | `settings-override` |
 | write failed (500) | `settings_write_failed` | Toast "Shakedown couldn't write the file"; the edit stays | behaviour test |
@@ -92,21 +93,11 @@ gives the space back to the disk."
 Failure notice: "Failure notice", "Shakedown posts to this address when
 a run fails.", "Webhook URL".
 
-Sources: "Sources", "Type <type>", "Add collection", "Login", "Change
-login" / "Add login", "Forget", "Set in the container. Environment
-variables win over a login entered here.", "Requests at once" ("The most
+Sources: "Sources", "Add source", "Type <type>", "Add collection", "Requests at once" ("The most
 connections Shakedown opens to this source, across all its
 collections."), "Collections", "Next sync <clock>", "1 setting has an
 error" / "N settings have errors"; screen-reader "Edit <name>" / "Show
 <name>".
-
-Login dialog: "Login for <source>", "For shows that need an account to
-download. Shakedown keeps it in its database and never shows it again.",
-"Email", "Password", "Cancel", "Save login" ("Checking…"). Toasts:
-"Login accepted" / "<source> accepted the login."; "Login rejected" /
-"<source> rejected it. It's saved; check it and enter it again."; "Login
-saved, not checked" / "Shakedown couldn't reach <source>. Validate
-checks it later."; "Login forgotten".
 
 Removed collections: "Removed collections", "No longer synced. Their
 files are still on disk.", "Add back", "Delete files…". Dialog "Delete
@@ -121,7 +112,7 @@ Toasts: "Deleting files" / "<name>. It shows under Running now.";
 left to delete".
 
 Read-only: "Settings are read-only", "shakedown.yaml was written outside
-Shakedown, so the dashboard doesn't change it. Logins, Sync now,
+Shakedown, so the dashboard doesn't change it. Sync now,
 Validate, Trim history now, and deleting removed collections' files
 still work.", "Allow dashboard edits". Confirm: "Allow dashboard
 edits?", "If shakedown.yaml is later changed where it came from, by hand
@@ -155,25 +146,29 @@ and `WARNING` in `web/src/lib/words.ts`; "shakedown.yaml has an error" /
   new and nothing is being edited; after a save the values stay up until
   the refresh brings the file back. Discard and Reload settings return
   to the last answer.
-- After a save, a login, a forget, a delete, or the override, the page
+- After a save, a delete, or the override, the page
   refetches `GET /api/config` and `GET /api/health`.
 - Editing any setting clears the last save's warnings. A 422's errors
   replace the file's errors until the next answer with a new revision.
 - While locked: no save bar, no Inputs, no Add collection, no Add back;
-  logins, Forget, Trim history now, and Delete files… still work.
+  Trim history now and Delete files… still work.
   Allow dashboard edits confirms, then posts the override; there is no
   way back.
-- Logins are write-only: the dialog starts empty every time and the
-  fields clear after a save. "Forget" acts at once (no confirm), since
-  the login can be entered again.
 - The delete dialog opens on "Library folders" every time.
 - Collection rows link to `#settings/<source>/<collection>`, Add
-  collection to `#settings/<source>/new`, Add back to
-  `#settings/<source>/new?name=<collection>` (the collection editor,
-  round S3). The tab is chosen by the hash's first segment.
+  collection to `#settings/<source>?add`, Add back to
+  `#settings/<source>?add=<collection>` (the collection editor,
+  `docs/ui/handoff/collection.md`). A collection being added shows in
+  its source's list as "Not saved yet". The tab is chosen by the hash's
+  first segment.
 
 ## Open questions
 
 None. Round S2 (2026-11-24): the operator approved the page and its
 words, the read-only view and the override confirm, the save states,
-and the login and delete dialogs as rendered.
+and the login and delete dialogs as rendered. 2026-11-25: the operator
+dropped the login, since no archive.org download needs an account
+(§spec:dashboard-credentials); the login row, dialog, and toasts are
+gone and the source card keeps Requests at once. Round S3
+(2026-11-25): Add source and the raised toasts were approved with the
+collection editor.

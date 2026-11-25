@@ -14,6 +14,7 @@ import type { UnconfiguredCollection } from "@/api/types"
 import { refusal, send, useNote } from "@/dash/actions"
 import { bytes, count, plural } from "@/lib/format"
 import { useDraft } from "@/settings/draft"
+import { addHref } from "@/settings/route"
 
 type Scope = "library" | "everything"
 
@@ -96,9 +97,9 @@ export function RemovedCard({ removed, onDone }: { removed: UnconfiguredCollecti
               </div>
               <div className="ml-auto flex gap-2">
                 {d.editable && (
-                  <Button size="sm" variant="ghost" onClick={() => {
-                    location.hash = `settings/${encodeURIComponent(c.source)}/new?name=${encodeURIComponent(c.collection)}`
-                  }}>Add back</Button>
+                  <Button size="sm" variant="ghost" asChild>
+                    <a href={addHref(c.source, c.collection)}>Add back</a>
+                  </Button>
                 )}
                 <DeleteFiles c={c} onDone={onDone} />
               </div>
