@@ -179,5 +179,6 @@ source called <s>.", "Back to Settings".
 None. Round S3 (2026-11-25): the operator approved the editor, adding
 and adding back, the remove dialog, the read-only and error states, and
 pasted links (Q-S8b). They chose to have each source plugin read its own
-links (Q-S8c), so the page asks `GET /api/source-link`, which waits on
-§road:source-links. The link help words became source-neutral to match.
+links (Q-S8c), so the page asks `GET /api/source-link`, which the
+server answers from the plugin. The link help words became
+source-neutral to match.

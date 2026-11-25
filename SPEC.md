@@ -588,6 +588,11 @@ capability declaration (`type_name`, the metadata
 `template_fields` it surfaces for library layout, §spec:library-staging,
 and which of those fields are **per-item-unique** so the config layer can
 guard against lossy layouts, §spec:layout-collision-safety).
+A plugin may also offer `query_from_link(url) -> str | None`, called on
+the class, which reads a link from its source's site as its own search
+from the link's text alone, with no request to the source; offering it
+is what `reads_links` reports, and the `ia` and `etree` plugins share one
+reading of archive.org links (§spec:dashboard-settings "Pasted links").
 The authoring contract — exact method signatures, the durability and
 backoff the core owns, and a worked example — is documented for third-party
 authors in [`docs/plugins.md`](docs/plugins.md).
@@ -2214,6 +2219,7 @@ config-management increment ofelia did (§req:constraints, superseded
 | `POST /api/config/check-paths` | Path checks without saving (write gate; §spec:dashboard-settings) |
 | `POST /api/config/override` | Turn on the edit override (write gate; §spec:edit-lock) |
 | `GET /api/setup`, `POST /api/setup` | First-run setup (write gate on `POST`; §spec:first-run-setup) |
+| `GET /api/source-link?type=&url=` | The search a pasted link stands for; read-only, no write gate, answers with no config (§spec:dashboard-settings) |
 | `PUT /api/credentials`, `DELETE /api/credentials` | Store or forget a source's credentials (write gate; §spec:dashboard-credentials) |
 | `POST /api/collections/purge` | Delete an unconfigured collection's files (write gate; §spec:collection-removal) |
 | `POST /api/history/trim` | Trim old run error detail now and compact the database (write gate; §spec:run-error-retention) |
@@ -3650,8 +3656,8 @@ loads.
 
 ## Settings in the dashboard §spec:dashboard-settings
 
-*Status: in progress*
-The API is built, and the Settings tab and the collection editor are designed and built (§spec:ui-kit Screens, rounds S2 and S3); setup shows the path checks before Finish, and a file with errors opens in Settings when nothing has loaded (round S4); `GET /api/source-link` and `reads_links` wait on §road:source-links.
+*Status: complete*
+The API is built, including `GET /api/source-link` and `reads_links` for pasted links, and the Settings tab and the collection editor are designed and built (§spec:ui-kit Screens, rounds S2 and S3); setup shows the path checks before Finish, and a file with errors opens in Settings when nothing has loaded (round S4).
 
 Compatibility, from deployment status "deployed, one install, no
 outside consumers" (§req:constraints, operator-confirmed 2026-11-24):

@@ -398,6 +398,16 @@ One optional attribute ties your plugin to the politeness budget:
   shares one concurrency budget, so two sources never add up past what one host
   should see. Defaults to `None`: each source of your plugin gets its own budget.
 
+One optional classmethod lets the dashboard read links pasted into a
+collection's Search:
+
+- **`query_from_link(url: str) -> str | None`** — the search a link from your
+  source's site stands for, or `None` for a link you can't read. It is called on
+  the class, from the link's text alone: never send a request from it. The
+  dashboard offers pasted links for your type only when you implement it
+  (`reads_links`). The default reads nothing. The `ia` and `etree` plugins share
+  one reading of archive.org links (`shakedown/plugins/archive_org.py`).
+
 ## Registration
 
 Two steps wire your plugin into the registry:
