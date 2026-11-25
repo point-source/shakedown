@@ -15,7 +15,7 @@ import yaml
 
 pytest.importorskip("fastapi")
 
-from shakedown import credentials, server, validate
+from shakedown import server, validate
 from shakedown.config import read_config_file
 from shakedown.server import build_app
 from shakedown.trigger import Busy, ExitedEarly, Failed
@@ -173,25 +173,20 @@ async def test_finishing_writes_the_file_and_starts_the_first_sync(
 
 
 @pytest.mark.asyncio
-async def test_credentials_are_stored_and_never_answered(
-    config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_a_login_in_the_body_is_refused_and_writes_nothing(
+    config_path: Path, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("IA_EMAIL", raising=False)
-    monkeypatch.delenv("IA_PASSWORD", raising=False)
-    monkeypatch.setattr(server, "launch", lambda *a, **k: Busy())  # no real archive.org run
+    """Setup takes no login (§spec:dashboard-credentials): `credentials` is an
+    unknown key like any other, even beside a document setup would accept."""
     body = {
         "document": _document(tmp_path, type_="ia"),
-        "credentials": {"email": " me@example.org ", "password": PASSWORD},
+        "credentials": {"email": "me@example.org", "password": PASSWORD},
     }
     async with _client(build_app(config_path)) as client:
         response = await _finish(client, body)
-        config = await client.get("/api/config")
-    assert response.status_code == 201, response.text
-    assert config.json()["credentials"] == [{"source": "ia", "credentials": "dashboard"}]
-    state_db = tmp_path / "data" / "archive" / ".shakedown" / "state.db"
-    assert credentials.stored(state_db, "ia") == credentials.Login("me@example.org", PASSWORD)
-    for text in (response.text, config.text, config_path.read_text()):
-        assert PASSWORD not in text and "me@example.org" not in text
+    assert (response.status_code, response.json()) == (422, {"code": "invalid_body"})
+    assert PASSWORD not in response.text
+    assert not config_path.parent.exists()
 
 
 @pytest.mark.asyncio
@@ -287,9 +282,6 @@ async def test_a_document_setup_refuses_writes_nothing(
     [],
     {},
     {"document": {}, "extra": 1},
-    {"document": {}, "credentials": {"email": "me@example.org"}},
-    {"document": {}, "credentials": {"email": "me@example.org", "password": " "}},
-    {"document": {}, "credentials": {"email": "me@example.org", "password": 5}},
 ])
 async def test_a_body_setup_cannot_read_is_one_code_never_quoted(
     config_path: Path, body: Any
@@ -297,18 +289,6 @@ async def test_a_body_setup_cannot_read_is_one_code_never_quoted(
     async with _client(build_app(config_path)) as client:
         response = await _finish(client, body)
     assert (response.status_code, response.json()) == (422, {"code": "invalid_body"})
-    assert not config_path.parent.exists()
-
-
-@pytest.mark.asyncio
-async def test_credentials_for_a_source_that_takes_none_write_nothing(
-    config_path: Path, tmp_path: Path
-) -> None:
-    body = {"document": _document(tmp_path),
-            "credentials": {"email": "me@example.org", "password": PASSWORD}}
-    async with _client(build_app(config_path)) as client:
-        response = await _finish(client, body)
-    assert (response.status_code, response.json()) == (404, {"code": "takes_no_credentials"})
     assert not config_path.parent.exists()
 
 

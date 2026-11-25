@@ -12,7 +12,6 @@ from shakedown.config import (
     CollectionConfig,
     Config,
     ExecHandoff,
-    IAAuth,
     SourceConfig,
     WebhookHandoff,
 )
@@ -111,7 +110,6 @@ def test_combined_failures_named_and_no_items(tmp_path: Path, monkeypatch) -> No
     blocker = tmp_path / "blocker"
     blocker.write_text("x")
     archive = blocker / "archive"  # missing/unusable archive path
-    monkeypatch.delenv("NOPE_EMAIL", raising=False)
     FakePlugin.unreachable_sources.add("s-bad")
     FakePlugin.items["ok-1"] = FakeItem(
         identifier="ok-1", files=[FakeFile(name="a.flac", content=b"a")]
@@ -120,7 +118,6 @@ def test_combined_failures_named_and_no_items(tmp_path: Path, monkeypatch) -> No
         SourceConfig(
             name="s-bad",
             type="fake",
-            auth=IAAuth(email_env="NOPE_EMAIL"),
             collections=[_collection("bad-coll", library_layout="{title}")],
         ),
         SourceConfig(name="s-good", type="fake", collections=[_collection("good-coll")]),
@@ -269,12 +266,6 @@ def _write_yaml(
     for s in sources:
         lines.append(f"  - name: {s.name}")
         lines.append(f"    type: {s.type}")
-        if s.auth:
-            lines.append("    auth:")
-            if s.auth.email_env:
-                lines.append(f"      email_env: {s.auth.email_env}")
-            if s.auth.password_env:
-                lines.append(f"      password_env: {s.auth.password_env}")
         lines.append("    collections:")
         for c in s.collections:
             lines.append(f"      - name: {c.name}")

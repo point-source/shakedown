@@ -407,19 +407,7 @@ CONFIG_EDIT_TABLE = """
         at     TEXT NOT NULL
     )
     """
-# Credentials entered in the dashboard (§spec:dashboard-credentials): one row per
-# source, in plain text, protected as this file is. Written by `serve` (and setup).
-CREDENTIALS_TABLE = """
-    CREATE TABLE IF NOT EXISTS source_credentials (
-        source    TEXT PRIMARY KEY,
-        email     TEXT NOT NULL,
-        password  TEXT NOT NULL,
-        at        TEXT NOT NULL
-    )
-    """
-_SCHEMA += [
-    SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE, CONFIG_EDIT_TABLE, CREDENTIALS_TABLE
-]
+_SCHEMA += [SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE, CONFIG_EDIT_TABLE]
 
 
 # Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer

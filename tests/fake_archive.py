@@ -29,20 +29,6 @@ class Reply:
     headers: dict[str, str] = field(default_factory=dict)
 
 
-def login_accepted(access: str = "S3ACCESS", secret: str = "S3SECRET") -> Reply:
-    """The login service accepting a login: S3 keys and signed cookies."""
-    return json_reply({"success": True, "values": {
-        "s3": {"access": access, "secret": secret},
-        "cookies": {"logged-in-user": "user%40example.org", "logged-in-sig": "SIG"},
-        "screenname": "someone",
-    }})
-
-
-def login_rejected() -> Reply:
-    """The login service refusing a wrong password."""
-    return json_reply({"success": False, "values": {"reason": "account_bad_password"}})
-
-
 def json_reply(payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> Reply:
     return Reply(status, json.dumps(payload).encode(), {"Content-Type": "application/json", **(headers or {})})
 
@@ -66,9 +52,6 @@ class FakeArchive:
         self.calls: list[Call] = []
         # Seconds urllib3's Retry slept between attempts (backoff or Retry-After).
         self.sleeps: list[float] = []
-        # Paths that answer 403 unless the request carries this Authorization header:
-        # a download-restricted file, served only to a logged-in account.
-        self.required_auth: dict[str, str] = {}
 
     def route(self, path: str, *replies: Reply | BaseException) -> None:
         self.routes[path] = list(replies)
@@ -91,11 +74,6 @@ class FakeArchive:
     def calls_to(self, path: str) -> list[Call]:
         return [c for c in self.calls if c.path == path]
 
-    def login(self, *replies: Reply | BaseException) -> None:
-        """archive.org's login service, as `internetarchive.config.get_auth_config`
-        asks it."""
-        self.route("/services/xauthn/", *replies)
-
     def _reply(
         self, method: str, url: str, timeout: Any,
         headers: dict[str, str] | None = None, body: Any = None,
@@ -103,9 +81,6 @@ class FakeArchive:
         path = unquote(urlsplit(url).path)
         data = body.encode() if isinstance(body, str) else bytes(body or b"")
         self.calls.append(Call(method, path, url, timeout, dict(headers or {}), data))
-        need = self.required_auth.get(path)
-        if need is not None and (headers or {}).get("Authorization") != need:
-            return Reply(403, b"forbidden")
         queue = self.routes.get(path)
         if not queue:
             return Reply(404, b"not found")

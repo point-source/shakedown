@@ -24,7 +24,6 @@ from shakedown import realformat, stopping
 from shakedown.activity import ActivityKind, ActivityRecorder, Phase, Progress, RunCounts, Waiting
 from shakedown.config import CollectionConfig, Config, ConfigError, SourceConfig
 from shakedown.config import load as load_config
-from shakedown.credentials import login_for
 from shakedown.db import connect, connect_reader, transaction
 from shakedown.discovery import (
     ItemDescriptor,
@@ -370,14 +369,12 @@ def _run_sync(
     log lines say so, and each clears its rescheduled entry when it ends, whatever its
     result (§spec:rescheduled-syncs Clearing). A killed run clears nothing."""
     # One plugin per source block, not per name: two blocks may share a name with
-    # different collections and credentials.
+    # different collections and settings.
     plugins: dict[int, SourcePlugin] = {}
     work: list[tuple[SourceConfig, CollectionConfig, SourcePlugin]] = []
     for source, collection in scope:
         if id(source) not in plugins:
-            plugins[id(source)] = registry.for_source(
-                source, login_for(source, config.state_db)
-            )
+            plugins[id(source)] = registry.for_source(source)
         work.append((source, collection, plugins[id(source)]))
 
     if not work:
@@ -2594,7 +2591,7 @@ def run_single_shows(
         (
             source,
             collection,
-            registry.for_source(source, login_for(source, config.state_db)),
+            registry.for_source(source),
             targets[key],
         )
         for source in config.sources

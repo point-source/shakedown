@@ -85,6 +85,7 @@ def _snapshot(root: Path) -> dict[str, tuple[int, bytes]]:
 async def test_a_valid_file_with_every_default_filled_in(
     paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Set, and still no login anywhere in the answer (§spec:dashboard-credentials).
     monkeypatch.setenv("TEST_IA_EMAIL", "a@b.c")
     monkeypatch.setenv("TEST_IA_PASSWORD", "pw")
     _write(paths)
@@ -108,10 +109,7 @@ async def test_a_valid_file_with_every_default_filled_in(
         "preserve_source_metadata": False, "fill_tags": False, "on_complete": None,
         "schedule": None,
     }
-    assert answer["credentials"] == [
-        {"source": "ia", "credentials": "environment"},
-        {"source": "lma", "credentials": "none"},
-    ]
+    assert "credentials" not in answer
     next_syncs = answer["next_syncs"]
     assert [(n["source"], n["collection"]) for n in next_syncs] == [
         ("ia", "gd"), ("ia", "phish"), ("lma", "lma")
@@ -120,48 +118,11 @@ async def test_a_valid_file_with_every_default_filled_in(
     assert gd_next.tzinfo is not None and gd_next.weekday() == 6
     assert next_syncs[1]["next_at"] is None
     types = {t["type"]: t for t in answer["source_types"]}
-    assert types["ia"]["takes_credentials"] is True
-    assert types["etree"]["takes_credentials"] is False
+    assert all("takes_credentials" not in t for t in types.values())
     assert "identifier" in types["ia"]["layout_fields"]
     assert types["ia"]["layout_filters"] == ["lower", "sanitize", "short", "upper"]
     assert datetime.fromisoformat(answer["generated_at"]).tzinfo is not None
     assert answer["unconfigured"] == []  # no state database yet
-
-
-@pytest.mark.asyncio
-async def test_credentials_need_every_named_variable(
-    paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("TEST_IA_EMAIL", "a@b.c")
-    monkeypatch.delenv("TEST_IA_PASSWORD", raising=False)
-    _write(paths)
-    assert (await _get(paths))["credentials"][0] == {"source": "ia", "credentials": "none"}
-
-
-@pytest.mark.asyncio
-async def test_stored_credentials_show_as_dashboard_and_environment_wins(
-    paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from shakedown.credentials import Login, store
-
-    monkeypatch.delenv("TEST_IA_EMAIL", raising=False)
-    monkeypatch.delenv("TEST_IA_PASSWORD", raising=False)
-    _write(paths)
-    store(paths["state_db"], "ia", Login("stored-email@example.org", "stored-pw"))
-    store(paths["state_db"], "lma", Login("stored-email@example.org", "stored-pw"))
-    async with _client(paths) as client:
-        response = await client.get("/api/config")
-    assert response.json()["credentials"] == [
-        {"source": "ia", "credentials": "dashboard"},
-        {"source": "lma", "credentials": "none"},  # etree takes no credentials
-    ]
-    assert "stored-email" not in response.text and "stored-pw" not in response.text
-
-    monkeypatch.setenv("TEST_IA_EMAIL", "a@b.c")
-    monkeypatch.setenv("TEST_IA_PASSWORD", "pw")
-    assert (await _get(paths))["credentials"][0] == {
-        "source": "ia", "credentials": "environment"
-    }
 
 
 @pytest.mark.asyncio
@@ -170,7 +131,7 @@ async def test_a_missing_file(paths: dict[str, Path]) -> None:
     assert answer["state"] == "missing"
     assert answer["revision"] is None and answer["document"] is None
     assert answer["errors"] == [] and answer["edit"] == "locked"
-    assert answer["credentials"] == [] and answer["next_syncs"] == []
+    assert answer["next_syncs"] == []
     assert answer["source_types"]
 
 
@@ -201,7 +162,7 @@ async def test_an_invalid_file_shows_its_settings_and_errors(paths: dict[str, Pa
     assert doc["state_db"] == str(paths["state_db"])
     assert doc["sources"][0]["collections"][1]["fill_tags"] is False
     assert doc["sources"][0]["collections"][0]["library_layout"] == "Shows/All"
-    assert answer["credentials"] == [] and answer["next_syncs"] == []
+    assert answer["next_syncs"] == []
 
 
 @pytest.mark.asyncio
@@ -751,41 +712,22 @@ async def test_no_unconfigured_list_without_a_valid_file_or_a_database(
     assert answer["state"] == "invalid" and answer["unconfigured"] == []
 
 
-# -- Stored credentials follow the save (§spec:dashboard-credentials) -------------
+# -- A save that moves the state database (§spec:edit-lock) ----------------------
 
 
 @pytest.mark.asyncio
-async def test_moving_the_state_database_moves_the_stored_credentials(
+async def test_naming_the_same_database_another_way_keeps_the_edit_state(
     paths: dict[str, Path], tmp_path: Path
 ) -> None:
-    from shakedown.credentials import Login, store, stored
-
-    loaded = await _unlocked(paths)
-    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
-    doc = loaded["document"]
-    new_db = tmp_path / "state" / "state.db"
-    doc["state_db"] = str(new_db)
-    async with _client(paths) as client:
-        assert (await _put(client, loaded["revision"], doc)).status_code == 200
-    assert stored(new_db, "ia") == Login("me@example.org", "pw")
-
-
-@pytest.mark.asyncio
-async def test_naming_the_same_database_another_way_keeps_the_stored_credentials(
-    paths: dict[str, Path], tmp_path: Path
-) -> None:
-    from shakedown.credentials import Login, store, stored
     from shakedown.edit_lock import read_edit
 
     loaded = await _unlocked(paths)
-    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
     alias = tmp_path / "alias"
     alias.symlink_to(paths["state_db"].parent)
     doc = loaded["document"]
     doc["state_db"] = str(alias / "state.db")
     async with _client(paths) as client:
         assert (await _put(client, loaded["revision"], doc)).status_code == 200
-    assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")
     assert read_edit(paths["state_db"]) == "override"
 
 
@@ -808,32 +750,6 @@ async def test_moving_the_state_database_while_a_run_writes_is_refused(
         assert (response.status_code, response.json()) == (409, {"code": "busy"})
         assert paths["config"].read_bytes() == before
         assert (await _put(client, loaded["revision"], doc)).status_code == 200
-
-
-@pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root writes anywhere")
-@pytest.mark.asyncio
-async def test_a_move_whose_file_cannot_be_written_copies_no_credentials(
-    paths: dict[str, Path], tmp_path: Path
-) -> None:
-    from shakedown.credentials import Login, store, stored
-
-    loaded = await _unlocked(paths)
-    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
-    new_db = tmp_path / "state" / "state.db"
-    store(new_db, "lma", Login("other@example.org", "pw2"))
-    doc = loaded["document"]
-    doc["state_db"] = str(new_db)
-    folder = paths["config"].parent
-    folder.chmod(0o555)
-    try:
-        async with _client(paths) as client:
-            response = await _put(client, loaded["revision"], doc)
-    finally:
-        folder.chmod(0o755)
-    assert response.status_code == 500
-    assert stored(new_db, "ia") is None
-    assert stored(new_db, "lma") == Login("other@example.org", "pw2")
-    assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")
 
 
 @pytest.mark.asyncio
@@ -928,76 +844,3 @@ def test_two_spellings_of_one_database_share_one_writer_lock(tmp_path: Path) -> 
     alias = tmp_path / "alias.db"
     with writer_lock_at(real), pytest.raises(LockHeld), writer_lock_at(alias):
         pass
-
-
-@pytest.mark.asyncio
-async def test_a_save_that_removes_a_source_forgets_its_credentials(
-    paths: dict[str, Path],
-) -> None:
-    from shakedown.credentials import Login, store, stored
-
-    loaded = await _unlocked(paths)
-    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
-    store(paths["state_db"], "lma", Login("x@example.org", "pw2"))
-    store(paths["state_db"], "hand-removed", Login("y@example.org", "pw3"))
-    doc = loaded["document"]
-    doc["sources"] = [s for s in doc["sources"] if s["name"] != "ia"]
-    async with _client(paths) as client:
-        response = await _put(client, loaded["revision"], doc)
-    assert response.status_code == 200, response.json()
-    assert stored(paths["state_db"], "ia") is None
-    assert stored(paths["state_db"], "hand-removed") is None
-    assert stored(paths["state_db"], "lma") == Login("x@example.org", "pw2")
-
-
-@pytest.mark.asyncio
-async def test_a_refused_save_forgets_nothing(paths: dict[str, Path]) -> None:
-    from shakedown.credentials import Login, store, stored
-
-    loaded = await _unlocked(paths)
-    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
-    doc = loaded["document"]
-    doc["sources"] = [s for s in doc["sources"] if s["name"] != "ia"]
-    async with _client(paths) as client:
-        stale = await _put(client, "sha256:stale", doc)
-        doc["sources"][0]["collections"][0]["library_layout"] = "Shows/All"
-        invalid = await _put(client, loaded["revision"], doc)
-    assert stale.status_code == 409 and invalid.status_code == 422
-    assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")
-
-
-@pytest.mark.asyncio
-async def test_moving_the_state_database_leaves_no_credentials_behind(
-    paths: dict[str, Path], tmp_path: Path
-) -> None:
-    from shakedown.credentials import Login, store, stored
-
-    loaded = await _unlocked(paths)
-    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
-    doc = loaded["document"]
-    doc["state_db"] = str(tmp_path / "state" / "state.db")
-    async with _client(paths) as client:
-        assert (await _put(client, loaded["revision"], doc)).status_code == 200
-    assert stored(paths["state_db"], "ia") is None
-
-
-@pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root writes anywhere")
-@pytest.mark.asyncio
-async def test_a_save_that_fails_to_write_keeps_the_credentials(
-    paths: dict[str, Path], tmp_path: Path
-) -> None:
-    from shakedown.credentials import Login, store, stored
-
-    loaded = await _unlocked(paths)
-    store(paths["state_db"], "ia", Login("me@example.org", "pw"))
-    doc = loaded["document"]
-    doc["sources"] = [s for s in doc["sources"] if s["name"] != "ia"]
-    folder = paths["config"].parent
-    folder.chmod(0o555)
-    try:
-        async with _client(paths) as client:
-            response = await _put(client, loaded["revision"], doc)
-    finally:
-        folder.chmod(0o755)
-    assert response.status_code == 500
-    assert stored(paths["state_db"], "ia") == Login("me@example.org", "pw")

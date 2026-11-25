@@ -181,7 +181,7 @@ def validate(
     """Preflight a configured deployment before a large mirror (§spec:setup-readiness-validation).
 
     Reports one pass/fail result per source and collection, naming the setting, path,
-    credential, source, or handoff target that needs action. Exits non-zero on any
+    source, or handoff target that needs action. Exits non-zero on any
     failure. A pass means "ready to attempt a real sync," not "already mirrored."
     """
     from shakedown.validate import run_validate

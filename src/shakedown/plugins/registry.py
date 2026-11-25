@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from shakedown.config import SourceConfig
-from shakedown.credentials import Login
 from shakedown.plugins.base import SourcePlugin
 
 
@@ -34,10 +33,9 @@ def _ensure_builtins_loaded() -> None:
     from shakedown.plugins.ia.plugin import IAPlugin  # noqa: F401
 
 
-def for_source(source_config: SourceConfig, login: Login | None = None) -> SourcePlugin:
-    """The plugin for a source, holding the login a run resolved for it
-    (`shakedown.credentials.login_for`)."""
-    return plugin_class(source_config.type)(source_config, login)
+def for_source(source_config: SourceConfig) -> SourcePlugin:
+    """The plugin for a source."""
+    return plugin_class(source_config.type)(source_config)
 
 
 def plugin_class(type_name: str) -> type[SourcePlugin]:

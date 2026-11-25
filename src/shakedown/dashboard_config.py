@@ -23,7 +23,6 @@ from shakedown.config import (
     raw_state_db,
     read_config_file,
 )
-from shakedown.credentials import resolve
 from shakedown.dashboard import iso
 from shakedown.db import open_read_only
 from shakedown.edit_lock import read_edit, state_db_for
@@ -45,7 +44,6 @@ def config_answer(path: Path, now: datetime | None = None) -> dict[str, Any]:
         "edit": read_edit(state_db_for(file)),
         "document": document_of(file),
         "errors": [e.to_dict() for e in file.errors],
-        "credentials": credentials_of(config) if config else [],
         "next_syncs": (
             [
                 {"source": source, "collection": collection, "next_at": iso(at)}
@@ -114,18 +112,9 @@ def _plain(value: Any) -> Any:
     return str(value)
 
 
-def credentials_of(config: Config) -> list[dict[str, str]]:
-    """Per source, where its login comes from (§spec:dashboard-credentials):
-    `environment`, `dashboard`, or `none`. Never a value. Reads only."""
-    return [
-        {"source": source.name, "credentials": resolve(source, config.state_db)[0]}
-        for source in config.sources
-    ]
-
-
 def source_types() -> list[dict[str, Any]]:
     """Per installed source plugin: the layout fields and filters its
-    `library_layout` accepts, and whether it takes credentials."""
+    `library_layout` accepts."""
     answer = []
     for type_name in registry.known_types():
         plugin = registry.plugin_class(type_name)
@@ -134,7 +123,6 @@ def source_types() -> list[dict[str, Any]]:
                 "type": type_name,
                 "layout_fields": list(plugin.template_fields),
                 "layout_filters": list(FILTER_NAMES),
-                "takes_credentials": plugin.takes_credentials,
             }
         )
     return answer

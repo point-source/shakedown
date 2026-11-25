@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from shakedown import credentials
 from shakedown.config import (
     ConfigFile,
     ConfigProblem,
@@ -40,7 +39,7 @@ PATH_KEYS = ("archive_root", "library_root", "state_db")
 EXEC_FILE_ONLY = "exec_file_only"
 
 # Serializes every write serve makes to the config file and the install state
-# beside it (the edit state, stored credentials).
+# beside it (the edit state).
 writing = threading.Lock()
 
 
@@ -77,15 +76,7 @@ def save(path: Path, revision: str | None, document: Any) -> Saved:
             if old_db is not None and not _same_db(old_db, new_db):
                 _move(path, current.data, merged, old_db, new_db)
             else:
-                old_db = None
                 _replace(path, merged)
-            # Only once the file is saved: forget the credentials of a removed source
-            # (§spec:dashboard-credentials), or of one a hand edit removed before, and
-            # leave none behind in a database the config no longer names.
-            names = {source["name"] for source in new["sources"]}
-            _forget(new_db, lambda: credentials.forget_others(new_db, names))
-            if old_db is not None:
-                _forget(old_db, lambda: credentials.forget_others(old_db, set()))
         return Saved(revision_of(merged), warnings)
 
 
@@ -98,7 +89,7 @@ def _replace(path: Path, data: bytes) -> None:
 
 def _move(path: Path, before: bytes, merged: bytes, old_db: Path, new_db: Path) -> None:
     """Save a file that points the config at another state database, and carry the
-    edit state and stored credentials there (§spec:edit-lock "Where the state
+    edit state there (§spec:edit-lock "Where the state
     lives"). No run may write meanwhile: one holding the old database's lock would
     keep writing while the next took the new one's, two writers on one archive. The
     install state is copied only once the file is written, so a refused write leaves
@@ -229,15 +220,6 @@ def _exec_values(raw: Any) -> list[tuple[tuple[Any, Any], Any, tuple[str | int, 
                 continue  # refused by the validation; and never a match below
             values.append((key, command, ("sources", i, "collections", j, "on_complete")))
     return values
-
-
-def _forget(state_db: Path, write: Any) -> None:
-    """Forget credentials after a save went through: the file is written, so a
-    failure here is logged, not answered. The next save forgets them again."""
-    try:
-        write()
-    except (sqlite3.Error, OSError) as e:
-        log.warning("could not forget stored credentials in %s: %s", state_db, e)
 
 
 def write_state(state_db: Path, write: Any) -> None:

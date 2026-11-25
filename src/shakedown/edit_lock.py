@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from shakedown import credentials, db
+from shakedown import db
 from shakedown.config import ConfigFile, raw_state_db
 
 EditState = Literal["editable", "locked", "override"]
@@ -49,12 +49,10 @@ def record_edit(state_db: Path, state: Recorded) -> None:
 
 def move_install_state(old_db: Path, new_db: Path) -> None:
     """Carry what Shakedown keeps for this install into the database a save points
-    the config at: the edit state (§spec:edit-lock "Where the state lives") and the
-    stored credentials (§spec:dashboard-credentials)."""
+    the config at: the edit state (§spec:edit-lock "Where the state lives")."""
     state = read_edit(old_db)
     if state != "locked":
         record_edit(new_db, state)
-    credentials.move(old_db, new_db)
 
 
 def state_db_for(file: ConfigFile) -> Path | None:

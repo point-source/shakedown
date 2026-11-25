@@ -22,7 +22,6 @@ from shakedown.config import (
     Config,
     ConfigError,
     ExecHandoff,
-    IAAuth,
     SourceConfig,
     load,
 )
@@ -99,24 +98,6 @@ def test_first_setup_readiness_missing_path(tmp_path: Path) -> None:
     assert not archive_check.ok
     assert archive_check.consequence and str(archive) in archive_check.consequence
     assert archive_check.action
-
-
-def test_first_setup_readiness_bad_credentials(tmp_path: Path, tmp_roots, monkeypatch) -> None:
-    archive, library = tmp_roots
-    monkeypatch.delenv("MISSING_EMAIL_X", raising=False)
-    monkeypatch.delenv("MISSING_PW_X", raising=False)
-    src = SourceConfig(
-        name="fake-src",
-        type="fake",
-        auth=IAAuth(email_env="MISSING_EMAIL_X", password_env="MISSING_PW_X"),
-        collections=[_collection()],
-    )
-    report = validate_config(_config(archive, library, tmp_path / "state.db", [src]))
-    assert not report.ok
-    src_group = next(g for g in report.groups if g.source == "fake-src" and g.collection is None)
-    cred = next(c for c in src_group.checks if c.name == "credentials present")
-    assert not cred.ok
-    assert cred.consequence and "MISSING_EMAIL_X" in cred.consequence
 
 
 def test_first_setup_readiness_source_access(tmp_path: Path, tmp_roots) -> None:

@@ -30,7 +30,7 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
-from shakedown import __version__, config_save, dashboard_credentials, first_run
+from shakedown import __version__, config_save, first_run
 from shakedown.activity import HISTORY_DAYS
 from shakedown.config import (
     Config,
@@ -322,23 +322,6 @@ def build_app(
     def override() -> dict[str, str]:
         config_save.override(config_path)
         return {"edit": "override"}
-
-    # Credentials entered in the dashboard (§spec:dashboard-credentials): behind the
-    # write gate, not under the edit lock. The body is read by hand so that a bad
-    # one never answers FastAPI's validation detail, which quotes the input.
-    @app.put("/api/credentials", dependencies=[Depends(write_gate)])
-    async def put_credentials(request: Request) -> dict[str, Any]:
-        try:
-            body = await request.json()
-        except ValueError:
-            raise Refusal(422, "invalid_body") from None
-        return await asyncio.to_thread(
-            dashboard_credentials.put_credentials, current_config, body
-        )
-
-    @app.delete("/api/credentials", dependencies=[Depends(write_gate)])
-    def delete_credentials(source: str = Query()) -> dict[str, Any]:
-        return dashboard_credentials.delete_credentials(current_config, source)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
