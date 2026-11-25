@@ -2557,7 +2557,9 @@ Observable behavior:
   behind it. An answer older than two intervals, or one whose refresh
   failed, is not handed out again: the next viewer waits for the
   recompute (sharing one already running) and receives its answer or
-  its error.
+  its error. An answer built from an older config file is not handed
+  out either, and the page reads every view again after a change it
+  makes, so a saved setting shows on Overview at once.
 - **Old data is labelled, never passed off as current.** Every answer
   carries `generated_at`, the time `serve` computed it. When a refresh
   fails or no answer has arrived for twice its refresh interval, the

@@ -174,3 +174,14 @@ def test_a_refresh_that_starts_after_a_newer_answer_skips_its_computation() -> N
     clock.now = 3 * TTL
     answers.get("k", TTL, build)
     assert len(queued) == 1  # a new refresh is scheduled
+
+
+def test_an_answer_built_from_an_older_config_file_is_not_served() -> None:
+    """A changed config file (a dashboard save or a hand edit) makes the next viewer
+    wait on a fresh answer, so Overview never lists a collection the file dropped."""
+    answers, _clock, threads, build = _answers()
+    assert answers.get("k", TTL, build, version="a") == {"n": 1}
+    assert answers.get("k", TTL, build, version="a") == {"n": 1}
+    assert answers.get("k", TTL, build, version="b") == {"n": 2}
+    assert answers.get("k", TTL, build, version="b") == {"n": 2}
+    assert threads.started == []

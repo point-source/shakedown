@@ -74,6 +74,16 @@ test.describe("behaviour", () => {
     await expect(page.getByText("Library files can't link to the archive here", { exact: false })).toBeVisible()
   })
 
+  test("a save reads Overview's views again at once", async ({ page, baseURL }) => {
+    await openScenario(page, baseURL!, "settings_saved", { tab: "settings" })
+    await days(page).fill("90")
+    const saved = page.waitForResponse((r) => r.request().method() === "PUT" && r.url().endsWith("/api/config"))
+    await save(page)
+    await saved
+    const read = (view: string) => page.waitForRequest((r) => r.method() === "GET" && r.url().endsWith(`/api/${view}`), { timeout: 5000 })
+    await Promise.all([read("health"), read("attention")])
+  })
+
   test("Discard puts the file's values back", async ({ page, baseURL }) => {
     await openScenario(page, baseURL!, "settings_saved", { tab: "settings" })
     await days(page).fill("90")

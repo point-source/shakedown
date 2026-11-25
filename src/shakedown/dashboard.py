@@ -66,6 +66,16 @@ class ConfigTracker:
         self._last_good: Config | None = None
         self._state = ConfigState(error=None, last_loaded_at=None)
 
+    def file_version(self) -> Hashable:
+        """Which file is in place now, by its stat: a dashboard save replaces the
+        file and a hand edit rewrites it, and either changes this. None while the
+        file can't be read."""
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
+
     def load_now(self) -> Config:
         """The config as the file is now; raises ConfigError when it does not load."""
         try:
@@ -120,6 +130,7 @@ class _Slot:
     computing: threading.Lock = field(default_factory=threading.Lock)
     answer: dict[str, Any] | None = None
     computed_at: float = 0.0
+    version: Hashable = None  # the config file the answer was built from
     refreshing: bool = False  # a refresh runs behind the answer being served
     failed: bool = False  # the last refresh failed: the answer is not served again
 
@@ -141,8 +152,10 @@ class SharedAnswers:
     default) computes the next. Older than that — or once a refresh has failed —
     it is no longer served: the viewer computes the answer, or waits for the
     computation already running, so the page's freshness rule (no answer for two
-    intervals means stale) stays true. A failure (an `HTTPException`) is raised to
-    the viewer that computed it and never cached."""
+    intervals means stale) stays true. An answer built from another ``version`` of
+    the config file is never served either, so a saved change shows at once. A
+    failure (an `HTTPException`) is raised to the viewer that computed it and never
+    cached."""
 
     def __init__(self, clock: Callable[[], float], spawn: Spawn = in_thread) -> None:
         self._clock = clock
@@ -151,30 +164,39 @@ class SharedAnswers:
         self._slots: dict[Hashable, _Slot] = {}
 
     def get(
-        self, key: Hashable, ttl: float, compute: Callable[[], dict[str, Any]]
+        self,
+        key: Hashable,
+        ttl: float,
+        compute: Callable[[], dict[str, Any]],
+        version: Hashable = None,
     ) -> dict[str, Any]:
         with self._lock:
             slot = self._slots.setdefault(key, _Slot())
             answer, age = slot.answer, self._clock() - slot.computed_at
-            servable = answer is not None and not slot.failed and age < 2 * ttl
+            servable = (answer is not None and not slot.failed and age < 2 * ttl
+                        and slot.version == version)
             refresh = servable and age >= ttl and not slot.refreshing
             if refresh:
                 slot.refreshing = True
             seen = slot.computed_at
         if refresh:
-            self._spawn(lambda: self._refresh(slot, compute, seen))
+            self._spawn(lambda: self._refresh(slot, compute, seen, version))
         if servable:
             # The latest answer: one a synchronous spawn just refreshed is in place.
             assert slot.answer is not None
             return slot.answer
-        return self._compute_now(slot, ttl, compute)
+        return self._compute_now(slot, ttl, compute, version)
 
     def _compute_now(
-        self, slot: _Slot, ttl: float, compute: Callable[[], dict[str, Any]]
+        self,
+        slot: _Slot,
+        ttl: float,
+        compute: Callable[[], dict[str, Any]],
+        version: Hashable,
     ) -> dict[str, Any]:
         seen = slot.computed_at
         with slot.computing:
-            if slot.answer is not None and not slot.failed and (
+            if slot.answer is not None and not slot.failed and slot.version == version and (
                 slot.computed_at != seen or self._clock() - slot.computed_at < ttl
             ):
                 return slot.answer  # computed while this viewer waited
@@ -183,10 +205,15 @@ class SharedAnswers:
                 # Dated when ready, as generated_at is: a computation slower than the
                 # interval still yields an answer viewers are served.
                 slot.answer, slot.computed_at, slot.failed = answer, self._clock(), False
+                slot.version = version
             return answer
 
     def _refresh(
-        self, slot: _Slot, compute: Callable[[], dict[str, Any]], seen: float
+        self,
+        slot: _Slot,
+        compute: Callable[[], dict[str, Any]],
+        seen: float,
+        version: Hashable,
     ) -> None:
         with slot.computing:
             if slot.computed_at != seen:
@@ -202,7 +229,7 @@ class SharedAnswers:
                     slot.failed, slot.refreshing = True, False
                 return
             with self._lock:
-                slot.answer, slot.computed_at = answer, self._clock()
+                slot.answer, slot.computed_at, slot.version = answer, self._clock(), version
                 slot.failed = slot.refreshing = False
 
 
@@ -222,7 +249,8 @@ def shared_answer(app: FastAPI, key: Hashable, ttl: float, build: Builder) -> di
         return {"generated_at": iso(datetime.now()), **body}
 
     answers: SharedAnswers = app.state.answers
-    return answers.get(key, ttl, compute)
+    configs: ConfigTracker = app.state.configs
+    return answers.get(key, ttl, compute, configs.file_version())
 
 
 def register_api(app: FastAPI, path: str, ttl: float, build: Builder) -> None:

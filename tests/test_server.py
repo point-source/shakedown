@@ -846,6 +846,30 @@ async def test_api_health_reports_release_config_and_last_validation(
 
 
 @pytest.mark.asyncio
+async def test_api_health_follows_a_config_change_at_once(
+    tmp_roots: tuple[Path, Path],
+) -> None:
+    """A collection taken out of the file leaves the next health answer, without
+    waiting for the refresh interval (§spec:dashboard "Live where it matters")."""
+    from shakedown.config import CollectionConfig
+
+    archive, library = tmp_roots
+    config = make_config(archive, library)
+    two = config.model_copy(deep=True)
+    two.sources[0].collections.append(
+        CollectionConfig(name="coll2", query="*", library_layout="passthrough"))
+    app = _health_app(two, _Clock())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        before = (await client.get("/api/health")).json()
+        assert [v["collection"] for v in before["validation"]] == ["coll1", "coll2"]
+        write_config(archive.parent / "cfg.yaml", config)
+        after = (await client.get("/api/health")).json()
+    assert [v["collection"] for v in after["validation"]] == ["coll1"]
+
+
+@pytest.mark.asyncio
 async def test_api_health_shows_a_failed_validation(tmp_roots: tuple[Path, Path]) -> None:
     from shakedown.models import OperationStatus, OperationType
     from shakedown.state import OperationOutcomeRepo

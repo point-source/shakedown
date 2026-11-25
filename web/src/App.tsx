@@ -142,7 +142,7 @@ export function App() {
             <TabsContent value="sources"><SourcesView network={d.network.data} activity={d.activity.data} now={now} /></TabsContent>
             <TabsContent value="library"><LibraryView library={d.library.data} attention={d.attention.data} now={now} /></TabsContent>
             <TabsContent value="settings">
-              <SettingsView config={d.config.data} library={d.library.data} now={now} onChanged={() => { d.config.refresh?.(); d.health.refresh?.() }} />
+              <SettingsView config={d.config.data} library={d.library.data} now={now} onChanged={refreshAll} />
             </TabsContent>
           </main>
         </Tabs>
