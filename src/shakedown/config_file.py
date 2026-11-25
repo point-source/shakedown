@@ -26,6 +26,7 @@ from ruamel.yaml.scalarstring import ScalarString
 
 from shakedown.config import (
     NAMED_LISTS,
+    WITHDRAWN_SOURCE_KEYS,
     Config,
     ConfigRejected,
     check_document,
@@ -96,6 +97,7 @@ def merge(text: str, old: dict[str, Any], new: dict[str, Any]) -> str:
     document) and ``new`` (the submitted one) changed, everything else as it was.
     Both are `Config.model_dump(mode="json")`."""
     y, data = _round_trip(text)
+    _drop_withdrawn(data)
     _merge_map(data, old, new, Config, _shared(data))
     merged = _dump(y, data)
     effective = _effective(merged)
@@ -108,6 +110,20 @@ def merge(text: str, old: dict[str, Any], new: dict[str, Any]) -> str:
     if effective != new:
         raise MergeFailed("the merged config does not read back as the saved document")
     return merged
+
+
+def _drop_withdrawn(data: Any) -> None:
+    """Remove the source keys the config no longer reads (`WITHDRAWN_SOURCE_KEYS`).
+    They load ignored, so the documents never differ on them and the merge alone
+    would keep them; every save leaves them out (§spec:dashboard-credentials
+    "Removal")."""
+    sources = data.get("sources") if isinstance(data, CommentedMap) else None
+    if not isinstance(sources, CommentedSeq):
+        return
+    for source in sources:
+        if isinstance(source, CommentedMap):
+            for key in WITHDRAWN_SOURCE_KEYS:
+                source.pop(key, None)
 
 
 def _effective(text: str) -> dict[str, Any] | None:

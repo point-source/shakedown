@@ -286,6 +286,24 @@ async def test_a_save_keeps_comments_and_the_next_load_uses_it(
 
 
 @pytest.mark.asyncio
+async def test_a_save_writes_the_file_without_a_leftover_auth_key(
+    paths: dict[str, Path],
+) -> None:
+    """The login is withdrawn (§spec:dashboard-credentials "Removal"): the file's
+    `auth` loads ignored, is not in the document, and the next save leaves it out,
+    even a save that changes nothing else."""
+    loaded = await _unlocked(paths)
+    assert "auth" not in loaded["document"]["sources"][0]
+    assert "auth:" in paths["config"].read_text()
+    async with _client(paths) as client:
+        response = await _put(client, loaded["revision"], loaded["document"])
+    assert response.status_code == 200, response.json()
+    text = paths["config"].read_text()
+    assert "auth:" not in text and "TEST_IA_EMAIL" not in text
+    assert "      # The Dead, every Sunday." in text
+
+
+@pytest.mark.asyncio
 async def test_a_shared_field_layout_saves_with_a_warning(paths: dict[str, Path]) -> None:
     loaded = await _unlocked(paths)
     doc = loaded["document"]

@@ -24,12 +24,6 @@ from pydantic_core import PydanticCustomError, PydanticUndefined
 log = logging.getLogger(__name__)
 
 
-class IAAuth(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    email_env: str | None = None
-    password_env: str | None = None
-
-
 class WebhookHandoff(BaseModel):
     model_config = ConfigDict(extra="forbid")
     webhook: str
@@ -115,12 +109,15 @@ class CollectionConfig(BaseModel):
     schedule: CronExpression | None = None
 
 
+# Source keys a file may still carry from an older release, read and dropped.
+WITHDRAWN_SOURCE_KEYS = ("auth",)
+
+
 class SourceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
     type: str  # validated against the plugin registry at lookup time (sync.py)
-    auth: IAAuth | None = None
     collections: list[CollectionConfig]
 
     # Per-source shared concurrency budget: the hard ceiling on simultaneous
@@ -129,6 +126,17 @@ class SourceConfig(BaseModel):
     # (SPEC §spec:source-budget). Falls back to the global max_concurrent_downloads
     # when unset.
     max_concurrent_requests: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _ignore_withdrawn_keys(cls, data: Any) -> Any:
+        """A source's `auth` named the withdrawn archive.org login
+        (§spec:dashboard-credentials "Removal"): a file that still has it loads with
+        the key ignored, so an upgrade never stops a run over it, and the next save
+        from the dashboard leaves it out (`config_file.merge`)."""
+        if isinstance(data, dict) and any(k in data for k in WITHDRAWN_SOURCE_KEYS):
+            data = {k: v for k, v in data.items() if k not in WITHDRAWN_SOURCE_KEYS}
+        return data
 
 
 class FailureNotification(BaseModel):
