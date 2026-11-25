@@ -3233,8 +3233,8 @@ result and time appear per collection.
 
 *Status: complete*
 
-The visual kit, terms, and design authority for the read-only web
-dashboard (§spec:dashboard). §spec:dashboard and the endpoint sections
+The visual kit, terms, and design authority for the web dashboard
+(§spec:dashboard). §spec:dashboard and the endpoint sections
 fix behavior and data; this section fixes how the page looks and what it
 calls things. Every screen is built only from the tokens and components
 recorded here. A value the kit lacks is a kit change, made here first.
@@ -3432,12 +3432,13 @@ Spec and code names in the last column never appear on screen.
 | Not responding | The scheduler has not reported in since the time shown. | stopped, down, stale | `scheduler.state: stale` |
 | Nothing scheduled | No collection has a schedule. | idle, off | `scheduler.state: no_schedule` |
 | Never started | The scheduler has never reported in. | missing, not running | `scheduler.state: never` |
+| Schedule | When a collection syncs on its own; set with Repeat. | cron job, timer, plan | `schedule` |
 | Next sync | When a collection's next scheduled sync starts. | next run, next tick | `next_syncs[].next_at` |
-| Manual only | A collection with no schedule; it syncs only on Sync now. | unscheduled, disabled | no `schedule` key |
+| Manual only | A collection with no schedule; it syncs only when someone presses Sync now. | unscheduled, disabled, off, none | `schedule: null` (no `schedule` key) |
 | Sync now | Start a sync of one collection now. | run now, trigger | `POST /sync` |
 | Validate | Run validation now, for every collection. | test, check | `POST /validate` |
 | A run is in progress | An action refused because another run holds the lock. | busy, locked | 409 busy |
-| Validation | A check that the config, sources, and handoff targets work, run with `shakedown validate`. | test, preflight | readiness validation |
+| Validation | A check that the config, sources, and handoff targets work, run with Validate or `shakedown validate`. | test, preflight | readiness validation |
 | Release | The Shakedown version answering this page. | version, build | `release` |
 | Running | A run that is working and reporting. | active, in progress | `state: running` |
 | Waiting | A collection whose run starts when a slot frees in the current sync. | queued, pending, scheduled | `waiting`, waiting entry |
@@ -3458,7 +3459,7 @@ Spec and code names in the last column never appear on screen.
 | Disappeared | A show the source no longer lists. Shakedown keeps its copy. | removed, deleted, gone | `disappeared`, removed upstream |
 | Needs attention | Things waiting on the operator, one entry per collection and kind. | issues, alerts, problems | attention entries |
 | Library health | Facts about the library that need no action. | warnings | health |
-| Handoff notice | The message that tells your music tools new shows arrived. | notification, webhook, ping | handoff |
+| Handoff notice | What tells your music tools that new shows arrived: a webhook, or a command set in the file. | notification, ping, on complete, hook, trigger | handoff, `on_complete` |
 | Failure notice | The message Shakedown sends when a run fails. | alert, error email | failure notice |
 | Requests in flight | Requests to a source that are open right now. | connections, active requests | `requests_in_flight` |
 | Rate limited | The source asked Shakedown to slow down (HTTP 429). | throttled, blocked | `rate_limited` |
@@ -3473,6 +3474,7 @@ Spec and code names in the last column never appear on screen.
 | Passed | The last validation found no problems. | OK, valid, green | validation `completed` |
 | Passed with problems | The last validation finished but found problems. | warnings, partial | validation `completed_with_item_issues` |
 | Did not finish | The last validation stopped before it finished. | interrupted, aborted | validation `in_progress` |
+| Last validation | When a collection was last validated, and its result. | last check, last test | `health.validation[].at`, `.status` |
 | Never validated | No validation is recorded for the collection. | unknown, untested | validation `status: null` |
 | No playable copy | A show with no audio file a player can read. | broken, unplayable | `not_playable` |
 | Original plus a playable copy | A show kept as its unplayable original beside a staged playable copy. | duplicate, converted | `playable_copies` |
@@ -3511,11 +3513,9 @@ Spec and code names in the last column never appear on screen.
 | Fill in missing tags | Write tags a file lacks from the source's notes. | autotag, tag filling | `fill_tags` |
 | Keep the source's notes | Keep the source's description beside each show. | metadata sidecar, preserve metadata | `preserve_source_metadata` |
 | Repeat | How often a collection syncs: Daily, Weekly, Manual only, or Custom. | frequency, interval | `schedule` |
-| Manual only | A collection with no schedule; it syncs when someone presses Sync now. | disabled, off, none | `schedule: null` |
 | Custom / Cron expression | A schedule written as five cron fields. | crontab, advanced | `schedule` |
 | Quick change check | Skip looking a show up again when the source says it hasn't changed. | incremental discovery | `incremental_discovery` |
 | Delete shows the source removes | When the source stops listing a show, delete its files too. | prune, sync deletions | `prune_disappeared` |
-| Handoff notice | What tells your music tools that new shows arrived: a webhook, or a command set in the file. | on complete, hook, trigger | `on_complete` |
 | Remove collection… | Take a collection out of shakedown.yaml, keeping or deleting its files. | delete, unsubscribe | `PUT /api/config`, then `POST /api/collections/purge` |
 | Removed X, files kept | The collection left the file, but a run stopped its files being deleted. | partial, failed delete | `409` from purge |
 | Set up Shakedown | The first visit with no shakedown.yaml: folders, a first collection, and its schedule. | onboarding, wizard, init | `GET /api/setup` |
@@ -3557,8 +3557,9 @@ is one route (`GET /`) with five tabs.
   (`web/tests/*.spec.ts`, config `web/playwright.config.ts`): one project
   per size × theme, `maxDiffPixels: 0`, `threshold: 0.05`, animations and
   caret off, UTC clock, `en-US` locale. Behaviour tests with no
-  screenshot (`freshness.spec.ts`, `behaviour.spec.ts`) run in one
-  project only. Baselines are committed only for
+  screenshot (`freshness.spec.ts`, `behaviour.spec.ts`, and the
+  `behaviour` blocks of `settings.spec.ts`, `collection.spec.ts`, and
+  `setup.spec.ts`) run in one project only (1440 light). Baselines are committed only for
   approved screens and the approved kit sheet. A font or renderer
   difference is a finding, never a reason to loosen the threshold.
   Every baseline was rendered on Linux x86-64 (Rocky Linux 9.8) with
@@ -3572,7 +3573,9 @@ is one route (`GET /`) with five tabs.
   `/api/*` endpoints (`web/src/api/types.ts`), with a fixed clock.
   `web/src/fixtures/scenarios.ts` names each scenario and how the server
   behaves in it (answers, 503 with the config error, stops answering, or
-  hangs). `web/scripts/fixture-page.mjs` serves a scenario to the real
+  hangs) and how it answers the page's writes (keyed by method and path).
+  In the 503 modes `config`, `setup`, and `source-link` still answer, as
+  the server's do. `web/scripts/fixture-page.mjs` serves a scenario to the real
   page by intercepting its `./api/*` requests, fixes the clock, and holds
   the answers until the bundled fonts load, so chart labels measure the
   same every time.
