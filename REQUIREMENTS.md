@@ -491,8 +491,8 @@ the run logs.
     user starts the compose example with no `shakedown.yaml`. Opening
     the dashboard leads them through setup in the browser: confirm the
     archive, library, and state paths and see whether hardlinks work
-    between archive and library; optionally enter archive.org
-    credentials; add a first collection; choose its schedule. When
+    between archive and library; add a first collection; choose its
+    schedule. When
     they finish, `shakedown.yaml` exists and a first sync starts. They
     never open, write, or upload a YAML file. Verifiable on a clean
     stack by completing setup on a phone and seeing the first run in
@@ -536,12 +536,14 @@ the run logs.
     override stays on once set. A file written by Shakedown's setup is
     editable from the start. Either way, hand edits to the file keep
     working and the next run uses them.
-40. **Credentials go in once and never come back out.** A user can
-    enter archive.org credentials in the dashboard. They never appear
-    in `shakedown.yaml`, on any page, in any API response, or in any
-    log, and the dashboard shows only whether they are set.
-    Credentials set as environment variables still work and take
-    priority, and the dashboard says which ones are in effect.
+40. **No account needed (revised 2026-11-25).** Shakedown mirrors
+    everything archive.org lets it download without an archive.org
+    login, and asks for none: not in setup, not in Settings, not in the
+    environment. Shows it cannot download are listed as restricted
+    with their reason (criterion 7). This replaces "credentials go in
+    once and never come back out": no download Shakedown makes needs
+    an account, so a login would be a secret to keep that changes
+    nothing.
 41. **Sync now and validate from the dashboard.** A user can start a
     sync of one collection and run setup validation from the
     dashboard, and watch the result in the live view. A sync started
@@ -768,7 +770,7 @@ criterion and implies a testable path through the product's surface.
   a log line. *(→ criteria 31, 34)*
 - **Set up without YAML.** As a homelab user installing Shakedown for
   the first time, I want the dashboard to walk me through paths,
-  credentials, a first collection, and its schedule, and to tell me
+  a first collection, and its schedule, and to tell me
   right away if hardlinks will not work, so that I reach a first sync
   without learning the config file. *(→ criteria 6, 35)*
 - **Add a collection from my phone.** As a homelab operator, I want to
@@ -794,11 +796,11 @@ criterion and implies a testable path through the product's surface.
   but not change them unless I deliberately turn that on — and to warn
   me that my next deploy will replace dashboard changes — so that the
   file in my repository stays the truth. *(→ criterion 39)*
-- **Credentials without a redeploy.** As a homelab operator, I want to
-  enter my archive.org login in the dashboard and never see it again,
-  while credentials I already set as environment variables keep
-  winning, so that I can add a restricted collection without editing
-  the stack. *(→ criterion 40)*
+- **No account to manage.** As a homelab operator, I want Shakedown to
+  mirror without my archive.org login, so that I keep no extra secret
+  in the stack or the dashboard for downloads that never needed one.
+  *(→ criterion 40; replaces "credentials without a redeploy",
+  2026-11-25)*
 - **Sync it now.** As a homelab operator who just added a collection,
   I want a "sync now" button and a "validate" button on the dashboard,
   so that I can start and check the work without waiting for its tick
@@ -916,8 +918,8 @@ constraints that drive architecture.
   configuration on QNAP is achievable through Container Station and File
   Station. Failures are visible at the scheduler / container-exit layer,
   not buried in a daemon.
-- **Security of secrets.** Source credentials (e.g. IA email/password)
-  are supplied only via environment variables or secrets files, never
+- **Security of secrets.** Secrets (such as the API token) are
+  supplied only via environment variables or secrets files, never
   written into the YAML config. Any ad-hoc trigger API is
   auth-protected. The read-only dashboard, like the read endpoints,
   shows only operational data — never credentials or tokens.
@@ -964,10 +966,6 @@ constraints that drive architecture.
   exactly what the next run accepts. A save never reports success for
   settings a run would refuse, and never refuses settings a run would
   accept, except for path warnings, which never block.
-- **Credentials stay out of sight.** Credentials entered in the
-  dashboard are kept out of the config file, every page, every API
-  response, every log, and every export, so the config file stays safe
-  to back up, share, and commit.
 - **Sane by default, exact when needed.** The defaults the dashboard
   offers — schedules spread across collections, every opt-in off —
   give a working, polite setup with no tuning; a user who wants exact
@@ -1126,7 +1124,7 @@ Technical, operational, and scope bounds on the solution space.
   2026-11-24).** This reverses the 2026-11-12 "read-only dashboard, no
   config management yet" decision. The dashboard gains settings for
   everything `shakedown.yaml` holds today (paths, concurrency caps,
-  sources with their request ceiling and credentials, collections with
+  sources with their request ceiling, collections with
   every option, failure notifications), per-collection schedules, a
   first-run setup, and "sync now" and "validate" buttons. Viewing still
   changes nothing (criterion 33). `GET /status` stays available for
@@ -1149,14 +1147,16 @@ Technical, operational, and scope bounds on the solution space.
   hardlinks work, folders writable) and warns on failure, but the save
   goes through. Runs still refuse to start on a path that fails, as
   §req:constraints "Same-filesystem archive and library" requires.
-- **Credentials: dashboard or environment.** Archive.org credentials
-  may be entered in the dashboard and are stored by Shakedown — never
-  in `shakedown.yaml` in plain text. Credentials in environment
-  variables still work and take priority when set.
+- **No source login (operator decision, 2026-11-25).** Shakedown uses
+  no archive.org account. Archive.org refuses its `private` files to
+  ordinary accounts as it does to anonymous ones, and Shakedown skips
+  `access-restricted` items before any download, so a login unlocked
+  nothing. This replaces "credentials: dashboard or environment"
+  (2026-11-24).
 - **What stays outside the dashboard.** Only what must exist before
   `serve` can show a page: the compose file with its single data
   volume mount, the image, the container user, the port, and (if used)
-  the API token and environment-variable credentials. Everything
+  the API token. Everything
   currently in `shakedown.yaml` is managed from the dashboard.
 - **Schedule input.** Presets (daily or weekly at a time of day,
   manual only) by default, plus a cron expression for power users.
@@ -1378,9 +1378,9 @@ are refused at save (criterion 36).
     validation.
 41. "Sync now" and "validate" buttons (→ criterion 41). Small: the
     API already offers both; the work is the buttons and their gate.
-42. Credentials entered in the dashboard (→ criterion 40). Small in
-    surface, but it needs a storage decision that keeps secrets out of
-    the config file.
+42. No account needed (→ criterion 40). Revised 2026-11-25: the login
+    entered in the dashboard is withdrawn; the work left is taking the
+    built login back out.
 43. Moving the operator's install onto the new setup (→ criteria 37,
     38; §req:constraints deployment status). Must land with 39: the
     existing ofelia schedules must not be lost, and nothing already

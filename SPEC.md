@@ -626,11 +626,12 @@ Plugins shipped in v1:
   the plugin does not reimplement them. That package checksums only
   files already on disk before a download, never the bytes it just
   wrote, so the plugin checks each downloaded file's size and md5
-  against the manifest before reporting success. Optional credentials
-  (for download-restricted items) come from environment variables or
-  from the dashboard (§spec:dashboard-credentials); the plugin logs in
-  to archive.org with the email and password and signs its requests
-  with the keys and cookies the login returns.
+  against the manifest before reporting success. Credentials from
+  environment variables or stored by the dashboard, when set, make the
+  plugin log in to archive.org and sign its requests with the keys and
+  cookies the login returns. A login unlocks nothing the plugin could
+  fetch, so it is withdrawn and comes out under
+  §road:remove-source-login (§spec:dashboard-credentials).
 - **etree (`etree`).** A second, independently written plugin that
   proves the seam is real (§req:success-criteria #8): it drives
   archive.org's public HTTP/JSON API directly — a different integration
@@ -2528,8 +2529,7 @@ Observable behavior:
 
 - **Looking changes nothing.** Only an explicit action changes
   anything: saving settings (§spec:dashboard-settings), turning on the
-  edit override (§spec:edit-lock), entering credentials
-  (§spec:dashboard-credentials), finishing setup
+  edit override (§spec:edit-lock), finishing setup
   (§spec:first-run-setup), Sync now and Validate
   (§spec:dashboard-run-controls), and deleting an unconfigured
   collection's files (§spec:collection-removal). Until the
@@ -3493,12 +3493,6 @@ Spec and code names in the last column never appear on screen.
 | Keep run errors for | How many days a run keeps its per-show error lines. | retention, history days | `keep_run_errors_days` |
 | Trim history now | Start a Trim history run at once. | compact, vacuum, clean up | `POST /api/history/trim` |
 | Webhook URL | The address the failure notice is posted to. | endpoint, hook | `notifications.on_failure.webhook` |
-| Login | A source's email and password, for shows that need an account. | credentials, auth, account | `source_credentials`, `auth` |
-| From environment variables | The login comes from the container's environment and wins over one entered here. | env, set externally | `credentials: environment` |
-| Saved in the dashboard | The login was entered on the Settings tab. | stored, DB credentials | `credentials: dashboard` |
-| No login | The source has no login. | anonymous, none | `credentials: none` |
-| Login accepted / rejected / saved, not checked | What the source said when a login was saved. | valid, invalid, unverified | `check: accepted` / `rejected` / `unchecked` |
-| Forget (login) | Delete a login entered in the dashboard. | remove, clear, revoke | `DELETE /api/credentials` |
 | Removed collection | A collection shakedown.yaml no longer names whose files are still on disk. | unconfigured, orphaned, deleted | `unconfigured` |
 | Add back | Open a new collection with a removed collection's name. | restore, re-add | — |
 | Delete files… | Choose what to delete of a removed collection: Library folders, or Library folders and archived shows. | purge, wipe | `POST /api/collections/purge`, `scope` |
@@ -3527,7 +3521,7 @@ is one route (`GET /`) with five tabs.
 | Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content, trims, purges; loading | round 1, 2026-11-12; loading 2026-11-13; trim and delete runs and the Action column, round S1 2026-11-24 |
 | Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
-| Settings tab | `docs/ui/handoff/settings.md` | default, settings-locked, settings-invalid; settings-dirty, -saved-warnings, -refused, -conflict, -login, -delete, -override (`web/tests/settings.spec.ts`) | round S2, 2026-11-24 |
+| Settings tab | `docs/ui/handoff/settings.md` | default, settings-locked, settings-invalid; settings-dirty, -saved-warnings, -refused, -conflict, -delete, -override (`web/tests/settings.spec.ts`) | round S2, 2026-11-24 |
 
 ### Harness
 
@@ -3639,7 +3633,7 @@ free; dashboard pages and their JSON — free; state database — additive
 migration only; archived media — frozen (an upgrade never forces a
 re-download). This line governs every section of the config-management
 increment: §spec:dashboard-settings, §spec:edit-lock, §spec:schedules,
-§spec:dashboard-credentials, §spec:first-run-setup,
+§spec:first-run-setup,
 §spec:dashboard-run-controls, §spec:collection-removal, and
 §spec:run-error-retention.
 
@@ -3675,15 +3669,13 @@ Observable behavior:
     (`["sources", 0, "collections", 1, "query"]`) and `message` is the
     developer-facing error text the run would log (it never echoes a
     value from the file, §spec:configuration);
-  - `credentials`: per source, `environment`, `dashboard`, or `none`
-    (§spec:dashboard-credentials) — never a credential value;
   - `next_syncs`: per collection, `{source, collection, next_at}` with
     `next_at` the next scheduled sync, formatted like every other time
     the dashboard receives, or `null` for a manual-only collection
     (§spec:schedules);
   - `source_types`: per installed source plugin, its `type`, the layout
-    fields and filters its `library_layout` accepts, and whether it
-    takes credentials — so the editor can explain the options without
+    fields and filters its `library_layout` accepts — so the editor
+    can explain the options without
     hard-coding them;
   - `unconfigured`: collections that still have shows or files but are
     no longer in the file (§spec:collection-removal);
@@ -3847,9 +3839,9 @@ Observable behavior:
 - **Locked means read-only for the file.** While `locked`,
   `PUT /api/config` answers `409 {code: "locked"}` and the dashboard
   shows the settings without editing controls. What the file does not
-  hold stays available: credentials (§spec:dashboard-credentials),
-  Sync now and Validate (§spec:dashboard-run-controls), and deleting the
-  files of unconfigured collections (§spec:collection-removal).
+  hold stays available: Sync now and Validate
+  (§spec:dashboard-run-controls), and deleting the files of
+  unconfigured collections (§spec:collection-removal).
 - **Turning on the override.** `POST /api/config/override` sets the
   state to `override` and answers `200 {edit: "override"}`; it is
   idempotent. The dashboard confirms first, warning that a later edit to
@@ -3860,9 +3852,9 @@ Observable behavior:
   `editable` or `override` file never locks it, and the next run and the
   next page refresh use it.
 - **Where the state lives.** The edit state is recorded in the state
-  database the config names, beside the credentials. A file with no
+  database the config names. A file with no
   record there is `locked`. When a dashboard save points `state_db` at a
-  new database, the edit state and stored credentials move with it,
+  new database, the edit state moves with it,
   once the file is written; the same database named another way (a
   link, a relative path) moves nothing. The old database's writer lock
   is then marked retired: a run that started before the save, and so
@@ -3877,8 +3869,7 @@ Shakedown, because §req:constraints asks exactly that: Shakedown cannot
 know whether a pre-existing file will be maintained from its source or
 from the dashboard from now on, so it starts safe and lets the operator
 say. The record lives in the state database because Shakedown alone
-writes it, it already holds per-install state, and the operator chose
-it for credentials (§spec:dashboard-credentials).
+writes it and it already holds per-install state.
 
 **Alternatives rejected.** *A marker key in the file* — an IaC copy of
 a setup-written file would carry the marker and unlock itself on every
@@ -4033,8 +4024,7 @@ Observable behavior:
 - **No new history to trim.** What this increment stores is current
   state, not a log: the heartbeat, the edit state (§spec:edit-lock), and
   whether the stale-scheduler notification was sent for this episode are
-  one record each; stored credentials are one record per source and go
-  with the source. Scheduled syncs and purges write the run records and
+  one record each. Scheduled syncs and purges write the run records and
   activity entries every run already writes, at the rate ofelia's ticks
   did; activity is kept 30 days and run records are kept, as before
   (§spec:state), their error lines as §spec:run-error-retention sets.
@@ -4109,90 +4099,64 @@ failure webhook fires once, and Container Station shows the container
 unhealthy; a tick that passes meanwhile shows as overdue. Start it
 again: the entries clear and the next tick runs.
 
-## Credentials in the dashboard §spec:dashboard-credentials
+## Credentials in the dashboard, withdrawn §spec:dashboard-credentials
 
 *Status: in progress*
-The API, storage, run resolution, and the Settings tab's login entry (round S2) are built; the optional login in first-run setup waits on Design.
+Withdrawn 2026-11-25. The Settings tab no longer offers a login and first-run setup will not; the credentials API, storage, run login, and the `ia` source's `takes_credentials` are still in the code and come out under §road:remove-source-login.
 
-A user can enter a source's archive.org credentials in the dashboard.
-They never appear in `shakedown.yaml`, on any page, in any API answer,
-or in any log. Credentials set as environment variables still work and
-win (§req:success-criteria #40; §req:quality-attributes: credentials
-stay out of sight; §req:constraints: credentials, dashboard or
-environment; §req:user-stories: credentials without a redeploy).
+Shakedown downloads from archive.org without an account, and no
+dashboard, file, or environment setting supplies one (operator
+decision, 2026-11-25; §req:success-criteria #40; §req:constraints: no
+source login). An account
+would change nothing Shakedown can download:
 
-Observable behavior:
+- **A file archive.org marks `private` is never requested.** The source
+  reports it refused (§spec:source-plugins), and selection picks only files
+  the source serves (§spec:failure-behavior: item restricted upstream). Only
+  an item's uploader or archive.org staff can download a private file;
+  an ordinary account cannot. This is the stream-only soundboard case:
+  the lossless originals are private and the lossy copies are public.
+- **An item marked `access-restricted` is never fetched.** Discovery
+  flags it restricted from its metadata, with its reason, without a
+  download attempt, and it shows as Restricted on the dashboard and in
+  `status`.
+- **The login did nothing else.** It only signed the plugin's metadata
+  and download requests; neither check above reads it.
 
-- **Write-only.** `PUT /api/credentials` with `{source, email,
-  password}` stores them for that source and answers
-  `200 {source, credentials, check}`: `credentials` is the source's
-  status after the change, and `check` is the source's verdict on the
-  login — `accepted`, `rejected`, or `unchecked` when the source could
-  not be reached. Rejected credentials are still stored, so a user can
-  retry the check through Validate. `DELETE /api/credentials?source=`
-  forgets them. Unknown source, or a source type that takes no
-  credentials: `404` (`{code: "unknown_source"}` or
-  `{code: "takes_no_credentials"}`). Values travel only in the request
-  body, never in a URL. A body that is not exactly those three non-empty
-  strings answers `422 {code: "invalid_body"}`, never the field-by-field
-  detail, which would quote what was entered. Values are trimmed, as
-  environment values are. Both endpoints pass the write gate
-  (§spec:dashboard-run-controls).
-- **Status, never values.** `GET /api/config` reports, per source,
-  `environment` (its environment variables are set and in effect),
-  `dashboard` (stored credentials are in effect), or `none`. No answer
-  returns a stored value or a hint of one.
-- **Which wins.** A run uses a source's environment variables when both
-  are set: those `auth` names in the file, or the source type's standard
-  names (`IA_EMAIL`, `IA_PASSWORD`) when the file names none; a name the
-  file leaves out falls back to the standard one. Otherwise it uses the
-  source's stored credentials; otherwise none. `auth` stays optional in
-  the file, and setup never writes it. The `ia` source logs in to
-  archive.org once per run with that email and password; a login the
-  source rejects or cannot answer is logged, without values, and the run
-  continues without it. Validate asks the source about the login in
-  effect and fails on a rejected or unchecked one.
-- **Where they live.** Stored credentials are kept in the state database
-  the config names, in plain text, protected as that file is (operator
-  decision, 2026-11-24), one row per source in a table outside schema
-  versioning (§spec:state): `serve` writes it and never holds the writer
-  lock that migrates. A save that moves the state database carries them
-  with the edit state (§spec:edit-lock) and leaves none in the old one.
-  Removing a source from the file forgets its stored credentials at that
-  save, as does any save after a hand edit removed one; a save that
-  fails to write the file forgets nothing.
-- **Never logged.** No log line, error message, validation result,
-  export, or `status` output contains a stored or entered credential.
-- **Not under the edit lock.** Credentials are not in the file, so the
-  edit lock (§spec:edit-lock) does not cover them.
+**Decision.** Drop the login rather than keep a setting with no effect.
+A login that changes nothing still costs a secret to store, a Settings
+row and a setup step a first-time user has to judge, and a Validate
+check that can fail for no gain.
 
-**Decision and constraint.** The state database, because Shakedown alone
-writes it, it sits beside the archive and is backed up with it, and it
-is outside the config folder people back up, share, and commit
-(§req:quality-attributes: credentials stay out of sight). Environment
-variables win so a deployment that already sets them keeps working
-unchanged and an IaC deployment keeps secrets in its own secret store
-(§req:constraints). The login is checked at entry, without blocking,
-because a user entering credentials wants to know they work, and only
-the source can say whether a login is accepted.
+**Alternatives rejected.** *Keep it and correct the wording* — the
+dashboard would still ask for a secret that unlocks nothing. *Keep
+the plugin hook for a future source that needs an account* — no
+shipped or planned source does; a plugin that needs one brings its
+design with it.
 
-**Alternatives rejected.** *A secrets file beside `shakedown.yaml`* —
-deployable by IaC, but it sits in the folder people commit; the
-operator chose the database. *Encrypt them with a key on the same NAS*
-— anyone who can read the database can read the key; protection in name
-only. *Refuse credentials the source rejects* — a source outage would
-block entry; the verdict is shown instead.
+**Removal.** §road:remove-source-login takes the login out of the
+code: the credentials endpoints, the credential status in
+`GET /api/config` and `takes_credentials` in its source types, the
+`credentials` field of `POST /api/setup`, the run login, Validate's
+login check, and the `IA_*` lines in the compose example,
+`shakedown.example.yaml`, and the README. A file that still names a source's `auth` keeps loading:
+the key is ignored, and the next save from the dashboard leaves it out,
+so an upgrade never stops a scheduled run over it. `serve` drops the
+`source_credentials` table the first time it opens a database that has
+one, so no stored password outlives the feature; the table is outside
+schema versioning (§spec:state), so nothing else changes.
 
-**Tradeoffs.** A backup of the state database holds the credentials. A
-rebuilt database forgets them, and the user enters them again.
+**Tradeoffs.** Should archive.org later serve a file to logged-in
+accounts that it refuses to anonymous ones, Shakedown cannot fetch it
+until a login is designed again.
 
-**User-level test path.** Enter credentials for the `ia` source: the
-dashboard shows them as set from the dashboard, a sync of a
-download-restricted collection downloads its files, and a search of
-`shakedown.yaml`, every `/api/*` answer, and the `serve` and run logs
-finds neither value. Set `IA_EMAIL` and `IA_PASSWORD` on the container:
-the dashboard shows environment in effect. Enter a wrong password: the
-answer says rejected.
+**User-level test path.** The Settings tab and first-run setup show no
+login. A sync of a collection holding a stream-only show mirrors its
+public files and lists the show's private files as refused; an
+`access-restricted` item shows as Restricted with its reason. Once
+§road:remove-source-login lands, `/api/credentials` answers `404`,
+`GET /api/config` carries no credential status, and `IA_EMAIL` and
+`IA_PASSWORD` on the container change nothing.
 
 ## First-run setup §spec:first-run-setup
 
@@ -4201,8 +4165,7 @@ The API is built: `serve` starts with no file, `GET /api/setup`, and `POST /api/
 
 A homelab user starts the compose example with no `shakedown.yaml`.
 Opening the dashboard leads them through setup in the browser — paths
-with a hardlink check, optional archive.org credentials, a first
-collection, and its schedule — and when they finish, `shakedown.yaml`
+with a hardlink check, a first collection, and its schedule — and when they finish, `shakedown.yaml`
 exists and a first sync starts. They never open, write, or upload a YAML
 file (§req:success-criteria #6, #35; §req:user-stories: set up without
 YAML; §req:constraints: what stays outside the dashboard).
@@ -4226,12 +4189,12 @@ Observable behavior:
   `POST /api/config/check-paths` (§spec:dashboard-settings); a failure is
   a warning, and the user may continue. The check creates the archive and
   library folders when they are missing, as validation does today.
-- **Finishing.** `POST /api/setup` takes `{document, credentials}`:
-  `document` as in `PUT /api/config`, with exactly one source holding
-  exactly one collection; `credentials` optional, `{email, password}` for
-  that source. The system checks the document like any save, creates the
-  config folder if needed, writes the file, records it as `editable`
-  (§spec:edit-lock), stores the credentials, and starts the collection's
+- **Finishing.** `POST /api/setup` takes `{document}`, as in
+  `PUT /api/config`, with exactly one source holding exactly one
+  collection; setup asks for no login (§spec:dashboard-credentials).
+  The system checks the document like any save, creates the config
+  folder if needed, writes the file, records it as `editable`
+  (§spec:edit-lock), and starts the collection's
   first sync as Sync now does (§spec:dashboard-run-controls). Answers:
   - `201 {revision, warnings, started}` — written; `started` is the
     scope the sync started (`{source, collection}`), or `null` with a
@@ -4240,16 +4203,11 @@ Observable behavior:
     codes, a document without exactly one source holding exactly one
     collection is `setup_one_collection`, at `["sources"]` or
     `["sources", 0, "collections"]`;
-  - `422 {code: "invalid_body"}` — a body of another shape, or
-    credentials that are not two non-empty strings; never the
-    field-by-field detail, which would quote them. Credentials for a
-    source type that takes none answer
-    `404 {code: "takes_no_credentials"}`, as in
-    §spec:dashboard-credentials;
+  - `422 {code: "invalid_body"}` — a body of another shape;
   - `409 {code: "exists"}` — a file appeared at the path since setup
     began; nothing is overwritten and the page moves to Settings;
   - `403` and `500 write_failed` as in `PUT /api/config`. The file is
-    written before the edit state and the credentials, so a file that
+    written before the edit state, so a file that
     fails to write leaves no `editable` record to unlock a file written
     later by hand; a state database that fails after it answers
     `write_failed` naming the database, and the file stays.
@@ -4286,7 +4244,7 @@ runs the scheduler with no schedules.
 
 **User-level test path.** On a clean stack from the compose example,
 open the dashboard on a phone: setup appears. Accept the default paths;
-the hardlink check passes. Skip credentials, add `phish` with query
+the hardlink check passes. Add `phish` with query
 `collection:Phish`, keep the default schedule, finish: the live view
 shows the first sync of `phish`, `shakedown.yaml` exists with that
 collection and schedule, and Settings is editable. Repeat with the
