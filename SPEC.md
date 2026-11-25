@@ -626,12 +626,9 @@ Plugins shipped in v1:
   the plugin does not reimplement them. That package checksums only
   files already on disk before a download, never the bytes it just
   wrote, so the plugin checks each downloaded file's size and md5
-  against the manifest before reporting success. Credentials from
-  environment variables or stored by the dashboard, when set, make the
-  plugin log in to archive.org and sign its requests with the keys and
-  cookies the login returns. A login unlocks nothing the plugin could
-  fetch, so it is withdrawn and comes out under
-  §road:remove-source-login (§spec:dashboard-credentials).
+  against the manifest before reporting success. It asks archive.org
+  anonymously: no request logs in or is signed, since a login unlocks
+  nothing the plugin could fetch (§spec:dashboard-credentials).
 - **etree (`etree`).** A second, independently written plugin that
   proves the seam is real (§req:success-criteria #8): it drives
   archive.org's public HTTP/JSON API directly — a different integration
@@ -1866,7 +1863,7 @@ annotated example.
 Structure: top-level roots (`archive_root`, `library_root`,
 `state_db`) and global concurrency caps (`max_concurrent_downloads`,
 `max_concurrent_collections`); a list of `sources` (name, plugin
-`type`, optional auth) each containing `collections` (name, `query`,
+`type`, `max_concurrent_requests`) each containing `collections` (name, `query`,
 `library_layout`, `prune_disappeared`, `incremental_discovery`,
 `preserve_source_metadata`, `fill_tags`, `on_complete`, `schedule`);
 global `notifications`; an optional `timezone` for schedules
@@ -1886,18 +1883,19 @@ per-collection `preserve_source_metadata` opt-in
 `library_layout` structurally unable to distinguish items
 (§spec:layout-collision-safety). All are validated at load time like
 every other key (`extra="forbid"`, so an unknown or misspelled key fails
-the run rather than being ignored).
+the run rather than being ignored). The one exception is a source's
+`auth`, the withdrawn login's setting: a file that still has it loads
+with the key ignored, and the next save from the dashboard leaves it
+out, so an upgrade never stops a scheduled run over it
+(§spec:dashboard-credentials).
 
 - The system shall validate the full configuration at startup and
   refuse to run on errors, naming the offending key — a scheduled
   headless tool that limps along on half-parsed config fails at 3am
   with nobody watching.
 - **Secrets never appear in the YAML** (§req:quality-attributes:
-  security). Credential fields name environment variables (e.g.
-  `email_env: IA_EMAIL`) rather than holding values, and credentials
-  entered in the dashboard are stored in the state database
-  (§spec:dashboard-credentials), so the config file is safe to back up,
-  share, and commit.
+  security). Shakedown downloads without an account, so the file holds
+  no credentials at all (§spec:dashboard-credentials).
 - **Each collection's `schedule` lives in the file** (§spec:schedules).
   Until the config-management increment there was no `schedule:` field:
   timing lived in ofelia labels in the compose file, to keep one source
@@ -1913,13 +1911,15 @@ the run rather than being ignored).
 Complete through schema v14.
 
 The scheduler's heartbeat, the stale-scheduler notice record
-(§spec:schedules), the config file's edit state (`config_edit`,
-§spec:edit-lock), and the credentials entered in the dashboard
-(`source_credentials`, one row per source, §spec:dashboard-credentials)
-are rows in tables outside schema versioning:
+(§spec:schedules), and the config file's edit state (`config_edit`,
+§spec:edit-lock) are rows in tables outside schema versioning:
 each writer (the scheduler, `serve`, setup) creates its own table when
 the database lacks it and leaves `schema_version` alone, so none ever
 migrates and a previous release ignores them.
+`serve` drops the `source_credentials` table, where an older release
+kept the withdrawn dashboard login, when it starts, the same way:
+outside schema versioning, with the freed pages zeroed
+(§spec:dashboard-credentials).
 
 Sync state lives in a single-file embedded SQLite database at
 `<archive_root>/.shakedown/state.db`.
@@ -2209,12 +2209,11 @@ config-management increment ofelia did (§req:constraints, superseded
 | `GET /api/library` | Library, database, disk, and growth (§spec:library-stats) |
 | `GET /api/attention` | Needs attention and library health (§spec:needs-attention) |
 | `GET /api/health` | Release, config validity, last validation (§spec:dashboard-health) |
-| `GET /api/config` | The config file's settings, edit state, credential status, next syncs, unconfigured collections (§spec:dashboard-settings) |
+| `GET /api/config` | The config file's settings, edit state, next syncs, unconfigured collections (§spec:dashboard-settings) |
 | `PUT /api/config` | Save settings (write gate; §spec:dashboard-settings, §spec:edit-lock) |
 | `POST /api/config/check-paths` | Path checks without saving (write gate; §spec:dashboard-settings) |
 | `POST /api/config/override` | Turn on the edit override (write gate; §spec:edit-lock) |
 | `GET /api/setup`, `POST /api/setup` | First-run setup (write gate on `POST`; §spec:first-run-setup) |
-| `PUT /api/credentials`, `DELETE /api/credentials` | Store or forget a source's credentials (write gate; §spec:dashboard-credentials) |
 | `POST /api/collections/purge` | Delete an unconfigured collection's files (write gate; §spec:collection-removal) |
 | `POST /api/history/trim` | Trim old run error detail now and compact the database (write gate; §spec:run-error-retention) |
 
@@ -4150,8 +4149,8 @@ again: the entries clear and the next tick runs.
 
 ## Credentials in the dashboard, withdrawn §spec:dashboard-credentials
 
-*Status: in progress*
-Withdrawn 2026-11-25. The Settings tab no longer offers a login and first-run setup will not; the credentials API, storage, run login, and the `ia` source's `takes_credentials` are still in the code and come out under §road:remove-source-login.
+*Status: complete*
+Withdrawn 2026-11-25 and removed: no screen, endpoint, setting, or run takes a login.
 
 Shakedown downloads from archive.org without an account, and no
 dashboard, file, or environment setting supplies one (operator
@@ -4183,17 +4182,20 @@ the plugin hook for a future source that needs an account* — no
 shipped or planned source does; a plugin that needs one brings its
 design with it.
 
-**Removal.** §road:remove-source-login takes the login out of the
-code: the credentials endpoints, the credential status in
-`GET /api/config` and `takes_credentials` in its source types, the
-`credentials` field of `POST /api/setup`, the run login, Validate's
-login check, and the `IA_*` lines in the compose example,
-`shakedown.example.yaml`, and the README. A file that still names a source's `auth` keeps loading:
-the key is ignored, and the next save from the dashboard leaves it out,
-so an upgrade never stops a scheduled run over it. `serve` drops the
-`source_credentials` table the first time it opens a database that has
-one, so no stored password outlives the feature; the table is outside
-schema versioning (§spec:state), so nothing else changes.
+**Removal.** The login is out of the code: the credentials endpoints
+(`PUT` and `DELETE /api/credentials` answer `404`), the credential
+status in `GET /api/config` and `takes_credentials` in its source
+types, the `credentials` field of `POST /api/setup` (a body that still
+carries it is refused like any unknown key), the run login and the
+signed requests, Validate's login check, and the `IA_*` lines in the
+compose example, `shakedown.example.yaml`, and the README. A file that
+still names a source's `auth` keeps loading: the key is ignored, and
+the next save from the dashboard leaves it out, so an upgrade never
+stops a scheduled run over it. `serve` drops the `source_credentials`
+table from the database the config names each time it starts, with the
+freed pages zeroed, so no stored password outlives the feature; the
+table is outside schema versioning (§spec:state), so nothing else
+changes.
 
 **Tradeoffs.** Should archive.org later serve a file to logged-in
 accounts that it refuses to anonymous ones, Shakedown cannot fetch it
@@ -4202,15 +4204,16 @@ until a login is designed again.
 **User-level test path.** The Settings tab and first-run setup show no
 login. A sync of a collection holding a stream-only show mirrors its
 public files and lists the show's private files as refused; an
-`access-restricted` item shows as Restricted with its reason. Once
-§road:remove-source-login lands, `/api/credentials` answers `404`,
-`GET /api/config` carries no credential status, and `IA_EMAIL` and
-`IA_PASSWORD` on the container change nothing.
+`access-restricted` item shows as Restricted with its reason.
+`/api/credentials` answers `404`, `GET /api/config` carries no
+credential status, and with `IA_EMAIL` and `IA_PASSWORD` set on the
+container a sync makes no login request. A database that held a stored
+login has no `source_credentials` table once `serve` has started.
 
 ## First-run setup §spec:first-run-setup
 
 *Status: in progress*
-The API is built (`serve` starts with no file, `GET /api/setup`, `POST /api/setup`) and the setup flow on screen is designed and built (§spec:ui-kit Screens, round S4); `POST /api/setup` still accepts the withdrawn `credentials` key until §road:remove-source-login.
+The API is built (`serve` starts with no file, `GET /api/setup`, `POST /api/setup`) and the setup flow on screen is designed and built (§spec:ui-kit Screens, round S4); its Search reads pasted links through `GET /api/source-link` and `reads_links`, which wait on §road:source-links.
 
 A homelab user starts the compose example with no `shakedown.yaml`.
 Opening the dashboard leads them through setup in the browser — paths
@@ -4331,8 +4334,8 @@ Observable behavior:
 - **The write gate.** Every endpoint that writes or starts work —
   `POST /sync`, `POST /verify`, `POST /validate`, `PUT /api/config`,
   `POST /api/config/override`, `POST /api/config/check-paths`,
-  `POST /api/setup`, `PUT` and `DELETE /api/credentials`,
-  `POST /api/collections/purge`, `POST /api/history/trim` — accepts a
+  `POST /api/setup`, `POST /api/collections/purge`,
+  `POST /api/history/trim` — accepts a
   request that either:
   - carries the configured bearer token (`SHAKEDOWN_API_TOKEN`), as
     scripts and `curl` do today; or
@@ -4621,9 +4624,9 @@ page (§req:constraints: what stays outside the dashboard):
   again, read-only, over it, so no scheduled run can rewrite the config;
 - serve's port, published on host loopback only, so the operator's
   reverse proxy is the one way in (operator decision, 2026-11-12);
-- optionally `SHAKEDOWN_API_TOKEN` (§spec:dashboard-run-controls),
-  archive.org credentials as environment variables
-  (§spec:dashboard-credentials), and `TZ`, given to both containers.
+- optionally `SHAKEDOWN_API_TOKEN` (§spec:dashboard-run-controls) and
+  `TZ`, given to both containers. No archive.org login is set
+  (§spec:dashboard-credentials).
 
 Everything else is set in the dashboard (§spec:first-run-setup,
 §spec:dashboard-settings). No third-party scheduler runs, and no
@@ -4722,7 +4725,7 @@ output goes to the scheduler container's log.
 
 A first-time operator can run a dedicated readiness validation before
 the first large mirror. The validation reports one pass/fail result per
-collection and names the specific setting, path, credential, source, or
+collection and names the specific setting, path, source, or
 handoff target that needs action. It never downloads a full collection
 and never leaves behind archive or library items; a broken setup cannot
 look like a clean no-op. (§req:success-criteria #16,
@@ -4736,16 +4739,16 @@ Observable behavior:
   library, and state paths are writable where writes are required;
   a test file in the archive can be hardlinked into the library;
   configured sources and
-  collections can be reached; required credential environment variables
-  are present and accepted by the source when credentials are needed;
+  collections can be reached;
   layout templates are checked with the existing collision-risk guard;
   and configured handoff targets are checked according to the handoff
   validation mode below.
 - Validation output is grouped by source and collection. Each failing
   check gives the plain-language consequence and the user action needed
   to continue, for example "archive path is not writable; fix the volume
-  mount before syncing" or "IA credentials were rejected; update the
-  environment variables in Container Station." `--json` emits the same
+  mount before syncing" or "source 'ia' could not be reached for
+  collection 'grateful-dead'; check source connectivity and the
+  collection query, then rerun." `--json` emits the same
   structure for dashboards and the optional control plane.
 - A validation failure exits non-zero. A validation pass means "this
   deployment is ready to attempt a real sync," not "the whole collection
@@ -4798,8 +4801,7 @@ the potentially mutating behavior is explicit and opt-in, while the
 default readiness check remains safe to run repeatedly.
 
 **User-level test path.** On a fresh config, run validation with a
-missing archive path, a bad credential environment variable, an
-unreachable source, and a valid minimal collection. The output identifies
+missing archive path, an unreachable source, and a valid minimal collection. The output identifies
 each failing collection or setting and exits non-zero without
 downloading a collection. Fix the configuration and rerun until it
 passes; then run `validate --live-handoff` against a test webhook or
@@ -4892,8 +4894,8 @@ no release-check command (§req:success-criteria #18, revised).
 Observable behavior:
 
 - **Lives in the test suite, runs in CI.** The release workflows —
-  first-setup readiness (`validate` catches a missing path, bad
-  credentials or source access, an unsafe layout, and a broken handoff
+  first-setup readiness (`validate` catches a missing path, source
+  access, an unsafe layout, and a broken handoff
   target), unsafe config rejection, partial-failure recovery (a failed
   sync, restage, reconcile, or validation leaves recordings intact, and
   a retry clears the recovery warning only once the work completes),

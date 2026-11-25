@@ -1379,8 +1379,8 @@ are refused at save (criterion 36).
 41. "Sync now" and "validate" buttons (→ criterion 41). Small: the
     API already offers both; the work is the buttons and their gate.
 42. No account needed (→ criterion 40). Revised 2026-11-25: the login
-    entered in the dashboard is withdrawn; the work left is taking the
-    built login back out.
+    entered in the dashboard is withdrawn, and the built login is
+    removed.
 43. Moving the operator's install onto the new setup (→ criteria 37,
     38; §req:constraints deployment status). Must land with 39: the
     existing ofelia schedules must not be lost, and nothing already
