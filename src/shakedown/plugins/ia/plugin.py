@@ -17,6 +17,7 @@ from urllib3.exceptions import MaxRetryError
 from shakedown import stopping
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.models import ManifestFile
+from shakedown.plugins import archive_org
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
     FailureCause,
@@ -166,6 +167,10 @@ class IAPlugin(SourcePlugin):
     # `identifier` is the item's IA identifier — globally unique, the composite key
     # (§spec:layout-collision-safety); no other surfaced field is guaranteed distinct.
     per_item_unique_fields = ("identifier",)
+
+    @classmethod
+    def query_from_link(cls, url: str) -> str | None:
+        return archive_org.query_from_link(url)
 
     def __init__(self, source_config: SourceConfig) -> None:
         super().__init__(source_config)

@@ -373,3 +373,16 @@ class SourcePlugin(ABC):
     # the same staging path (§spec:layout-collision-safety). Empty means the plugin
     # vouches for no field's uniqueness.
     per_item_unique_fields: tuple[str, ...] = ()
+
+    @classmethod
+    def query_from_link(cls, url: str) -> str | None:
+        """Optional: the search a link from the source's site stands for, or None
+        for a link this plugin can't read (§spec:dashboard-settings "Pasted links").
+        Read from the link's text alone, with no request to the source."""
+        return None
+
+    @classmethod
+    def reads_links(cls) -> bool:
+        """Whether this plugin reads pasted links: it implements `query_from_link`."""
+        return cls.query_from_link.__func__ is not SourcePlugin.query_from_link.__func__
+

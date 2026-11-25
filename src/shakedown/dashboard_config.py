@@ -1,5 +1,6 @@
 """`GET /api/config`: the config file as it is now (§spec:dashboard-settings "One
-config resource"), with its edit state (§spec:edit-lock).
+config resource"), with its edit state (§spec:edit-lock); and `GET /api/source-link`,
+the search a pasted link stands for (§spec:dashboard-settings "Pasted links").
 
 Read at each request, never shared or cached, so a hand edit shows on the next
 refresh. Answering writes nothing: the state database is opened read-only and never
@@ -27,6 +28,7 @@ from shakedown.dashboard import iso
 from shakedown.db import open_read_only
 from shakedown.edit_lock import read_edit, state_db_for
 from shakedown.plugins import registry
+from shakedown.plugins.registry import UnknownPluginError
 from shakedown.purge import configured_pairs, unconfigured
 from shakedown.schedule import next_syncs
 from shakedown.utils.templates import FILTER_NAMES
@@ -114,7 +116,8 @@ def _plain(value: Any) -> Any:
 
 def source_types() -> list[dict[str, Any]]:
     """Per installed source plugin: the layout fields and filters its
-    `library_layout` accepts."""
+    `library_layout` accepts, and whether it reads pasted links
+    (`GET /api/source-link`)."""
     answer = []
     for type_name in registry.known_types():
         plugin = registry.plugin_class(type_name)
@@ -123,6 +126,18 @@ def source_types() -> list[dict[str, Any]]:
                 "type": type_name,
                 "layout_fields": list(plugin.template_fields),
                 "layout_filters": list(FILTER_NAMES),
+                "reads_links": plugin.reads_links(),
             }
         )
     return answer
+
+
+def source_link_answer(type_name: str, url: str) -> dict[str, str | None] | None:
+    """`GET /api/source-link`: the search the type's plugin reads the link as, null
+    when it can't read it or the type offers no reading. None for an unknown type.
+    Needs no config, so it answers whatever state the file is in."""
+    try:
+        plugin = registry.plugin_class(type_name)
+    except UnknownPluginError:
+        return None
+    return {"query": plugin.query_from_link(url)}

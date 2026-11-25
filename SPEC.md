@@ -588,6 +588,11 @@ capability declaration (`type_name`, the metadata
 `template_fields` it surfaces for library layout, §spec:library-staging,
 and which of those fields are **per-item-unique** so the config layer can
 guard against lossy layouts, §spec:layout-collision-safety).
+A plugin may also offer `query_from_link(url) -> str | None`, called on
+the class, which reads a link from its source's site as its own search
+from the link's text alone, with no request to the source; offering it
+is what `reads_links` reports, and the `ia` and `etree` plugins share one
+reading of archive.org links (§spec:dashboard-settings "Pasted links").
 The authoring contract — exact method signatures, the durability and
 backoff the core owns, and a worked example — is documented for third-party
 authors in [`docs/plugins.md`](docs/plugins.md).
@@ -2214,6 +2219,7 @@ config-management increment ofelia did (§req:constraints, superseded
 | `POST /api/config/check-paths` | Path checks without saving (write gate; §spec:dashboard-settings) |
 | `POST /api/config/override` | Turn on the edit override (write gate; §spec:edit-lock) |
 | `GET /api/setup`, `POST /api/setup` | First-run setup (write gate on `POST`; §spec:first-run-setup) |
+| `GET /api/source-link?type=&url=` | The search a pasted link stands for; read-only, no write gate, answers with no config (§spec:dashboard-settings) |
 | `POST /api/collections/purge` | Delete an unconfigured collection's files (write gate; §spec:collection-removal) |
 | `POST /api/history/trim` | Trim old run error detail now and compact the database (write gate; §spec:run-error-retention) |
 
@@ -3649,8 +3655,8 @@ loads.
 
 ## Settings in the dashboard §spec:dashboard-settings
 
-*Status: in progress*
-The API is built, and the Settings tab and the collection editor are designed and built (§spec:ui-kit Screens, rounds S2 and S3); setup shows the path checks before Finish, and a file with errors opens in Settings when nothing has loaded (round S4); `GET /api/source-link` and `reads_links` wait on §road:source-links.
+*Status: complete*
+The API is built, including `GET /api/source-link` and `reads_links` for pasted links, and the Settings tab and the collection editor are designed and built (§spec:ui-kit Screens, rounds S2 and S3); setup shows the path checks before Finish, and a file with errors opens in Settings when nothing has loaded (round S4).
 
 Compatibility, from deployment status "deployed, one install, no
 outside consumers" (§req:constraints, operator-confirmed 2026-11-24):
@@ -3677,76 +3683,44 @@ path checks warn, never block).
 Observable behavior:
 
 - **One config resource.** `GET /api/config` answers what the file says
-  now, read at the request (a hand edit appears on the next refresh):
-  - `state`: `missing` (no file; §spec:first-run-setup), `unreadable`
-    (the file is not valid YAML, or cannot be read), `invalid` (it
-    parses but a run would refuse it), or `valid`;
-  - `path`: the config file's path inside the container;
-  - `revision`: an opaque token for the exact file content, or `null`
-    when there is no file;
-  - `edit`: `editable`, `locked`, or `override` (§spec:edit-lock);
-  - `document`: the file's settings as JSON, keyed exactly as the YAML
-    is (`archive_root`, `sources[].collections[].library_layout`, …),
-    including keys the file leaves out at their effective default, or
-    `null` when the file is missing or unreadable;
-  - `errors`: for an `invalid` or `unreadable` file, a list of
-    `{loc, code, message}`, where `loc` is the path to the offending
-    setting as a list of keys and indexes
-    (`["sources", 0, "collections", 1, "query"]`) and `message` is the
-    developer-facing error text the run would log (it never echoes a
-    value from the file, §spec:configuration);
-  - `next_syncs`: per collection, `{source, collection, next_at}` with
-    `next_at` the next scheduled sync, formatted like every other time
-    the dashboard receives, or `null` for a manual-only collection
-    (§spec:schedules);
-  - `source_types`: per installed source plugin, its `type`, the layout
-    fields and filters its `library_layout` accepts, and whether it
-    reads pasted links (`reads_links`) — so the editor can explain the
-    options without hard-coding them;
-  - `unconfigured`: collections that still have shows or files but are
-    no longer in the file (§spec:collection-removal);
-  - `generated_at`, like every dashboard answer.
+  now, read at the request, so a hand edit appears on the next refresh.
+  It reports the file's state — `missing` (§spec:first-run-setup),
+  `unreadable` (not valid YAML, or not readable), `invalid` (a run would
+  refuse it), or `valid` — its path, a revision token for the exact
+  content, the edit state (§spec:edit-lock), and the settings as JSON
+  keyed exactly as the YAML is, with every key the file leaves out at
+  its effective default. An invalid or unreadable file adds its errors,
+  each pointing at the setting it names, with the message the run would
+  log, which never echoes a value from the file (§spec:configuration).
+  It also carries each collection's next sync (§spec:schedules); per
+  installed source type, the layout fields and filters it accepts and
+  whether it reads pasted links, so the editor explains the options
+  without hard-coding them; and the collections that still hold shows
+  or files but are no longer in the file (§spec:collection-removal).
   Opening it never writes anything (§req:success-criteria #33).
 - **Save is a whole-document replace, checked first.** `PUT /api/config`
-  takes `{revision, document}`. The document is checked by the same
-  validation every run applies at startup — unknown keys, types and
-  ranges, duplicate collection names, an unknown source type, a layout
-  with an unknown field or filter or none at all, plus the schedule and
-  timezone rules of §spec:schedules. Answers:
-  - `200 {revision, warnings}` — written; `warnings` lists, each
-    `{loc, code}`: the path-check results (below) with `path_moved`, and
-    `layout_not_unique` for a layout the run also only warns about
-    (§spec:layout-collision-safety);
-  - `422 {errors}` — refused, same `{loc, code, message}` shape as
-    above, every error found, not only the first; the file is untouched;
-  - `409 {code: "changed"}` — the file's revision is no longer the one
-    the editor loaded (someone edited it since); nothing is written and
-    the editor reloads;
-  - `409 {code: "locked"}` — the edit lock is on (§spec:edit-lock);
-  - `409 {code: "busy"}` — the save points `state_db` at another
-    database while a run holds the writer lock: that run would keep the
-    old database's lock while the next took the new one's, two writers
-    on one archive. Nothing is written; save again once the run ends;
-  - `403 {code: "cross_site"}` — the write gate refused the request
-    (§spec:dashboard-run-controls);
-  - `500 {code: "write_failed", path}` — the file or its folder cannot
-    be written (for example, a read-only mount); the file is untouched;
-  - `409 {code: "missing"}` or `409 {code: "unreadable"}` — there is no
-    file, or it is not valid YAML: no editor exists for either (below),
-    and the override answers the same.
-  A document a save accepts is one the next run accepts, and the reverse
-  (§req:quality-attributes: a save tells the truth): both paths call one
-  validation, never two copies of it.
-  Codes: an error's `code` is pydantic's own error type for a type,
-  range, or unknown-key rule (`extra_forbidden`, `missing`,
-  `greater_than_equal`, …), and for the rules of our own:
-  `schedule_invalid`, `timezone_unknown`, `duplicate_name`,
-  `source_type_unknown`, `layout_unknown_filter`,
-  `layout_unknown_field`, `layout_no_field`, and `exec_file_only`. An
-  unreadable file has one error at `loc: []`: `yaml_invalid`,
-  `root_not_mapping`, or `read_failed`. Path-check warnings are
-  `not_writable` (at the setting whose folder fails) and
-  `hardlink_failed` (at `library_root`).
+  takes the revision the editor loaded and the whole document, checked
+  by the same validation every run applies at startup — unknown keys,
+  types and ranges, duplicate collection names, an unknown source type,
+  a layout with an unknown field or filter or none at all, plus the
+  schedule and timezone rules of §spec:schedules. An accepted save is
+  written and answers its new revision with any warnings: the path
+  checks (below), and `layout_not_unique` for a layout the run also only
+  warns about (§spec:layout-collision-safety). Otherwise nothing is
+  written and the answer says why: every error found, not only the
+  first, each against its setting; the file changed since the editor
+  loaded it (the editor reloads); the edit lock is on
+  (§spec:edit-lock); the save points `state_db` at another database
+  while a run holds the writer lock, which would leave two writers on
+  one archive; the write gate refused it (§spec:dashboard-run-controls);
+  the file or its folder cannot be written (`write_failed`, for
+  example on a read-only mount); or there is no file, or it is not YAML, which have no editor
+  (below). A document a save accepts is one the next run accepts, and
+  the reverse (§req:quality-attributes: a save tells the truth): both
+  paths call one validation, never two copies of it. Error codes are
+  pydantic's own error types for its rules and short names of our own
+  for the rest (`exec_file_only`, `source_type_unknown`, …); path-check
+  warnings carry their check's code.
 - **Paths warn, never block.** When a save changes `archive_root`,
   `library_root`, or `state_db`, the system runs the path checks of
   §spec:setup-readiness-validation on the new values — each folder
@@ -3793,21 +3767,19 @@ Observable behavior:
   shows the error, and the file is fixed by hand.
 - **Pasted links.** A user may paste a link from the source's site
   into a collection's Search instead of typing the search (operator
-  request, round S3). The source plugin reads it: a plugin may offer
-  `query_from_link(url) -> str | None`, which turns a link into its own
-  search, or `None` for a link it can't read, from the link's text
-  alone, with no request to the source. `GET /api/source-link?type=&url=`
-  answers `200 {query}`, `query` null when unreadable or when the type
-  offers no reading; an unknown type answers
-  `404 {code: "source_type_unknown"}`. It reads nothing and writes
-  nothing, so it is not behind the write gate. The page sends only
-  text that is a web link, replaces it with the answer's search if the
-  field still holds that link, and says so under the field; an
+  request, round S3). The source plugin reads it as its own search, from
+  the link's text alone and with no request to the source
+  (§spec:source-plugins); `GET /api/source-link` answers that search,
+  null when the link is unreadable or the type offers no reading, and
+  refuses an unknown type. It reads and writes nothing, so it sits
+  outside the write gate and answers with no config or a broken one. The
+  page sends only text that is a web link, replaces it with the search
+  if the field still holds that link, and says so under the field; an
   unreadable link stays as typed with a warning, and a failed request
-  says to paste it again. The `ia` and `etree` plugins read
-  archive.org links: `/details/<id>` is `collection:<id>`, or
-  `collection:<id> AND (<q>)` when it carries `?query=<q>`; `/search?query=<q>` and
-  `/advancedsearch.php?q=<q>` are `<q>`.
+  says to paste it again. The `ia` and `etree` plugins read archive.org
+  links: `/details/<id>` is `collection:<id>`, or
+  `collection:<id> AND (<q>)` when it carries `?query=<q>`;
+  `/search?query=<q>` and `/advancedsearch.php?q=<q>` are `<q>`.
 
 **Decision and constraint.** The dashboard edits the YAML file itself,
 because §req:constraints keeps the file the source of truth so
@@ -4212,8 +4184,8 @@ login has no `source_credentials` table once `serve` has started.
 
 ## First-run setup §spec:first-run-setup
 
-*Status: in progress*
-The API is built (`serve` starts with no file, `GET /api/setup`, `POST /api/setup`) and the setup flow on screen is designed and built (§spec:ui-kit Screens, round S4); its Search reads pasted links through `GET /api/source-link` and `reads_links`, which wait on §road:source-links.
+*Status: complete*
+Built: `serve` starts with no file, `GET /api/setup` and `POST /api/setup`, and the setup flow on screen (§spec:ui-kit Screens, round S4), whose Search reads pasted links (§spec:dashboard-settings "Pasted links").
 
 A homelab user starts the compose example with no `shakedown.yaml`.
 Opening the dashboard leads them through setup in the browser — paths
@@ -4228,47 +4200,28 @@ Observable behavior:
   `serve` starts, the dashboard opens, and `GET /api/config` answers
   `state: "missing"`. The page leads to setup instead of the no-config
   state (§spec:ui-kit); a file with errors opens in Settings and an
-  unreadable one shows its error. The read endpoints that need a config answer as
-  they do today with none.
-- **Defaults that work on the example stack.** `GET /api/setup` answers
-  the defaults setup offers: `archive_root` `/data/archive`,
-  `library_root` `/data/library`, `state_db`
-  `/data/archive/.shakedown/state.db`, the source types available
-  (`source_types`, as in §spec:dashboard-settings), and the default
-  first schedule (§spec:schedules) as `schedule`, with `generated_at`
-  like every dashboard answer. The page fills `timezone` from the
-  browser.
-- **Path check before finishing.** Setup runs the path checks through
-  `POST /api/config/check-paths` (§spec:dashboard-settings); a failure is
-  a warning, and the user may continue. The check creates the archive and
-  library folders when they are missing, as validation does today.
-- **Finishing.** `POST /api/setup` takes `{document}`, as in
-  `PUT /api/config`, with exactly one source holding exactly one
-  collection; setup asks for no login (§spec:dashboard-credentials).
-  The system checks the document like any save, creates the config
-  folder if needed, writes the file, records it as `editable`
-  (§spec:edit-lock), and starts the collection's
-  first sync as Sync now does (§spec:dashboard-run-controls). Answers:
-  - `201 {revision, warnings, started}` — written; `started` is the
-    scope the sync started (`{source, collection}`), or `null` with a
-    `reason` code when it could not start; the file stays written;
-  - `422 {errors}` — refused, nothing written. Besides the save's
-    codes, a document without exactly one source holding exactly one
-    collection is `setup_one_collection`, at `["sources"]` or
-    `["sources", 0, "collections"]`;
-  - `422 {code: "invalid_body"}` — a body of another shape;
-  - `409 {code: "exists"}` — a file appeared at the path since setup
-    began; nothing is overwritten and the page moves to Settings;
-  - `403` and `500 write_failed` as in `PUT /api/config`. The file is
-    written before the edit state, so a file that
-    fails to write leaves no `editable` record to unlock a file written
-    later by hand; a state database that fails after it answers
-    `write_failed` naming the database, and the file stays.
-  `reason` is `busy` (another run holds the writer lock), `failed` (the
-  run could not be launched), or `exited_early` (it exited before it
-  started). Warnings are the path checks' failures and
-  `layout_not_unique`; setup moves nothing, so there is no
-  `path_moved`.
+  unreadable one shows its error. The read endpoints that need a config
+  answer as they do with none.
+- **Defaults that work on the example stack.** Setup offers the paths of
+  the compose example's single `/data` mount (`/data/archive`,
+  `/data/library`, the database beside the archive), the installed
+  source types, and the default first schedule (§spec:schedules); the
+  page fills `timezone` from the browser.
+- **Path check before finishing.** Setup runs the save's path checks
+  (§spec:dashboard-settings); a failure is a warning, and the user may
+  continue. The check creates missing archive and library folders, as
+  validation does.
+- **Finishing.** Setup takes one document with exactly one source
+  holding exactly one collection, and no login
+  (§spec:dashboard-credentials). It checks the document like any save,
+  writes the file, records it `editable` (§spec:edit-lock), and starts
+  the collection's first sync as Sync now does
+  (§spec:dashboard-run-controls). A sync that cannot start (busy,
+  failed to launch, exited early) leaves the file written and says why.
+  A refused document writes nothing; a file that appeared since setup
+  began is never overwritten, and the page moves to Settings. The file
+  is written before the edit state, so a failed write leaves no
+  `editable` record to unlock a file written later by hand.
 - **The written file.** It holds only what setup set, plus a header
   comment saying the file is editable by hand or in the dashboard, and
   pointing at `shakedown.example.yaml` for the full option list.

@@ -119,6 +119,9 @@ async def test_a_valid_file_with_every_default_filled_in(
     assert next_syncs[1]["next_at"] is None
     types = {t["type"]: t for t in answer["source_types"]}
     assert all("takes_credentials" not in t for t in types.values())
+    # The two archive.org types read pasted links; a type without the hook doesn't.
+    assert (types["ia"]["reads_links"], types["etree"]["reads_links"]) == (True, True)
+    assert types["fake"]["reads_links"] is False
     assert "identifier" in types["ia"]["layout_fields"]
     assert types["ia"]["layout_filters"] == ["lower", "sanitize", "short", "upper"]
     assert datetime.fromisoformat(answer["generated_at"]).tzinfo is not None

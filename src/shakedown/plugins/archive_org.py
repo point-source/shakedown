@@ -1,10 +1,14 @@
-"""archive.org's per-item file list, shared by the two sources that read it (`ia`
-and `etree`): one mapping from its metadata API's file entries to the core's
-ItemLookup file records (§spec:per-item-isolation)."""
+"""archive.org, shared by the two sources that read it (`ia` and `etree`): one
+mapping from its metadata API's file entries to the core's ItemLookup file records
+(§spec:per-item-isolation), and one reading of links from its site as searches
+(§spec:dashboard-settings "Pasted links")."""
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
+
+HOSTS = ("archive.org", "www.archive.org")
 
 
 def file_records(identifier: str, files: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -30,3 +34,32 @@ def file_records(identifier: str, files: Iterable[Mapping[str, Any]]) -> list[di
         }
         for f in files
     ]
+
+
+def query_from_link(url: str) -> str | None:
+    """The search an archive.org link stands for: `/details/<id>` is
+    `collection:<id>`, or `collection:<id> AND (<q>)` with `?query=<q>`;
+    `/search?query=<q>` and `/advancedsearch.php?q=<q>` are `<q>`. Other parameters
+    are ignored; any other link is None."""
+    try:
+        parts = urlsplit(url.strip())
+        host = parts.hostname or ""
+    except ValueError:  # not a URL at all, e.g. an unclosed IPv6 bracket
+        return None
+    if parts.scheme not in ("http", "https") or host not in HOSTS:
+        return None
+    params = parse_qs(parts.query)
+
+    def param(name: str) -> str | None:
+        value = params.get(name, [""])[0].strip()
+        return value or None
+
+    segments = parts.path.strip("/").split("/")
+    if len(segments) == 2 and segments[0] == "details" and segments[1]:
+        query = param("query")
+        return f"collection:{segments[1]} AND ({query})" if query else f"collection:{segments[1]}"
+    if parts.path == "/search":
+        return param("query")
+    if parts.path == "/advancedsearch.php":
+        return param("q")
+    return None
