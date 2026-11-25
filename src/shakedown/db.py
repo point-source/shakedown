@@ -488,6 +488,21 @@ def write_unversioned(
     return True
 
 
+def drop_withdrawn_credentials(db_path: Path) -> None:
+    """Drop the `source_credentials` table an older release kept the dashboard's
+    archive.org login in (§spec:dashboard-credentials "Removal"), so no stored
+    password outlives the feature. Outside schema versioning, like the table was:
+    no writer lock, no migration. `secure_delete` zeroes the freed pages rather
+    than leaving the values on disk. A missing database stays missing; raises
+    sqlite3.Error when it cannot be written."""
+    if not db_path.exists():
+        return
+    with closing(open_unmigrated(db_path)) as conn:
+        conn.execute("PRAGMA secure_delete=ON")
+        with transaction(conn):
+            conn.execute("DROP TABLE IF EXISTS source_credentials")
+
+
 def open_read_only(db_path: Path) -> sqlite3.Connection:
     """Open an existing state DB strictly for reading: never created, never
     migrated, never written (raises sqlite3.OperationalError when missing)."""

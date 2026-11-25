@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
@@ -38,6 +39,7 @@ from shakedown.config import (
     ConfigRejected,
     UnknownScopeError,
     check_scope,
+    read_config_file,
 )
 from shakedown.dashboard import (
     LIVE_TTL_S,
@@ -57,7 +59,8 @@ from shakedown.dashboard_library import library_answer
 from shakedown.dashboard_network import network_answer
 from shakedown.dashboard_page import PAGE_DIR, register_page
 from shakedown.dashboard_runs import runs_answer
-from shakedown.db import connect_reader
+from shakedown.db import connect_reader, drop_withdrawn_credentials
+from shakedown.edit_lock import state_db_for
 from shakedown.purge import PurgeRefused, check_purgeable
 from shakedown.scheduler_watch import start_watching
 from shakedown.state import ItemRepo
@@ -104,6 +107,19 @@ class PurgeBody(BaseModel):
     scope: Literal["library", "everything"]
 
 
+def drop_stored_login(config_path: Path) -> None:
+    """Drop the login an older release stored in the database the config file
+    names (§spec:dashboard-credentials "Removal"). A file that is missing or
+    unreadable names none; a database that cannot be written never stops serve."""
+    state_db = state_db_for(read_config_file(config_path))
+    if state_db is None:
+        return
+    try:
+        drop_withdrawn_credentials(state_db)
+    except (sqlite3.Error, OSError) as e:
+        log.warning("could not drop the stored login in %s: %s", state_db, e)
+
+
 def build_app(
     config_path: Path,
     *,
@@ -122,6 +138,7 @@ def build_app(
     (§spec:dashboard-page)."""
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        await asyncio.to_thread(drop_stored_login, config_path)
         # Watch the scheduler's heartbeat and send the stale-scheduler notice
         # (§spec:schedules), from the last config this serve loaded.
         watching = threading.Event()

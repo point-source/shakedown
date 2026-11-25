@@ -4,6 +4,7 @@ stream-only show still mirrors its public files and lists the private ones as
 refused, which is all a login could ever have changed."""
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
@@ -128,3 +129,62 @@ def test_a_sync_with_ia_variables_set_logs_in_nowhere_and_lists_private_files_re
     with closing(connect(config.state_db)) as conn:
         item = ItemRepo(conn).get("ia", "gd", SHOW)
     assert item is not None and item.restriction_reason == LOSSLESS_REFUSED_REASON
+
+
+# -- serve drops a stored login (§spec:state) --------------------------------------
+
+STORED_LOGIN = """
+    CREATE TABLE source_credentials (
+        source TEXT PRIMARY KEY, email TEXT NOT NULL, password TEXT NOT NULL,
+        at TEXT NOT NULL
+    )
+"""
+
+
+def _tables(db_path: Path) -> set[str]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        return {row[0] for row in rows}
+
+
+def _version(db_path: Path) -> int:
+    with closing(sqlite3.connect(db_path)) as conn:
+        return conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+
+
+async def _start_and_stop_serve(config_path: Path) -> None:
+    app = build_app(config_path)
+    async with app.router.lifespan_context(app):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_serve_drops_a_stored_login_when_it_starts(config_path: Path) -> None:
+    config = load(config_path)
+    assert config.state_db is not None
+    connect(config.state_db).close()
+    with closing(sqlite3.connect(config.state_db)) as conn, conn:
+        conn.execute(STORED_LOGIN)
+        conn.execute("INSERT INTO source_credentials VALUES "
+                     "('ia', 'me@example.org', 'a-stored-password', 'now')")
+    version = _version(config.state_db)
+
+    await _start_and_stop_serve(config_path)
+
+    assert "source_credentials" not in _tables(config.state_db)
+    assert _version(config.state_db) == version  # outside schema versioning
+    assert b"a-stored-password" not in config.state_db.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_serve_creates_no_database_to_drop_from(config_path: Path) -> None:
+    config = load(config_path)
+    assert config.state_db is not None
+    await _start_and_stop_serve(config_path)
+    assert not config.state_db.exists()
+
+
+def test_a_new_database_has_no_login_table(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    connect(db_path).close()
+    assert "source_credentials" not in _tables(db_path)
