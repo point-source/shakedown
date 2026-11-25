@@ -2510,8 +2510,8 @@ finishes normally.
 
 ## Web dashboard §spec:dashboard
 
-*Status: in progress*
-The config-management increment lifts the read-only rule for explicit actions (§spec:dashboard-run-controls); that part is not built yet.
+*Status: complete*
+The config-management increment's explicit actions (settings, override, setup, Sync now, Validate, file deletes) are built.
 
 Compatibility, from deployment status "deployed, no outside consumers"
 (§req:constraints, operator-confirmed 2026-11-12): HTTP API — free; CLI
@@ -2519,7 +2519,7 @@ and `status` output — free; config — free; dashboard pages and their
 JSON — free; state database — moves forward by one additive migration
 and never forces a re-download.
 
-`shakedown serve` serves one read-only web dashboard at its root path
+`shakedown serve` serves one web dashboard at its root path
 (`GET /`), usable on a phone and on a desktop browser
 (§req:success-criteria #28–#33; §req:constraints: UI line, read-only
 dashboard, dashboard lives in serve, no login of its own). The page is
@@ -3839,8 +3839,8 @@ Add `exec:` to a collection's handoff through the API: refused with
 
 ## Edit lock §spec:edit-lock
 
-*Status: in progress*
-The edit state, `POST /api/config/override`, the locked save, and setup's new `editable` file (`POST /api/setup`) are built; the Settings tab's read-only view and the Allow dashboard edits confirmation are built (round S2), and so is the collection editor's read-only view (round S3); what is left is confirming them end to end against the real API.
+*Status: complete*
+Built and confirmed end to end against a real `serve` on 2026-11-25: the read-only Settings tab and collection editor, Allow dashboard edits, and a save once the override is on (Design rounds S2 and S3).
 
 A `shakedown.yaml` that Shakedown's setup wrote is editable from the
 dashboard from the start. A file that already existed — written by hand
@@ -3863,8 +3863,8 @@ Observable behavior:
   (§spec:dashboard-run-controls), and deleting the files of
   unconfigured collections (§spec:collection-removal).
 - **Turning on the override.** `POST /api/config/override` sets the
-  state to `override` and answers `200 {edit: "override"}`; it is
-  idempotent. The dashboard confirms first, warning that a later edit to
+  state to `override`; turning it on twice changes nothing. The
+  dashboard confirms first, warning that a later edit to
   the file from its source (a hand edit, a git deploy) replaces changes
   made in the dashboard. The override stays on; the dashboard offers no
   way back to `locked`.
@@ -3911,8 +3911,8 @@ setup: Settings is editable without any override.
 
 ## Schedules and the scheduler §spec:schedules
 
-*Status: in progress*
-The `schedule` and `timezone` keys, the scheduler with its heartbeat and `--check`, and serve's reporting (health, `/status`, Needs attention, the stale notice) are built; the collection editor's schedule presets, custom cron, staggered default for a new collection, and preset read-back are built (round S3); `next_syncs` in `GET /api/config` waits on the config resource.
+*Status: complete*
+Built: the `schedule` and `timezone` keys, the scheduler with its heartbeat and `--check`, serve's reporting (health, `/status`, Needs attention, the stale notice), next syncs in `GET /api/config`, and the collection editor's presets, custom cron, staggered default and read-back (Design round S3), confirmed against a real `serve` on 2026-11-25.
 
 Each collection's schedule lives in `shakedown.yaml` and is set from the
 dashboard. A long-running Shakedown scheduler, in its own container
@@ -4019,16 +4019,11 @@ Observable behavior:
   - when the scheduler turns `stale`, `serve` sends the configured
     failure notification (`notifications.on_failure`,
     §spec:handoff) once for that episode, naming the scheduler and its
-    last heartbeat: the shared envelope with `event: scheduler.stale`,
-    `source`, `collection`, `staging_root`, and `run` null,
-    `scheduler: {last_seen, release}`, and one `errors` line
-    ([docs/handoff.md](docs/handoff.md)). The episode is the heartbeat
+    last heartbeat (event `scheduler.stale`,
+    [docs/handoff.md](docs/handoff.md)). The episode is the heartbeat
     time the scheduler went stale on; it is recorded, so a restarted
     `serve` never sends it twice, and an undelivered notice is not
     retried.
-  - `GET /status` answers `{scheduler, collections}`, `collections`
-    being the `status --json` list, since a list cannot carry the
-    field.
   An outside monitor (Uptime Kuma, Homepage) can watch the same field in
   `GET /status`.
 - **Only while the scheduler runs.** With the scheduler stopped, no
@@ -4343,8 +4338,8 @@ and without the dashboard's headers: `403`.
 
 ## Removing a collection §spec:collection-removal
 
-*Status: in progress*
-The unconfigured list, `POST /api/collections/purge`, and `shakedown purge` are built; the Removed collections list and its Delete files confirmation are built (round S2), and so is the collection editor's remove confirmation (round S3); what is left is confirming it end to end against the real API.
+*Status: complete*
+Built and confirmed end to end against a real `serve` on 2026-11-25: remove with files kept, the Removed collections list, and a library delete that keeps the archive (Design rounds S2 and S3; `shakedown purge` on the CLI).
 
 Removing a collection stops syncing it. By default its archived shows
 and library folders stay. The dashboard says what happens before the
@@ -4361,8 +4356,8 @@ Observable behavior:
   From then on it has no schedule and cannot be synced.
 - **Unconfigured collections.** `GET /api/config` lists, in
   `unconfigured`, every collection the state database still holds shows
-  or library files for that the file no longer names: `{source,
-  collection, shows, archive_bytes, library_bytes}`. A collection
+  or library files for that the file no longer names, with its shows,
+  archive size and library size. A collection
   dropped from the file by hand or by an IaC deploy appears there too.
   `shows` and `archive_bytes` count the shows with an archive copy, as
   `status` does; `library_bytes` counts those of them the library still
@@ -4370,9 +4365,8 @@ Observable behavior:
   file is not `valid` or no state database exists yet.
   Adding a collection with the same source and name brings it back: its
   archived shows are reused and nothing downloads again.
-- **Two deletes.** `POST /api/collections/purge` with `{source,
-  collection, scope}` starts a fresh run that deletes the collection's
-  files:
+- **Two deletes.** `POST /api/collections/purge` starts a fresh run
+  that deletes the collection's files, by one of two scopes:
   - `scope: "library"` — deletes every library file and folder the
     placement records say Shakedown put there for this collection
     (§spec:library-ownership), and those records. Files a user added
@@ -4381,10 +4375,9 @@ Observable behavior:
   - `scope: "everything"` — does that and also deletes the collection's
     archive folder and its shows' records. Adding it back downloads
     everything again.
-  Answers: `202 {started: "purge", source, collection, scope}`; `409`
-  with "a run is in progress" when another run holds the writer lock;
-  `409 {code: "configured"}` when the file still names the collection;
-  `404` when nothing is held for it. The run shows in the live view and
+  It is refused when another run holds the writer lock (as a run in
+  progress), when the file still names the collection, and when nothing
+  is held for it. The run shows in the live view and
   run history as kind `purge` (§spec:run-activity, §spec:run-history)
   and frees the space it reports. It also drops the collection's
   rescheduled entry and pending handoffs. The same run is
