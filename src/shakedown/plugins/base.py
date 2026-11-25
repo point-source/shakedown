@@ -433,6 +433,21 @@ class SourcePlugin(ABC):
     # vouches for no field's uniqueness.
     per_item_unique_fields: tuple[str, ...] = ()
 
+    @classmethod
+    def query_from_link(cls, url: str) -> str | None:
+        """Optional: the search a link from the source's site stands for, or None
+        for a link this plugin can't read (§spec:dashboard-settings "Pasted links").
+        Read from the link's text alone, with no request to the source."""
+        return None
+
+    @classmethod
+    def reads_links(cls) -> bool:
+        """Whether this plugin reads pasted links: it implements `query_from_link`."""
+        return any(
+            "query_from_link" in vars(klass)
+            for klass in cls.__mro__[: cls.__mro__.index(SourcePlugin)]
+        )
+
     # Whether the source uses login credentials, so the dashboard offers them
     # (§spec:dashboard-settings `source_types`).
     takes_credentials: bool = False

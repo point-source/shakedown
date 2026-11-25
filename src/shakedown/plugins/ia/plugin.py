@@ -22,6 +22,7 @@ from shakedown import stopping
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.credentials import Login, LoginCheck
 from shakedown.models import ManifestFile
+from shakedown.plugins import archive_org
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
     FailureCause,
@@ -195,6 +196,10 @@ class IAPlugin(SourcePlugin):
 
     # Read when the file's `auth` names none (§spec:dashboard-credentials).
     credential_env = ("IA_EMAIL", "IA_PASSWORD")
+
+    @classmethod
+    def query_from_link(cls, url: str) -> str | None:
+        return archive_org.query_from_link(url)
 
     def __init__(self, source_config: SourceConfig, login: Login | None = None) -> None:
         super().__init__(source_config, login)

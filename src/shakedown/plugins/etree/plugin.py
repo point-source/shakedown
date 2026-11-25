@@ -27,6 +27,7 @@ from shakedown import stopping
 from shakedown.config import CollectionConfig, SourceConfig
 from shakedown.credentials import Login
 from shakedown.models import ManifestFile
+from shakedown.plugins import archive_org
 from shakedown.plugins.archive_org import file_records
 from shakedown.plugins.base import (
     TRANSIENT_CAUSES,
@@ -122,6 +123,10 @@ class EtreePlugin(SourcePlugin):
     # (§spec:layout-collision-safety); the other fields (date, venue, ...) repeat across
     # the multiple recordings of a single show.
     per_item_unique_fields = ("identifier",)
+
+    @classmethod
+    def query_from_link(cls, url: str) -> str | None:
+        return archive_org.query_from_link(url)
 
     def __init__(self, source_config: SourceConfig, login: Login | None = None) -> None:
         super().__init__(source_config, login)
