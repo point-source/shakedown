@@ -443,10 +443,7 @@ class SourcePlugin(ABC):
     @classmethod
     def reads_links(cls) -> bool:
         """Whether this plugin reads pasted links: it implements `query_from_link`."""
-        return any(
-            "query_from_link" in vars(klass)
-            for klass in cls.__mro__[: cls.__mro__.index(SourcePlugin)]
-        )
+        return cls.query_from_link.__func__ is not SourcePlugin.query_from_link.__func__
 
     # Whether the source uses login credentials, so the dashboard offers them
     # (§spec:dashboard-settings `source_types`).
