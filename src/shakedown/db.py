@@ -1,11 +1,14 @@
 """SQLite schema and connection helpers. Co-located with the archive (PRD §6)."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 14
 
@@ -493,7 +496,8 @@ def drop_withdrawn_credentials(db_path: Path) -> None:
     archive.org login in (§spec:dashboard-credentials "Removal"), so no stored
     password outlives the feature. Outside schema versioning, like the table was:
     no writer lock, no migration. `secure_delete` zeroes the freed pages rather
-    than leaving the values on disk. A missing database stays missing; raises
+    than leaving the values on disk, and a checkpoint moves them into the file. A
+    missing database stays missing; raises
     sqlite3.Error when it cannot be written."""
     if not db_path.exists():
         return
@@ -501,6 +505,13 @@ def drop_withdrawn_credentials(db_path: Path) -> None:
         conn.execute("PRAGMA secure_delete=ON")
         with transaction(conn):
             conn.execute("DROP TABLE IF EXISTS source_credentials")
+        # The zeroed pages sit in the write-ahead log until a checkpoint, and a run
+        # holding the database open keeps a close from making one: copy them into
+        # the file now and empty the log, which also holds the old pages.
+        busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        if busy:
+            log.warning("a reader kept %s's write-ahead log from emptying; the dropped "
+                        "login's pages leave it at the next checkpoint", db_path)
 
 
 def open_read_only(db_path: Path) -> sqlite3.Connection:

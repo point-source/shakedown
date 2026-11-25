@@ -188,3 +188,25 @@ def test_a_new_database_has_no_login_table(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
     connect(db_path).close()
     assert "source_credentials" not in _tables(db_path)
+
+
+@pytest.mark.asyncio
+async def test_the_dropped_password_leaves_the_files_while_a_run_has_the_database_open(
+    config_path: Path,
+) -> None:
+    """A sync or the scheduler may hold the database open when serve starts, so no
+    close checkpoints the log for it: the zeroed pages must reach the database file
+    and the log must not keep the old ones."""
+    config = load(config_path)
+    assert config.state_db is not None
+    with closing(connect(config.state_db)) as conn:
+        conn.execute(STORED_LOGIN)
+        conn.execute("INSERT INTO source_credentials VALUES "
+                     "('ia', 'me@example.org', 'a-stored-password', 'now')")
+    with closing(connect(config.state_db)) as running:
+        await _start_and_stop_serve(config_path)
+        wal = config.state_db.with_name(config.state_db.name + "-wal")
+        for path in (config.state_db, wal):
+            data = path.read_bytes() if path.exists() else b""
+            assert b"a-stored-password" not in data, path.name
+        assert running.execute("SELECT 1").fetchone()[0] == 1
