@@ -36,10 +36,6 @@ const STATES: { name: string; scenario: string; go: (page: Page) => Promise<void
     await save(page)
     await expect(page.getByRole("alertdialog")).toBeVisible()
   } },
-  { name: "login", scenario: "settings_saved", go: async (page) => {
-    await page.getByRole("button", { name: "Change login" }).click()
-    await expect(page.getByRole("dialog")).toBeVisible()
-  } },
   { name: "delete", scenario: "settings_saved", go: async (page) => {
     await page.getByRole("button", { name: "Delete files…" }).click()
     await page.locator("label[for=scope-everything]").click()
@@ -113,7 +109,7 @@ test.describe("behaviour", () => {
     await expect(days(page)).toHaveValue("180")
   })
 
-  test("a locked file shows settings as text, with logins and deletes still offered", async ({ page, baseURL }) => {
+  test("a locked file shows settings as text, with deletes still offered", async ({ page, baseURL }) => {
     await openScenario(page, baseURL!, "settings_locked", { tab: "settings" })
     await expect(page.getByText("Settings are read-only")).toBeVisible()
     await expect(page.locator("main input")).toHaveCount(0)
@@ -121,24 +117,12 @@ test.describe("behaviour", () => {
     await expect(page.getByRole("button", { name: "Add back" })).toHaveCount(0)
     await expect(page.getByRole("button", { name: "Delete files…" })).toBeVisible()
     await expect(page.getByRole("button", { name: "Trim history now" })).toBeVisible()
-    await expect(page.getByText("From environment variables")).toBeVisible()
+    await expect(page.getByText("Login", { exact: true })).toHaveCount(0)
     const sent = page.waitForRequest((r) => r.method() === "POST" && r.url().endsWith("/api/config/override"))
     await page.getByRole("button", { name: "Allow dashboard edits" }).click()
     await page.getByRole("alertdialog").getByRole("button", { name: "Allow dashboard edits" }).click()
     await sent
     await expect(page.getByText("Dashboard edits allowed", { exact: true })).toBeVisible()
-  })
-
-  test("a login is sent once and the source's answer is shown", async ({ page, baseURL }) => {
-    await openScenario(page, baseURL!, "settings_saved", { tab: "settings" })
-    await page.getByRole("button", { name: "Change login" }).click()
-    await page.getByLabel("Email").fill("someone@example.net")
-    await page.getByLabel("Password").fill("pw")
-    const sent = page.waitForRequest((r) => r.method() === "PUT" && r.url().endsWith("/api/credentials"))
-    await page.getByRole("button", { name: "Save login" }).click()
-    expect((await sent).postDataJSON()).toEqual({ source: "internetarchive", email: "someone@example.net", password: "pw" })
-    await expect(page.getByText("Login rejected", { exact: true })).toBeVisible()
-    await expect(page.getByRole("dialog")).toHaveCount(0)
   })
 
   test("deleting a removed collection's files sends the chosen scope", async ({ page, baseURL }) => {
