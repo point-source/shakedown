@@ -60,8 +60,12 @@ function TimeInput({ id, hour, minute, onTime }: { id: string; hour: number; min
   )
 }
 
-function ScheduleSetting({ path, saved, next, now, timezone }: {
+export function ScheduleSetting({ path, saved, next, now, timezone, clockNote: clockText, setup }: {
   path: Loc; saved: string | null | undefined; next: string | null | undefined; now: string; timezone: string | null
+  /** Replaces "Times follow <tz>." (setup names where its zone came from). */
+  clockNote?: string
+  /** First-run setup: the first sync starts when setup finishes, then the schedule applies. */
+  setup?: boolean
 }) {
   const d = useDraft()
   const expr = (getIn(d.doc, path) as string | null | undefined) ?? null
@@ -73,10 +77,14 @@ function ScheduleSetting({ path, saved, next, now, timezone }: {
   const problem = d.problem(path)
   const at = read.kind === "daily" || read.kind === "weekly" ? { hour: read.hour, minute: read.minute } : { hour: 3, minute: 0 }
   const set = (s: Schedule) => d.set(path, writeSchedule(s))
-  const clockNote = `Times follow ${timezone ?? "the container's clock"}.`
-  const nextLine = kind === "manual"
-    ? "Syncs only when someone presses Sync now."
-    : expr === saved && next ? `Next sync ${clock(next, now)}` : "Next sync is worked out when you save."
+  const clockNote = clockText ?? `Times follow ${timezone ?? "the container's clock"}.`
+  const nextLine = setup
+    ? kind === "manual"
+      ? "The first sync starts when you finish. After that, it syncs only when someone presses Sync now."
+      : "The first sync starts when you finish. After that, it follows this schedule."
+    : kind === "manual"
+      ? "Syncs only when someone presses Sync now."
+      : expr === saved && next ? `Next sync ${clock(next, now)}` : "Next sync is worked out when you save."
 
   if (!d.editable) {
     return (
@@ -206,6 +214,48 @@ function RemoveDialog({ name, shows, archiveBytes, otherChanges, onRemove }: {
   )
 }
 
+/** A collection's search. A pasted link is sent to the source's plugin; its answer
+ *  replaces the link with the search it stands for, and the field says so. An
+ *  answer for a link that has since been edited away is dropped. */
+export function SearchSetting({ path, type, readsLinks, finishing }: {
+  path: Loc; type: string; readsLinks: boolean
+  /** In setup, which finishes rather than saves. */
+  finishing?: boolean
+}) {
+  const d = useDraft()
+  const [link, setLink] = useState<LinkReading | null>(null)
+  const typed = useRef("")
+  const put = (v: unknown) => {
+    const text = String(v ?? "")
+    typed.current = text
+    d.set(path, v ?? "")
+    setLink(null)
+    if (!readsLinks || !isLink(text)) return
+    void readLink(type, text).then((r) => {
+      if (typed.current !== text) return
+      if (r.kind === "read") d.set(path, r.query)
+      setLink(r)
+    })
+  }
+  return (
+    <TextSetting
+      path={path}
+      multiline
+      label="Search"
+      put={put}
+      help={link?.kind === "unreadable"
+        ? <span className="text-warning">Shakedown can't read this link for this source. Paste a collection or search page from the source's site, or type the search.</span>
+        : link?.kind === "failed"
+          ? <span className="text-warning">Shakedown couldn't read this link just now. Paste it again, or type the search.</span>
+          : link?.kind === "read"
+            ? `Read from the link you pasted. Check it before you ${finishing ? "finish" : "save"}.`
+            : readsLinks
+              ? "Paste a collection or search link from the source's site, or type the search."
+              : "The source's own search for the shows to mirror."}
+    />
+  )
+}
+
 /** The fields this page shows, under a collection's loc; a problem anywhere else under it is listed at the top. */
 const FIELDS = ["name", "query", "library_layout", "schedule", "on_complete.webhook", "prune_disappeared", "incremental_discovery", "preserve_source_metadata", "fill_tags"]
 
@@ -230,24 +280,7 @@ export function CollectionEditor({ config, library, now, i, j, fresh, otherChang
   const shows = held ? held.counts.complete + held.counts.disappeared : 0
   const exec = c.on_complete && "exec" in c.on_complete ? c.on_complete.exec : null
   const webhook = c.on_complete && "webhook" in c.on_complete ? c.on_complete.webhook : null
-  // A pasted link is sent to the source's plugin; its answer replaces the link
-  // with the search it stands for, and the field says so. An answer for a link
-  // that has since been edited away is dropped.
-  const readsLinks = config.source_types.find((t) => t.type === source.type)?.reads_links ?? false
-  const [link, setLink] = useState<LinkReading | null>(null)
-  const typed = useRef("")
-  const putQuery = (v: unknown) => {
-    const text = String(v ?? "")
-    typed.current = text
-    d.set(at("query"), v ?? "")
-    setLink(null)
-    if (!readsLinks || !isLink(text)) return
-    void readLink(source.type, text).then((r) => {
-      if (typed.current !== text) return
-      if (r.kind === "read") d.set(at("query"), r.query)
-      setLink(r)
-    })
-  }
+  const readsLinks = type?.reads_links ?? false
   const prefix = locKey(at())
   const elsewhere = problems.filter((p) => {
     const k = locKey(p.loc)
@@ -302,22 +335,7 @@ export function CollectionEditor({ config, library, now, i, j, fresh, otherChang
                     ? `Shakedown still holds ${plural(removed.shows, "show", "shows")} (${bytes(removed.archive_bytes)}) for ${c.name}. They're reused: nothing downloads again.`
                     : "Fixed once saved: its shows are filed under it."}
                 />
-                <TextSetting
-                  path={at("query")}
-                  multiline
-                  label="Search"
-                  get={() => c.query}
-                  put={putQuery}
-                  help={link?.kind === "unreadable"
-                    ? <span className="text-warning">Shakedown can't read this link for this source. Paste a collection or search page from the source's site, or type the search.</span>
-                    : link?.kind === "failed"
-                      ? <span className="text-warning">Shakedown couldn't read this link just now. Paste it again, or type the search.</span>
-                      : link?.kind === "read"
-                        ? "Read from the link you pasted. Check it before you save."
-                        : readsLinks
-                          ? "Paste a collection or search link from the source's site, or type the search."
-                          : "The source's own search for the shows to mirror."}
-                />
+                <SearchSetting path={at("query")} type={source.type} readsLinks={readsLinks} />
               </FieldGroup>
             </CardContent>
           </Card>

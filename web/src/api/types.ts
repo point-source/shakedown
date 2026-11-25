@@ -314,6 +314,27 @@ export interface ConfigAnswer {
   unconfigured: UnconfiguredCollection[]
 }
 
+/** `GET /api/setup` (§spec:first-run-setup): the defaults setup offers. The page
+ *  fills `timezone` from the browser. */
+export interface SetupAnswer {
+  generated_at: Iso
+  archive_root: string
+  library_root: string
+  state_db: string
+  source_types: SourceType[]
+  /** The first collection's schedule: the staggered default (§spec:schedules). */
+  schedule: string
+}
+
+/** `POST /api/setup` 201: the file is written; `started` is the first sync's scope,
+ *  or null with `reason` when it could not start. */
+export interface SetupDone {
+  revision: string
+  warnings: ConfigWarning[]
+  started: { source: string; collection: string } | null
+  reason?: "busy" | "failed" | "exited_early"
+}
+
 /** `POST /validate` (§spec:setup-readiness-validation). */
 export interface ValidationReport {
   ready: boolean

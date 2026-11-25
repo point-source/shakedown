@@ -2,7 +2,7 @@
 // shapes of src/api/types.ts, with a fixed clock. Served to the real page by
 // intercepting its requests (scripts/render.mjs, tests/screens.spec.ts).
 import type {
-  SourceLinkAnswer,
+  SetupAnswer, SourceLinkAnswer,
   ActivityAnswer, AttentionAnswer, AttentionEntry, ConfigAnswer, HealthAnswer, HistoryRun, LibraryAnswer, NetworkAnswer,
   RunsAnswer,
 } from "@/api/types"
@@ -17,6 +17,8 @@ export type Answers = {
   attention: AttentionAnswer
   health: HealthAnswer
   config: ConfigAnswer
+  /** `GET /api/setup`: only setup scenarios answer it. */
+  setup?: SetupAnswer
 } & { [link: `source-link?${string}`]: SourceLinkAnswer }
 
 /** An answer to a write (POST/PUT/DELETE), keyed "<METHOD> <path after the page>",
@@ -25,7 +27,8 @@ export type Writes = Record<string, { status: number; body: unknown }>
 
 export interface Scenario {
   now: string
-  /** How the server behaves: answer normally, answer 503 with the config error,
+  /** How the server behaves: answer normally, answer 503 with the config error
+   *  (`config`, `setup`, and `source-link` still answer, as they need no config),
    *  answer first and then stop (advance the clock by `minutes`), or never answer. */
   mode: { kind: "ok" } | { kind: "no_config"; detail: string } | { kind: "goes_away"; minutes: number } | { kind: "hangs" }
     | { kind: "restarts_broken"; detail: string; minutes: number } | { kind: "refused" }
@@ -361,6 +364,38 @@ function settingsInvalid(): Answers {
   return a
 }
 
+// No config loaded (every other endpoint 503): the config resource says why.
+// No file leads to setup; a file with errors opens in Settings; a file that isn't
+// YAML is fixed by hand (§spec:first-run-setup, §spec:dashboard-settings).
+const CONFIG_PATH = "/data/config/shakedown.yaml"
+const NO_FILE = `config file not found: ${CONFIG_PATH}`
+const NOT_YAML = `failed to parse YAML at ${CONFIG_PATH}: mapping values are not allowed here\n  in "${CONFIG_PATH}", line 14, column 12`
+const INVALID = "config validation failed:\nkeep_run_errors_days: Input should be greater than or equal to 30\ntimezone: unknown timezone\nsources.0.collections.1.library_layout: unknown field 'band'\nmax_concurrent_collectons: Extra inputs are not permitted"
+
+function noFile(): Answers {
+  const a = defaultAnswers()
+  Object.assign(a.config, { state: "missing", revision: null, document: null, errors: [], next_syncs: [], unconfigured: [] })
+  a.setup = {
+    generated_at: a.config.generated_at,
+    archive_root: "/data/archive",
+    library_root: "/data/library",
+    state_db: "/data/archive/.shakedown/state.db",
+    source_types: a.config.source_types,
+    schedule: "0 3 * * 0",
+  }
+  return a
+}
+
+function notYaml(): Answers {
+  const a = defaultAnswers()
+  Object.assign(a.config, { state: "unreadable", document: null, next_syncs: [], unconfigured: [],
+    errors: [{ loc: [], code: "yaml_invalid", message: "mapping values are not allowed here" }] })
+  return a
+}
+
+const SETUP_STARTED = { revision: "sha256:1", warnings: [], started: { source: "etree", collection: "phish" } }
+const PATHS_OK = { status: 200, body: { warnings: [] } }
+
 const SAVED_WITH_WARNINGS = { revision: "sha256:2", warnings: [
   { loc: ["library_root"], code: "hardlink_failed" }, { loc: ["library_root"], code: "path_moved" },
 ] }
@@ -376,7 +411,15 @@ export const SCENARIOS: Record<string, Scenario> = {
   quiet: { now: NOW, mode: { kind: "ok" }, answers: sorted(quiet()) },
   first_install: { now: NOW, mode: { kind: "ok" }, answers: sorted(firstInstall()) },
   config_broken: { now: NOW, mode: { kind: "ok" }, answers: sorted(configBroken()) },
-  no_config: { now: NOW, mode: { kind: "no_config", detail: CONFIG_ERROR }, answers: sorted(defaultAnswers()) },
+  config_invalid: { now: NOW, mode: { kind: "no_config", detail: INVALID }, answers: sorted(settingsInvalid()) },
+  config_unreadable: { now: NOW, mode: { kind: "no_config", detail: NOT_YAML }, answers: sorted(notYaml()) },
+  // First-run setup: no file. The folder check passes and the first sync starts;
+  // then the folder check warns and the sync can't start (another run).
+  setup: { now: NOW, mode: { kind: "no_config", detail: NO_FILE }, answers: sorted(noFile()),
+    writes: { "POST api/config/check-paths": PATHS_OK, "POST api/setup": { status: 201, body: SETUP_STARTED } } },
+  setup_warnings: { now: NOW, mode: { kind: "no_config", detail: NO_FILE }, answers: sorted(noFile()),
+    writes: { "POST api/config/check-paths": { status: 200, body: { warnings: [{ loc: ["library_root"], code: "hardlink_failed" }] } },
+      "POST api/setup": { status: 201, body: { ...SETUP_STARTED, started: null, reason: "busy" } } } },
   unreachable: { now: NOW, mode: { kind: "goes_away", minutes: 4 }, answers: sorted(defaultAnswers()) },
   loading: { now: NOW, mode: { kind: "hangs" }, answers: sorted(defaultAnswers()) },
   never_reached: { now: NOW, mode: { kind: "refused" }, answers: sorted(defaultAnswers()) },

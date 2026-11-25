@@ -3518,6 +3518,12 @@ Spec and code names in the last column never appear on screen.
 | Handoff notice | What tells your music tools that new shows arrived: a webhook, or a command set in the file. | on complete, hook, trigger | `on_complete` |
 | Remove collection… | Take a collection out of shakedown.yaml, keeping or deleting its files. | delete, unsubscribe | `PUT /api/config`, then `POST /api/collections/purge` |
 | Removed X, files kept | The collection left the file, but a run stopped its files being deleted. | partial, failed delete | `409` from purge |
+| Set up Shakedown | The first visit with no shakedown.yaml: folders, a first collection, and its schedule. | onboarding, wizard, init | `GET /api/setup` |
+| Finish setup | Write shakedown.yaml from setup and start the first collection's sync. | done, create config, submit | `POST /api/setup` |
+| Folder check | Whether Shakedown can write to the folders and link library files to the archive; warns, never blocks. | path check, hardlink test | `POST /api/config/check-paths` |
+| Source name | The name a source is filed under; fixed once saved. | source ID, key | `sources[].name` |
+| Collection name | The name a collection's shows are filed under; fixed once saved. | collection ID, slug | `collections[].name` |
+| Can't load shakedown.yaml | A file with errors and nothing loaded before it; fixed in Settings or by hand. | invalid config, startup error | `state: invalid` with every endpoint `503` |
 
 "Updated" carries two meanings, kept on purpose (operator decision,
 2026-11-12): as a count of shows on Runs and Overview, and as the data
@@ -3532,13 +3538,14 @@ is one route (`GET /`) with five tabs.
 
 | Screen | Handoff spec | Golden scenarios | Approved |
 | --- | --- | --- | --- |
-| Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, no-config, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13; Settings tab, round S2 2026-11-24 |
+| Page shell and page-wide states | `docs/ui/handoff/shell.md` | unreachable, config-broken, loading; never-reached | round 2, 2026-11-12; never-reached 2026-11-13; Settings tab, round S2 2026-11-24; no-config routing, round S4 2026-11-25 |
 | Overview tab | `docs/ui/handoff/overview.md` | default, quiet, first-install, long-content, waiting, scheduler-stopped, trims, purges | round 2, 2026-11-12; waiting rows 2026-11-20; unidentified files row 2026-11-23; Shakedown card with scheduler and run controls, trim and delete runs, round S1 2026-11-24 |
 | Runs tab | `docs/ui/handoff/runs.md` | default, first-install, long-content, trims, purges; loading | round 1, 2026-11-12; loading 2026-11-13; trim and delete runs and the Action column, round S1 2026-11-24 |
 | Sources tab | `docs/ui/handoff/sources.md` | default, first-install, long-content; loading | round 1, 2026-11-12; loading 2026-11-13 |
 | Library tab | `docs/ui/handoff/library.md` | default, first-install, long-content, loading | round 1, 2026-11-12 |
 | Settings tab | `docs/ui/handoff/settings.md` | default, settings-locked, settings-invalid; settings-dirty, -saved-warnings, -refused, -conflict, -delete, -override (`web/tests/settings.spec.ts`) | round S2, 2026-11-24; login removed, Add source and raised toasts, round S3, 2026-11-25 |
 | Collection editor | `docs/ui/handoff/collection.md` | collection-editor, -new, -add-back, -manual-command, -custom, -variety-list, -invalid, -locked; collection-daily, -remove, -remove-busy, -add-source, -link-read, -link-unreadable (`web/tests/collection.spec.ts`) | round S3, 2026-11-25 |
+| First-run setup and the page with no config | `docs/ui/handoff/setup.md` | setup, setup-warnings, setup-required, setup-link, config-invalid, config-unreadable (`web/tests/setup.spec.ts`) | round S4, 2026-11-25 |
 
 ### Harness
 
@@ -3641,7 +3648,7 @@ loads.
 ## Settings in the dashboard §spec:dashboard-settings
 
 *Status: in progress*
-The API is built, and the Settings tab and the collection editor are designed and built (§spec:ui-kit Screens, rounds S2 and S3); `GET /api/source-link` and `reads_links` wait on §road:source-links, and the path checks on screen wait on the Design task.
+The API is built, and the Settings tab and the collection editor are designed and built (§spec:ui-kit Screens, rounds S2 and S3); setup shows the path checks before Finish, and a file with errors opens in Settings when nothing has loaded (round S4); `GET /api/source-link` and `reads_links` wait on §road:source-links.
 
 Compatibility, from deployment status "deployed, one install, no
 outside consumers" (§req:constraints, operator-confirmed 2026-11-24):
@@ -4200,7 +4207,7 @@ public files and lists the show's private files as refused; an
 ## First-run setup §spec:first-run-setup
 
 *Status: in progress*
-The API is built: `serve` starts with no file, `GET /api/setup`, and `POST /api/setup`; the setup flow on screen waits on the Design task.
+The API is built (`serve` starts with no file, `GET /api/setup`, `POST /api/setup`) and the setup flow on screen is designed and built (§spec:ui-kit Screens, round S4); `POST /api/setup` still accepts the withdrawn `credentials` key until §road:remove-source-login.
 
 A homelab user starts the compose example with no `shakedown.yaml`.
 Opening the dashboard leads them through setup in the browser — paths
@@ -4214,7 +4221,8 @@ Observable behavior:
 - **`serve` starts without a config.** With no file at the config path,
   `serve` starts, the dashboard opens, and `GET /api/config` answers
   `state: "missing"`. The page leads to setup instead of the no-config
-  state (§spec:ui-kit). The read endpoints that need a config answer as
+  state (§spec:ui-kit); a file with errors opens in Settings and an
+  unreadable one shows its error. The read endpoints that need a config answer as
   they do today with none.
 - **Defaults that work on the example stack.** `GET /api/setup` answers
   the defaults setup offers: `archive_root` `/data/archive`,
