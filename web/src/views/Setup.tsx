@@ -120,6 +120,7 @@ export function SetupView({ config, onDone }: {
   const draft: Draft = {
     doc,
     editable: true,
+    generation: 0,
     set: (path, value) => {
       setDoc((d) => setIn(d!, path, value))
       setErrors((all) => all.filter((e) => locKey(e.loc) !== locKey(path)))

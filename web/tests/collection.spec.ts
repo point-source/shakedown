@@ -114,6 +114,15 @@ test.describe("behaviour", () => {
     await expect(page.locator(`${sched}-time`)).toHaveValue("03:00")
   })
 
+  test("Discard clears a time that isn't one", async ({ page, baseURL }) => {
+    await openScenario(page, baseURL!, "default", { tab: GD })
+    await page.locator("#set-sources\\.0\\.collections\\.0\\.query").fill("collection:GratefulDead AND year:1977")
+    await page.locator(`${sched}-time`).fill("3pm")
+    await page.getByRole("button", { name: "Discard" }).click()
+    await expect(page.locator(`${sched}-time`)).toHaveValue("03:00")
+    await expect(page.getByText("Enter a 24-hour time, such as 03:30.")).toHaveCount(0)
+  })
+
   test("a schedule the file holds as a number shows as Custom, with its error", async ({ page, baseURL }) => {
     await openScenario(page, baseURL!, "settings_invalid_schedule", { tab: "settings" })
     await expect(page.getByText("Custom: 5")).toBeVisible()
@@ -258,6 +267,20 @@ test.describe("pasted links", () => {
     release()
     await answered
     await expect(page.locator(q)).toHaveValue(before)
+    await expect(page.getByText("Unsaved changes")).toHaveCount(0)
+  })
+
+  test("a reading that comes back after leaving the editor and discarding is dropped", async ({ page, baseURL }) => {
+    await openScenario(page, baseURL!, "default", { tab: "settings/internetarchive/grateful-dead" })
+    let release!: () => void
+    const held = new Promise<void>((r) => { release = r })
+    await page.route("**/api/source-link**", async (route) => { await held; await route.fallback() })
+    const answered = page.waitForResponse((r) => r.url().includes("/api/source-link"))
+    await page.locator(q).fill("https://archive.org/details/BobWeir")
+    await page.evaluate(() => { location.hash = "settings" })
+    await page.getByRole("button", { name: "Discard" }).click()
+    release()
+    await answered
     await expect(page.getByText("Unsaved changes")).toHaveCount(0)
   })
 

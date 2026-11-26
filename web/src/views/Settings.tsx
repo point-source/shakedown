@@ -103,6 +103,7 @@ export function SettingsView({ config, library, now, onChanged }: {
   const [fresh, setFresh] = useState<Fresh | null>(null)
   const [doc, setDoc] = useState<ConfigDocument | null>(config?.document ?? null)
   const [revision, setRevision] = useState<string | null>(config?.revision ?? null)
+  const [generation, setGeneration] = useState(0)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [errors, setErrors] = useState<ConfigProblem[] | null>(null)
@@ -120,6 +121,7 @@ export function SettingsView({ config, library, now, onChanged }: {
     setDoc(config.document)
     setRevision(config.revision)
     setErrors(null)
+    setGeneration((g) => g + 1)
   }, [config, dirty])
 
   // Opening "add" puts a new collection with the staggered schedule into the draft.
@@ -158,6 +160,7 @@ export function SettingsView({ config, library, now, onChanged }: {
   const draft: Draft = {
     doc,
     editable,
+    generation,
     set: (path, value) => { setDoc((d) => setIn(d!, path, value)); setDirty(true); setWarnings([]) },
     problem: (path) => byLoc.get(locKey(path)) ?? null,
     warnings: (path) => warnByLoc.get(locKey(path)) ?? [],
@@ -167,6 +170,7 @@ export function SettingsView({ config, library, now, onChanged }: {
 
   const discard = () => {
     applied.current = config.revision; setDoc(config.document); setRevision(config.revision); setDirty(false); setErrors(null); setWarnings([])
+    setGeneration((g) => g + 1)
     setFresh(null)
     if (route.page === "new") location.hash = "settings"
   }

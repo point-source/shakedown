@@ -142,7 +142,7 @@ export function ScheduleSetting({ path, saved, next, now, timezone, clockNote: c
           </Field>
         )}
         {(kind === "daily" || kind === "weekly") && (
-          <TimeInput id={`${id}-time`} hour={at.hour} minute={at.minute} onTime={time} />
+          <TimeInput key={d.generation} id={`${id}-time`} hour={at.hour} minute={at.minute} onTime={time} />
         )}
         {kind === "cron" && (
           <Field className="sm:col-span-2" data-invalid={problem ? true : undefined}>
@@ -236,6 +236,8 @@ export function SearchSetting({ path, type, readsLinks, finishing }: {
   // The draft's value now: a reading that comes back after Discard must not undo it.
   const current = useRef<unknown>(null)
   current.current = getIn(d.doc, path)
+  // Leaving the editor drops a reading still on its way: the draft moved on without it.
+  useEffect(() => () => { typed.current = "" }, [])
   const put = (v: unknown) => {
     const text = String(v ?? "")
     typed.current = text

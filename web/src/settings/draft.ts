@@ -24,6 +24,9 @@ export interface Draft {
   doc: ConfigDocument
   /** False while the file is locked: settings are shown without controls. */
   editable: boolean
+  /** Changes when the draft is replaced from outside (Discard, a new file): fields
+   * holding text of their own start again from the draft. */
+  generation: number
   set: (path: Loc, value: unknown) => void
   /** The words for the setting at a path: its error, and its warnings after a save. */
   problem: (path: Loc) => string | null
