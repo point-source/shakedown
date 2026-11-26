@@ -5,8 +5,9 @@ bearer token (``SHAKEDOWN_API_TOKEN``), as scripts and ``curl`` do, or comes fro
 the dashboard's own page: a JSON request, which a cross-site form cannot send, that
 the browser marks ``Sec-Fetch-Site: same-origin``. A browser sends fetch metadata
 only to HTTPS and localhost, so a page opened over plain HTTP at a LAN address is
-recognised by its ``Origin`` instead: its host name must be the host the request was
-sent to (``Host``, ``X-Forwarded-Host`` or ``Forwarded``). Anything else answers
+recognised by its ``Origin`` instead: its host name must be an IP address or a local
+name, and the host the request was sent to (``Host``, ``X-Forwarded-Host`` or
+``Forwarded``). Anything else answers
 ``403 {"code": "cross_site"}``. With no token configured only the dashboard page
 writes.
 
@@ -20,6 +21,7 @@ Attach it to a route, never copy it::
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import os
 from typing import Any
 from urllib.parse import urlsplit
@@ -29,6 +31,9 @@ from fastapi.responses import JSONResponse
 
 TOKEN_ENV = "SHAKEDOWN_API_TOKEN"
 CROSS_SITE = "cross_site"
+# Names only a LAN resolves (RFC 6762 .local, RFC 8375 .home.arpa, ICANN's .internal,
+# and the common .lan): an outside site cannot serve a page from one.
+LOCAL_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal")
 
 
 class Refusal(Exception):
@@ -64,16 +69,28 @@ def has_token(request: Request) -> bool:
 
 def from_dashboard(request: Request) -> bool:
     """A JSON request the browser marks same-origin, or, when it sends no fetch
-    metadata, whose Origin names the host it was sent to. A cross-site page can set
-    neither Sec-Fetch-Site nor Origin, nor send JSON without a CORS preflight, which
-    serve never allows (§spec:dashboard-run-controls)."""
+    metadata, whose Origin names a local host and the host it was sent to. A
+    cross-site page can set neither Sec-Fetch-Site nor Origin, nor send JSON without a
+    CORS preflight, which serve never allows; a DNS-rebinding page shares its host
+    with the request but is served from a public name (§spec:dashboard-run-controls)."""
     media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
     if media_type != "application/json":
         return False
     site = request.headers.get("sec-fetch-site", "").strip().lower()
     if site:
         return site == "same-origin"
-    return _host_name(request.headers.get("origin", "")) in _request_host_names(request)
+    origin = _host_name(request.headers.get("origin", ""))
+    return origin is not None and _is_local(origin) and origin in _request_host_names(request)
+
+
+def _is_local(host: str) -> bool:
+    """An IP address, a one-word name, or a name under a LAN-only suffix."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        name = host.rstrip(".")
+        return "." not in name or name.endswith(LOCAL_SUFFIXES)
 
 
 def _host_name(url: str) -> str | None:

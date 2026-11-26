@@ -4296,10 +4296,12 @@ Observable behavior:
   - comes from the dashboard's own page: it is a JSON request a
     cross-site form cannot send, and either the browser marks it
     same-origin (`Sec-Fetch-Site: same-origin`) or, when the browser
-    sends no fetch metadata, its `Origin` names the host the request was
-    sent to. The host names are compared without port or scheme, against
-    `Host`, `X-Forwarded-Host` (its first entry) or the first `Forwarded`
-    entry's `host=`. A request whose `Sec-Fetch-Site` says anything other
+    sends no fetch metadata, its `Origin` names a local host — an IP
+    address, a one-word name, or a name ending in `.local`, `.lan`,
+    `.home.arpa` or `.internal` — and the host the request was sent to.
+    The host names are compared without port or scheme, against `Host`,
+    `X-Forwarded-Host` (its first entry) or the first `Forwarded` entry's
+    `host=`. A request whose `Sec-Fetch-Site` says anything other
     than same-origin is refused, whatever its `Origin`; a missing
     `Origin`, `Origin: null`, or another host is refused too.
   Anything else answers `403 {code: "cross_site"}`. With no token
@@ -4330,13 +4332,16 @@ mapping `serve` never learns it. Another site on the same host passes
 that comparison, but its JSON request is still cross-origin and still
 needs the preflight. Trusting the forwarded headers costs nothing: a
 script that reaches `serve` directly can already forge every header,
-`Sec-Fetch-Site` included. DNS-rebinding attacks mostly fail on the
-example layout, because `serve` listens on loopback and the proxy routes
-by host name, and a rebinding page carries none of the proxy's sign-in,
-which belongs to the real host name. The `Origin` check is no weaker there, since a rebinding page's `Origin` and
-`Host` name the same host just as its fetch metadata says same-origin.
-The command handoff staying in the file (§spec:dashboard-settings) caps
-what is left. The token stays for
+`Sec-Fetch-Site` included. A DNS-rebinding page — an outside site that
+points its own name at the NAS — shares its host with the request, so its
+`Origin` matches; it is always served over a public name, though, and
+over plain HTTP it gets no fetch metadata. Accepting the `Origin` check
+only for IP addresses and local names keeps rebinding refused (operator
+decision, 2026-11-26). Over HTTPS, rebinding fails at the certificate.
+Beyond that, `serve` listens on loopback, the proxy routes by host name,
+and a rebinding page carries none of the proxy's sign-in; the command
+handoff staying in the file (§spec:dashboard-settings) caps what is
+left. The token stays for
 scripts so `curl` triggers keep working unchanged (operator decision,
 2026-11-24). Sync now reuses `POST /sync` because
 §req:success-criteria #41 asks for the same rules as an API trigger.
@@ -4353,13 +4358,18 @@ way to change settings. *Matching the full origin, port and scheme
 included, from the forwarded headers* — fails behind proxies that drop
 the port, such as Nginx Proxy Manager by IP, and adds nothing the
 preflight does not already give. *A configured allowed origin* — one
-more bootstrap setting.
+more bootstrap setting. *The `Origin` check for any host name* — lets a
+DNS-rebinding page write wherever the proxy forwards every host name
+with no sign-in. *IP addresses only* — refuses `http://nas.local` and
+other local names for no gain.
 
 **Tradeoffs.** Anyone who passes the proxy can change settings, start
 runs, and delete an unconfigured collection's files — the posture the
 operator chose. The same-origin rule stops browsers, not scripts: a
 script that reaches `serve` directly can forge the headers, so the proxy
-and the loopback-only port remain the real gate. A proxy that adds
+and the loopback-only port remain the real gate. A page opened over
+plain HTTP at a public domain name is refused: open it over HTTPS. A
+proxy that adds
 `Referrer-Policy: no-referrer` makes browsers send `Origin: null`, so
 dashboard writes through it over plain HTTP are refused; `serve` sets no
 such policy itself.

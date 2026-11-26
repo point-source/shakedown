@@ -1,8 +1,8 @@
 """The write gate on serve's mutating endpoints (§spec:dashboard-run-controls,
 §spec:serve): the bearer token, or a JSON request from the dashboard's own page —
 marked same-origin by the browser, or, when the browser sends no fetch metadata (a
-plain-HTTP page at a LAN address), carrying an Origin whose host name is the host
-the request was sent to; anything else is `403 {"code": "cross_site"}`."""
+plain-HTTP page at a LAN address), carrying an Origin whose host name is an IP or a
+local name and the host the request was sent to; anything else is `403 {"code": "cross_site"}`."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -98,7 +98,11 @@ PLAIN_HTTP_PAGE = [
     ),
     pytest.param(_page("http://NAS.lan:8090", Host="nas.LAN"), id="host-name-case"),
     pytest.param(_page("http://[fd00::5]:8090", Host="[FD00::5]"), id="ipv6"),
-    pytest.param(_page("https://nas.example.net", Host="nas.example.net"), id="https-proxy-strips-metadata"),
+    # Local names: only the LAN resolves them, so no rebinding page is served from one.
+    pytest.param(_page("http://nas:8090", Host="nas"), id="one-word-name"),
+    pytest.param(_page("http://nas.local:8090", Host="nas.local:8090"), id="mdns-name"),
+    pytest.param(_page("http://nas.home.arpa", Host="nas.home.arpa"), id="home-arpa-name"),
+    pytest.param(_page("http://nas.internal:8090", Host="nas.internal"), id="internal-name"),
     pytest.param(
         _page(Host="10.20.111.219:8090", **{"Content-Type": "application/json; charset=utf-8"}),
         id="json-with-charset",
@@ -114,6 +118,16 @@ NOT_THE_PAGE = [
         _page("http://10.20.111.219.evil.example", Host="10.20.111.219"), id="host-as-subdomain"
     ),
     pytest.param(_page("null", Host="10.20.111.219"), id="origin-null"),
+    # DNS rebinding: an outside site points its own name at the NAS, so its Origin and
+    # Host agree. Without fetch metadata only IPs and local names pass.
+    pytest.param(
+        _page("http://rebind.attacker.example:8090", Host="rebind.attacker.example:8090"),
+        id="dns-rebinding",
+    ),
+    pytest.param(
+        _page("http://nas.example.net", Host="nas.example.net"), id="public-name-over-http"
+    ),
+    pytest.param(_page("http://lan.attacker.example", Host="lan.attacker.example"), id="lan-label-not-suffix"),
     pytest.param({**JSON, "Host": "10.20.111.219"}, id="no-origin"),
     pytest.param(_page("10.20.111.219", Host="10.20.111.219"), id="origin-without-scheme"),
     pytest.param(_page("http://[fd00::5", Host="[fd00::5"), id="malformed-ipv6"),

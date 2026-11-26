@@ -50,7 +50,8 @@ services:
   # could change settings. A proxy on the host uses http://127.0.0.1:8080; a
   # proxy in another container on this stack's network uses
   # http://shakedown-serve:8080. The dashboard can change settings and start
-  # runs through the proxy over HTTPS or plain HTTP (http://<nas-ip>:<port>).
+  # runs through the proxy over HTTPS, or over plain HTTP at the NAS's IP or a
+  # local name (http://<nas-ip>:<port>, http://nas.local:<port>).
   #
   # SHAKEDOWN_API_TOKEN is optional. It lets scripts and curl call every
   # endpoint that writes or starts work (POST /sync, POST /verify,
