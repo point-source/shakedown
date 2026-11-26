@@ -4368,11 +4368,7 @@ runs, and delete an unconfigured collection's files — the posture the
 operator chose. The same-origin rule stops browsers, not scripts: a
 script that reaches `serve` directly can forge the headers, so the proxy
 and the loopback-only port remain the real gate. A page opened over
-plain HTTP at a public domain name is refused: open it over HTTPS. A
-proxy that adds
-`Referrer-Policy: no-referrer` makes browsers send `Origin: null`, so
-dashboard writes through it over plain HTTP are refused; `serve` sets no
-such policy itself.
+plain HTTP at a public domain name is refused: open it over HTTPS.
 
 **User-level test path.** Tap Sync now on a collection: it starts and
 shows in the live view. Tap it again while that sync runs: the
