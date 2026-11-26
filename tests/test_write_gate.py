@@ -103,6 +103,8 @@ PLAIN_HTTP_PAGE = [
     pytest.param(_page("http://nas.local:8090", Host="nas.local:8090"), id="mdns-name"),
     pytest.param(_page("http://nas.home.arpa", Host="nas.home.arpa"), id="home-arpa-name"),
     pytest.param(_page("http://nas.internal:8090", Host="nas.internal"), id="internal-name"),
+    # A name typed with its DNS root dot keeps it in Origin; nginx's $host drops it.
+    pytest.param(_page("http://nas.home.arpa.:8090", Host="nas.home.arpa"), id="root-dot"),
     pytest.param(
         _page(Host="10.20.111.219:8090", **{"Content-Type": "application/json; charset=utf-8"}),
         id="json-with-charset",

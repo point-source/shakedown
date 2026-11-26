@@ -89,17 +89,18 @@ def _is_local(host: str) -> bool:
         ipaddress.ip_address(host)
         return True
     except ValueError:
-        name = host.rstrip(".")
-        return "." not in name or name.endswith(LOCAL_SUFFIXES)
+        return "." not in host or host.endswith(LOCAL_SUFFIXES)
 
 
 def _host_name(url: str) -> str | None:
-    """The lowercased host name of an origin or ``//host[:port]``; None if it has none.
-    Port and scheme do not count: a proxy often drops or replaces the port."""
+    """The lowercased host name of an origin or ``//host[:port]``, without a DNS root
+    dot; None if it has none. Port and scheme do not count: a proxy often drops or
+    replaces the port, and nginx drops the root dot."""
     try:
-        return urlsplit(url.strip()).hostname
+        name = urlsplit(url.strip()).hostname
     except ValueError:  # a malformed IPv6 literal
         return None
+    return name.rstrip(".") or None if name else None
 
 
 def _request_host_names(request: Request) -> set[str]:
