@@ -2,7 +2,7 @@
 // what it mirrors, when it syncs (§spec:schedules "Presets and cron"), how its
 // library is laid out, and who hears about new shows. It edits the same draft as
 // the Settings list, so the save bar saves both. Names are fixed once saved.
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ChevronLeft } from "lucide-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button, buttonVariants } from "@/components/ui/button"
@@ -37,6 +37,14 @@ const KINDS: { value: Schedule["kind"]; label: string }[] = [
 /** A 24-hour time, as the rest of the page writes times; held as typed until it reads as one. */
 function TimeInput({ id, hour, minute, onTime }: { id: string; hour: number; minute: number; onTime: (h: number, m: number) => void }) {
   const [text, setText] = useState(hhmm(hour, minute))
+  // Discard or a reload changes the time from outside: show it. While typing, the
+  // text already reads as the time it set, or as none.
+  useEffect(() => {
+    setText((t) => {
+      const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(t)
+      return m && Number(m[1]) === hour && Number(m[2]) === minute ? t : hhmm(hour, minute)
+    })
+  }, [hour, minute])
   const bad = !/^([01]?\d|2[0-3]):[0-5]\d$/.test(text)
   return (
     <Field data-invalid={bad ? true : undefined}>
@@ -225,6 +233,9 @@ export function SearchSetting({ path, type, readsLinks, finishing }: {
   const d = useDraft()
   const [link, setLink] = useState<LinkReading | null>(null)
   const typed = useRef("")
+  // The draft's value now: a reading that comes back after Discard must not undo it.
+  const current = useRef<unknown>(null)
+  current.current = getIn(d.doc, path)
   const put = (v: unknown) => {
     const text = String(v ?? "")
     typed.current = text
@@ -232,7 +243,7 @@ export function SearchSetting({ path, type, readsLinks, finishing }: {
     setLink(null)
     if (!readsLinks || !isLink(text)) return
     void readLink(type, text).then((r) => {
-      if (typed.current !== text) return
+      if (typed.current !== text || current.current !== text) return
       if (r.kind === "read") d.set(path, r.query)
       setLink(r)
     })

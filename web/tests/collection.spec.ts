@@ -107,6 +107,21 @@ test.describe("behaviour", () => {
     await expect(page.getByText("Next sync 15 Nov, 03:00")).toBeVisible()
   })
 
+  test("Discard puts the time back in the Time field", async ({ page, baseURL }) => {
+    await openScenario(page, baseURL!, "default", { tab: GD })
+    await page.locator(`${sched}-time`).fill("04:15")
+    await page.getByRole("button", { name: "Discard" }).click()
+    await expect(page.locator(`${sched}-time`)).toHaveValue("03:00")
+  })
+
+  test("a schedule the file holds as a number shows as Custom, with its error", async ({ page, baseURL }) => {
+    await openScenario(page, baseURL!, "settings_invalid_schedule", { tab: "settings" })
+    await expect(page.getByText("Custom: 5")).toBeVisible()
+    await page.evaluate((h) => { location.hash = h }, GD)
+    await expect(page.locator(sched)).toHaveValue("5")
+    await expect(page.getByText("This value isn't the right kind for this setting.")).toBeVisible()
+  })
+
   test("a new collection gets the staggered schedule, saves, and opens under its name", async ({ page, baseURL }) => {
     await openScenario(page, baseURL!, "settings_clean", { tab: "settings/internetarchive?add" })
     await expect(page.locator(`${sched.replace("collections\\.0", "collections\\.2")}-time`)).toHaveValue("06:00")
@@ -231,6 +246,21 @@ test.describe("pasted links", () => {
     expect(Object.fromEntries(url.searchParams)).toEqual({ type: "ia", url: "https://archive.org/details/BobWeir" })
     await expect(page.locator(q)).toHaveValue("collection:BobWeir")
   })
+  test("a reading that comes back after Discard doesn't undo it", async ({ page, baseURL }) => {
+    await openScenario(page, baseURL!, "default", { tab: "settings/internetarchive/grateful-dead" })
+    const before = await page.locator(q).inputValue()
+    let release!: () => void
+    const held = new Promise<void>((r) => { release = r })
+    await page.route("**/api/source-link**", async (route) => { await held; await route.fallback() })
+    const answered = page.waitForResponse((r) => r.url().includes("/api/source-link"))
+    await page.locator(q).fill("https://archive.org/details/BobWeir")
+    await page.getByRole("button", { name: "Discard" }).click()
+    release()
+    await answered
+    await expect(page.locator(q)).toHaveValue(before)
+    await expect(page.getByText("Unsaved changes")).toHaveCount(0)
+  })
+
   test("a search that isn't a link is never sent for reading", async ({ page, baseURL }) => {
     await openScenario(page, baseURL!, "default", { tab: "settings/internetarchive/grateful-dead" })
     let asked = false

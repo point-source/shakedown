@@ -364,6 +364,19 @@ function settingsInvalid(): Answers {
   return a
 }
 
+// A hand edit left a number where a schedule goes: the file keeps it as written
+// (the server's answer for `schedule: 5`).
+function settingsInvalidSchedule(): Answers {
+  const a = defaultAnswers()
+  a.config.document!.sources[0].collections[0].schedule = 5 as unknown as string
+  a.config.state = "invalid"
+  a.config.errors = [
+    { loc: ["sources", 0, "collections", 0, "schedule"], code: "string_type", message: "Input should be a valid string" },
+  ]
+  a.config.next_syncs = []
+  return a
+}
+
 // No config loaded (every other endpoint 503): the config resource says why.
 // No file leads to setup; a file with errors opens in Settings; a file that isn't
 // YAML is fixed by hand (§spec:first-run-setup, §spec:dashboard-settings).
@@ -437,6 +450,7 @@ export const SCENARIOS: Record<string, Scenario> = {
   settings_locked: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsLocked()),
     writes: { "POST api/config/override": { status: 200, body: { edit: "override" } } } },
   settings_invalid: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsInvalid()) },
+  settings_invalid_schedule: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsInvalidSchedule()) },
   settings_saved: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
     writes: { "PUT api/config": { status: 200, body: SAVED_WITH_WARNINGS },
       "POST api/collections/purge": { status: 202, body: { started: "purge", source: "internetarchive", collection: "dmb", scope: "everything" } },

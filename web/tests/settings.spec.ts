@@ -77,11 +77,15 @@ test.describe("behaviour", () => {
   test("a save reads Overview's views again at once", async ({ page, baseURL }) => {
     await openScenario(page, baseURL!, "settings_saved", { tab: "settings" })
     await days(page).fill("90")
-    const saved = page.waitForResponse((r) => r.request().method() === "PUT" && r.url().endsWith("/api/config"))
+    // Listen from the save on: the reads may start before the save's answer is seen here.
+    let saved = false
+    const reads = new Set<string>()
+    page.on("request", (r) => {
+      if (r.method() === "PUT" && r.url().endsWith("/api/config")) saved = true
+      else if (saved && r.method() === "GET") reads.add(new URL(r.url()).pathname.replace(/^.*\/api\//, ""))
+    })
     await save(page)
-    await saved
-    const read = (view: string) => page.waitForRequest((r) => r.method() === "GET" && r.url().endsWith(`/api/${view}`), { timeout: 5000 })
-    await Promise.all([read("health"), read("attention")])
+    await expect.poll(() => ["health", "attention"].every((v) => reads.has(v)), { timeout: 5000 }).toBe(true)
   })
 
   test("Discard puts the file's values back", async ({ page, baseURL }) => {

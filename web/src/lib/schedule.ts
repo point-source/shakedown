@@ -12,8 +12,10 @@ export type Schedule =
 
 const whole = (s: string, max: number) => (/^\d{1,2}$/.test(s) && Number(s) <= max ? Number(s) : null)
 
-export function readSchedule(expr: string | null): Schedule {
-  if (expr === null) return { kind: "manual" }
+export function readSchedule(value: unknown): Schedule {
+  if (value === null || value === undefined) return { kind: "manual" }
+  // A file with errors keeps its values as written, so a schedule may not be text.
+  const expr = String(value)
   const f = expr.trim().split(/\s+/)
   if (f.length === 5 && f[2] === "*" && f[3] === "*") {
     const minute = whole(f[0], 59)
@@ -39,7 +41,7 @@ export function writeSchedule(s: Schedule): string | null {
 export const hhmm = (h: number, m: number) => `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
 
 /** One line for a collection row: "Daily at 03:30", "Weekly, Sunday at 03:00". */
-export function scheduleLine(expr: string | null): string {
+export function scheduleLine(expr: unknown): string {
   const s = readSchedule(expr)
   switch (s.kind) {
     case "daily": return `Daily at ${hhmm(s.hour, s.minute)}`
@@ -51,7 +53,7 @@ export function scheduleLine(expr: string | null): string {
 
 /** A new collection's schedule (§spec:schedules "Staggered default"): Weekly on
  * Sunday at the first whole hour from 03:00 at which no other collection starts. */
-export function staggeredDefault(existing: (string | null)[]): string {
+export function staggeredDefault(existing: unknown[]): string {
   const taken = new Set<number>()
   for (const e of existing) {
     const s = readSchedule(e)
