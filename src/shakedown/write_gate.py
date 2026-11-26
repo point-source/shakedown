@@ -2,8 +2,12 @@
 
 A request that writes or starts work passes when it either carries the configured
 bearer token (``SHAKEDOWN_API_TOKEN``), as scripts and ``curl`` do, or comes from
-the dashboard's own page: the browser marks it ``Sec-Fetch-Site: same-origin`` and
-it is a JSON request, which a cross-site form cannot send. Anything else answers
+the dashboard's own page: a JSON request, which a cross-site form cannot send, that
+the browser marks ``Sec-Fetch-Site: same-origin``. A browser sends fetch metadata
+only to HTTPS and localhost, so a page opened over plain HTTP at a LAN address is
+recognised by its ``Origin`` instead: its host name must be an IP address or a local
+name, and the host the request was sent to (``Host``, ``X-Forwarded-Host`` or
+``Forwarded``). Anything else answers
 ``403 {"code": "cross_site"}``. With no token configured only the dashboard page
 writes.
 
@@ -17,14 +21,19 @@ Attach it to a route, never copy it::
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import os
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 TOKEN_ENV = "SHAKEDOWN_API_TOKEN"
 CROSS_SITE = "cross_site"
+# Names only a LAN resolves (RFC 6762 .local, RFC 8375 .home.arpa, ICANN's .internal,
+# and the common .lan): an outside site cannot serve a page from one.
+LOCAL_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal")
 
 
 class Refusal(Exception):
@@ -59,12 +68,55 @@ def has_token(request: Request) -> bool:
 
 
 def from_dashboard(request: Request) -> bool:
-    """The browser marks the request same-origin, and it is JSON: a cross-site page
-    can neither set Sec-Fetch-Site nor send JSON without a CORS preflight, which serve
-    never allows."""
-    site = request.headers.get("sec-fetch-site", "").strip().lower()
+    """A JSON request the browser marks same-origin, or, when it sends no fetch
+    metadata, whose Origin names a local host and the host it was sent to. A
+    cross-site page can set neither Sec-Fetch-Site nor Origin, nor send JSON without a
+    CORS preflight, which serve never allows; a DNS-rebinding page shares its host
+    with the request but is served from a public name (§spec:dashboard-run-controls)."""
     media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
-    return site == "same-origin" and media_type == "application/json"
+    if media_type != "application/json":
+        return False
+    site = request.headers.get("sec-fetch-site", "").strip().lower()
+    if site:
+        return site == "same-origin"
+    origin = _host_name(request.headers.get("origin", ""))
+    return origin is not None and _is_local(origin) and origin in _request_host_names(request)
+
+
+def _is_local(host: str) -> bool:
+    """An IP address, a one-word name, or a name under a LAN-only suffix."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return "." not in host or host.endswith(LOCAL_SUFFIXES)
+
+
+def _host_name(url: str) -> str | None:
+    """The lowercased host name of an origin or ``//host[:port]``, without a DNS root
+    dot; None if it has none. Port and scheme do not count: a proxy often drops or
+    replaces the port, and nginx drops the root dot."""
+    try:
+        name = urlsplit(url.strip()).hostname
+    except ValueError:  # a malformed IPv6 literal
+        return None
+    return name.rstrip(".") or None if name else None
+
+
+def _request_host_names(request: Request) -> set[str]:
+    """The host names the request was sent to: Host, and the first proxy's
+    X-Forwarded-Host and Forwarded ``host=``. Only a browser's cross-site request
+    matters here, and it cannot set the forwarded headers without a preflight."""
+    hosts = [
+        request.headers.get("host", ""),
+        request.headers.get("x-forwarded-host", "").split(",")[0],
+    ]
+    first_hop = request.headers.get("forwarded", "").split(",")[0]
+    for pair in first_hop.split(";"):
+        key, _, value = pair.partition("=")
+        if key.strip().lower() == "host":
+            hosts.append(value.strip().strip('"'))
+    return {name for host in hosts if (name := _host_name("//" + host))}
 
 
 def write_gate(request: Request) -> None:
