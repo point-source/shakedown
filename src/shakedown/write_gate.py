@@ -73,15 +73,14 @@ def from_dashboard(request: Request) -> bool:
     site = request.headers.get("sec-fetch-site", "").strip().lower()
     if site:
         return site == "same-origin"
-    origin = _host_name(request.headers.get("origin", ""))
-    return origin is not None and origin in _request_host_names(request)
+    return _host_name(request.headers.get("origin", "")) in _request_host_names(request)
 
 
 def _host_name(url: str) -> str | None:
     """The lowercased host name of an origin or ``//host[:port]``; None if it has none.
     Port and scheme do not count: a proxy often drops or replaces the port."""
     try:
-        return urlsplit(url.strip()).hostname or None
+        return urlsplit(url.strip()).hostname
     except ValueError:  # a malformed IPv6 literal
         return None
 
@@ -99,8 +98,7 @@ def _request_host_names(request: Request) -> set[str]:
         key, _, value = pair.partition("=")
         if key.strip().lower() == "host":
             hosts.append(value.strip().strip('"'))
-    names = (_host_name("//" + host.strip()) for host in hosts if host.strip())
-    return {name for name in names if name}
+    return {name for host in hosts if (name := _host_name("//" + host))}
 
 
 def write_gate(request: Request) -> None:

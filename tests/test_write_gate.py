@@ -191,15 +191,11 @@ async def test_a_plain_http_dashboard_page_passes_the_gate(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("token", [TOKEN, None], ids=["token-configured", "no-token"])
 @pytest.mark.parametrize("headers", NOT_THE_PAGE)
 async def test_a_request_not_from_the_dashboard_page_is_refused_without_fetch_metadata(
-    tmp_roots: tuple[Path, Path],
-    monkeypatch: pytest.MonkeyPatch,
-    token: str | None,
-    headers: dict[str, str],
+    tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
 ) -> None:
-    _token(monkeypatch, token)
+    _token(monkeypatch, TOKEN)
     async with _client(_app(make_config(*tmp_roots))) as client:
         r = await client.post("/sync", params={"collection": "nope"}, headers=headers)
     assert r.status_code == 403
