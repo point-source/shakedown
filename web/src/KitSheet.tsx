@@ -7,6 +7,19 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Button, buttonVariants } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import { Switch } from "@/components/ui/switch"
+import { Checkbox } from "@/components/ui/checkbox"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import { Toast, ToastDescription, ToastProvider, ToastTitle, ToastViewport } from "@/components/ui/toast"
 
 const COLORS = [
   "background", "foreground", "card", "muted", "muted-foreground", "border",
@@ -22,7 +35,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-export function KitSheet() {
+/** `overlay`: the kit's overlays open over the sheet (?view=kit&overlay=1). */
+export function KitSheet({ overlay = false }: { overlay?: boolean }) {
   return (
     <div className="mx-auto flex min-w-0 max-w-5xl flex-col gap-8 p-4 sm:p-6">
       <h1 className="text-xl font-semibold">Kit</h1>
@@ -74,6 +88,79 @@ export function KitSheet() {
           <Badge variant="secondary">3</Badge>
           <Badge variant="secondary">Downloading</Badge>
         </div>
+      </Section>
+
+      <Section title="Buttons">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button>Save</Button>
+          <Button variant="outline">Sync now</Button>
+          <Button variant="secondary">Discard changes</Button>
+          <Button variant="ghost">Cancel</Button>
+          <Button variant="destructive">Delete everything</Button>
+          <Button variant="link">All runs</Button>
+          <Button disabled>Save</Button>
+          <Button size="sm" variant="outline">Validate</Button>
+        </div>
+      </Section>
+
+      <Section title="Fields">
+        <FieldGroup className="max-w-md">
+          <Field>
+            <FieldLabel htmlFor="kit-archive">Archive folder</FieldLabel>
+            <Input id="kit-archive" defaultValue="/data/archive" />
+            <FieldDescription>Where Shakedown keeps every downloaded file.</FieldDescription>
+          </Field>
+          <Field data-invalid>
+            <FieldLabel htmlFor="kit-keep">Keep run errors for (days)</FieldLabel>
+            <Input id="kit-keep" defaultValue="10" aria-invalid />
+            <FieldError>Enter 30 or more.</FieldError>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="kit-locked">Library folder</FieldLabel>
+            <Input id="kit-locked" defaultValue="/data/library" disabled />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="kit-query">Query</FieldLabel>
+            <Textarea id="kit-query" defaultValue="collection:etree AND NOT collection:GratefulDead" />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="kit-repeat">Repeats</FieldLabel>
+            <Select defaultValue="weekly">
+              <SelectTrigger id="kit-repeat" className="w-40"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="daily">Daily</SelectItem>
+                <SelectItem value="weekly">Weekly</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field orientation="horizontal">
+            <FieldContent>
+              <FieldLabel htmlFor="kit-tags">Fill in missing tags</FieldLabel>
+              <FieldDescription>Adds artist, album, date, and track titles your player can't find.</FieldDescription>
+            </FieldContent>
+            <Switch id="kit-tags" defaultChecked />
+          </Field>
+          <Field orientation="horizontal">
+            <FieldContent>
+              <FieldLabel htmlFor="kit-prune">Remove disappeared shows</FieldLabel>
+            </FieldContent>
+            <Switch id="kit-prune" />
+          </Field>
+          <RadioGroup defaultValue="keep">
+            <Field orientation="horizontal">
+              <RadioGroupItem value="keep" id="kit-keep-files" />
+              <FieldLabel htmlFor="kit-keep-files">Keep files</FieldLabel>
+            </Field>
+            <Field orientation="horizontal">
+              <RadioGroupItem value="library" id="kit-del-library" />
+              <FieldLabel htmlFor="kit-del-library">Delete library folders</FieldLabel>
+            </Field>
+          </RadioGroup>
+          <Field orientation="horizontal">
+            <Checkbox id="kit-sure" />
+            <FieldLabel htmlFor="kit-sure">I understand this can't be undone</FieldLabel>
+          </Field>
+        </FieldGroup>
       </Section>
 
       <Section title="Progress">
@@ -131,7 +218,7 @@ export function KitSheet() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Collection</TableHead>
-                  <TableHead>Run</TableHead>
+                  <TableHead>Action</TableHead>
                   <TableHead className="text-right">Downloaded</TableHead>
                   <TableHead>Result</TableHead>
                 </TableRow>
@@ -154,6 +241,32 @@ export function KitSheet() {
           </CardContent>
         </Card>
       </Section>
+
+      {overlay && (
+        <>
+          <AlertDialog defaultOpen>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete everything for phish?</AlertDialogTitle>
+                <AlertDialogDescription>This deletes 1,204 shows (2.41 TB). It can't be undone.</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction className={buttonVariants({ variant: "destructive" })}>Delete everything</AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+          <ToastProvider duration={Infinity}>
+            <Toast variant="success" open>
+              <div className="grid gap-1">
+                <ToastTitle>Sync started</ToastTitle>
+                <ToastDescription>phish</ToastDescription>
+              </div>
+            </Toast>
+            <ToastViewport />
+          </ToastProvider>
+        </>
+      )}
     </div>
   )
 }

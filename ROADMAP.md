@@ -6,4 +6,3 @@
 > exercise end-to-end. Completed work is deleted from this file — the
 > changelog records history.
 
-_No open workstreams: the codebase is caught up with SPEC.md._

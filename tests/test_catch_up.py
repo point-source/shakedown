@@ -326,7 +326,7 @@ def test_source_blocks_sharing_a_name_each_get_their_own_plugin(
     tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two source blocks may share a name with different collections (and so
-    different credentials); each collection must sync with its own block's plugin."""
+    different settings); each collection must sync with its own block's plugin."""
     from shakedown.plugins import registry
 
     archive, library = tmp_roots
@@ -336,9 +336,9 @@ def test_source_blocks_sharing_a_name_each_get_their_own_plugin(
     asked: list[SourceConfig] = []
     real = registry.for_source
 
-    def for_source(source: SourceConfig, login=None):  # type: ignore[no-untyped-def]
+    def for_source(source: SourceConfig):  # type: ignore[no-untyped-def]
         asked.append(source)
-        return real(source, login)
+        return real(source)
 
     monkeypatch.setattr(registry, "for_source", for_source)
     assert run_sync(cfg) == 0

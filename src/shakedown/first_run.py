@@ -4,10 +4,10 @@ it.
 Setup writes the same `shakedown.yaml` Settings edits, and only while no file exists:
 it never replaces one. The defaults are the paths of the compose example's single
 `/data` mount (§spec:deployment), so a new user can accept them as they are.
-Finishing checks the document like any save, writes the file (recorded `editable`),
-and stores the credentials; `serve` then starts the collection's first sync.
+Finishing checks the document like any save and writes the file (recorded
+`editable`); `serve` then starts the collection's first sync.
 
-Order: the file first, then the edit state, then the credentials. A file that fails
+Order: the file first, then the edit state. A file that fails
 to write leaves no `editable` record behind to unlock a file written later by hand
 (§spec:edit-lock); a state database that fails after the file is written answers
 `write_failed` naming it, and the file stays.
@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from shakedown import config_save, credentials
+from shakedown import config_save
 from shakedown.config import (
     ConfigProblem,
     ConfigRejected,
@@ -28,10 +28,8 @@ from shakedown.config import (
     default_state_db,
 )
 from shakedown.config_file import ConfigExists, WriteFailed, create_config
-from shakedown.credentials import Login
 from shakedown.dashboard import iso
 from shakedown.dashboard_config import source_types
-from shakedown.dashboard_credentials import credential_source, login_of
 from shakedown.schedule import staggered_default
 from shakedown.validate import path_checks, path_warnings
 from shakedown.write_gate import Refusal
@@ -55,7 +53,7 @@ def setup_defaults(now: datetime | None = None) -> dict[str, Any]:
 
 
 SETUP_ONE_COLLECTION = "setup_one_collection"
-BODY_KEYS = {"document", "credentials"}
+BODY_KEYS = {"document"}
 
 
 @dataclass(frozen=True)
@@ -67,11 +65,11 @@ class Finished:
 
 
 def finish(path: Path, body: Any) -> Finished:
-    """`POST /api/setup`: write the config at ``path`` from the body's document and
-    store its credentials. Raises Refusal (`invalid_body`, `exists`,
-    `takes_no_credentials`, `write_failed`) or ConfigRejected; nothing is written for
-    either, except a `write_failed` naming the state database, which keeps the file."""
-    document, login = _read_body(body)
+    """`POST /api/setup`: write the config at ``path`` from the body's document.
+    Raises Refusal (`invalid_body`, `exists`, `write_failed`) or ConfigRejected;
+    nothing is written for either, except a `write_failed` naming the state
+    database, which keeps the file."""
+    document = _read_body(body)
     with config_save.writing:
         if path.exists():
             raise Refusal(409, "exists")
@@ -88,8 +86,6 @@ def finish(path: Path, body: Any) -> Finished:
         state_db = config.state_db
         source = config.sources[0]
         collection = source.collections[0]
-        if login is not None:
-            credential_source(config, source.name)
         # Every path is new: the checks' failures warn, and nothing moved.
         warnings = path_warnings(
             path_checks(config.archive_root, config.library_root, state_db)
@@ -102,20 +98,14 @@ def finish(path: Path, body: Any) -> Finished:
             raise Refusal(500, "write_failed", path=str(e.path)) from e
         except (sqlite3.Error, OSError) as e:
             raise Refusal(500, "write_failed", path=str(state_db)) from e
-        if login is not None:
-            config_save.write_state(
-                state_db, lambda: credentials.store(state_db, source.name, login)
-            )
     return Finished(revision, warnings, source.name, collection.name)
 
 
-def _read_body(body: Any) -> tuple[Any, Login | None]:
-    """The document and the optional credentials. A body of any other shape is one
-    code, never the field-by-field detail, which would quote the credentials."""
-    if not isinstance(body, dict) or "document" not in body or not set(body) <= BODY_KEYS:
+def _read_body(body: Any) -> Any:
+    """The document. A body of any other shape is one code."""
+    if not isinstance(body, dict) or set(body) != BODY_KEYS:
         raise Refusal(422, "invalid_body")
-    values = body.get("credentials")
-    return body["document"], None if values is None else login_of(values)
+    return body["document"]
 
 
 def _shape_problems(document: Any) -> list[ConfigProblem]:

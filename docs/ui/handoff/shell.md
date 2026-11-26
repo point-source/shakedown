@@ -1,6 +1,6 @@
 # Handoff: Page shell and page-wide states
 
-*Approved: round 2, 2026-11-12; never-reached state 2026-11-13 · Kit: §spec:ui-kit · Endpoints: all six `GET /api/*` (§spec:dashboard)*
+*Approved: round 2, 2026-11-12; never-reached state 2026-11-13; Settings tab, round S2 2026-11-24; no-config routing, round S4 2026-11-25 · Kit: §spec:ui-kit · Endpoints: all six `GET /api/*` (§spec:dashboard)*
 *Code: `web/src/App.tsx`, `web/src/data/useDashboard.ts` · Fixtures: `web/src/fixtures/scenarios.ts`*
 
 ## Purpose
@@ -24,7 +24,7 @@ the config is broken, so old numbers are never passed off as current.
 "Shakedown" (`text-xl` semibold), release (`text-sm` muted), and
 Updated pushed right (`ml-auto`); wraps on narrow screens. Notices
 (Alert) sit under the header, above the tabs. Tabs (shadcn Tabs):
-Overview · Runs · Sources · Library; full width below 640 px
+Overview · Runs · Sources · Library · Settings; full width below 640 px
 (`w-full`), fitted and left-aligned from 640 px (`sm:w-fit
 sm:self-start`). Tab content sits in the single `main` landmark.
 
@@ -38,7 +38,9 @@ Rendered at 390/768/1440 in light and dark (`npm run render`).
 | can't reach Shakedown | `unreachable`: answers, then requests fail for 4 min | warning Alert "Can't reach Shakedown" / "Showing data from 4 min ago."; dot amber; Updated shows when the oldest answer arrived; content keeps the last data |
 | never reached | `never_reached`: every request fails before any answer | warning Alert, description "Nothing to show until it answers."; tabs hidden |
 | config broken | `config_broken`: `health.config.valid` false | destructive Alert "shakedown.yaml has an error", the error text, "Showing data from the config loaded at 18:02."; content keeps showing data |
-| config never loaded | `no_config`: every endpoint 503 `{detail}` | destructive Alert with the error and "Nothing to show until it loads."; tabs hidden |
+| no file | `setup`: every endpoint 503, `config.state: missing` | first-run setup in place of the tabs (`setup.md`) |
+| file with errors, never loaded | `config_invalid`: every endpoint 503, `config.state: invalid` | destructive Alert "Shakedown can't load shakedown.yaml"; the Settings page with no tabs (`setup.md`) |
+| file Shakedown can't read | `config_unreadable`: every endpoint 503, `config.state: unreadable` | destructive Alert with the error and "Fix <path> by hand. Nothing to show until it loads."; tabs hidden |
 | loading | `loading`: no answer yet | every card shows Skeleton rows; header shows "Shakedown" only |
 
 Stale rule (§spec:dashboard): stale when any endpoint's last request
@@ -51,8 +53,8 @@ from <age> ago" uses the oldest `generated_at` on screen.
 "Shakedown" · "Release <x>" · "Updated <time>" · "Can't reach
 Shakedown" · "Showing data from <age> ago." · "Nothing to show until it
 answers." · "shakedown.yaml has an error" · "Showing data from the
-config loaded at <time>." · "Nothing to show until it loads." · tab
-labels Overview, Runs, Sources, Library. Terms: Shakedown, Release
+config loaded at <time>." · "Nothing to show until it loads." · "Shakedown can't load shakedown.yaml" (see `setup.md`) · tab
+labels Overview, Runs, Sources, Library, Settings. Terms: Shakedown, Release
 (§spec:ui-kit Terms).
 
 ## Behavior
@@ -68,9 +70,15 @@ labels Overview, Runs, Sources, Library. Terms: Shakedown, Release
   config-broken notice over the kept data.
 - A `useNow` clock ticks every 5 s so ages and staleness update between
   answers.
-- The open tab lives in the URL hash (`#runs`, `#sources`, `#library`;
-  none = Overview); switching tabs scrolls to top and adds one history
+- The open tab lives in the URL hash (`#runs`, `#sources`, `#library`,
+  `#settings`; none = Overview). The first `/`-separated segment picks
+  the tab, so `#settings/<source>/<collection>` opens Settings; switching tabs scrolls to top and adds one history
   entry, so Back/forward move between tabs.
+- With no config loaded (every data endpoint 503), `GET /api/config`,
+  which always answers, decides the page: `missing` → setup, `invalid`
+  → Settings, `unreadable` → the error alone. Until it answers, the
+  header shows alone. A 503 after data arrived keeps the data, as
+  above.
 - Every source-derived string renders as React text, never markup.
 
 ## Open questions

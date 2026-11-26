@@ -152,7 +152,7 @@ def test_a_new_source_is_written() -> None:
 
     def edit(doc: dict[str, Any]) -> None:
         doc["sources"].append({
-            "name": "lma", "type": "etree", "auth": None, "max_concurrent_requests": None,
+            "name": "lma", "type": "etree", "max_concurrent_requests": None,
             "collections": [{
                 "name": "lma", "query": "collection:etree", "library_layout": "passthrough",
                 "prune_disappeared": False, "incremental_discovery": False,
@@ -251,9 +251,77 @@ library_root: /l
 sources:
   - name: ia
     type: ia
+    collections:
+      - name: gd
+        query: 'collection:GratefulDead'
+        on_complete: &hook
+          webhook: http://hook.example/a
+  - name: ia2
+    type: ia
+    collections:
+      - name: phish
+        query: 'collection:Phish'
+        on_complete: *hook
+"""
+
+
+@pytest.mark.parametrize("edited", [0, 1])
+def test_editing_one_use_of_a_shared_anchor_leaves_the_other_as_it_was(edited: int) -> None:
+    def edit(doc: dict[str, Any]) -> None:
+        doc["sources"][edited]["collections"][0]["on_complete"]["webhook"] = "http://other"
+
+    merged = _save(ALIASED, edit)
+    sources = _effective(merged)["sources"]
+    assert sources[edited]["collections"][0]["on_complete"]["webhook"] == "http://other"
+    assert (sources[1 - edited]["collections"][0]["on_complete"]["webhook"]
+            == "http://hook.example/a")
+
+
+# -- a leftover `auth` key (§spec:dashboard-credentials "Removal") --------------
+
+LEFTOVER_AUTH = """\
+archive_root: /a
+library_root: /l
+sources:
+  # The Internet Archive.
+  - name: ia
+    type: ia
+    auth:
+      email_env: IA_EMAIL   # the old login
+      password_env: IA_PASSWORD
+    collections:
+      - name: gd
+        query: 'collection:GratefulDead'
+"""
+
+
+def test_a_leftover_auth_key_loads_ignored() -> None:
+    checked = check_document(yaml.safe_load(LEFTOVER_AUTH))
+    assert checked.errors == []
+    assert checked.config is not None
+    assert "auth" not in checked.config.sources[0].model_dump()
+
+
+def test_a_save_that_changes_nothing_else_writes_the_file_without_auth() -> None:
+    merged = merge(LEFTOVER_AUTH, _effective(LEFTOVER_AUTH), _effective(LEFTOVER_AUTH))
+    assert "auth" not in merged and "IA_EMAIL" not in merged
+    assert merged == (
+        LEFTOVER_AUTH.replace(
+            "    auth:\n      email_env: IA_EMAIL   # the old login\n"
+            "      password_env: IA_PASSWORD\n", ""
+        )
+    )
+
+
+def test_anchored_auth_keys_are_all_dropped() -> None:
+    text = """\
+archive_root: /a
+library_root: /l
+sources:
+  - name: ia
+    type: ia
     auth: &login
       email_env: IA_EMAIL
-      password_env: IA_PASSWORD
     collections:
       - name: gd
         query: 'collection:GratefulDead'
@@ -264,14 +332,5 @@ sources:
       - name: phish
         query: 'collection:Phish'
 """
-
-
-@pytest.mark.parametrize("edited", [0, 1])
-def test_editing_one_use_of_a_shared_anchor_leaves_the_other_as_it_was(edited: int) -> None:
-    def edit(doc: dict[str, Any]) -> None:
-        doc["sources"][edited]["auth"]["email_env"] = "OTHER_EMAIL"
-
-    merged = _save(ALIASED, edit)
-    sources = _effective(merged)["sources"]
-    assert sources[edited]["auth"]["email_env"] == "OTHER_EMAIL"
-    assert sources[1 - edited]["auth"]["email_env"] == "IA_EMAIL"
+    merged = _save(text, lambda doc: None)
+    assert "auth" not in merged and "login" not in merged

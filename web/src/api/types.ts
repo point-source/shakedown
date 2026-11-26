@@ -238,3 +238,110 @@ export interface HealthAnswer {
   /** Whether the scheduler is running (§spec:schedules). Not drawn yet: Design's. */
   scheduler: { state: "running" | "stale" | "no_schedule" | "never"; last_seen: Iso | null; release: string | null }
 }
+
+// ---- Config management (§spec:dashboard-settings and the sections it names) ----
+
+export type ConfigState = "missing" | "unreadable" | "invalid" | "valid"
+export type EditState = "editable" | "locked" | "override"
+/** Keys and list indexes to the setting a problem names, e.g. ["sources", 0, "collections", 1, "query"]. */
+export type Loc = (string | number)[]
+
+export interface ConfigProblem { loc: Loc; code: string; message: string }
+export interface ConfigWarning { loc: Loc; code: string }
+
+export interface CollectionConfig {
+  name: string
+  query: string
+  library_layout: string
+  prune_disappeared: boolean
+  incremental_discovery: boolean
+  preserve_source_metadata: boolean
+  fill_tags: boolean
+  on_complete: { webhook: string } | { exec: string } | null
+  /** Five-field cron; null for manual only (§spec:schedules). */
+  schedule: string | null
+}
+
+export interface SourceConfig {
+  name: string
+  type: string
+  collections: CollectionConfig[]
+  max_concurrent_requests: number | null
+}
+
+export interface ConfigDocument {
+  archive_root: string
+  library_root: string
+  state_db: string | null
+  max_concurrent_downloads: number
+  max_concurrent_collections: number
+  keep_run_errors_days: number
+  sources: SourceConfig[]
+  notifications: { on_failure: { webhook: string | null } | null } | null
+  timezone: string | null
+}
+
+export interface SourceType {
+  type: string
+  layout_fields: string[]
+  layout_filters: string[]
+  /** The plugin reads pasted links as searches (`GET /api/source-link`). */
+  reads_links: boolean
+}
+
+/** `GET /api/source-link?type=&url=`: the search a pasted link stands for, or
+ *  null when the type's plugin can't read it (§spec:dashboard-settings). */
+export interface SourceLinkAnswer { query: string | null }
+
+export interface UnconfiguredCollection {
+  source: string
+  collection: string
+  shows: number
+  archive_bytes: number
+  library_bytes: number
+}
+
+export interface ConfigAnswer {
+  generated_at: Iso
+  state: ConfigState
+  path: string
+  revision: string | null
+  edit: EditState
+  document: ConfigDocument | null
+  errors: ConfigProblem[]
+  next_syncs: { source: string; collection: string; next_at: Iso | null }[]
+  source_types: SourceType[]
+  unconfigured: UnconfiguredCollection[]
+}
+
+/** `GET /api/setup` (§spec:first-run-setup): the defaults setup offers. The page
+ *  fills `timezone` from the browser. */
+export interface SetupAnswer {
+  generated_at: Iso
+  archive_root: string
+  library_root: string
+  state_db: string
+  source_types: SourceType[]
+  /** The first collection's schedule: the staggered default (§spec:schedules). */
+  schedule: string
+}
+
+/** `POST /api/setup` 201: the file is written; `started` is the first sync's scope,
+ *  or null with `reason` when it could not start. */
+export interface SetupDone {
+  revision: string
+  warnings: ConfigWarning[]
+  started: { source: string; collection: string } | null
+  reason?: "busy" | "failed" | "exited_early"
+}
+
+/** `POST /validate` (§spec:setup-readiness-validation). */
+export interface ValidationReport {
+  ready: boolean
+  groups: {
+    source: string | null
+    collection: string | null
+    ok: boolean
+    checks: { name: string; ok: boolean; target: string | null; consequence: string | null; action: string | null }[]
+  }[]
+}

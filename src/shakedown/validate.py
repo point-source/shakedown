@@ -3,9 +3,8 @@
 A dedicated preflight an operator runs *before* the first large mirror. It reuses the
 same startup configuration contract as every command, then continues into setup-specific
 probes — path writability, archive→library hardlink probe, source/collection
-reachability, credential presence/acceptance, layout collision-risk, and handoff
-readiness — and reports one grouped pass/fail result per source and collection. Each
-failing check names the affected setting/source/collection, the plain-language
+reachability, layout collision-risk, and handoff readiness — and reports one grouped
+pass/fail result per source and collection. Each failing check names the affected setting/source/collection, the plain-language
 consequence, and the user action needed to continue.
 
 Crucially it never downloads a full collection and never leaves archive or library items
@@ -28,7 +27,6 @@ import click
 from shakedown import config as config_module
 from shakedown import notify
 from shakedown.config import Config
-from shakedown.credentials import login_for
 from shakedown.db import connect_reader, transaction
 from shakedown.filesystem import FilesystemError, check_writable, ensure_hardlinkable
 from shakedown.models import OperationStatus, OperationType
@@ -262,7 +260,7 @@ def validate_config(
         src_checks: list[Check] = []
         plugin = None
         try:
-            plugin = registry.for_source(source, login_for(source, config.state_db))
+            plugin = registry.for_source(source)
         except Exception as e:  # a broken plugin is a readiness failure, not a crash
             src_checks.append(
                 Check(
@@ -274,12 +272,6 @@ def validate_config(
                 )
             )
 
-        if plugin is not None:
-            src_checks.append(
-                Check.from_probe(
-                    "credentials present", source.name, plugin.check_credentials()
-                )
-            )
         groups.append(Group(source=source.name, collection=None, checks=src_checks))
 
         for collection in source.collections:

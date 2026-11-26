@@ -1,11 +1,14 @@
 """SQLite schema and connection helpers. Co-located with the archive (PRD §6)."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 14
 
@@ -407,19 +410,7 @@ CONFIG_EDIT_TABLE = """
         at     TEXT NOT NULL
     )
     """
-# Credentials entered in the dashboard (§spec:dashboard-credentials): one row per
-# source, in plain text, protected as this file is. Written by `serve` (and setup).
-CREDENTIALS_TABLE = """
-    CREATE TABLE IF NOT EXISTS source_credentials (
-        source    TEXT PRIMARY KEY,
-        email     TEXT NOT NULL,
-        password  TEXT NOT NULL,
-        at        TEXT NOT NULL
-    )
-    """
-_SCHEMA += [
-    SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE, CONFIG_EDIT_TABLE, CREDENTIALS_TABLE
-]
+_SCHEMA += [SCHEDULER_HEARTBEAT_TABLE, SCHEDULER_NOTICE_TABLE, CONFIG_EDIT_TABLE]
 
 
 # Indexes over the stored figures (§spec:library-stats "Stored figures"): each answer
@@ -498,6 +489,29 @@ def write_unversioned(
         for sql, values in statements:
             conn.execute(sql, values)
     return True
+
+
+def drop_withdrawn_credentials(db_path: Path) -> None:
+    """Drop the `source_credentials` table an older release kept the dashboard's
+    archive.org login in (§spec:dashboard-credentials "Removal"), so no stored
+    password outlives the feature. Outside schema versioning, like the table was:
+    no writer lock, no migration. `secure_delete` zeroes the freed pages rather
+    than leaving the values on disk, and a checkpoint moves them into the file. A
+    missing database stays missing; raises
+    sqlite3.Error when it cannot be written."""
+    if not db_path.exists():
+        return
+    with closing(open_unmigrated(db_path)) as conn:
+        conn.execute("PRAGMA secure_delete=ON")
+        with transaction(conn):
+            conn.execute("DROP TABLE IF EXISTS source_credentials")
+        # The zeroed pages sit in the write-ahead log until a checkpoint, and a run
+        # holding the database open keeps a close from making one: copy them into
+        # the file now and empty the log, which also holds the old pages.
+        busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        if busy:
+            log.warning("a reader kept %s's write-ahead log from emptying; the dropped "
+                        "login's pages leave it at the next checkpoint", db_path)
 
 
 def open_read_only(db_path: Path) -> sqlite3.Connection:

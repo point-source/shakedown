@@ -174,3 +174,43 @@ def test_a_refresh_that_starts_after_a_newer_answer_skips_its_computation() -> N
     clock.now = 3 * TTL
     answers.get("k", TTL, build)
     assert len(queued) == 1  # a new refresh is scheduled
+
+
+def test_an_answer_built_from_an_older_config_file_is_not_served() -> None:
+    """A changed config file (a dashboard save or a hand edit) makes the next viewer
+    wait on a fresh answer, so Overview never lists a collection the file dropped."""
+    answers, _clock, threads, build = _answers()
+    assert answers.get("k", TTL, build, version="a") == {"n": 1}
+    assert answers.get("k", TTL, build, version="a") == {"n": 1}
+    assert answers.get("k", TTL, build, version="b") == {"n": 2}
+    assert answers.get("k", TTL, build, version="b") == {"n": 2}
+    assert threads.started == []
+
+
+def test_a_dashboard_answer_is_built_from_the_config_its_own_request_loaded(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another request publishing an older read between this request's load and
+    its build must not swap it in, neither the config nor the file's state: the
+    answer is cached under the file version this request read."""
+    from shakedown.dashboard import ConfigState, ConfigTracker
+    from tests.conftest import make_config, write_config
+
+    older = make_config(tmp_path / "archive", tmp_path / "library")
+    newer = older.model_copy(deep=True)
+    newer.max_concurrent_collections = older.max_concurrent_collections + 1
+    path = write_config(tmp_path / "cfg.yaml", newer)
+    tracker = ConfigTracker(path)
+    real = ConfigTracker._load
+
+    def load_then_overtaken(self: ConfigTracker) -> Any:
+        loaded = real(self)
+        # A slower request publishing what it read earlier: the broken file.
+        self._last_good = older
+        self._state = ConfigState("broken before the save", None)
+        return loaded
+
+    monkeypatch.setattr(ConfigTracker, "_load", load_then_overtaken)
+    config, state = tracker.for_dashboard()
+    assert config.max_concurrent_collections == newer.max_concurrent_collections
+    assert state.error is None

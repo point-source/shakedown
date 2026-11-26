@@ -19,19 +19,33 @@ export async function openScenario(page, baseURL, name, opts = {}) {
   // labels with the real font (Recharts caches text widths).
   let release
   const fontsReady = new Promise((r) => { release = r })
+  // Writes (POST/PUT/DELETE) answer from the scenario's `writes`, keyed by method
+  // and path after the page: "POST sync?source=…", "PUT api/config".
+  const write = async (route) => {
+    const req = route.request()
+    const url = new URL(req.url())
+    const key = `${req.method()} ${url.pathname.replace(/^\//, "")}${url.search}`
+    const w = s.writes?.[key]
+    if (!w) return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ detail: "Not Found" }) })
+    return route.fulfill({ status: w.status, contentType: "application/json", body: JSON.stringify(w.body) })
+  }
+  await page.route(/\/(sync|validate)(\?|$)/, (route) => (route.request().method() === "GET" ? route.fallback() : write(route)))
   await page.route("**/api/**", async (route) => {
     await fontsReady
+    if (route.request().method() !== "GET") return write(route)
     const url = new URL(route.request().url())
     const key = url.pathname.replace(/^.*\/api\//, "") + url.search
     if (s.mode.kind === "hangs") return // never answers: the page stays in its loading state
     if (s.mode.kind === "refused") return route.abort("connectionrefused") // never reached
-    if (s.mode.kind === "no_config") {
+    // These answer with no config loaded, as the server's do.
+    const needsConfig = !/^(config|setup|source-link)(\?|$)/.test(key)
+    if (s.mode.kind === "no_config" && needsConfig) {
       return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: s.mode.detail }) })
     }
-    if (gone && s.mode.kind === "restarts_broken") {
+    if (gone && s.mode.kind === "restarts_broken" && needsConfig) {
       return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: s.mode.detail }) })
     }
-    if (gone) return route.abort("connectionrefused")
+    if (gone && s.mode.kind !== "restarts_broken") return route.abort("connectionrefused")
     const status = s.fail?.[key]
     if (status) return route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ detail: "Internal Server Error" }) })
     const body = s.answers[key]

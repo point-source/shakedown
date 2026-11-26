@@ -19,7 +19,7 @@ from shakedown import purge
 from shakedown.activity import ActivityRepo
 from shakedown.cli import main
 from shakedown.config import CollectionConfig, Config, SourceConfig
-from shakedown.db import connect
+from shakedown.db import connect, transaction
 from shakedown.history import run_history
 from shakedown.lock import writer_lock
 from shakedown.models import OperationType
@@ -199,6 +199,28 @@ def test_a_linked_folder_inside_the_library_is_never_deleted_through(synced: Con
 
     assert (_archive(synced) / "show-a" / "t1.flac").exists()
     assert "is a link" in " ".join(_errors(synced))
+
+
+def test_the_empty_folder_sweep_never_reaches_through_a_linked_folder(
+    synced: Config, tmp_path: Path,
+) -> None:
+    """Folders a placement names sit under the collection's library folder; through a
+    link they would be someone else's, and an empty one there stays."""
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "set1").mkdir(parents=True)
+    with closing(connect(synced.state_db)) as conn, transaction(conn):
+        conn.execute(
+            "UPDATE library_placements SET path='show-a/set1/t1.flac' "
+            "WHERE source_name=? AND collection_name=? AND path='show-a/t1.flac'", (S, C))
+    show = _library(synced) / "show-a"
+    for f in show.iterdir():
+        f.unlink()
+    show.rmdir()
+    show.symlink_to(elsewhere)
+
+    _purge(synced)
+
+    assert (elsewhere / "set1").is_dir()
 
 
 def test_adding_the_collection_back_after_a_library_delete_restages_without_downloading(

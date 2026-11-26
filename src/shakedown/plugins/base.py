@@ -18,7 +18,6 @@ import requests
 import urllib3.exceptions
 
 from shakedown.config import CollectionConfig, SourceConfig
-from shakedown.credentials import Login, LoginCheck, env_names, env_value
 from shakedown.models import ManifestFile
 
 _HASH_CHUNK = 1024 * 1024
@@ -265,11 +264,8 @@ class SourcePlugin(ABC):
     #: source gets a budget of its own.
     upstream_host: str | None = None
 
-    def __init__(self, source_config: SourceConfig, login: Login | None = None) -> None:
+    def __init__(self, source_config: SourceConfig) -> None:
         self.source_config = source_config
-        # The login a run resolved for this source (§spec:dashboard-credentials
-        # "Which wins"), or None. Only a plugin that takes credentials uses it.
-        self.login = login
 
     @abstractmethod
     def list_items(self, collection: CollectionConfig) -> Iterator[ListedItem]:
@@ -339,71 +335,16 @@ class SourcePlugin(ABC):
         """Cheap re-check: every given file present on disk."""
 
     # -- readiness probes (§spec:setup-readiness-validation) ----------------
-    # Both are strictly non-mutating: they read from the source but never download a
-    # full item, write to the archive/library, or leave state behind. `shakedown
-    # validate` calls them once per configured source/collection before a real mirror.
-
-    def check_credentials(self) -> ProbeResult:
-        """Readiness probe for the source's login.
-
-        With a resolved login, the source's own verdict (:meth:`check_login`): a
-        rejected login, or one the source could not be asked about, fails — so a
-        user retries a stored login's check here (§spec:dashboard-credentials).
-        Without one: a source with no ``auth`` block needs no credentials (pass);
-        otherwise the environment variables it names are missing.
-        """
-        if self.login is not None:
-            verdict = self.check_login()
-            if verdict == "accepted":
-                return ProbeResult(ok=True)
-            name = self.source_config.name
-            if verdict == "rejected":
-                return ProbeResult(
-                    ok=False,
-                    consequence=f"source {name!r} rejected the login",
-                    action="enter the correct email and password for this source",
-                )
-            return ProbeResult(
-                ok=False,
-                consequence=f"source {name!r} could not be reached to check the login",
-                action="check source connectivity, then rerun",
-            )
-        auth = self.source_config.auth
-        if auth is None:
-            return ProbeResult(ok=True)
-        # The names the run reads (`credentials.resolve`): a name `auth` leaves out
-        # falls back to the type's standard one, and a blank value counts as unset.
-        missing = [
-            name
-            for name in env_names(auth, self.credential_env)
-            if name and not env_value(name)
-        ]
-        if missing:
-            return ProbeResult(
-                ok=False,
-                consequence=(
-                    f"required credential environment variable(s) {missing} are not set, "
-                    f"so authenticated access to source {self.source_config.name!r} will fail"
-                ),
-                action=(
-                    "set the credential environment variables, or enter the credentials "
-                    "in the dashboard, before syncing"
-                ),
-            )
-        return ProbeResult(ok=True)
-
-    def check_login(self) -> LoginCheck:
-        """The source's verdict on :attr:`login`: `accepted`, `rejected`, or
-        `unchecked` when the source could not be asked. A plugin that takes
-        credentials overrides it; the default can ask no one."""
-        return "unchecked"
+    # Strictly non-mutating: it reads from the source but never downloads a full
+    # item, writes to the archive/library, or leaves state behind. `shakedown
+    # validate` calls it once per configured collection before a real mirror.
 
     def check_reachable(self, collection: CollectionConfig) -> ProbeResult:
         """Readiness probe that the source (and this collection's query) can be reached.
 
         Default: pull only the first page of the listing — a bounded, read-only touch
         that never downloads item files. An empty-but-reachable collection passes; a
-        source that raises (network down, bad query, rejected credentials) fails with
+        source that raises (network down, bad query) fails with
         the source's own error text. Reraising is caught here and turned into a
         failing :class:`ProbeResult`, never propagated.
         """
@@ -419,7 +360,7 @@ class SourcePlugin(ABC):
                     f"source {self.source_config.name!r} could not be reached for "
                     f"collection {collection.name!r}: {e}"
                 ),
-                action="check source connectivity, credentials, and the collection query, then rerun",
+                action="check source connectivity and the collection query, then rerun",
             )
 
     # Optional: declared metadata fields available for library_layout templates.
@@ -433,10 +374,15 @@ class SourcePlugin(ABC):
     # vouches for no field's uniqueness.
     per_item_unique_fields: tuple[str, ...] = ()
 
-    # Whether the source uses login credentials, so the dashboard offers them
-    # (§spec:dashboard-settings `source_types`).
-    takes_credentials: bool = False
+    @classmethod
+    def query_from_link(cls, url: str) -> str | None:
+        """Optional: the search a link from the source's site stands for, or None
+        for a link this plugin can't read (§spec:dashboard-settings "Pasted links").
+        Read from the link's text alone, with no request to the source."""
+        return None
 
-    # The environment variables (email, password) a source of this type reads when
-    # its `auth` names none (§spec:dashboard-credentials "Which wins").
-    credential_env: tuple[str, str] | None = None
+    @classmethod
+    def reads_links(cls) -> bool:
+        """Whether this plugin reads pasted links: it implements `query_from_link`."""
+        return cls.query_from_link.__func__ is not SourcePlugin.query_from_link.__func__
+

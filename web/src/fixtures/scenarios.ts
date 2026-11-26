@@ -2,9 +2,12 @@
 // shapes of src/api/types.ts, with a fixed clock. Served to the real page by
 // intercepting its requests (scripts/render.mjs, tests/screens.spec.ts).
 import type {
-  ActivityAnswer, AttentionAnswer, AttentionEntry, HealthAnswer, HistoryRun, LibraryAnswer, NetworkAnswer, RunsAnswer,
+  SetupAnswer, SourceLinkAnswer,
+  ActivityAnswer, AttentionAnswer, AttentionEntry, ConfigAnswer, HealthAnswer, HistoryRun, LibraryAnswer, NetworkAnswer,
+  RunsAnswer,
 } from "@/api/types"
 import * as base from "./default.ts"
+import { config as baseConfig } from "./config.ts"
 
 export type Answers = {
   activity: ActivityAnswer
@@ -13,15 +16,25 @@ export type Answers = {
   library: LibraryAnswer
   attention: AttentionAnswer
   health: HealthAnswer
-}
+  config: ConfigAnswer
+  /** `GET /api/setup`: only setup scenarios answer it. */
+  setup?: SetupAnswer
+} & { [link: `source-link?${string}`]: SourceLinkAnswer }
+
+/** An answer to a write (POST/PUT/DELETE), keyed "<METHOD> <path after the page>",
+ *  e.g. "POST sync?source=internetarchive&collection=phish" or "PUT api/config". */
+export type Writes = Record<string, { status: number; body: unknown }>
 
 export interface Scenario {
   now: string
-  /** How the server behaves: answer normally, answer 503 with the config error,
+  /** How the server behaves: answer normally, answer 503 with the config error
+   *  (`config`, `setup`, and `source-link` still answer, as they need no config),
    *  answer first and then stop (advance the clock by `minutes`), or never answer. */
   mode: { kind: "ok" } | { kind: "no_config"; detail: string } | { kind: "goes_away"; minutes: number } | { kind: "hangs" }
     | { kind: "restarts_broken"; detail: string; minutes: number } | { kind: "refused" }
   answers: Answers
+  /** Answers to the page's writes; a write with no entry answers 404. */
+  writes?: Writes
   /** Endpoints that always answer this HTTP error status instead of their answer. */
   fail?: Partial<Record<keyof Answers, number>>
 }
@@ -31,13 +44,30 @@ const at = (minutesAgo: number) =>
   new Date(Date.parse(NOW) - minutesAgo * 60_000).toISOString().replace(".000Z", "+00:00")
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v))
 
+// What the ia plugin answers for the links the editor's tests and renders paste
+// (§spec:dashboard-settings "Pasted links"); any other link reads as unreadable.
+const LINKS: [string, string | null][] = [
+  ["https://archive.org/details/GratefulDead", "collection:GratefulDead"],
+  ["https://archive.org/details/BobWeir", "collection:BobWeir"],
+  ["https://archive.org/details/etree?query=phish&tab=collection", "collection:etree AND (phish)"],
+  ["https://archive.org/search?query=collection%3APhish+AND+year%3A1997", "collection:Phish AND year:1997"],
+  ["https://archive.org/advancedsearch.php?q=creator%3A%22Grateful+Dead%22&fl%5B%5D=identifier", 'creator:"Grateful Dead"'],
+  ["https://example.net/bob-weir", null],
+  ["https://example.net/shows", null],
+]
+const linkAnswers = () => Object.fromEntries(
+  LINKS.map(([url, query]) => [`source-link?${new URLSearchParams({ type: "ia", url })}`, { query }]),
+) as Record<`source-link?${string}`, SourceLinkAnswer>
+
 const defaultAnswers = (): Answers => clone({
+  ...linkAnswers(),
   activity: base.activity,
   "network?days=30": base.network,
   "runs?days=30": base.runs,
   library: base.library,
   attention: base.attention,
   health: base.health,
+  config: baseConfig,
 })
 
 const CONFIG_ERROR = "config validation failed:\nmax_concurrent_collectons: Extra inputs are not permitted"
@@ -277,8 +307,111 @@ function schedulerStopped(): Answers {
       identifiers: [], count: 0, detail: {} },
   ]
   a.health.scheduler = { state: "stale", last_seen: at(45), release: "1.9.0" }
+  // grateful-dead syncs daily at 21:00; the 21:00 tick passed with the scheduler down.
+  a.config.document!.sources[0].collections[0].schedule = "0 21 * * *"
+  a.config.next_syncs[0].next_at = "2026-11-13T21:00:00+00:00"
   return a
 }
+
+const PHISH_SYNC = "POST sync?source=internetarchive&collection=phish"
+const VALIDATION_PROBLEMS = {
+  ready: false,
+  groups: [
+    { source: null, collection: null, ok: true, checks: [] },
+    { source: "internetarchive", collection: "phish", ok: false, checks: [] },
+  ],
+}
+
+// Settings (§spec:dashboard-settings, §spec:edit-lock).
+function settingsLocked(): Answers {
+  const a = defaultAnswers()
+  a.config.edit = "locked"
+  return a
+}
+
+// Every way a collection's schedule and handoff read back: phish is manual only
+// and hands off with a command that uses {staging_root} (so the library folder is
+// file-only too); etree-lma runs on a custom cron.
+function settingsVariety(): Answers {
+  const a = defaultAnswers()
+  const [ia, etree] = a.config.document!.sources
+  ia.collections[1].schedule = null
+  ia.collections[1].on_complete = { exec: "/scripts/beets-import.sh {staging_root}" }
+  etree.collections[0].schedule = "0 2 1,15 * *"
+  a.config.next_syncs = [
+    a.config.next_syncs[0],
+    { source: "etree-lma", collection: "etree-lma", next_at: "2026-11-15T02:00:00+00:00" },
+  ]
+  return a
+}
+
+// A file that parses but a run would refuse: errors against the settings they
+// name, and one against a key the page has no field for.
+function settingsInvalid(): Answers {
+  const a = defaultAnswers()
+  const doc = a.config.document!
+  doc.keep_run_errors_days = 10
+  doc.timezone = "Europe/Londn"
+  doc.sources[0].collections[1].library_layout = "{year}/{band}"
+  a.config.state = "invalid"
+  a.config.errors = [
+    { loc: ["keep_run_errors_days"], code: "greater_than_equal", message: "Input should be greater than or equal to 30" },
+    { loc: ["timezone"], code: "timezone_unknown", message: "unknown timezone" },
+    { loc: ["sources", 0, "collections", 1, "library_layout"], code: "layout_unknown_field", message: "unknown field 'band'" },
+    { loc: ["max_concurrent_collectons"], code: "extra_forbidden", message: "Extra inputs are not permitted" },
+  ]
+  a.config.next_syncs = []
+  return a
+}
+
+// A hand edit left a number where a schedule goes: the file keeps it as written
+// (the server's answer for `schedule: 5`).
+function settingsInvalidSchedule(): Answers {
+  const a = defaultAnswers()
+  a.config.document!.sources[0].collections[0].schedule = 5 as unknown as string
+  a.config.state = "invalid"
+  a.config.errors = [
+    { loc: ["sources", 0, "collections", 0, "schedule"], code: "string_type", message: "Input should be a valid string" },
+  ]
+  a.config.next_syncs = []
+  return a
+}
+
+// No config loaded (every other endpoint 503): the config resource says why.
+// No file leads to setup; a file with errors opens in Settings; a file that isn't
+// YAML is fixed by hand (§spec:first-run-setup, §spec:dashboard-settings).
+const CONFIG_PATH = "/data/config/shakedown.yaml"
+const NO_FILE = `config file not found: ${CONFIG_PATH}`
+const NOT_YAML = `failed to parse YAML at ${CONFIG_PATH}: mapping values are not allowed here\n  in "${CONFIG_PATH}", line 14, column 12`
+const INVALID = "config validation failed:\nkeep_run_errors_days: Input should be greater than or equal to 30\ntimezone: unknown timezone\nsources.0.collections.1.library_layout: unknown field 'band'\nmax_concurrent_collectons: Extra inputs are not permitted"
+
+function noFile(): Answers {
+  const a = defaultAnswers()
+  Object.assign(a.config, { state: "missing", revision: null, document: null, errors: [], next_syncs: [], unconfigured: [] })
+  a.setup = {
+    generated_at: a.config.generated_at,
+    archive_root: "/data/archive",
+    library_root: "/data/library",
+    state_db: "/data/archive/.shakedown/state.db",
+    source_types: a.config.source_types,
+    schedule: "0 3 * * 0",
+  }
+  return a
+}
+
+function notYaml(): Answers {
+  const a = defaultAnswers()
+  Object.assign(a.config, { state: "unreadable", document: null, next_syncs: [], unconfigured: [],
+    errors: [{ loc: [], code: "yaml_invalid", message: "mapping values are not allowed here" }] })
+  return a
+}
+
+const SETUP_STARTED = { revision: "sha256:1", warnings: [], started: { source: "etree", collection: "phish" } }
+const PATHS_OK = { status: 200, body: { warnings: [] } }
+
+const SAVED_WITH_WARNINGS = { revision: "sha256:2", warnings: [
+  { loc: ["library_root"], code: "hardlink_failed" }, { loc: ["library_root"], code: "path_moved" },
+] }
 
 // The server lists runs newest first (§spec:run-history).
 function sorted(a: Answers): Answers {
@@ -291,13 +424,53 @@ export const SCENARIOS: Record<string, Scenario> = {
   quiet: { now: NOW, mode: { kind: "ok" }, answers: sorted(quiet()) },
   first_install: { now: NOW, mode: { kind: "ok" }, answers: sorted(firstInstall()) },
   config_broken: { now: NOW, mode: { kind: "ok" }, answers: sorted(configBroken()) },
-  no_config: { now: NOW, mode: { kind: "no_config", detail: CONFIG_ERROR }, answers: sorted(defaultAnswers()) },
+  config_invalid: { now: NOW, mode: { kind: "no_config", detail: INVALID }, answers: sorted(settingsInvalid()) },
+  config_unreadable: { now: NOW, mode: { kind: "no_config", detail: NOT_YAML }, answers: sorted(notYaml()) },
+  // First-run setup: no file. The folder check passes and the first sync starts;
+  // then the folder check warns and the sync can't start (another run).
+  setup: { now: NOW, mode: { kind: "no_config", detail: NO_FILE }, answers: sorted(noFile()),
+    writes: { "POST api/config/check-paths": PATHS_OK, "POST api/setup": { status: 201, body: SETUP_STARTED } } },
+  setup_warnings: { now: NOW, mode: { kind: "no_config", detail: NO_FILE }, answers: sorted(noFile()),
+    writes: { "POST api/config/check-paths": { status: 200, body: { warnings: [{ loc: ["library_root"], code: "hardlink_failed" }] } },
+      "POST api/setup": { status: 201, body: { ...SETUP_STARTED, started: null, reason: "busy" } } } },
   unreachable: { now: NOW, mode: { kind: "goes_away", minutes: 4 }, answers: sorted(defaultAnswers()) },
   loading: { now: NOW, mode: { kind: "hangs" }, answers: sorted(defaultAnswers()) },
   never_reached: { now: NOW, mode: { kind: "refused" }, answers: sorted(defaultAnswers()) },
   long_content: { now: NOW, mode: { kind: "ok" }, answers: sorted(longContent()) },
   waiting: { now: NOW, mode: { kind: "ok" }, answers: sorted(waitingRound()) },
   scheduler_stopped: { now: NOW, mode: { kind: "ok" }, answers: sorted(schedulerStopped()) },
+  // Run controls (review): Sync now answered at once, refused as busy; Validate.
+  sync_started: { now: NOW, mode: { kind: "ok" }, answers: sorted(quiet()),
+    writes: { [PHISH_SYNC]: { status: 202, body: { started: "sync", source: "internetarchive", collection: "phish" } } } },
+  sync_busy: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { [PHISH_SYNC]: { status: 409, body: { detail: "a run is in progress; try again when it finishes" } },
+      "POST validate": { status: 200, body: VALIDATION_PROBLEMS } } },
+  // Settings: editable (the default answers), locked, and a file with errors; then
+  // each answer a save, a delete, and the override can get.
+  settings_locked: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsLocked()),
+    writes: { "POST api/config/override": { status: 200, body: { edit: "override" } } } },
+  settings_invalid: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsInvalid()) },
+  settings_invalid_schedule: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsInvalidSchedule()) },
+  settings_saved: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 200, body: SAVED_WITH_WARNINGS },
+      "POST api/collections/purge": { status: 202, body: { started: "purge", source: "internetarchive", collection: "dmb", scope: "everything" } },
+      "POST api/history/trim": { status: 202, body: { started: "trim" } } } },
+  settings_refused: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 422, body: { errors: [
+      { loc: ["keep_run_errors_days"], code: "greater_than_equal", message: "Input should be greater than or equal to 30" },
+    ] } } } },
+  settings_variety: { now: NOW, mode: { kind: "ok" }, answers: sorted(settingsVariety()) },
+  // Saves that go through clean, then the delete after a remove starts or finds a run.
+  settings_clean: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 200, body: { revision: "sha256:2", warnings: [] } },
+      "POST api/collections/purge": { status: 202, body: { started: "purge", source: "internetarchive", collection: "phish", scope: "library" } } } },
+  settings_remove_busy: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 200, body: { revision: "sha256:2", warnings: [] } },
+      "POST api/collections/purge": { status: 409, body: { detail: "a run is in progress; try again when it finishes" } } } },
+  settings_conflict: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 409, body: { code: "changed" } } } },
+  settings_write_failed: { now: NOW, mode: { kind: "ok" }, answers: sorted(defaultAnswers()),
+    writes: { "PUT api/config": { status: 500, body: { code: "write_failed", path: "/data/config/shakedown.yaml" } } } },
   // Behaviour scenarios (tests/behaviour.spec.ts, tests/freshness.spec.ts); no screenshots.
   // The browser's clock runs a minute ahead of the server's; the server answers normally.
   server_clock_behind: { now: at(-1), mode: { kind: "ok" }, answers: sorted(defaultAnswers()) },
