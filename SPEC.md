@@ -3947,8 +3947,10 @@ Observable behavior:
   back as that preset; any other reads back as cron.
 - **Staggered default (provisional).** A collection added from the
   dashboard or setup defaults to Weekly on Sunday at the first whole
-  hour from 03:00 at which no other collection's schedule starts, so
-  collections do not all start at once. The user may change it before
+  hour from 03:00 at which no other collection's Daily or Weekly
+  schedule starts, so collections do not all start at once. A Custom
+  expression is not read for this; a clash only runs the two one after
+  the other. The user may change it before
   saving. (Provisional default; the operator may change the cadence or
   start hour.)
 - **Next sync.** `GET /api/config` carries each collection's next
@@ -4162,7 +4164,10 @@ still names a source's `auth` keeps loading: the key is ignored, and
 the next save from the dashboard leaves it out, so an upgrade never
 stops a scheduled run over it. `serve` drops the `source_credentials`
 table from the database the config names each time it starts, with the
-freed pages zeroed, so no stored password outlives the feature; the
+freed pages zeroed. When no run is reading the database then, the
+write-ahead log is emptied as well; otherwise the old pages leave the
+files at SQLite's next checkpoint, which comes with later writes or
+when the last connection closes. The
 table is outside schema versioning (§spec:state), so nothing else
 changes.
 
