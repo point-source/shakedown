@@ -185,3 +185,29 @@ def test_an_answer_built_from_an_older_config_file_is_not_served() -> None:
     assert answers.get("k", TTL, build, version="b") == {"n": 2}
     assert answers.get("k", TTL, build, version="b") == {"n": 2}
     assert threads.started == []
+
+
+def test_a_dashboard_answer_is_built_from_the_config_its_own_request_loaded(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another request publishing an older config between this request's load and
+    its build must not swap it in: the answer is cached under the file version
+    this request read, so it has to be built from what this request read."""
+    from shakedown.dashboard import ConfigTracker
+    from tests.conftest import make_config, write_config
+
+    older = make_config(tmp_path / "archive", tmp_path / "library")
+    newer = older.model_copy(deep=True)
+    newer.max_concurrent_collections = older.max_concurrent_collections + 1
+    path = write_config(tmp_path / "cfg.yaml", newer)
+    tracker = ConfigTracker(path)
+    real = ConfigTracker.load_now
+
+    def load_then_overtaken(self: ConfigTracker) -> Any:
+        config = real(self)
+        self._last_good = older  # a slower request publishing what it read earlier
+        return config
+
+    monkeypatch.setattr(ConfigTracker, "load_now", load_then_overtaken)
+    config, _state = tracker.for_dashboard()
+    assert config.max_concurrent_collections == newer.max_concurrent_collections

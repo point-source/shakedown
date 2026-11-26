@@ -103,13 +103,16 @@ class ConfigTracker:
         this serve loaded. A serve that never loaded one answers 503 with the
         error, as the other endpoints do."""
         try:
-            self.load_now()
+            config = self.load_now()
         except ConfigError as e:
-            if self._last_good is None:
-                raise HTTPException(503, str(e)) from e
+            with self._lock:
+                if self._last_good is None:
+                    raise HTTPException(503, str(e)) from e
+                return self._last_good, self._state
+        # What this request read, not `_last_good`: another request may publish an
+        # older read in between, and the answer is cached under this file version.
         with self._lock:
-            assert self._last_good is not None
-            return self._last_good, self._state
+            return config, self._state
 
 
 @dataclass
