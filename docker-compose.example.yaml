@@ -49,12 +49,14 @@ services:
   # operational data (counts, paths, timings, errors — never credentials) and
   # could change settings. A proxy on the host uses http://127.0.0.1:8080; a
   # proxy in another container on this stack's network uses
-  # http://shakedown-serve:8080.
+  # http://shakedown-serve:8080. The dashboard can change settings and start
+  # runs through the proxy over HTTPS or plain HTTP (http://<nas-ip>:<port>).
   #
-  # SHAKEDOWN_API_TOKEN is optional. It lets scripts and curl call the
-  # mutating endpoints (POST /sync, POST /verify, POST /validate, and live
-  # handoff validation, which takes the token only). Unset, only the
-  # dashboard's own page can start runs. Trigger a sync
+  # SHAKEDOWN_API_TOKEN is optional. It lets scripts and curl call every
+  # endpoint that writes or starts work (POST /sync, POST /verify,
+  # POST /validate, PUT /api/config and the rest; live handoff validation
+  # takes the token only). Unset, only the dashboard's own page can change
+  # settings and start runs. Trigger a sync
   # through the proxy (or with http://127.0.0.1:8080 on the host itself):
   #   curl -XPOST -H "Authorization: Bearer $SHAKEDOWN_API_TOKEN" \
   #     "https://<serve behind your proxy>/sync?collection=grateful-dead"
