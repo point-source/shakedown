@@ -2230,8 +2230,7 @@ nothing configured.
 Security posture (this endpoint accepts requests that cause network
 fetches and disk writes): every mutating endpoint passes the write gate
 of §spec:dashboard-run-controls — the bearer token supplied via
-environment variable, or a same-origin request from the dashboard's own
-page. Until the config-management increment the token was the only way
+environment variable, or a JSON request from the dashboard's own page. Until the config-management increment the token was the only way
 in and, unset, disabled every mutating endpoint, so a reverse-proxy
 misconfiguration could not turn into an unauthenticated write API; the
 operator chose the proxy as the one gate for dashboard writes on
@@ -4294,8 +4293,15 @@ Observable behavior:
   request that either:
   - carries the configured bearer token (`SHAKEDOWN_API_TOKEN`), as
     scripts and `curl` do today; or
-  - comes from the dashboard's own page: the browser marks it
-    same-origin, and it is a JSON request a cross-site form cannot send.
+  - comes from the dashboard's own page: it is a JSON request a
+    cross-site form cannot send, and either the browser marks it
+    same-origin (`Sec-Fetch-Site: same-origin`) or, when the browser
+    sends no fetch metadata, its `Origin` names the host the request was
+    sent to. The host names are compared without port or scheme, against
+    `Host`, `X-Forwarded-Host` (its first entry) or the first `Forwarded`
+    entry's `host=`. A request whose `Sec-Fetch-Site` says anything other
+    than same-origin is refused, whatever its `Origin`; a missing
+    `Origin`, `Origin: null`, or another host is refused too.
   Anything else answers `403 {code: "cross_site"}`. With no token
   configured, only the dashboard writes; the token stays optional
   (operator decision, 2026-11-24). Live handoff validation accepts the
@@ -4311,10 +4317,26 @@ same-origin rule closes the one hole that posture leaves open in a
 browser: another website the operator visits while signed in to the
 proxy cannot fire writes through the operator's browser (cross-site
 request forgery). The browser's fetch metadata and a JSON body are the
-standard defense, decided from the request itself. DNS-rebinding attacks
-mostly fail on the example layout, because `serve` listens on loopback
-and the proxy routes by host name; the command handoff staying in the
-file (§spec:dashboard-settings) caps what is left. The token stays for
+standard defense, decided from the request itself. Browsers send fetch
+metadata only to HTTPS and localhost origins, so a page opened over
+plain HTTP at a LAN address — the usual NAS setup, with no domain name
+and no certificate — is recognised by the standard `Origin` check
+instead (operator decision, 2026-11-26). A cross-site page can forge
+neither `Origin` nor the forwarded headers, and cannot send a JSON body
+without a CORS preflight, which `serve` never answers. Host names are
+compared without port or scheme because the proxy often loses the port:
+Nginx Proxy Manager passes `Host` without it, and behind Docker port
+mapping `serve` never learns it. Another site on the same host passes
+that comparison, but its JSON request is still cross-origin and still
+needs the preflight. Trusting the forwarded headers costs nothing: a
+script that reaches `serve` directly can already forge every header,
+`Sec-Fetch-Site` included. DNS-rebinding attacks mostly fail on the
+example layout, because `serve` listens on loopback and the proxy routes
+by host name, and a rebinding page carries none of the proxy's sign-in,
+which belongs to the real host name. The `Origin` check is no weaker there, since a rebinding page's `Origin` and
+`Host` name the same host just as its fetch metadata says same-origin.
+The command handoff staying in the file (§spec:dashboard-settings) caps
+what is left. The token stays for
 scripts so `curl` triggers keep working unchanged (operator decision,
 2026-11-24). Sync now reuses `POST /sync` because
 §req:success-criteria #41 asks for the same rules as an API trigger.
@@ -4325,23 +4347,32 @@ browser* — a login in all but name, which §req:constraints rules out.
 *No same-origin check* — leaves every write open to any website the
 operator visits. *A Host allowlist against DNS rebinding* — one more
 bootstrap setting for an attack the example layout already blunts.
+*Fetch metadata only* — refuses every write from a plain-HTTP page at a
+LAN address, leaving an SSH tunnel or a self-signed proxy as the only
+way to change settings. *Matching the full origin, port and scheme
+included, from the forwarded headers* — fails behind proxies that drop
+the port, such as Nginx Proxy Manager by IP, and adds nothing the
+preflight does not already give. *A configured allowed origin* — one
+more bootstrap setting.
 
 **Tradeoffs.** Anyone who passes the proxy can change settings, start
 runs, and delete an unconfigured collection's files — the posture the
 operator chose. The same-origin rule stops browsers, not scripts: a
 script that reaches `serve` directly can forge the headers, so the proxy
-and the loopback-only port remain the real gate. Browsers send fetch
-metadata only to HTTPS and localhost origins, so dashboard writes work
-through the HTTPS proxy or at `http://127.0.0.1`, and are refused from a
-page opened over plain HTTP at another address.
+and the loopback-only port remain the real gate. A proxy that adds
+`Referrer-Policy: no-referrer` makes browsers send `Origin: null`, so
+dashboard writes through it over plain HTTP are refused; `serve` sets no
+such policy itself.
 
 **User-level test path.** Tap Sync now on a collection: it starts and
 shows in the live view. Tap it again while that sync runs: the
 dashboard shows that a run is in progress. Tap Validate: the result
 shows, and health shows it as the last validation. From a page on
 another origin, POST to `/sync` and `PUT /api/config` in the browser:
-both refused. `curl -XPOST` `/sync` with the token: `202`; without it
-and without the dashboard's headers: `403`.
+both refused. Open the dashboard over plain HTTP at the NAS's LAN
+address through the proxy and tap Sync now: it starts. `curl -XPOST`
+`/sync` with the token: `202`; without it and without the dashboard's
+headers: `403`.
 
 ## Removing a collection §spec:collection-removal
 

@@ -1,6 +1,8 @@
 """The write gate on serve's mutating endpoints (§spec:dashboard-run-controls,
-§spec:serve): the bearer token, or a same-origin JSON request from the dashboard's
-own page; anything else is `403 {"code": "cross_site"}`."""
+§spec:serve): the bearer token, or a JSON request from the dashboard's own page —
+marked same-origin by the browser, or, when the browser sends no fetch metadata (a
+plain-HTTP page at a LAN address), carrying an Origin whose host name is the host
+the request was sent to; anything else is `403 {"code": "cross_site"}`."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -62,6 +64,77 @@ REFUSED = [
     pytest.param(None, {"Content-Type": "application/json"}, id="json-without-fetch-metadata"),
 ]
 
+# A dashboard page opened over plain HTTP at a LAN address: the browser sends Origin
+# but no fetch metadata. NAS is the address the operator typed.
+NAS = "http://10.20.111.219:8090"
+JSON = {"Content-Type": "application/json"}
+
+
+def _page(origin: str = NAS, **headers: str) -> dict[str, str]:
+    return {**JSON, "Origin": origin, **headers}
+
+
+PLAIN_HTTP_PAGE = [
+    pytest.param(_page(Host="10.20.111.219:8090"), id="host-with-port"),
+    # nginx's $host (Nginx Proxy Manager's default) drops the port the browser used.
+    pytest.param(_page(Host="10.20.111.219"), id="proxy-drops-the-port"),
+    # A proxy with Docker port mapping passes its own port, not the one in the URL.
+    pytest.param(_page(Host="10.20.111.219:80"), id="proxy-passes-another-port"),
+    # A proxy that sends serve's own address as Host names the page's in a header.
+    pytest.param(
+        _page(Host="127.0.0.1:8080", **{"X-Forwarded-Host": "10.20.111.219:8090"}),
+        id="x-forwarded-host",
+    ),
+    pytest.param(
+        _page(Host="127.0.0.1:8080", **{"X-Forwarded-Host": "10.20.111.219, 127.0.0.1"}),
+        id="x-forwarded-host-chain-first",
+    ),
+    pytest.param(
+        _page(
+            Host="shakedown-serve:8080",
+            Forwarded='for=10.20.111.5;proto=http;host="10.20.111.219:8090", for=10.0.0.2',
+        ),
+        id="forwarded-host",
+    ),
+    pytest.param(_page("http://NAS.lan:8090", Host="nas.LAN"), id="host-name-case"),
+    pytest.param(_page("http://[fd00::5]:8090", Host="[FD00::5]"), id="ipv6"),
+    pytest.param(_page("https://nas.example.net", Host="nas.example.net"), id="https-proxy-strips-metadata"),
+    pytest.param(
+        _page(Host="10.20.111.219:8090", **{"Content-Type": "application/json; charset=utf-8"}),
+        id="json-with-charset",
+    ),
+]
+
+# What a plain-HTTP page at another origin, or a non-browser caller without the
+# token, sends. Matching-looking Origins are paired with what still refuses them.
+NOT_THE_PAGE = [
+    pytest.param(_page("http://evil.example", Host="10.20.111.219:8090"), id="other-origin"),
+    pytest.param(_page("http://10.20.111.21:8090", Host="10.20.111.219"), id="host-prefix"),
+    pytest.param(
+        _page("http://10.20.111.219.evil.example", Host="10.20.111.219"), id="host-as-subdomain"
+    ),
+    pytest.param(_page("null", Host="10.20.111.219"), id="origin-null"),
+    pytest.param({**JSON, "Host": "10.20.111.219"}, id="no-origin"),
+    pytest.param(_page("10.20.111.219", Host="10.20.111.219"), id="origin-without-scheme"),
+    pytest.param(_page("http://[fd00::5", Host="[fd00::5"), id="malformed-ipv6"),
+    pytest.param(_page("http://", Host=""), id="empty-host-names"),
+    pytest.param(
+        _page(Host="127.0.0.1:8080", **{"X-Forwarded-Host": "nas.lan"}),
+        id="forwarded-host-names-another",
+    ),
+    # A browser that sends fetch metadata decides; the Origin fallback never overrides it.
+    pytest.param(_page(Host="10.20.111.219", **{"Sec-Fetch-Site": "cross-site"}), id="cross-site"),
+    pytest.param(_page(Host="10.20.111.219", **{"Sec-Fetch-Site": "same-site"}), id="same-site"),
+    pytest.param(_page(Host="10.20.111.219", **{"Sec-Fetch-Site": "none"}), id="user-initiated"),
+    # A form can be sent cross-site without a preflight, so only JSON passes.
+    pytest.param(
+        _page(Host="10.20.111.219", **{"Content-Type": "application/x-www-form-urlencoded"}),
+        id="form",
+    ),
+    pytest.param(_page(Host="10.20.111.219", **{"Content-Type": "text/plain"}), id="text-plain"),
+    pytest.param({"Origin": NAS, "Host": "10.20.111.219"}, id="no-content-type"),
+]
+
 
 # One route carries the header matrix: every mutating route runs the same gate, and
 # test_the_gate_answers_before_the_scope_and_config_checks shows each one is gated.
@@ -98,6 +171,53 @@ async def test_the_dashboard_page_starts_a_sync_with_or_without_a_token(
             "/sync",
             params={"collection": "coll1"},
             headers={**DASHBOARD, "Content-Type": content_type},
+            content=b"{}",
+        )
+        assert r.status_code == 202
+        assert r.json() == {"started": "sync", "source": None, "collection": "coll1"}
+        await _finish(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headers", PLAIN_HTTP_PAGE)
+async def test_a_plain_http_dashboard_page_passes_the_gate(
+    tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+) -> None:
+    """Past the gate, an unknown scope answers 404 (§spec:api-sync-runs)."""
+    _token(monkeypatch, None)
+    async with _client(_app(make_config(*tmp_roots))) as client:
+        r = await client.post("/sync", params={"collection": "nope"}, headers=headers)
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", [TOKEN, None], ids=["token-configured", "no-token"])
+@pytest.mark.parametrize("headers", NOT_THE_PAGE)
+async def test_a_request_not_from_the_dashboard_page_is_refused_without_fetch_metadata(
+    tmp_roots: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    token: str | None,
+    headers: dict[str, str],
+) -> None:
+    _token(monkeypatch, token)
+    async with _client(_app(make_config(*tmp_roots))) as client:
+        r = await client.post("/sync", params={"collection": "nope"}, headers=headers)
+    assert r.status_code == 403
+    assert r.json() == CROSS_SITE
+
+
+@pytest.mark.asyncio
+async def test_a_plain_http_dashboard_page_starts_a_sync(
+    tmp_roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported setup end to end: Nginx Proxy Manager by IP on :8090."""
+    _token(monkeypatch, None)
+    app = _child_app(make_config(*tmp_roots))
+    async with _client(app) as client:
+        r = await client.post(
+            "/sync",
+            params={"collection": "coll1"},
+            headers=_page(Host="10.20.111.219"),
             content=b"{}",
         )
         assert r.status_code == 202
