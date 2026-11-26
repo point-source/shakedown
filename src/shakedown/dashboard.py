@@ -78,16 +78,20 @@ class ConfigTracker:
 
     def load_now(self) -> Config:
         """The config as the file is now; raises ConfigError when it does not load."""
+        return self._load()[0]
+
+    def _load(self) -> tuple[Config, ConfigState]:
+        """`load_now`, with the file's state as this load found it."""
         try:
             config = load(self.path)
         except ConfigError as e:
             with self._lock:
                 self._state = ConfigState(str(e), self._state.last_loaded_at)
             raise
+        state = ConfigState(None, datetime.now())
         with self._lock:
-            self._last_good = config
-            self._state = ConfigState(None, datetime.now())
-        return config
+            self._last_good, self._state = config, state
+        return config, state
 
     def last_good(self) -> Config | None:
         """The file as it is now, else the last config this serve loaded; None when
@@ -103,16 +107,15 @@ class ConfigTracker:
         this serve loaded. A serve that never loaded one answers 503 with the
         error, as the other endpoints do."""
         try:
-            config = self.load_now()
+            # What this request read, not `_last_good` and `_state`: another request
+            # may publish an older read in between, and the answer is cached under
+            # this file version.
+            return self._load()
         except ConfigError as e:
             with self._lock:
                 if self._last_good is None:
                     raise HTTPException(503, str(e)) from e
                 return self._last_good, self._state
-        # What this request read, not `_last_good`: another request may publish an
-        # older read in between, and the answer is cached under this file version.
-        with self._lock:
-            return config, self._state
 
 
 @dataclass
