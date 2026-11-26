@@ -4413,7 +4413,8 @@ Observable behavior:
     folder name is refused the same way, and so is a source or collection
     folder that is a link, which would aim the deletes outside the
     collection. A placed file reached through a linked folder deeper in
-    the library is kept and reported, and stays recorded.
+    the library is kept and reported, and stays recorded; no folder is
+    deleted through a link either, even an empty one.
 - **Before confirming.** The remove and delete confirmations state what
   each choice deletes, that deletion cannot be undone, and the shows
   and space it covers, from the `unconfigured` figures or the

@@ -264,6 +264,11 @@ class _Deletes:
         for folder in sorted(touched, key=lambda p: len(p.parts), reverse=True):
             current = folder
             while current.is_relative_to(self.library_base):
+                if self._through_link(current):
+                    # Someone else's folder: deleting it would reach outside the
+                    # collection. Its parent holds the link, so it stays too.
+                    current = current.parent
+                    continue
                 try:
                     current.rmdir()
                 except FileNotFoundError:
@@ -295,8 +300,16 @@ class _Deletes:
     def _linked_folder(self, path: Path) -> Path | None:
         """The first folder between the collection's library folder and ``path``
         that is a link, or None."""
+        return self._first_link(path.relative_to(self.library_base).parts[:-1])
+
+    def _through_link(self, folder: Path) -> bool:
+        """Whether ``folder``, or a folder between it and the collection's library
+        folder, is a link."""
+        return self._first_link(folder.relative_to(self.library_base).parts) is not None
+
+    def _first_link(self, parts: tuple[str, ...]) -> Path | None:
         folder = self.library_base
-        for part in path.relative_to(self.library_base).parts[:-1]:
+        for part in parts:
             folder = folder / part
             if folder.is_symlink():
                 return folder
